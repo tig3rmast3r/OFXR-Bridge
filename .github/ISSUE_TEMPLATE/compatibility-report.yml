@@ -1,0 +1,84 @@
+name: Game compatibility report
+description: Report a working, partially working or non-working game.
+title: "[Compatibility]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing OFXR Bridge. Please attach a bridge flight log whenever possible.
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: Compatibility status
+      options:
+        - Working
+        - Working with issues
+        - OFXR does not activate
+        - Freeze or crash
+    validations:
+      required: true
+
+  - type: input
+    id: game
+    attributes:
+      label: Game and version
+      placeholder: Game title, store and build/version
+    validations:
+      required: true
+
+  - type: input
+    id: vr_mod
+    attributes:
+      label: VR mod or injector
+      placeholder: Native OpenXR, UEVR, Luke Ross, Mutar, other
+    validations:
+      required: true
+
+  - type: input
+    id: headset_runtime
+    attributes:
+      label: Headset and OpenXR runtime
+      placeholder: Quest 3 with Virtual Desktop OpenXR, SteamVR, Pimax OpenXR, other
+    validations:
+      required: true
+
+  - type: input
+    id: gpu_driver
+    attributes:
+      label: GPU and driver version
+      placeholder: RTX 4090, NVIDIA driver 000.00
+    validations:
+      required: true
+
+  - type: input
+    id: ofxr_settings
+    attributes:
+      label: OFXR backend and settings
+      placeholder: FidelityFX, or NVIDIA Medium / 50% / forward
+    validations:
+      required: true
+
+  - type: textarea
+    id: result
+    attributes:
+      label: Steps and observed result
+      description: Explain how OFXR was armed, how VR was started and what happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: OFXR flight log and crash information
+      description: Drag the newest ofxr-bridge-flight log here. Add game logs or a crash dump when available.
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I tested OFXR Bridge successfully in another game, or clearly stated that I could not do so.
+          required: true
+        - label: I understand that some FPS counters report application frames upstream of OFXR and may show half the submitted headset frames.
+          required: true

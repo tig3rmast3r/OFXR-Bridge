@@ -1,0 +1,5 @@
+#include <windows.h>
+#include "resource.h"
+
+IDI_OFXR_DISARMED ICON "../../OFXR_disarmed.ico"
+IDI_OFXR_ARMED ICON "../../OFXR_armed.ico"
