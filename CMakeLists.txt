@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.66.0 LANGUAGES CXX)
 
 option(XRFG_BUILD_LAYER "Build the Windows OpenXR API layer" ON)
 option(XRFG_BUILD_TESTS "Build the core test executable" ON)
@@ -22,6 +22,7 @@ set(XRFG_NVIDIA_OPTICAL_FLOW_SDK_ROOT
     "Path to the NVIDIA Optical Flow SDK 5.0.7 root")
 
 add_library(xrfg_core STATIC
+    src/core/fps_overlay_model.cpp
     src/core/image.cpp
     src/core/optical_flow.cpp
     src/core/pose.cpp)
@@ -47,6 +48,9 @@ if(XRFG_BUILD_TESTS)
         target_compile_definitions(xrfg_core_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     endif()
     add_test(NAME xrfg_core_tests COMMAND xrfg_core_tests)
+    add_executable(xrfg_fps_overlay_tests tests/fps_overlay_tests.cpp)
+    target_link_libraries(xrfg_fps_overlay_tests PRIVATE xrfg_core)
+    add_test(NAME xrfg_fps_overlay_tests COMMAND xrfg_fps_overlay_tests)
 
     add_executable(xrfg_optical_flow_tests tests/optical_flow_tests.cpp)
     target_link_libraries(xrfg_optical_flow_tests PRIVATE xrfg_core)
@@ -104,6 +108,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_NVIDIA_PACK_INPUT_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_pack_flow_input_shader.hpp")
     set(XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp")
+    set(XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_fast_synthesize_midpoint_pixel_shader.hpp")
+    set(XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp")
     add_custom_command(
         OUTPUT
             "${XRFG_PACK_INPUT_HEADER}"
@@ -112,6 +118,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_NVIDIA_PACK_INPUT_HEADER}"
             "${XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
+            "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
+            "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E PackFlowInput
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
@@ -137,6 +145,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeNvidiaFastMidpointPS
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeNvidiaFastBidirectionalMidpointPS
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
         VERBATIM)
 
@@ -149,7 +165,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_NVIDIA_PACK_INPUT_HEADER}"
         "${XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
-        "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}")
+        "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
+        "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
+        "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}")
     target_include_directories(xrfg_d3d12_history
         PUBLIC include
         PRIVATE
@@ -180,7 +198,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     target_compile_definitions(xrfg_bridge_flight_logger PRIVATE
         NOMINMAX
         WIN32_LEAN_AND_MEAN
-        XRFG_IMPLEMENTATION_VERSION=59)
+        XRFG_IMPLEMENTATION_VERSION=66)
     if(MSVC)
         target_compile_options(xrfg_bridge_flight_logger PRIVATE
             /W4 /permissive- /EHsc)
@@ -202,6 +220,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /W4 /permissive- /EHsc)
     endif()
 
+    add_library(xrfg_fps_overlay STATIC src/layer/openxr_fps_overlay.cpp)
+    target_include_directories(xrfg_fps_overlay PUBLIC include "${XRFG_OPENXR_SDK_ROOT}/include")
+    target_compile_features(xrfg_fps_overlay PUBLIC cxx_std_20)
+    target_compile_definitions(xrfg_fps_overlay PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN
+        XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_PLATFORM_WIN32)
+    target_link_libraries(xrfg_fps_overlay PUBLIC xrfg_core d3d11 d3d12 dxgi)
+    if(MSVC)
+        target_compile_options(xrfg_fps_overlay PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    if(XRFG_BUILD_TESTS)
+        add_executable(xrfg_openxr_fps_overlay_tests tests/openxr_fps_overlay_tests.cpp)
+        target_link_libraries(xrfg_openxr_fps_overlay_tests PRIVATE xrfg_fps_overlay)
+        add_test(NAME xrfg_openxr_fps_overlay_d3d12 COMMAND xrfg_openxr_fps_overlay_tests)
+        add_test(NAME xrfg_openxr_fps_overlay_d3d11 COMMAND xrfg_openxr_fps_overlay_tests d3d11)
+    endif()
+
     add_library(XR_APILAYER_XRFrameBridge_diagnostic SHARED
         src/layer/openxr_layer.cpp)
     target_include_directories(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE
@@ -211,6 +245,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         xrfg_core
         xrfg_d3d12_history
         xrfg_bridge_flight_logger
+        xrfg_fps_overlay
         xrfg_implicit_layer)
     target_compile_features(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE cxx_std_20)
     target_compile_definitions(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE
@@ -235,7 +270,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             include/xrfg/standalone_launcher.hpp)
         target_include_directories(xrfg_standalone_core PUBLIC include)
         target_compile_features(xrfg_standalone_core PUBLIC cxx_std_20)
-        target_link_libraries(xrfg_standalone_core PUBLIC xrfg_implicit_layer)
+        target_link_libraries(xrfg_standalone_core PUBLIC xrfg_implicit_layer xrfg_core)
         target_compile_definitions(xrfg_standalone_core PRIVATE
             NOMINMAX
             WIN32_LEAN_AND_MEAN

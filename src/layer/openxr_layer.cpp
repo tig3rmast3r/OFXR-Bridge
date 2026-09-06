@@ -4,6 +4,7 @@
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/generation_backpressure.hpp"
 #include "xrfg/implicit_layer.hpp"
+#include "xrfg/openxr_fps_overlay.hpp"
 
 #include <windows.h>
 #include <d3d11_4.h>
@@ -89,6 +90,9 @@ template <typename Handle>
         xrfg::implicit_layer::read_nvidia_options(current_layer_directory());
     xrfg::D3D12NvidiaOpticalFlowOptions options;
     switch (configured.preset) {
+    case xrfg::implicit_layer::ConfiguredNvidiaPerformancePreset::fast:
+        options.preset = xrfg::D3D12NvidiaPerformancePreset::fast;
+        break;
     case xrfg::implicit_layer::ConfiguredNvidiaPerformancePreset::slow:
         options.preset = xrfg::D3D12NvidiaPerformancePreset::slow;
         break;
@@ -122,6 +126,8 @@ template <typename Handle>
     std::uint64_t code = 2;
     if (options.preset == xrfg::D3D12NvidiaPerformancePreset::slow) {
         code = 1;
+    } else if (options.preset == xrfg::D3D12NvidiaPerformancePreset::fast) {
+        code = 3;
     }
     std::uint64_t scale_code = 0;
     if (options.input_scale ==
@@ -243,6 +249,7 @@ struct SessionState {
         : dispatch(std::move(next_dispatch)) {}
 
     std::shared_ptr<Dispatch> dispatch;
+    std::unique_ptr<xrfg::OpenXrFpsOverlay> fps_overlay;
     // Serializes each generated synthetic/real frame pair atomically with
     // respect to application frame calls. A successful application wait owns
     // the next admission until its matching begin has been attempted, so a
@@ -1352,6 +1359,7 @@ XrResult layer_destroy_instance_impl(XrInstance instance) {
 
     for (const auto& session_state : find_sessions(dispatch)) {
         stop_continuous_presenter(session_state);
+        session_state->fps_overlay.reset();
     }
     for (const auto& swapchain_state : find_swapchains(dispatch)) {
         std::scoped_lock call_lock(swapchain_state->call_mutex);
@@ -1450,6 +1458,14 @@ XrResult layer_create_session_impl(
         return result;
     }
     state->handle = created_session;
+    // Optional instrumentation cannot fail an otherwise valid session.
+    try {
+        state->fps_overlay = std::make_unique<xrfg::OpenXrFpsOverlay>(
+            instance, created_session, create_info ? create_info->systemId : 0,
+            dispatch->get_instance_proc_addr, dispatch->end_frame,
+            state->d3d12_device.Get(), state->d3d12_queue.Get(),
+            state->d3d11_device.Get(), current_layer_directory() / L"ofxr_bridge.ini");
+    } catch (...) {}
     if (state->graphics_binding == SessionGraphicsBinding::d3d11 &&
         (state->graphics_binding_capabilities & 3ULL) == 3ULL) {
         const HRESULT bridge_device_result =
@@ -1499,6 +1515,7 @@ XrResult layer_destroy_session_impl(XrSession session) {
     }
 
     stop_continuous_presenter(state);
+    state->fps_overlay.reset();
     for (const auto& swapchain_state : find_swapchains(state)) {
         std::scoped_lock call_lock(swapchain_state->call_mutex);
         drain_swapchain_gpu(swapchain_state);
@@ -1521,6 +1538,7 @@ XrResult layer_destroy_session_impl(XrSession session) {
 }
 
 void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
+    if (state->fps_overlay) state->fps_overlay->reset_metrics();
     {
         std::scoped_lock frame_call_lock(state->frame_call_mutex);
         state->application_wait_pending_begin = false;
@@ -2269,6 +2287,7 @@ using OwnedCompositionLayer = std::variant<
     XrCompositionLayerPassthroughANDROID>;
 
 struct GeneratedFrameEndInfo {
+    bool synthetic{};
     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
     std::vector<ProjectionLayerCopy> projections;
     std::vector<OwnedCompositionLayer> composition_layers;
@@ -2529,7 +2548,11 @@ void continuous_presenter_main(
                 handle_value(state->handle),
                 static_cast<std::uint64_t>(submitted.displayTime),
                 submitted.layerCount);
-            end_result = state->dispatch->end_frame(state->handle, &submitted);
+            const bool fresh_synthetic = request && request->owned_frame &&
+                request->owned_frame->synthetic;
+            end_result = state->fps_overlay
+                ? state->fps_overlay->end_frame(&submitted, fresh_synthetic)
+                : state->dispatch->end_frame(state->handle, &submitted);
             xrfg::bridge_flight_logger().end(
                 end_token,
                 xrfg::BridgeFlightOperation::internal_end_frame,
@@ -3695,9 +3718,9 @@ struct InternalCycleResult {
         handle_value(state->handle),
         static_cast<std::uint64_t>(submitted.displayTime),
         submitted.layerCount);
-    const XrResult end_result = state->dispatch->end_frame(
-        state->handle,
-        &submitted);
+    const XrResult end_result = state->fps_overlay
+        ? state->fps_overlay->end_frame(&submitted, false)
+        : state->dispatch->end_frame(state->handle, &submitted);
     xrfg::bridge_flight_logger().end(
         end_token,
         xrfg::BridgeFlightOperation::internal_end_frame,
@@ -3813,6 +3836,11 @@ XrResult layer_end_frame_impl(
             std::unique_lock<std::mutex>(state->presenter_content_mutex);
     }
 
+    if (state->fps_overlay) {
+        std::scoped_lock gpu_lock(state->gpu_mutex);
+        state->fps_overlay->application_frame(end_info);
+    }
+
     const auto submit_borrowed_to_presenter = [&]() -> XrResult {
         auto request = enqueue_presenter_submission(state, nullptr, end_info);
         if (presenter_content_lock.owns_lock()) {
@@ -3861,7 +3889,8 @@ XrResult layer_end_frame_impl(
             end_info ? end_info->layerCount : 0);
         const XrResult end_result = use_continuous_presenter
             ? submit_borrowed_to_presenter()
-            : state->dispatch->end_frame(session, end_info);
+            : state->fps_overlay ? state->fps_overlay->end_frame(end_info, false)
+                                 : state->dispatch->end_frame(session, end_info);
         xrfg::bridge_flight_logger().end(
             end_token,
             xrfg::BridgeFlightOperation::downstream_first_end_frame,
@@ -3915,7 +3944,8 @@ XrResult layer_end_frame_impl(
             end_info ? end_info->layerCount : 0);
         const XrResult end_result = use_continuous_presenter
             ? submit_borrowed_to_presenter()
-            : state->dispatch->end_frame(session, end_info);
+            : state->fps_overlay ? state->fps_overlay->end_frame(end_info, false)
+                                 : state->dispatch->end_frame(session, end_info);
         xrfg::bridge_flight_logger().end(
             end_token,
             xrfg::BridgeFlightOperation::downstream_first_end_frame,
@@ -4026,6 +4056,7 @@ XrResult layer_end_frame_impl(
     }
 
     std::shared_ptr<GeneratedFrameEndInfo> presenter_first_frame;
+    first_generated.synthetic = pair_ready;
     std::shared_ptr<GeneratedFrameEndInfo> presenter_current_frame;
     if (use_continuous_presenter &&
         (prepared.kind == PreparedGenerationKind::prime || pair_ready)) {
@@ -4092,7 +4123,9 @@ XrResult layer_end_frame_impl(
             result = submit_borrowed_to_presenter();
         }
     } else {
-        result = state->dispatch->end_frame(session, submitted_end_info);
+        result = state->fps_overlay
+            ? state->fps_overlay->end_frame(submitted_end_info, pair_ready)
+            : state->dispatch->end_frame(session, submitted_end_info);
     }
     const auto first_end_elapsed =
         std::chrono::steady_clock::now() - first_end_started;

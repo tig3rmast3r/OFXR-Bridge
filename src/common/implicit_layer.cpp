@@ -90,6 +90,8 @@ ConfiguredNvidiaOptions read_nvidia_options(
         if (length > 0 && length < value.size()) {
             if (_wcsicmp(value.data(), L"slow") == 0) {
                 options.preset = ConfiguredNvidiaPerformancePreset::slow;
+            } else if (_wcsicmp(value.data(), L"fast") == 0) {
+                options.preset = ConfiguredNvidiaPerformancePreset::fast;
             }
         }
         const UINT input_scale = GetPrivateProfileIntW(

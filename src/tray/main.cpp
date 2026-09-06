@@ -31,7 +31,7 @@ constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
 constexpr UINT kArmPollMilliseconds = 250;
-constexpr std::uint32_t kImplementationVersion = 59;
+constexpr std::uint32_t kImplementationVersion = 65;
 constexpr wchar_t kDonateUrl[] = L"https://ko-fi.com/tig3rmast3r";
 
 enum MenuCommand : UINT {
@@ -39,11 +39,17 @@ enum MenuCommand : UINT {
     backend_fidelity_fx = 110,
     backend_nvidia_slow = 111,
     backend_nvidia_medium = 112,
+    backend_nvidia_fast = 113,
     toggle_nvidia_bidirectional = 114,
     nvidia_scale_full = 115,
     nvidia_scale_three_quarter = 116,
     nvidia_scale_half = 117,
     toggle_diagnostics = 120,
+    overlay_off = 121,
+    overlay_upper_left = 122,
+    overlay_upper_right = 123,
+    overlay_lower_left = 124,
+    overlay_lower_right = 125,
     open_logs = 130,
     donate = 139,
     show_about = 140,
@@ -289,6 +295,9 @@ void cleanup_stale_manifests(const std::filesystem::path& local_directory) {
     std::wstring tooltip = state.armed ? L"OFXR Bridge ARMED - " : L"OFXR Bridge - ";
     if (state.settings.backend == xrfg::standalone::FlowBackend::nvidia) {
         switch (state.settings.nvidia_preset) {
+        case xrfg::standalone::NvidiaPerformancePreset::fast:
+            tooltip += L"NVIDIA Fast (test)";
+            break;
         case xrfg::standalone::NvidiaPerformancePreset::slow:
             tooltip += L"NVIDIA Slow";
             break;
@@ -406,7 +415,7 @@ void show_balloon(
     return true;
 }
 
-void update_runtime_options(AppState& state) {
+void update_runtime_options(AppState& state, bool overlay_change = false) {
     save_settings(state);
     if (state.armed) {
         std::wstring error;
@@ -419,7 +428,8 @@ void update_runtime_options(AppState& state) {
         show_balloon(
             state,
             L"OFXR options saved",
-            L"The new optical-flow settings will be used by the next OpenXR session.");
+            overlay_change ? L"The FPS overlay position updates in running applications."
+                : L"The new optical-flow settings will be used by the next OpenXR session.");
     }
 }
 
@@ -451,6 +461,16 @@ void show_context_menu(AppState& state) {
                  : MF_UNCHECKED),
         backend_fidelity_fx,
         L"FidelityFX");
+    AppendMenuW(
+        backend_menu,
+        MF_STRING |
+            (state.settings.backend == xrfg::standalone::FlowBackend::nvidia &&
+                     state.settings.nvidia_preset ==
+                         xrfg::standalone::NvidiaPerformancePreset::fast
+                 ? MF_CHECKED
+                 : MF_UNCHECKED),
+        backend_nvidia_fast,
+        L"NVIDIA Fast (test)");
     AppendMenuW(
         backend_menu,
         MF_STRING |
@@ -520,6 +540,22 @@ void show_context_menu(AppState& state) {
         MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
         toggle_diagnostics,
         L"Bridge flight recorder");
+    HMENU overlay_menu = CreatePopupMenu();
+    if (overlay_menu) {
+        const struct { UINT command; xrfg::FpsOverlayPosition position; const wchar_t* text; } entries[]{
+            {overlay_upper_left, xrfg::FpsOverlayPosition::upper_left, L"Upper left"},
+            {overlay_upper_right, xrfg::FpsOverlayPosition::upper_right, L"Upper right"},
+            {overlay_lower_left, xrfg::FpsOverlayPosition::lower_left, L"Lower left"},
+            {overlay_lower_right, xrfg::FpsOverlayPosition::lower_right, L"Lower right"},
+            {overlay_off, xrfg::FpsOverlayPosition::off, L"Off"}};
+        for (const auto& entry : entries) {
+            if (entry.position == xrfg::FpsOverlayPosition::off) AppendMenuW(overlay_menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(overlay_menu, MF_STRING |
+                (state.settings.overlay_position == entry.position ? MF_CHECKED : MF_UNCHECKED),
+                entry.command, entry.text);
+        }
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(overlay_menu), L"FPS overlay");
+    }
     AppendMenuW(menu, MF_STRING, open_logs, L"Open bridge logs");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, donate, L"Donate");
@@ -551,6 +587,12 @@ void handle_command(AppState& state, UINT command) {
         break;
     case backend_fidelity_fx:
         state.settings.backend = xrfg::standalone::FlowBackend::fidelity_fx;
+        update_runtime_options(state);
+        break;
+    case backend_nvidia_fast:
+        state.settings.backend = xrfg::standalone::FlowBackend::nvidia;
+        state.settings.nvidia_preset =
+            xrfg::standalone::NvidiaPerformancePreset::fast;
         update_runtime_options(state);
         break;
     case backend_nvidia_slow:
@@ -585,6 +627,18 @@ void handle_command(AppState& state, UINT command) {
             xrfg::standalone::NvidiaInputScale::half;
         update_runtime_options(state);
         break;
+    case overlay_off:
+    case overlay_upper_left:
+    case overlay_upper_right:
+    case overlay_lower_left:
+    case overlay_lower_right:
+        state.settings.overlay_position = command == overlay_off ? xrfg::FpsOverlayPosition::off
+            : command == overlay_upper_left ? xrfg::FpsOverlayPosition::upper_left
+            : command == overlay_lower_left ? xrfg::FpsOverlayPosition::lower_left
+            : command == overlay_lower_right ? xrfg::FpsOverlayPosition::lower_right
+            : xrfg::FpsOverlayPosition::upper_right;
+        update_runtime_options(state, true);
+        break;
     case toggle_diagnostics:
         state.settings.diagnostics = !state.settings.diagnostics;
         update_runtime_options(state);
@@ -611,7 +665,7 @@ void handle_command(AppState& state, UINT command) {
                          TDF_USE_HICON_MAIN;
         dialog.dwCommonButtons = TDCBF_CLOSE_BUTTON;
         dialog.pszWindowTitle = kApplicationName;
-        dialog.pszMainInstruction = L"OFXR Bridge v0.1.0 (V059)";
+        dialog.pszMainInstruction = L"OFXR Bridge V066";
         dialog.pszContent =
             L"Licensed under LGPL-3.0-or-later.\r\n\r\n"
             L"<a href=\"https://github.com/tig3rmast3r/OFXR-Bridge\">"
@@ -637,7 +691,7 @@ void handle_command(AppState& state, UINT command) {
         if (FAILED(TaskDialogIndirect(&dialog, nullptr, nullptr, nullptr))) {
             MessageBoxW(
                 state.window,
-                L"OFXR Bridge v0.1.0 (V059)\r\n\r\n"
+                L"OFXR Bridge V066\r\n\r\n"
                 L"License: LGPL-3.0-or-later\r\n"
                 L"https://github.com/tig3rmast3r/OFXR-Bridge",
                 kApplicationName,

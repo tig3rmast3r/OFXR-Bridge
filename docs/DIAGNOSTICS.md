@@ -3,6 +3,12 @@
 The recorder belongs to the OFXR OpenXR layer and is independent from game or
 VR-mod logging. It is disabled by default.
 
+V066 also provides an independent transparent numeric FPS overlay. It is green
+when a recent synthetic submission succeeded and red when generation is
+inactive. It counts accepted nonempty OpenXR submissions, not physical headset
+scanout, and does not replace the recorder for crash or fallback diagnosis. See
+[FPS_OVERLAY.md](FPS_OVERLAY.md) for its controls and limitations.
+
 Enable **Bridge flight recorder** from the tray before starting the game. Each
 OpenXR process then creates a bounded file named
 `ofxr-bridge-flight-YYYYMMDD-HHMMSS-pidNNNN.log`. Use **Open bridge logs** to

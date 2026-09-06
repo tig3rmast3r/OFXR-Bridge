@@ -1,4 +1,5 @@
 #pragma once
+#include "xrfg/fps_overlay_model.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -18,6 +19,7 @@ enum class FlowBackend {
 enum class NvidiaPerformancePreset {
     slow,
     medium,
+    fast,
 };
 
 enum class NvidiaInputScale {
@@ -32,6 +34,7 @@ struct LauncherSettings {
     NvidiaInputScale nvidia_input_scale{NvidiaInputScale::half};
     bool nvidia_bidirectional{};
     bool diagnostics{};
+    FpsOverlayPosition overlay_position{FpsOverlayPosition::upper_right};
 };
 
 [[nodiscard]] std::string backend_ini_value(FlowBackend backend);

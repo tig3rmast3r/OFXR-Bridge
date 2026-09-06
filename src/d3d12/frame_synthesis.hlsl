@@ -422,6 +422,54 @@ bool coordinate_inside_rect(float2 coordinate, float4 rect) {
         coordinate.x <= maximum.x && coordinate.y <= maximum.y;
 }
 
+float rgb_error(float4 a, float4 b) {
+    float3 difference = abs(a.rgb - b.rgb);
+    return max(difference.r, max(difference.g, difference.b));
+}
+
+// Fast can report a plausible low-cost match on a different repeated edge.
+// Validate against the ORIGINAL endpoints, not just two already-warped samples:
+// those can both hit the same unrelated dark/bright patch and agree perfectly.
+float fast_endpoint_confidence(float2 pixel, float2 backward, uint slice) {
+    static const float2 offsets[5] = {
+        float2(0, 0), float2(-2, 0), float2(2, 0),
+        float2(0, -2), float2(0, 2)
+    };
+    float error = 0.0;
+    bool valid = true;
+    [unroll] for (uint i = 0; i < 5; ++i) {
+        float2 current = pixel + offsets[i];
+        float2 previous = current + backward;
+        if (!coordinate_inside_rect(current, PreviousMappings[ViewIndex].TargetRect) ||
+            !coordinate_inside_rect(previous, PreviousMappings[ViewIndex].SourceRect)) {
+            valid = false;
+        }
+        error = max(error, rgb_error(
+            bilinear_current_source(current, slice),
+            bilinear_previous_source(previous, slice)));
+    }
+    return valid ? 1.0 - smoothstep(8.0 / 255.0, 48.0 / 255.0, error) : 0.0;
+}
+
+// Preserve a stationary neighbourhood after the existing XR camera mapping.
+// Testing only the centre is insufficient (a moving edge can cross flat pixels).
+bool fast_stationary_patch(float2 pixel, uint slice, float4 current) {
+    CameraSample previous = sample_previous_target(pixel, slice, ViewIndex);
+    static const float2 offsets[4] = {
+        float2(-2, 0), float2(2, 0), float2(0, -2), float2(0, 2)
+    };
+    bool stationary = previous.valid >= 0.5 &&
+        rgb_error(previous.color, current) <= 1.0 / 255.0;
+    [unroll] for (uint i = 0; i < 4; ++i) {
+        CameraSample a = sample_previous_target(pixel + offsets[i], slice, ViewIndex);
+        CameraSample b = sample_current_target(pixel + offsets[i], slice, ViewIndex);
+        if (a.valid < 0.5 || b.valid < 0.5 || rgb_error(a.color, b.color) > 1.0 / 255.0) {
+            stationary = false;
+        }
+    }
+    return stationary;
+}
+
 struct FullscreenVertex {
     float4 position : SV_Position;
 };
@@ -439,7 +487,8 @@ float4 synthesize_midpoint(
     FullscreenVertex input,
     float flow_value_scale,
     bool use_nvidia_cost,
-    bool use_nvidia_bidirectional) {
+    bool use_nvidia_bidirectional,
+    bool validate_fast) {
     float4 output_color = float4(0.0, 0.0, 0.0, 1.0);
     uint2 integer_pixel = uint2(input.position.xy);
     bool in_bounds = integer_pixel.x < Width && integer_pixel.y < Height &&
@@ -457,89 +506,100 @@ float4 synthesize_midpoint(
         bool scene_changed = RepeatedCapture == 0 && !use_nvidia_cost &&
             (FlowAuxiliary.Load(int3(1, 0, 0)) & 0x0fU) != 0;
         if (previous_coverage.valid >= 0.5 && !scene_changed) {
-            // The raw B-to-A flow includes head rotation. The OpenXR mapping
-            // supplies that camera component, leaving residual scene motion.
-            float2 raw_backward = RepeatedCapture != 0
-                ? float2(0.0, 0.0)
-                : flow_for_pixel(
-                    pixel,
+            bool preserve_stationary = validate_fast && RepeatedCapture == 0 &&
+                current_fallback.valid >= 0.5 &&
+                fast_stationary_patch(pixel, Slice, current_fallback.color);
+            if (preserve_stationary) {
+                output_color = saturate(0.5 * (current_fallback.color +
+                    sample_previous_target(pixel, Slice, ViewIndex).color));
+            } else {
+                // The raw B-to-A flow includes head rotation. The OpenXR mapping
+                // supplies that camera component, leaving residual scene motion.
+                float2 raw_backward = RepeatedCapture != 0
+                    ? float2(0.0, 0.0)
+                    : flow_for_pixel(
+                        pixel,
+                        Slice,
+                        ViewIndex,
+                        flow_value_scale,
+                        use_nvidia_cost);
+                float2 pose_backward = previous_coverage.coordinate - pixel;
+                float2 residual_backward = raw_backward - pose_backward;
+                CameraSample previous_sample = sample_previous_target(
+                    pixel + residual_backward * 0.5,
                     Slice,
-                    ViewIndex,
-                    flow_value_scale,
-                    use_nvidia_cost);
-            float2 pose_backward = previous_coverage.coordinate - pixel;
-            float2 residual_backward = raw_backward - pose_backward;
-            CameraSample previous_sample = sample_previous_target(
-                pixel + residual_backward * 0.5,
-                Slice,
-                ViewIndex);
-            CameraSample current_sample = sample_current_target(
-                pixel - residual_backward * 0.5,
-                Slice,
-                ViewIndex);
-            if (previous_sample.valid >= 0.5 && current_sample.valid >= 0.5) {
-                float4 flow_midpoint = 0.5 * (
-                    previous_sample.color + current_sample.color);
-                float disagreement = max(
-                    abs(previous_sample.color.r - current_sample.color.r),
-                    max(
-                        abs(previous_sample.color.g - current_sample.color.g),
-                        abs(previous_sample.color.b - current_sample.color.b)));
-                float confidence = saturate(1.0 - disagreement * 6.0);
-                float4 stable_midpoint = 0.5 * (
-                    sample_previous_target(pixel, Slice, ViewIndex).color +
-                    current_fallback.color);
-                if (use_nvidia_cost) {
-                    float consistency_confidence = 1.0;
-                    float cost_confidence = 1.0;
-                    if (RepeatedCapture == 0) {
-                        if (use_nvidia_bidirectional) {
-                            float2 previous_coordinate = pixel + raw_backward;
-                            if (coordinate_inside_rect(
-                                    previous_coordinate,
-                                    PreviousMappings[ViewIndex].SourceRect)) {
-                                float2 raw_forward = forward_flow_for_pixel(
-                                    previous_coordinate,
-                                    Slice,
-                                    ViewIndex,
-                                    flow_value_scale);
-                                float cycle_error = length(
-                                    raw_backward + raw_forward);
-                                consistency_confidence =
-                                    1.0 - smoothstep(2.0, 6.0, cycle_error);
-                                float maximum_cost = max(
-                                    nvidia_cost_for_pixel(
-                                        pixel,
-                                        Slice,
-                                        ViewIndex),
-                                    nvidia_forward_cost_for_pixel(
+                    ViewIndex);
+                CameraSample current_sample = sample_current_target(
+                    pixel - residual_backward * 0.5,
+                    Slice,
+                    ViewIndex);
+                if (previous_sample.valid >= 0.5 && current_sample.valid >= 0.5) {
+                    float4 flow_midpoint = 0.5 * (
+                        previous_sample.color + current_sample.color);
+                    float disagreement = max(
+                        abs(previous_sample.color.r - current_sample.color.r),
+                        max(
+                            abs(previous_sample.color.g - current_sample.color.g),
+                            abs(previous_sample.color.b - current_sample.color.b)));
+                    float confidence = saturate(1.0 - disagreement * 6.0);
+                    float4 stable_midpoint = 0.5 * (
+                        sample_previous_target(pixel, Slice, ViewIndex).color +
+                        current_fallback.color);
+                    if (use_nvidia_cost) {
+                        float consistency_confidence = 1.0;
+                        float cost_confidence = 1.0;
+                        if (RepeatedCapture == 0) {
+                            if (validate_fast) {
+                                confidence *= fast_endpoint_confidence(pixel, raw_backward, Slice);
+                            }
+                            if (use_nvidia_bidirectional) {
+                                float2 previous_coordinate = pixel + raw_backward;
+                                if (coordinate_inside_rect(
+                                        previous_coordinate,
+                                        PreviousMappings[ViewIndex].SourceRect)) {
+                                    float2 raw_forward = forward_flow_for_pixel(
                                         previous_coordinate,
                                         Slice,
-                                        ViewIndex));
-                                cost_confidence = saturate(
-                                    1.0 - maximum_cost / 255.0);
+                                        ViewIndex,
+                                        flow_value_scale);
+                                    float cycle_error = length(
+                                        raw_backward + raw_forward);
+                                    consistency_confidence =
+                                        1.0 - smoothstep(2.0, 6.0, cycle_error);
+                                    float maximum_cost = max(
+                                        nvidia_cost_for_pixel(
+                                            pixel,
+                                            Slice,
+                                            ViewIndex),
+                                        nvidia_forward_cost_for_pixel(
+                                            previous_coordinate,
+                                            Slice,
+                                            ViewIndex));
+                                    cost_confidence = saturate(
+                                        1.0 - maximum_cost / 255.0);
+                                } else {
+                                    consistency_confidence = 0.0;
+                                    cost_confidence = 0.0;
+                                }
                             } else {
-                                consistency_confidence = 0.0;
-                                cost_confidence = 0.0;
+                                cost_confidence = saturate(
+                                    1.0 - nvidia_cost_for_pixel(
+                                        pixel,
+                                        Slice,
+                                        ViewIndex) / 255.0);
                             }
-                        } else {
-                            cost_confidence = saturate(
-                                1.0 - nvidia_cost_for_pixel(
-                                    pixel,
-                                    Slice,
-                                    ViewIndex) / 255.0);
                         }
+                        confidence *= consistency_confidence * cost_confidence;
+                        output_color = saturate(lerp(
+                            stable_midpoint,
+                            flow_midpoint,
+                            confidence));
+                    } else {
+                        output_color = saturate(lerp(
+                            stable_midpoint,
+                            flow_midpoint,
+                            confidence));
                     }
-                    confidence *= consistency_confidence * cost_confidence;
-                    output_color = saturate(lerp(
-                        stable_midpoint,
-                        flow_midpoint,
-                        confidence));
-                } else {
-                    output_color = saturate(lerp(
-                        stable_midpoint,
-                        flow_midpoint,
-                        confidence));
                 }
             }
         }
@@ -548,16 +608,25 @@ float4 synthesize_midpoint(
 }
 
 float4 SynthesizeMidpointPS(FullscreenVertex input) : SV_Target {
-    return synthesize_midpoint(input, 1.0, false, false);
+    return synthesize_midpoint(input, 1.0, false, false, false);
 }
 
 float4 SynthesizeNvidiaMidpointPS(FullscreenVertex input) : SV_Target {
     // NVIDIA OFA stores flow in signed S10.5 fixed point.
-    return synthesize_midpoint(input, 1.0 / 32.0, true, false);
+    return synthesize_midpoint(input, 1.0 / 32.0, true, false, false);
 }
 
 float4 SynthesizeNvidiaBidirectionalMidpointPS(
     FullscreenVertex input) : SV_Target {
     // NVIDIA OFA stores flow in signed S10.5 fixed point.
-    return synthesize_midpoint(input, 1.0 / 32.0, true, true);
+    return synthesize_midpoint(input, 1.0 / 32.0, true, true, false);
+}
+
+float4 SynthesizeNvidiaFastMidpointPS(FullscreenVertex input) : SV_Target {
+    return synthesize_midpoint(input, 1.0 / 32.0, true, false, true);
+}
+
+float4 SynthesizeNvidiaFastBidirectionalMidpointPS(
+    FullscreenVertex input) : SV_Target {
+    return synthesize_midpoint(input, 1.0 / 32.0, true, true, true);
 }

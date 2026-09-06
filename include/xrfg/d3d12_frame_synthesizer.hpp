@@ -73,6 +73,7 @@ enum class D3D12OpticalFlowBackend {
 enum class D3D12NvidiaPerformancePreset {
     slow,
     medium,
+    fast,
 };
 
 enum class D3D12NvidiaInputScale {

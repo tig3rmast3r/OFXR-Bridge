@@ -9,6 +9,8 @@
 
 #include "fullscreen_vertex_shader.hpp"
 #include "nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
+#include "nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
+#include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_pack_flow_input_shader.hpp"
 #include "nvidia_synthesize_midpoint_pixel_shader.hpp"
 #include "pack_flow_input_shader.hpp"
@@ -853,6 +855,12 @@ struct D3D12FrameSynthesizer::Impl {
             g_xrfg_nvidia_synthesize_midpoint_pixel_shader,
             sizeof(g_xrfg_nvidia_synthesize_midpoint_pixel_shader),
         };
+        if (nvidia_options.preset == D3D12NvidiaPerformancePreset::fast) {
+            graphics_description.PS = {
+                g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader,
+                sizeof(g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader),
+            };
+        }
         result = device->CreateGraphicsPipelineState(
             &graphics_description,
             IID_PPV_ARGS(nvidia_graphics_pipeline.GetAddressOf()));
@@ -864,6 +872,12 @@ struct D3D12FrameSynthesizer::Impl {
             g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader,
             sizeof(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader),
         };
+        if (nvidia_options.preset == D3D12NvidiaPerformancePreset::fast) {
+            graphics_description.PS = {
+                g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader,
+                sizeof(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader),
+            };
+        }
         return device->CreateGraphicsPipelineState(
             &graphics_description,
             IID_PPV_ARGS(
@@ -1185,6 +1199,9 @@ struct D3D12FrameSynthesizer::Impl {
         initialization.hintGridSize = NV_OF_HINT_VECTOR_GRID_SIZE_UNDEFINED;
         initialization.mode = NV_OF_MODE_OPTICALFLOW;
         switch (nvidia_options.preset) {
+        case D3D12NvidiaPerformancePreset::fast:
+            initialization.perfLevel = NV_OF_PERF_LEVEL_FAST;
+            break;
         case D3D12NvidiaPerformancePreset::slow:
             initialization.perfLevel = NV_OF_PERF_LEVEL_SLOW;
             break;

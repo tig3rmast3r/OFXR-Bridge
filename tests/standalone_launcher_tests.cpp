@@ -22,6 +22,16 @@ int main() {
 
     const LauncherSettings release_defaults;
     const std::string default_runtime_ini = build_runtime_ini(release_defaults);
+    if (release_defaults.overlay_position != xrfg::FpsOverlayPosition::upper_right ||
+        !contains(default_runtime_ini, "[overlay]\r\nposition=upper_right")) return 1;
+    for (auto position : {xrfg::FpsOverlayPosition::off, xrfg::FpsOverlayPosition::upper_left,
+        xrfg::FpsOverlayPosition::upper_right, xrfg::FpsOverlayPosition::lower_left, xrfg::FpsOverlayPosition::lower_right}) {
+        LauncherSettings option;
+        option.overlay_position = position;
+        if (parse_settings(serialize_settings(option)).overlay_position != position ||
+            !contains(build_runtime_ini(option), std::string("[overlay]\r\nposition=") +
+                xrfg::overlay_position_name(position))) return 1;
+    }
     if (release_defaults.backend != FlowBackend::fidelity_fx ||
         release_defaults.nvidia_preset != NvidiaPerformancePreset::medium ||
         release_defaults.nvidia_input_scale != NvidiaInputScale::half ||
@@ -137,9 +147,33 @@ int main() {
         xrfg::implicit_layer::ConfiguredFlowBackend::nvidia;
     const auto nvidia_options =
         xrfg::implicit_layer::read_nvidia_options(backend_directory);
+    bool preset_round_trips = true;
+    for (auto preset : {NvidiaPerformancePreset::slow, NvidiaPerformancePreset::medium,
+                        NvidiaPerformancePreset::fast}) {
+        LauncherSettings option;
+        option.backend = FlowBackend::nvidia;
+        option.nvidia_preset = preset;
+        const auto round_trip = parse_settings(serialize_settings(option));
+        const auto text = build_runtime_ini(round_trip);
+        {
+            std::ofstream ini(backend_directory / L"ofxr_bridge.ini", std::ios::trunc);
+            ini << text;
+        }
+        const auto loaded = xrfg::implicit_layer::read_nvidia_options(backend_directory);
+        const auto expected = preset == NvidiaPerformancePreset::fast
+            ? xrfg::implicit_layer::ConfiguredNvidiaPerformancePreset::fast
+            : preset == NvidiaPerformancePreset::slow
+                ? xrfg::implicit_layer::ConfiguredNvidiaPerformancePreset::slow
+                : xrfg::implicit_layer::ConfiguredNvidiaPerformancePreset::medium;
+        preset_round_trips = preset_round_trips && round_trip.nvidia_preset == preset &&
+            contains(text, "nvidia_preset=" + nvidia_preset_ini_value(preset)) &&
+            loaded.preset == expected &&
+            loaded.input_scale == xrfg::implicit_layer::ConfiguredNvidiaInputScale::half &&
+            !loaded.bidirectional;
+    }
     std::error_code cleanup_error;
     std::filesystem::remove_all(backend_directory, cleanup_error);
-    if (!backend_from_ini ||
+    if (!backend_from_ini || !preset_round_trips ||
         nvidia_options.preset !=
             xrfg::implicit_layer::ConfiguredNvidiaPerformancePreset::slow ||
         nvidia_options.input_scale !=
@@ -161,8 +195,8 @@ int main() {
     }
 
     const std::filesystem::path version_directory =
-        runtime_version_directory(L"C:\\Users\\Test\\OFXR Bridge", 59);
-    if (version_directory.filename() != L"v059") {
+        runtime_version_directory(L"C:\\Users\\Test\\OFXR Bridge", 62);
+    if (version_directory.filename() != L"v062") {
         std::cerr << "runtime version directory failed\n";
         return 1;
     }

@@ -20,6 +20,7 @@ enum class ConfiguredFlowBackend {
 enum class ConfiguredNvidiaPerformancePreset {
     slow,
     medium,
+    fast,
 };
 
 enum class ConfiguredNvidiaInputScale {

@@ -2865,10 +2865,16 @@ void test_double_wide_single_slice_views(
         "double-wide history invalidate failed");
 }
 
+#include "nvidia_fast_patterns.inc"
+
 }  // namespace
 
 int main() {
     try {
+        if (GetEnvironmentVariableA("XRFG_TEST_NVIDIA_QUALITY", nullptr, 0)) {
+            run_nvidia_fast_controls();
+            return 0;
+        }
         D3D12WarpFixture fixture;
         test_stereo_capture_ring(fixture);
         test_capture_is_async_and_consumer_fence_blocks_reuse(fixture);
@@ -2894,13 +2900,19 @@ int main() {
             if (preset_length == 4 && _stricmp(preset.data(), "slow") == 0) {
                 nvidia_options.preset =
                     xrfg::D3D12NvidiaPerformancePreset::slow;
+            } else if (preset_length == 4 && _stricmp(preset.data(), "fast") == 0) {
+                nvidia_options.preset =
+                    xrfg::D3D12NvidiaPerformancePreset::fast;
             }
             std::array<char, 8> input_scale{};
             const DWORD input_scale_length = GetEnvironmentVariableA(
                 "XRFG_TEST_NVIDIA_INPUT_SCALE",
                 input_scale.data(),
                 static_cast<DWORD>(input_scale.size()));
-            if (input_scale_length == 2 &&
+            if (input_scale_length == 3 &&
+                std::string_view(input_scale.data(), input_scale_length) == "100") {
+                nvidia_options.input_scale = xrfg::D3D12NvidiaInputScale::full;
+            } else if (input_scale_length == 2 &&
                 std::string_view(input_scale.data(), input_scale_length) ==
                     "75") {
                 nvidia_options.input_scale =
@@ -2925,6 +2937,10 @@ int main() {
                 true,
                 nvidia_options);
             test_double_wide_single_slice_views(
+                nvidia_fixture,
+                xrfg::D3D12OpticalFlowBackend::nvidia,
+                nvidia_options);
+            test_rotation_aware_synthesis_beats_uncompensated_flow(
                 nvidia_fixture,
                 xrfg::D3D12OpticalFlowBackend::nvidia,
                 nvidia_options);

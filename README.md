@@ -3,7 +3,8 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current pre-release: **v0.1.0 (internal build V059)**.
+Current source build: **internal V066**. Latest packaged pre-release:
+**v0.1.0 (internal build V059)**.
 
 > [!WARNING]
 > This is a pre-release. It may not work with your game, VR mod, GPU or OpenXR
@@ -25,9 +26,11 @@ Current pre-release: **v0.1.0 (internal build V059)**.
 The current build provides:
 
 - AMD FidelityFX Optical Flow (default)
-- NVIDIA Optical Flow with Medium and Slow presets
+- NVIDIA Optical Flow with Fast (test), Medium and Slow presets
 - 100%, 75% and 50% NVIDIA optical-flow calculation scales
 - manual persistent OpenXR Arm/Disarm from a tray icon
+- an optional transparent in-headset FPS number with four corner positions;
+  green means recent synthetic submissions and red means inactive generation
 - an optional bridge flight recorder for diagnostics
 
 OFXR Bridge uses color-only optical flow. It does not receive game motion
@@ -56,6 +59,10 @@ negligible net performance gain, so it is not recommended for normal use.
 > application frames upstream of OFXR. While frame generation is active, they
 > may therefore display roughly half the frames actually being submitted to
 > the headset. This does not necessarily mean that OFXR is inactive.
+
+The bridge's own optional FPS number counts accepted nonempty OpenXR
+submissions. It is a diagnostic indicator rather than proof of physical headset
+scanout; see [FPS overlay details](docs/FPS_OVERLAY.md).
 
 Do not run the game as administrator unless the tray is running at the same
 integrity level. OFXR Bridge does not replace your active OpenXR runtime.

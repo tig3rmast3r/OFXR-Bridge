@@ -97,6 +97,8 @@ std::string nvidia_preset_ini_value(NvidiaPerformancePreset preset) {
     switch (preset) {
     case NvidiaPerformancePreset::slow:
         return "slow";
+    case NvidiaPerformancePreset::fast:
+        return "fast";
     case NvidiaPerformancePreset::medium:
     default:
         return "medium";
@@ -144,7 +146,9 @@ LauncherSettings parse_settings(std::string_view text) {
                     const std::string normalized = lower_ascii(value);
                     settings.nvidia_preset = normalized == "slow"
                         ? NvidiaPerformancePreset::slow
-                        : NvidiaPerformancePreset::medium;
+                        : normalized == "fast"
+                            ? NvidiaPerformancePreset::fast
+                            : NvidiaPerformancePreset::medium;
                 } else if (key == "nvidia_input_scale") {
                     settings.nvidia_input_scale = value == "75"
                         ? NvidiaInputScale::three_quarter
@@ -154,6 +158,8 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "nvidia_bidirectional") {
                     settings.nvidia_bidirectional = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "overlay_position") {
+                    settings.overlay_position = parse_overlay_position(lower_ascii(value));
                 } else if (key == "diagnostics") {
                     settings.diagnostics = value == "1" ||
                                            lower_ascii(value) == "true";
@@ -177,6 +183,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\nnvidia_bidirectional=" +
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
+           "\r\noverlay_position=" + overlay_position_name(settings.overlay_position) +
            "\r\n";
 }
 
@@ -212,7 +219,8 @@ std::string build_runtime_ini(
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\n\r\n[diagnostics]\r\nlogging_enabled=" +
            (settings.diagnostics ? "1" : "0") +
-           "\r\nmax_file_mb=32\r\nflush_each_event=0\r\n";
+           "\r\nmax_file_mb=32\r\nflush_each_event=0\r\n"
+           "\r\n[overlay]\r\nposition=" + overlay_position_name(settings.overlay_position) + "\r\n";
 }
 
 std::filesystem::path runtime_version_directory(
