@@ -3046,20 +3046,47 @@ void continuous_presenter_main(
 
         XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState frame_state{XR_TYPE_FRAME_STATE};
-        const auto wait_token = xrfg::bridge_flight_logger().begin(
-            xrfg::BridgeFlightOperation::internal_wait_frame,
-            handle_value(state->handle));
-        const XrResult wait_result = state->dispatch->wait_frame(
-            state->handle,
-            &wait_info,
-            &frame_state);
-        xrfg::bridge_flight_logger().end(
-            wait_token,
-            xrfg::BridgeFlightOperation::internal_wait_frame,
-            wait_result,
-            static_cast<std::uint64_t>(frame_state.predictedDisplayTime),
-            static_cast<std::uint64_t>(frame_state.predictedDisplayPeriod),
-            frame_state.shouldRender);
+        XrResult wait_result = XR_SUCCESS;
+        // XR_ERROR_CALL_ORDER_INVALID is the one xrWaitFrame failure the
+        // spec describes as a sequencing hazard rather than a lost
+        // session/instance: it can surface if the runtime has not yet
+        // finished processing the previous wait/begin/end cycle. A handful
+        // of short, bounded retries lets the presenter recover from that
+        // transient instead of permanently stopping generation for the
+        // rest of the session, which is the same class of "never recovers
+        // after a momentary hiccup" symptom already fixed elsewhere for the
+        // virtual-time clock. Every other failure (session lost/not
+        // running, instance lost, ...) is treated as before: fatal to this
+        // presenter loop.
+        constexpr int kCallOrderRetryLimit = 5;
+        for (int attempt = 0; attempt <= kCallOrderRetryLimit; ++attempt) {
+            frame_state = XrFrameState{XR_TYPE_FRAME_STATE};
+            const auto wait_token = xrfg::bridge_flight_logger().begin(
+                xrfg::BridgeFlightOperation::internal_wait_frame,
+                handle_value(state->handle));
+            wait_result = state->dispatch->wait_frame(
+                state->handle,
+                &wait_info,
+                &frame_state);
+            xrfg::bridge_flight_logger().end(
+                wait_token,
+                xrfg::BridgeFlightOperation::internal_wait_frame,
+                wait_result,
+                static_cast<std::uint64_t>(frame_state.predictedDisplayTime),
+                static_cast<std::uint64_t>(frame_state.predictedDisplayPeriod),
+                frame_state.shouldRender);
+            if (wait_result != XR_ERROR_CALL_ORDER_INVALID ||
+                attempt == kCallOrderRetryLimit) {
+                break;
+            }
+            {
+                std::scoped_lock lock(state->presenter_mutex);
+                if (state->presenter_stop_requested) {
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         if (XR_FAILED(wait_result)) {
             std::scoped_lock lock(state->presenter_mutex);
             fail_pending_presenter_submissions_locked(*state, wait_result);
@@ -3349,7 +3376,44 @@ void stop_continuous_presenter(
         }
         state->presenter_condition.notify_all();
         if (state->presenter_thread.joinable()) {
-            state->presenter_thread.join();
+            // The presenter thread can be parked inside a blocking
+            // state->dispatch->wait_frame() call to the OpenXR runtime (e.g.
+            // SteamVR). A frozen or crashed compositor, or a headset that
+            // was unplugged mid-session, can leave that call unreturned
+            // indefinitely. presenter_stop_requested is only observed on
+            // the next loop iteration or condition wait, never inside that
+            // specific blocking call, so an unconditional join() here can
+            // hang the application's own shutdown/session-destroy path.
+            //
+            // Give the thread a bounded chance to exit cleanly. If it does
+            // not, hand the join off to a detached helper thread and return
+            // anyway: state is kept alive by the presenter thread's own
+            // shared_ptr copy, so the eventual exit (once wait_frame
+            // returns, however late) remains safe even though this call no
+            // longer waits for it.
+            const auto join_completed = std::make_shared<std::atomic<bool>>(false);
+            std::thread helper(
+                [thread = std::move(state->presenter_thread),
+                 join_completed]() mutable {
+                    thread.join();
+                    join_completed->store(true, std::memory_order_release);
+                });
+            constexpr auto kPresenterJoinBudget = std::chrono::milliseconds(500);
+            const auto deadline =
+                std::chrono::steady_clock::now() + kPresenterJoinBudget;
+            while (!join_completed->load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            if (join_completed->load(std::memory_order_acquire)) {
+                helper.join();
+            } else {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_transition,
+                    -1,
+                    handle_value(state->handle));
+                helper.detach();
+            }
         }
         {
             std::scoped_lock lock(state->presenter_mutex);

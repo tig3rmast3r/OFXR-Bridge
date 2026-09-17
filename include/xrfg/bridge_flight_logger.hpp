@@ -53,6 +53,12 @@ enum class BridgeFlightOperation : std::uint32_t {
     presenter_pace,
     synthesis_frame_start_wait,
     embedded_configuration,
+    // Reports the adapter's local video memory budget/usage observed just
+    // before allocating the NVIDIA Optical Flow working set, and the
+    // estimated size of that working set, so a failed allocation can be
+    // told apart from a healthy one after the fact from the flight log
+    // alone. Best-effort: absence of this event does not indicate failure.
+    nvidia_vram_budget_check,
 };
 
 struct BridgeFlightToken {

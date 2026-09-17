@@ -21,6 +21,7 @@ $failures = [System.Collections.Generic.List[object]]::new()
 $decisions = [System.Collections.Generic.List[object]]::new()
 $nvidiaStages = [System.Collections.Generic.List[object]]::new()
 $nvidiaTotals = [System.Collections.Generic.List[object]]::new()
+$vramChecks = [System.Collections.Generic.List[object]]::new()
 $lineNumber = 0
 
 Get-Content -LiteralPath $resolved | ForEach-Object {
@@ -74,6 +75,9 @@ Get-Content -LiteralPath $resolved | ForEach-Object {
                 $entry.Result -eq 0) {
                 $nvidiaTotals.Add($entry)
             }
+            if ($entry.Operation -eq 'nvidia_vram_budget_check') {
+                $vramChecks.Add($entry)
+            }
         }
     }
 }
@@ -108,6 +112,22 @@ if ($decisions.Count -gt 0) {
         Group-Object Operation, Result |
         Sort-Object Name |
         Select-Object Count, Name |
+        Format-Table -AutoSize
+}
+
+if ($vramChecks.Count -gt 0) {
+    Write-Output ''
+    Write-Output 'NVIDIA Optical Flow VRAM budget checks (bytes, MiB):'
+    $vramChecks |
+        ForEach-Object {
+            [pscustomobject]@{
+                Milliseconds = $_.Milliseconds
+                OverBudget = $_.Result -lt 0
+                BudgetMiB = [Math]::Round($_.A / 1MB, 1)
+                CurrentUsageMiB = [Math]::Round($_.B / 1MB, 1)
+                EstimatedWorkingSetMiB = [Math]::Round($_.C / 1MB, 1)
+            }
+        } |
         Format-Table -AutoSize
 }
 

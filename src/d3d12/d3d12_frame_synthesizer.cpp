@@ -4,6 +4,8 @@
 #include <windows.h>
 #include <wrl/client.h>
 
+#include <dxgi1_4.h>
+
 #include <FidelityFX/host/backends/dx12/ffx_dx12.h>
 #include <FidelityFX/host/ffx_opticalflow.h>
 #include <nvOpticalFlowD3D12.h>
@@ -22,6 +24,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -218,6 +221,63 @@ constexpr D3D12_RESOURCE_STATES kShaderReadState =
     description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     description.Flags = flags;
     return description;
+}
+
+// Best-effort, non-fatal VRAM budget check. Reports the adapter's current
+// local-memory budget and usage next to the estimated size of the working
+// set the caller is about to allocate, so a later CreateCommittedResource
+// failure can be told apart in the flight log as "was already over budget"
+// versus a different failure mode. Never blocks initialization: a query
+// failure (older DXGI, remote/software adapter, etc.) simply skips the
+// report and lets allocation proceed as before.
+void report_vram_budget_if_enabled(
+    ID3D12Device* device,
+    UINT64 estimated_working_set_bytes) noexcept {
+    if (device == nullptr || !bridge_flight_logger().enabled()) {
+        return;
+    }
+    ComPtr<IDXGIFactory4> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf())))) {
+        return;
+    }
+    const LUID luid = device->GetAdapterLuid();
+    ComPtr<IDXGIAdapter3> adapter3;
+    if (FAILED(factory->EnumAdapterByLuid(
+            luid, IID_PPV_ARGS(adapter3.GetAddressOf())))) {
+        return;
+    }
+    DXGI_QUERY_VIDEO_MEMORY_INFO memory_info{};
+    if (FAILED(adapter3->QueryVideoMemoryInfo(
+            0,
+            DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
+            &memory_info))) {
+        return;
+    }
+    const UINT64 headroom_bytes =
+        memory_info.CurrentUsage >= memory_info.Budget
+            ? 0U
+            : memory_info.Budget - memory_info.CurrentUsage;
+    // Negative result signals the estimated allocation exceeds currently
+    // reported headroom; this is advisory only, since the OS budget can
+    // shift between this check and the actual allocations that follow.
+    const std::int64_t result =
+        headroom_bytes >= estimated_working_set_bytes ? 0 : -1;
+    bridge_flight_logger().event(
+        BridgeFlightOperation::nvidia_vram_budget_check,
+        result,
+        memory_info.Budget,
+        memory_info.CurrentUsage,
+        estimated_working_set_bytes);
+}
+
+[[nodiscard]] UINT64 estimated_resource_size(
+    ID3D12Device* device,
+    const D3D12_RESOURCE_DESC& description) noexcept {
+    const D3D12_RESOURCE_ALLOCATION_INFO info =
+        device->GetResourceAllocationInfo(0, 1, &description);
+    return info.SizeInBytes == std::numeric_limits<UINT64>::max()
+        ? 0U
+        : info.SizeInBytes;
 }
 
 [[nodiscard]] HRESULT ffx_result(FfxErrorCode result) noexcept {
@@ -1261,6 +1321,22 @@ struct D3D12FrameSynthesizer::Impl {
             flow_height,
             DXGI_FORMAT_R8_UINT,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        // Two full-resolution inputs plus flow/cost per eye per work slot,
+        // doubled again when the bidirectional preset also allocates
+        // backward flow/cost. This mirrors the allocation loop below and is
+        // only used to report an estimate; it does not gate initialization.
+        {
+            const UINT64 per_eye_bytes =
+                2U * estimated_resource_size(device.Get(), input_description) +
+                (nvidia_options.bidirectional ? 2U : 1U) *
+                    (estimated_resource_size(device.Get(), flow_description) +
+                     estimated_resource_size(device.Get(), cost_description));
+            const UINT64 estimated_bytes = per_eye_bytes *
+                static_cast<UINT64>(image_description.DepthOrArraySize) *
+                static_cast<UINT64>(work_slots.size());
+            report_vram_budget_if_enabled(device.Get(), estimated_bytes);
+        }
 
         NV_OF_INIT_PARAMS initialization{};
         initialization.width = packed_width;
