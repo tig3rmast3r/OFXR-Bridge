@@ -937,6 +937,10 @@ struct SessionState {
 
     bool dlss_motion_vectors{};
     std::array<std::atomic<std::uint64_t>, 2> eye_release_publication{};
+    // Frames whose guides were placed by the evaluations' cameras, and those
+    // that found none to place (refresh_release_bound_projection_guides).
+    std::uint64_t view_placements{};
+    std::uint64_t view_placement_misses{};
     xrfg::D3D12FrameGenerationMode frame_generation_mode{};
     bool hybrid_requested{};
     std::uint32_t native_dlss_generated_frames{};
@@ -10818,7 +10822,8 @@ void note_projection_eyes(
 // capture and its ticket remain release-bound; no EndFrame color recapture.
 // Ordinary D3D12 FSR uses strict identity; D11/AFW contracts stay separate.
 void refresh_release_bound_projection_guides(
-    SessionState& session, const ProjectionMappingResult& mappings) noexcept {
+    SessionState& session, const ProjectionSnapshot& snapshot,
+    const ProjectionMappingResult& mappings) noexcept {
     if (!release_bound_projection_guides(session) ||
         mappings.reason != ProjectionMappingReason::ready) return;
     std::array<std::shared_ptr<SwapchainState>, 2> chains{};
@@ -10835,12 +10840,23 @@ void refresh_release_bound_projection_guides(
     try {
         std::scoped_lock gpu_lock(session.gpu_mutex);
         std::array<std::uint64_t, 2> releases{};
+        std::array<XrRect2Di, 2> rects{};
+        std::array<std::optional<XrFovf>, 2> fovs{};
         bool ambiguous = false;
         for (const auto& mapping : mappings.mappings) {
             const auto chain = find_swapchain(mapping.application_swapchain);
             if (!chain) continue;
             const int eye = chain->projection_eye.load(std::memory_order_relaxed);
             if (eye != 0 && eye != 1) continue;
+            if (mapping.views.size() == 1 &&
+                mapping.views[0].projection_index < snapshot.layers.size() &&
+                mapping.views[0].view_index <
+                    snapshot.layers[mapping.views[0].projection_index].views.size()) {
+                const auto& view = snapshot.layers[mapping.views[0].projection_index]
+                                       .views[mapping.views[0].view_index];
+                rects[eye] = view.subImage.imageRect;
+                fovs[eye] = view.fov;
+            }
             std::scoped_lock lock(chain->mutex);
             if (!chain->last_released_capture || !chain->last_released_index ||
                 chain->last_released_capture->source_index != *chain->last_released_index ||
@@ -10855,20 +10871,83 @@ void refresh_release_bound_projection_guides(
             releases[eye] = chain->release_publication;
         }
         if (ambiguous) { reject(); return; }
+        std::array<std::shared_ptr<const xrfg::DlssMotionVectorSet>, 2> resolved{};
         for (std::size_t eye = 0; eye < chains.size(); ++eye) {
             session.eye_release_publication[eye].store(releases[eye], std::memory_order_relaxed);
             if (!chains[eye]) continue;
             std::scoped_lock lock(chains[eye]->mutex);
             // No watermark means no valid release association, not a request
             // to reuse the legacy newest/odd-even matching on an R15 route.
-            const auto guides = releases[eye] ? xrfg::resolve_dlss_motion_vectors(
+            resolved[eye] = releases[eye] ? xrfg::resolve_dlss_motion_vectors(
                 chains[eye]->enumerated_d3d12_images[*chains[eye]->last_released_index].Get(),
                 session.d3d12_queue.Get(), static_cast<int>(eye), releases[eye], releases[1 - eye],
                 strict_fsr_release_guides(session)
                     ? both_eyes_identity(*chains[eye], {true, chains[eye]->fsr_eye_identity.stream,
                         chains[eye]->fsr_eye_identity.epoch})
                     : both_eyes_identity(*chains[eye], {})) : nullptr;
+        }
+        // No evaluation the eye images' size: MSFS 2024's foveated rendering
+        // evaluates DLSS once per view - per eye a periphery over the whole
+        // field at FoveatedRenderingScale of its pixels and an inset - and
+        // composites them into the eye images itself. Each eye then takes the
+        // stream whose camera (Streamline's constants) covers its field,
+        // placed scaled (0.2's V515). Not on the FSR route, which reads whole
+        // texels. 753 per eye for the first frames and every 512th after: a
+        // the eye << 32 | the stream's low bits, b the vector rectangle placed
+        // on the view (x, y, width, height, each in eighths of a texel, 16
+        // bits), c the publication. 755 for the first eight frames none fit:
+        // a 0, b and c the eyes' fields (four tangents, 4096ths, 16 bits).
+        bool by_view = false;
+        if (chains[0] && chains[1] && (!resolved[0] || !resolved[1]) &&
+            !strict_fsr_release_guides(session) && releases[0] != 0 && releases[1] != 0 &&
+            fovs[0] && fovs[1]) {
+            std::array<xrfg::DlssEyeView, 2> views{};
+            for (std::size_t eye = 0; eye < views.size(); ++eye) {
+                views[eye] = {std::tan(fovs[eye]->angleLeft), std::tan(fovs[eye]->angleRight),
+                    std::tan(fovs[eye]->angleUp), std::tan(fovs[eye]->angleDown),
+                    rects[eye].offset.x, rects[eye].offset.y,
+                    static_cast<std::uint32_t>(rects[eye].extent.width),
+                    static_cast<std::uint32_t>(rects[eye].extent.height)};
+            }
+            auto placed = xrfg::resolve_view_placed_dlss_guides(
+                session.d3d12_queue.Get(), views, {releases[0], releases[1]});
+            if (placed[0] && placed[1]) {
+                resolved = std::move(placed);
+                by_view = true;
+            } else if (session.view_placement_misses++ < 8) {
+                const auto tangents = [](const xrfg::DlssEyeView& v) {
+                    const auto field = [](float value) -> std::uint64_t {
+                        const float scaled = std::clamp(value * 4096.0F, -32768.0F, 32767.0F);
+                        return static_cast<std::uint64_t>(static_cast<std::uint16_t>(
+                            static_cast<std::int16_t>(std::isfinite(scaled) ? scaled : 0.0F)));
+                    };
+                    return field(v.tan_left) | (field(v.tan_right) << 16U) |
+                        (field(v.tan_up) << 32U) | (field(v.tan_down) << 48U);
+                };
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                    755, 0, tangents(views[0]), tangents(views[1]));
+            }
+        }
+        const bool log_placement = by_view &&
+            (session.view_placements < 16 || session.view_placements % 512 == 0);
+        if (by_view) ++session.view_placements;
+        for (std::size_t eye = 0; eye < chains.size(); ++eye) {
+            if (!chains[eye]) continue;
+            std::scoped_lock lock(chains[eye]->mutex);
+            const auto& guides = resolved[eye];
             chains[eye]->last_released_motion_vectors = guides;
+            if (log_placement && guides && guides->eyes[0]) {
+                const auto& frame = *guides->eyes[0];
+                const auto eighths = [](float value) {
+                    return static_cast<std::uint64_t>(std::clamp(value * 8.0F, 0.0F, 65535.0F)) & 0xFFFFU;
+                };
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition, 753,
+                    (static_cast<std::uint64_t>(eye) << 32U) | (frame.stream & 0xFFFFFFFFULL),
+                    eighths(frame.placed_motion_rect[0]) | (eighths(frame.placed_motion_rect[1]) << 16U) |
+                        (eighths(frame.placed_motion_rect[2]) << 32U) |
+                        (eighths(frame.placed_motion_rect[3]) << 48U),
+                    frame.publication);
+            }
             if (strict_fsr_release_guides(session) && releases[0] && releases[1] &&
                     guides && guides->eyes[0]) {
                 const auto& guide = *guides->eyes[0];
@@ -16278,7 +16357,7 @@ XrResult layer_end_frame_impl(
         resource_mappings = build_projection_resource_mappings(current_snapshot);
         log_projection_view_rects(*state, current_snapshot);
         if (!state->luke_afw_enabled) note_projection_eyes(current_snapshot, resource_mappings);
-        refresh_release_bound_projection_guides(*state, resource_mappings);
+        refresh_release_bound_projection_guides(*state, current_snapshot, resource_mappings);
     } else {
         resource_mappings.reason = ProjectionMappingReason::no_projection_views;
     }

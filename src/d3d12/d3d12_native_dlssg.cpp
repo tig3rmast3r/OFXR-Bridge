@@ -975,21 +975,24 @@ struct D3D12NativeDlssG::Impl {
         const float ux = float(r.offset_x - g.output_x) / g.output_width,
                     uy = float(r.offset_y - g.output_y) / g.output_height;
         const float uw = float(r.width) / g.output_width, uh = float(r.height) / g.output_height;
-        p.motion_rect[0] = g.motion_x + ux * g.motion_width;
-        p.motion_rect[1] = g.motion_y + uy * g.motion_height;
-        p.motion_rect[2] = uw * g.motion_width;
-        p.motion_rect[3] = uh * g.motion_height;
-        p.depth_rect[0] = g.depth_x + ux * g.depth_width;
-        p.depth_rect[1] = g.depth_y + uy * g.depth_height;
-        p.depth_rect[2] = uw * g.depth_width;
-        p.depth_rect[3] = uh * g.depth_height;
-        p.motion_scale[0] = g.scale_x * float(g.output_width) / g.motion_width;
-        p.motion_scale[1] = g.scale_y * float(g.output_height) / g.motion_height;
+        // A guide placed by its camera (MSFS 2024's foveated periphery) maps
+        // the fractional part of its vectors and depth under the view.
+        const auto mr = guide_motion_rect(g), dr = guide_depth_rect(g);
+        p.motion_rect[0] = mr[0] + ux * mr[2];
+        p.motion_rect[1] = mr[1] + uy * mr[3];
+        p.motion_rect[2] = uw * mr[2];
+        p.motion_rect[3] = uh * mr[3];
+        p.depth_rect[0] = dr[0] + ux * dr[2];
+        p.depth_rect[1] = dr[1] + uy * dr[3];
+        p.depth_rect[2] = uw * dr[2];
+        p.depth_rect[3] = uh * dr[3];
+        p.motion_scale[0] = g.scale_x * float(g.output_width) / mr[2];
+        p.motion_scale[1] = g.scale_y * float(g.output_height) / mr[3];
         if (g.jittered) {
             p.jitter_delta[0] =
-                (g.jitter_x - g.previous_jitter_x) * float(g.output_width) / g.motion_width;
+                (g.jitter_x - g.previous_jitter_x) * float(g.output_width) / mr[2];
             p.jitter_delta[1] =
-                (g.jitter_y - g.previous_jitter_y) * float(g.output_height) / g.motion_height;
+                (g.jitter_y - g.previous_jitter_y) * float(g.output_height) / mr[3];
         }
         return p;
     }

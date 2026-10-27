@@ -201,6 +201,62 @@ struct DlssMotionVectorFrame {
     // to resolved frames, never to stored producer frames or recursively.
     std::shared_ptr<const DlssMotionVectorFrame> bridge;
     std::uint32_t raw_motion_native_span{1};
+    // A guide placed into an eye's view by its camera (place_guide_in_view):
+    // the output rectangle is then the eye's image rectangle, and
+    // placed_motion_rect (x, y, width, height in vector texels, not whole)
+    // the part of the vectors that lands on it. MSFS 2024's foveated
+    // periphery spreads a few hundred render columns over a whole eye.
+    bool placed{};
+    std::array<float, 4> placed_motion_rect{};
+};
+
+// The vector and depth rectangles a consumer maps the guide's output onto:
+// the placed part for a guide placed by its camera, the whole otherwise.
+// Depth covers the same field as the vectors, at its own resolution.
+[[nodiscard]] inline std::array<float, 4> guide_motion_rect(const DlssMotionVectorFrame& f) noexcept {
+    if (f.placed) return f.placed_motion_rect;
+    return {static_cast<float>(f.motion_x), static_cast<float>(f.motion_y),
+        static_cast<float>(f.motion_width), static_cast<float>(f.motion_height)};
+}
+[[nodiscard]] inline std::array<float, 4> guide_depth_rect(const DlssMotionVectorFrame& f) noexcept {
+    if (!f.placed || !f.motion_width || !f.motion_height)
+        return {static_cast<float>(f.depth_x), static_cast<float>(f.depth_y),
+            static_cast<float>(f.depth_width), static_cast<float>(f.depth_height)};
+    const float sx = static_cast<float>(f.depth_width) / static_cast<float>(f.motion_width);
+    const float sy = static_cast<float>(f.depth_height) / static_cast<float>(f.motion_height);
+    const auto& m = f.placed_motion_rect;
+    return {static_cast<float>(f.depth_x) + (m[0] - static_cast<float>(f.motion_x)) * sx,
+        static_cast<float>(f.depth_y) + (m[1] - static_cast<float>(f.motion_y)) * sy,
+        m[2] * sx, m[3] * sy};
+}
+
+// The field a DLSS evaluation rendered, from its camera's projection
+// (Streamline's cameraViewToClip): the tangents of its image's edges - left
+// and right where x runs from the image's left edge to its right, up and
+// down at its top and bottom row - and where the camera sits. Not known
+// without valid camera matrices or for a projection it cannot read.
+struct DlssViewGeometry {
+    bool known{};
+    float tan_left{};
+    float tan_right{};
+    float tan_up{};
+    float tan_down{};
+    std::array<float, 3> position{};
+    std::array<float, 3> right{};
+};
+[[nodiscard]] DlssViewGeometry dlss_view_geometry(const DlssMotionVectorFrame& frame) noexcept;
+
+// An eye's view in its XR image: the tangents of its field (XrFovf) and its
+// image rectangle.
+struct DlssEyeView {
+    float tan_left{};
+    float tan_right{};
+    float tan_up{};
+    float tan_down{};
+    std::int32_t x{};
+    std::int32_t y{};
+    std::uint32_t width{};
+    std::uint32_t height{};
 };
 
 inline DlssNativeCameraHistory dlss_native_camera_history(const DlssMotionVectorFrame& f) noexcept {
@@ -318,6 +374,26 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
 // Nonzero release watermarks select exact released snapshots. Strict ordinary
 // D3D12 FSR joins are opt-in; existing OFXR/DLSS-G and AFW contracts are preserved.
 std::uint64_t dlss_motion_vector_publications() noexcept;
+// A guide placed into an eye's view by its camera: a copy whose output
+// rectangle is the view's rectangle and whose placed_motion_rect is the part
+// of its vectors (and depth) that lands there. Null unless the guide's
+// camera covers the view, to within a hundredth of its field.
+std::shared_ptr<const DlssMotionVectorFrame> place_guide_in_view(
+    const DlssMotionVectorFrame& frame,
+    const DlssEyeView& view) noexcept;
+// Both eyes' guides from evaluations whose cameras are known, for a game
+// whose DLSS outputs are views of their own rather than its eye images -
+// MSFS 2024's foveated rendering, four a frame: per eye a periphery over the
+// whole field at a fraction of its pixels, and an inset. Each eye takes the
+// recent stream whose camera covers its field and fits it best (the
+// cameras' positions decide between two that fit alike), placed scaled; the
+// evaluation is the stream's newest by the eye's release watermark. Both
+// eyes or neither, from two streams. Ported from 0.2's V515.
+std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount>
+resolve_view_placed_dlss_guides(
+    ID3D12CommandQueue* consumer_queue,
+    const std::array<DlssEyeView, kDlssMotionVectorEyeCount>& eyes,
+    const std::array<std::uint64_t, kDlssMotionVectorEyeCount>& released_at) noexcept;
 // Resolves by logical projection-view count when the OpenXR swapchain is
 // D3D11 and therefore has no D3D12 image from which to derive array size.
 std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(

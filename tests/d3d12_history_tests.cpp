@@ -3803,6 +3803,134 @@ void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
     xrfg::retire_dlss_motion_vector_stream(633);
 }
 
+// MSFS 2024's foveated rendering, ported from 0.2's V515: DLSS once per
+// view, four a frame - per eye a periphery over the whole field at a
+// fraction of its pixels and an inset - none the size of an eye image. Each
+// eye takes the stream whose camera covers its field, placed scaled.
+void test_view_placed_dlss_guides(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    // A D3D-style row-vector projection with these edge tangents (w = z).
+    const auto projection = [](float left, float right, float up, float down) {
+        std::array<float, 16> m{};
+        m[0] = 2.0F / (right - left);
+        m[5] = 2.0F / (up - down);
+        m[8] = -(right + left) / (right - left);
+        m[9] = -(up + down) / (up - down);
+        m[10] = 0.0F;
+        m[11] = 1.0F;
+        m[14] = 0.1F;
+        return m;
+    };
+    {
+        xrfg::DlssMotionVectorFrame frame{};
+        frame.camera_matrices_valid = true;
+        frame.camera_view_to_clip = projection(-1.25F, 0.95F, 1.1F, -1.3F);
+        const auto g = xrfg::dlss_view_geometry(frame);
+        require(g.known && std::fabs(g.tan_left + 1.25F) < 1e-4F && std::fabs(g.tan_right - 0.95F) < 1e-4F &&
+                std::fabs(g.tan_up - 1.1F) < 1e-4F && std::fabs(g.tan_down + 1.3F) < 1e-4F,
+            "the edge tangents of an asymmetric projection were not read back");
+        frame.camera_matrices_valid = false;
+        require(!xrfg::dlss_view_geometry(frame).known, "a camera without valid matrices had a field");
+    }
+    const auto texture = [&](UINT width, UINT height) {
+        auto description = stereo_texture_description(width, height);
+        description.DepthOrArraySize = 1;
+        description.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const auto properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> resource;
+        require_hresult(fixture.device()->CreateCommittedResource(&properties,
+            D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_COMMON,
+            nullptr, IID_PPV_ARGS(&resource)), "foveated texture");
+        return resource;
+    };
+    const auto periphery_output = texture(96, 96), inset_output = texture(64, 64);
+    const auto periphery_motion = texture(48, 48), inset_motion = texture(32, 32);
+    struct View { float left, right, up, down; float x; };
+    const auto publish = [&](std::uint64_t stream, const View& v, bool periphery) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::DlssMotionVectorPublication p{};
+            p.stream = stream;
+            p.output = periphery ? periphery_output.Get() : inset_output.Get();
+            p.motion_vectors = periphery ? periphery_motion.Get() : inset_motion.Get();
+            p.output_width = p.output_height = periphery ? 96 : 64;
+            p.motion_width = p.motion_height = periphery ? 48 : 32;
+            p.producer_queue = fixture.queue(); p.producer_command_list = list;
+            p.resource_state = D3D12_RESOURCE_STATE_COMMON;
+            p.camera_view_to_clip = projection(v.left, v.right, v.up, v.down);
+            p.camera_position = {v.x, 0.0F, 0.0F};
+            p.camera_right = {1.0F, 0.0F, 0.0F};
+            p.camera_up = {0.0F, 1.0F, 0.0F};
+            p.camera_forward = {0.0F, 0.0F, 1.0F};
+            p.camera_data_valid = p.camera_matrices_valid = true;
+            require(xrfg::publish_dlss_motion_vectors(p) != nullptr, "foveated publication failed");
+        });
+        return xrfg::dlss_motion_vector_publications();
+    };
+    // Canted eyes, each wider outward. The peripheries reach a little past
+    // their eye's field; the insets sit inside it.
+    const View left_eye{-1.2F, 0.9F, 1.0F, -1.2F, -0.03F}, right_eye{-0.9F, 1.2F, 1.0F, -1.2F, 0.03F};
+    const View left_periphery{-1.25F, 0.95F, 1.05F, -1.25F, -0.03F};
+    const View right_periphery{-0.95F, 1.25F, 1.05F, -1.25F, 0.03F};
+    const View left_inset{-0.4F, 0.3F, 0.3F, -0.4F, -0.03F}, right_inset{-0.3F, 0.4F, 0.3F, -0.4F, 0.03F};
+    const auto eye_view = [](const View& v) {
+        return xrfg::DlssEyeView{v.left, v.right, v.up, v.down, 0, 0, 200, 220};
+    };
+    const std::array<xrfg::DlssEyeView, 2> eyes{eye_view(left_eye), eye_view(right_eye)};
+    std::uint64_t release{};
+    for (int frame = 0; frame < 2; ++frame) {
+        publish(901, left_inset, false);
+        publish(902, right_periphery, true);
+        publish(903, left_periphery, true);
+        release = publish(904, right_inset, false);
+    }
+    const auto placed = xrfg::resolve_view_placed_dlss_guides(fixture.queue(), eyes, {release, release});
+    require(placed[0] && placed[1] && placed[0]->eyes[0]->stream == 903 &&
+            placed[1]->eyes[0]->stream == 902,
+        "each eye did not take the periphery whose camera covers its field");
+    const auto& left = *placed[0]->eyes[0];
+    // The left eye's field starts 0.05 of the periphery's 2.2 to its right:
+    // 48 * 0.05 / 2.2 texels in, and spans 2.1 of the 2.2.
+    require(left.placed && left.output_x == 0 && left.output_width == 200 && left.output_height == 220 &&
+            std::fabs(left.placed_motion_rect[0] - 48.0F * 0.05F / 2.2F) < 1e-3F &&
+            std::fabs(left.placed_motion_rect[2] - 48.0F * 2.1F / 2.2F) < 1e-3F &&
+            std::fabs(left.placed_motion_rect[1] - 48.0F * 0.05F / 2.3F) < 1e-3F,
+        "the periphery was not placed over the eye's image by its camera");
+    const auto mr = xrfg::guide_motion_rect(left);
+    require(mr == left.placed_motion_rect, "a placed guide's vectors are not its placed rectangle");
+    require(placed[0]->eyes[0]->serial == 2 && placed[1]->eyes[0]->serial == 2,
+        "the newest evaluation by the release was not taken");
+    // A release before this frame's evaluations takes the stream's previous.
+    const auto earlier = xrfg::resolve_view_placed_dlss_guides(fixture.queue(), eyes, {release - 4, release - 4});
+    require(earlier[0] && earlier[0]->eyes[0]->serial == 1, "a release did not bound its eye's evaluation");
+    // Without the peripheries no camera covers an eye: neither eye is placed.
+    for (const auto stream : {901ULL, 902ULL, 903ULL, 904ULL})
+        xrfg::retire_dlss_motion_vector_stream(stream);
+    publish(905, left_inset, false);
+    const auto inset_only = publish(906, right_inset, false);
+    const auto none = xrfg::resolve_view_placed_dlss_guides(fixture.queue(), eyes, {inset_only, inset_only});
+    require(!none[0] && !none[1], "an inset that covers no eye was placed");
+    xrfg::retire_dlss_motion_vector_stream(905);
+    xrfg::retire_dlss_motion_vector_stream(906);
+    // A symmetric field both peripheries cover alike: the camera further
+    // left is the left eye, whichever was published first.
+    const View symmetric{-1.0F, 1.0F, 1.0F, -1.0F, 0.0F};
+    View periphery_a{-1.05F, 1.05F, 1.05F, -1.05F, 0.03F}, periphery_b = periphery_a;
+    periphery_b.x = -0.03F;
+    publish(907, periphery_a, true);
+    const auto both = publish(908, periphery_b, true);
+    const std::array<xrfg::DlssEyeView, 2> symmetric_eyes{eye_view(symmetric), eye_view(symmetric)};
+    const auto sided = xrfg::resolve_view_placed_dlss_guides(fixture.queue(), symmetric_eyes, {both, both});
+    require(sided[0] && sided[1] && sided[0]->eyes[0]->stream == 908 && sided[1]->eyes[0]->stream == 907,
+        "the camera positions did not decide two equally fitting peripheries");
+    xrfg::retire_dlss_motion_vector_stream(907);
+    xrfg::retire_dlss_motion_vector_stream(908);
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    std::cout << "Foveated guides placed by their cameras: field from projection, periphery per eye, release bound, insets refused, camera side PASS\n";
+}
+
 void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
     using Mode = xrfg::D3D12FrameGenerationMode;
     require(xrfg::use_release_bound_game_guides(Mode::ofxr, true, false) &&
@@ -5646,6 +5774,7 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string_view(argv[1]) == "release-bound-guides") {
             D3D12WarpFixture fixture;
             test_release_bound_dlss_guides(fixture);
+            test_view_placed_dlss_guides(fixture);
             fixture.require_no_debug_errors();
             return 0;
         }

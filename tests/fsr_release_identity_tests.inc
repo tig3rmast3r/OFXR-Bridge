@@ -94,7 +94,7 @@ void fsr_release_identity_test() {
         check(XR_SUCCEEDED(layer_release_swapchain_image_impl(chain->handle,&info)), "actual FSR release");
         check(chain->last_released_capture.has_value(), "FSR color captured at release");
     };
-    const auto refresh=[&] {refresh_release_bound_projection_guides(*s,mappings);};
+    const auto refresh=[&] {refresh_release_bound_projection_guides(*s,ProjectionSnapshot{},mappings);};
     const auto verify=[&] {
         for(unsigned eye=0;eye<2;++eye) {
             auto g=chains[eye]->last_released_motion_vectors;

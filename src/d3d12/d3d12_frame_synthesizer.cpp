@@ -3389,20 +3389,20 @@ struct D3D12FrameSynthesizer::Impl {
                 parameters.flow_height = guide->output_y;
                 parameters.flow_block_size = guide->output_width;
                 parameters.game_motion_padding = guide->output_height;
-                parameters.game_motion_rect = {
-                    static_cast<float>(guide->motion_x),
-                    static_cast<float>(guide->motion_y),
-                    static_cast<float>(guide->motion_width),
-                    static_cast<float>(guide->motion_height)};
+                // A guide placed by its camera (MSFS 2024's foveated
+                // periphery) maps the fractional part of its vectors under
+                // the image rectangle, so the scale into image pixels is the
+                // camera's.
+                parameters.game_motion_rect = guide_motion_rect(*guide);
                 // DLSS low-resolution vectors are expressed in render-space pixel
                 // units after applying MV_Scale. Synthesis and pose reprojection
                 // operate in the final output rectangle's pixel space, so convert
                 // both vector components into that same coordinate system.
                 parameters.game_motion_scale = {
                     guide->scale_x * static_cast<float>(guide->output_width) /
-                        static_cast<float>(guide->motion_width),
+                        parameters.game_motion_rect[2],
                     guide->scale_y * static_cast<float>(guide->output_height) /
-                        static_cast<float>(guide->motion_height)};
+                        parameters.game_motion_rect[3]};
                 parameters.game_motion_jitter_delta = guide->jittered
                     ? std::array<float, 2>{
                           guide->jitter_x - guide->previous_jitter_x,
@@ -5152,14 +5152,12 @@ struct D3D12FrameSynthesizer::Impl {
                         offset_gpu_handle(gpu_start, descriptor_base, descriptor_increment));
                     parameters.use_game_motion = guide->output_x | (guide->output_y << 16U);
                     parameters.game_motion_padding = guide->output_width | (guide->output_height << 16U);
-                    parameters.game_motion_rect = {
-                        static_cast<float>(guide->motion_x), static_cast<float>(guide->motion_y),
-                        static_cast<float>(guide->motion_width), static_cast<float>(guide->motion_height)};
+                    parameters.game_motion_rect = guide_motion_rect(*guide);
                     parameters.game_motion_scale = {
                         guide->scale_x * static_cast<float>(guide->output_width) /
-                            static_cast<float>(guide->motion_width),
+                            parameters.game_motion_rect[2],
                         guide->scale_y * static_cast<float>(guide->output_height) /
-                            static_cast<float>(guide->motion_height)};
+                            parameters.game_motion_rect[3]};
                     parameters.game_motion_jitter_delta = guide->jittered
                         ? std::array<float, 2>{guide->jitter_x - guide->previous_jitter_x,
                                                guide->jitter_y - guide->previous_jitter_y}
