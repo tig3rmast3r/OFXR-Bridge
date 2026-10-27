@@ -13,9 +13,28 @@
 #include "steamvr_vram_budget_test.inc"
 
 static bool framework_session_probe{},vdxr_legacy_probe{};
+// Star Citizen loads no implicit Vulkan layer, so the bridge declines its
+// Vulkan session, which SteamVR then creates natively. The private endpoint
+// has no D3D device to own; xrCreateSession must pass that session through,
+// not destroy it with XR_ERROR_INITIALIZATION_FAILED.
+static int unbridged_vulkan_session_test() {
+    for(const auto binding:{SessionGraphicsBinding::vulkan,SessionGraphicsBinding::opengl}) {
+        auto dispatch=std::make_shared<Dispatch>();
+        dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=true;
+        auto state=std::make_shared<SessionState>(dispatch);
+        state->handle=reinterpret_cast<XrSession>(2);state->graphics_binding=binding;state->vdxr_legacy=false;
+        check(comparison_delivery_runtime(*state),"SteamVR Auto selects the private endpoint");
+        check(install_private_runtime(state)==S_FALSE && !state->private_runtime && state->dispatch==dispatch,
+            "non-D3D session kept its native binding and runtime dispatch");
+    }
+    std::puts("Unbridged Vulkan/OpenGL session pass-through: PASS");
+    return 0;
+}
+
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
+    if(route=="unbridged-vulkan-session")return unbridged_vulkan_session_test();
     const bool steady_benchmark=route=="steady-benchmark-sequence" || route=="vram-steady-benchmark-sequence";
     const bool steady_memory=route.starts_with("vram-steady-") || steady_benchmark;
     if(steady_benchmark)route="benchmark-sequence";

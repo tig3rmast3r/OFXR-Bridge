@@ -5859,13 +5859,26 @@ XrResult layer_create_session_impl(
             }
         }
     }
-    if (dispatch->vulkan_bridge && GetPrivateProfileIntW(L"ofxr", L"vulkan_bridge", 1,
-            (current_layer_directory() / L"ofxr_bridge.ini").c_str()) == 1 &&
-        xrfg::vulkan_queue_serialized(state->vulkan_binding) &&
-        dispatch->get_d3d12_graphics_requirements != nullptr &&
-        state->graphics_binding == SessionGraphicsBinding::vulkan &&
-        create_info != nullptr &&
-        state->vulkan_binding.device != VK_NULL_HANDLE) {
+    // Bit per unmet precondition, logged when a Vulkan session stays native:
+    // 1 runtime/instance bridge, 2 ini switch, 4 queue not serialized (no
+    // OFXR Vulkan queue layer in the process, e.g. Star Citizen), 8 no D3D12
+    // requirements entry point, 16 no create info or device.
+    std::uint64_t vulkan_bridge_unmet = 0;
+    if (state->graphics_binding == SessionGraphicsBinding::vulkan) {
+        if (!dispatch->vulkan_bridge) vulkan_bridge_unmet |= 1;
+        if (GetPrivateProfileIntW(L"ofxr", L"vulkan_bridge", 1,
+                (current_layer_directory() / L"ofxr_bridge.ini").c_str()) != 1)
+            vulkan_bridge_unmet |= 2;
+        if (!xrfg::vulkan_queue_serialized(state->vulkan_binding)) vulkan_bridge_unmet |= 4;
+        if (dispatch->get_d3d12_graphics_requirements == nullptr) vulkan_bridge_unmet |= 8;
+        if (create_info == nullptr || state->vulkan_binding.device == VK_NULL_HANDLE)
+            vulkan_bridge_unmet |= 16;
+        if (vulkan_bridge_unmet)
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::vulkan_bridge, 5, vulkan_bridge_unmet, 0,
+                static_cast<std::uint64_t>(state->graphics_binding));
+    }
+    if (state->graphics_binding == SessionGraphicsBinding::vulkan && !vulkan_bridge_unmet) {
         XrGraphicsRequirementsD3D12KHR requirements{
             XR_TYPE_GRAPHICS_REQUIREMENTS_D3D12_KHR};
         const XrResult requirements_result =
