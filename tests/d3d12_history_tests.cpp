@@ -3920,6 +3920,39 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
     xrfg::retire_dlss_motion_vector_stream(722);
     xrfg::retire_dlss_motion_vector_stream(766);
 
+    // No Man's Sky: one evaluation per frame for both eyes side by side, each
+    // eye in the matching half of an image the evaluation's size. Both eyes
+    // take the frame's evaluation, chained to the previous frame's; without
+    // both_eyes the shared-stream rule gave the left eye the previous frame's
+    // and left every pair's serials unchained (DLSS-G skip 1, detail 5).
+    // Each takes its half of the vectors, its output on its view's half.
+    const xrfg::DlssReleasedEyeIdentity both_eyes{false, 0, 0, true, 0};
+    const xrfg::DlssReleasedEyeIdentity both_eyes_right{false, 0, 0, true, 1};
+    std::uint64_t both_previous{};
+    for (int frame = 0; frame < 3; ++frame) {
+        const auto release = publish(799, color.Get());
+        const auto both_left = xrfg::resolve_dlss_motion_vectors(xr_color.Get(), fixture.queue(),
+            0, release, release, both_eyes);
+        const auto both_right = xrfg::resolve_dlss_motion_vectors(xr_color.Get(), fixture.queue(),
+            1, release, release, both_eyes_right);
+        require(both_left && both_right && both_left->eyes[0]->publication == release &&
+                both_right->eyes[0]->publication == release &&
+                both_left->eyes[0]->previous_serial + 1 == both_left->eyes[0]->serial &&
+                (!both_previous || both_left->eyes[0]->previous_serial == both_previous),
+            "a both-eyes evaluation did not go to both eyes, chained frame to frame");
+        const auto& l = *both_left->eyes[0];
+        const auto& r = *both_right->eyes[0];
+        require(l.motion_x == 0 && l.motion_width == 32 && r.motion_x == 32 && r.motion_width == 32 &&
+                l.output_x == 0 && l.output_width == 32 && r.output_x == 32 && r.output_width == 32,
+            "a both-eyes evaluation did not give each eye its own half");
+        both_previous = both_left->eyes[0]->serial;
+    }
+    const auto alternating = resolve(0, xrfg::dlss_motion_vector_publications(),
+        xrfg::dlss_motion_vector_publications());
+    require(alternating && alternating->eyes[0]->serial + 1 == both_previous,
+        "without both_eyes one shared stream no longer gave the left eye the earlier evaluation");
+    xrfg::retire_dlss_motion_vector_stream(799);
+
     // A CPU publication on another queue is insufficient. Only the actual
     // producer submission attaches the fence to the selected older snapshot.
     ComPtr<ID3D12CommandQueue> consumer;
@@ -3944,7 +3977,7 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
     require(publish(788, color.Get()) > watermark, "R15 watermark reused an old publication after toggle");
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
-    std::cout << "R15 release-bound guides: right-first shared/separate, stale/spectator, resets, ambiguity, cross-queue receipts; FSR/OFA/AFW legacy preserved PASS\n";
+    std::cout << "R15 release-bound guides: right-first shared/separate, stale/spectator, resets, ambiguity, both-eyes evaluations, cross-queue receipts; FSR/OFA/AFW legacy preserved PASS\n";
 }
 
 // A game that renders both eyes through one view (UEVR's Synchronized

@@ -297,6 +297,15 @@ void report_dlss_motion_vector_reset(ID3D12GraphicsCommandList*) noexcept;
 struct DlssReleasedEyeIdentity {
     bool strict{};
     std::uint64_t stream{}, epoch{};
+    // The eye's view is one horizontal half of its image, so an evaluation the
+    // image's size covers both eyes (No Man's Sky: one side-by-side DLSS pass,
+    // each eye in the matching half of a swapchain of its own). Both eyes take
+    // the same evaluation, never the alternating pair of one shared stream,
+    // each its own half of it: vectors and depth from the eye's half of the
+    // evaluation, the output placed on the view, view_half (0 left, 1 right)
+    // of the image.
+    bool both_eyes{};
+    std::uint32_t view_half{};
 };
 std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
     ID3D12Resource* output,

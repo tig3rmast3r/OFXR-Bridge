@@ -1348,8 +1348,11 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 return std::shared_ptr<const DlssMotionVectorFrame>{};
             };
             auto chosen = newest_by(released_at);
-            const auto other = other_released_at ? newest_by(other_released_at) : nullptr;
-            bool shared_stream = candidates.size() == 1;
+            // One evaluation for both eyes: each eye's own release bounds it,
+            // and its serials chain frame to frame as published.
+            const auto other = other_released_at && !identity.both_eyes
+                ? newest_by(other_released_at) : nullptr;
+            bool shared_stream = candidates.size() == 1 && !identity.both_eyes;
             if (chosen && other && chosen == other) {
                 if (candidates.size() >= 2) {
                     // Both evaluated before either release. Exactly two
@@ -1407,6 +1410,26 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 return {};
             }
             auto frame = std::make_shared<DlssMotionVectorFrame>(*chosen);
+            if (identity.both_eyes) {
+                // Each eye reads its own half, so the two eyes' guides never
+                // cover the same vectors (classify_fsr_stereo_guides).
+                const std::uint32_t view_width = frame->output_width / 2U;
+                if (frame->output_x != 0 || frame->output_width != description.Width ||
+                    frame->output_width % 2U != 0 || identity.view_half > 1 ||
+                    frame->motion_width < 2 || (frame->depth && frame->depth_width < 2))
+                    return stale();
+                const auto half = static_cast<std::uint32_t>(eye);
+                frame->output_x = identity.view_half * view_width;
+                frame->output_width = view_width;
+                const std::uint32_t motion_half = frame->motion_width / 2U;
+                frame->motion_x += half * motion_half;
+                frame->motion_width = motion_half;
+                if (frame->depth) {
+                    const std::uint32_t depth_half = frame->depth_width / 2U;
+                    frame->depth_x += half * depth_half;
+                    frame->depth_width = depth_half;
+                }
+            }
             if (shared_stream) {
                 frame->previous_serial = frame->serial > 2 ? frame->serial - 2 : 0;
                 // Strict FSR retains its existing guides and queue waits.

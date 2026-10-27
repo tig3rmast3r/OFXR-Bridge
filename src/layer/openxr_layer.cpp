@@ -2351,6 +2351,9 @@ struct SwapchainState {
     std::shared_ptr<const xrfg::DlssMotionVectorSet> last_released_motion_vectors;
     // Learned from a two-view projection, for non-AFW native D3D12 guides.
     std::atomic<int> projection_eye{-1};
+    // Which horizontal half of the image that eye's view is, 0 or 1; -1 when
+    // it is not one (DlssReleasedEyeIdentity::both_eyes).
+    std::atomic<int> projection_half_view{-1};
     xrfg::DlssReleasedEyeIdentity fsr_eye_identity{}; // protected by swapchain mutex
     // Watermark captured on entry to the release of this exact color ticket.
     // R15 and ordinary D3D12 FSR exact joins write/read this watermark.
@@ -7752,6 +7755,16 @@ XrResult layer_wait_swapchain_image_impl(
     return candidate != 0 && candidate > last_evaluated;
 }
 
+// The eye's guide identity, with the half of the image its view is in when
+// one evaluation covers both eyes (DlssReleasedEyeIdentity::both_eyes).
+[[nodiscard]] xrfg::DlssReleasedEyeIdentity both_eyes_identity(
+    const SwapchainState& state, xrfg::DlssReleasedEyeIdentity identity) noexcept {
+    const int half = state.projection_half_view.load(std::memory_order_relaxed);
+    identity.both_eyes = half == 0 || half == 1;
+    identity.view_half = identity.both_eyes ? static_cast<std::uint32_t>(half) : 0U;
+    return identity;
+}
+
 XrResult release_swapchain_image_locked(
     const std::shared_ptr<SwapchainState>& state,
     const XrSwapchainImageReleaseInfo* release_info,
@@ -7922,8 +7935,8 @@ XrResult release_swapchain_image_locked(
                         ? state->session->eye_release_publication[1 - eye].load(
                               std::memory_order_relaxed) : 0,
                     strict_fsr_release_guides(*state->session)
-                        ? xrfg::DlssReleasedEyeIdentity{true, state->fsr_eye_identity.stream, state->fsr_eye_identity.epoch}
-                        : xrfg::DlssReleasedEyeIdentity{});
+                        ? both_eyes_identity(*state, {true, state->fsr_eye_identity.stream, state->fsr_eye_identity.epoch})
+                        : both_eyes_identity(*state, {}));
             } else if (d3d11_interop) {
                 std::shared_ptr<const xrfg::DlssMotionVectorSet> resolved;
                 if (luke_split_eye) {
@@ -10757,14 +10770,24 @@ void note_projection_eyes(
                 continue;
             }
             int eye = -1;
+            int half_view = -1;
             if (mapping.views.size() == 1 && swapchain->create_info.arraySize == 1) {
                 const ProjectionViewReference& view = mapping.views.front();
                 if (view.projection_index < snapshot.layers.size() &&
                     snapshot.layers[view.projection_index].views.size() == 2 &&
                     view.view_index < 2) {
                     eye = static_cast<int>(view.view_index);
+                    const XrRect2Di& rect = snapshot.layers[view.projection_index]
+                        .views[view.view_index].subImage.imageRect;
+                    const auto width = static_cast<std::int64_t>(swapchain->create_info.width);
+                    if (rect.extent.width > 0 && rect.offset.y == 0 &&
+                        2 * static_cast<std::int64_t>(rect.extent.width) == width &&
+                        rect.extent.height == static_cast<std::int32_t>(swapchain->create_info.height) &&
+                        (rect.offset.x == 0 || rect.offset.x == rect.extent.width))
+                        half_view = rect.offset.x == 0 ? 0 : 1;
                 }
             }
+            swapchain->projection_half_view.store(half_view, std::memory_order_relaxed);
             const int previous =
                 swapchain->projection_eye.exchange(eye, std::memory_order_relaxed);
             if (previous != eye) {
@@ -10842,8 +10865,9 @@ void refresh_release_bound_projection_guides(
                 chains[eye]->enumerated_d3d12_images[*chains[eye]->last_released_index].Get(),
                 session.d3d12_queue.Get(), static_cast<int>(eye), releases[eye], releases[1 - eye],
                 strict_fsr_release_guides(session)
-                    ? xrfg::DlssReleasedEyeIdentity{true, chains[eye]->fsr_eye_identity.stream,
-                        chains[eye]->fsr_eye_identity.epoch} : xrfg::DlssReleasedEyeIdentity{}) : nullptr;
+                    ? both_eyes_identity(*chains[eye], {true, chains[eye]->fsr_eye_identity.stream,
+                        chains[eye]->fsr_eye_identity.epoch})
+                    : both_eyes_identity(*chains[eye], {})) : nullptr;
             chains[eye]->last_released_motion_vectors = guides;
             if (strict_fsr_release_guides(session) && releases[0] && releases[1] &&
                     guides && guides->eyes[0]) {
