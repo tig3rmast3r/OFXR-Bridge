@@ -31,6 +31,22 @@ void vulkan_bridge_contract_test() {
     check(layer_enumerate_swapchain_formats(s->handle, 2, nullptr, formats.data()) == XR_ERROR_VALIDATION_FAILURE,
         "Vulkan format null count accepted");
     check(!xrfg::vulkan_queue_serialized({}), "null/unregistered Vulkan device passed serialization gate");
+    // Star Citizen: no implicit Vulkan layer at all -> synchronized calls;
+    // a loaded layer that does not serialize the device is still refused.
+    using Access = xrfg::VulkanQueueAccess;
+    check(xrfg::vulkan_queue_access(true, true) == Access::serialized &&
+        xrfg::vulkan_queue_access(false, true) == Access::refused &&
+        xrfg::vulkan_queue_access(false, false) == Access::synchronized_calls,
+        "Vulkan queue access policy changed");
+    check(!xrfg::vulkan_queue_layer_loaded() &&
+        xrfg::vulkan_queue_access(xrfg::vulkan_queue_serialized({}), xrfg::vulkan_queue_layer_loaded()) ==
+            Access::synchronized_calls,
+        "a process without the queue layer did not select synchronized calls");
+    {
+        xrfg::VulkanBridgeSwapchain unused;
+        check(unused.after_acquire(0) == E_UNEXPECTED && !unused.synchronized_calls_only() &&
+            unused.before_write(0) == E_UNEXPECTED, "uninitialized Vulkan bridge accepted queue work");
+    }
     check(xrfg::dxgi_format_for_vulkan(VK_FORMAT_UNDEFINED) == DXGI_FORMAT_UNKNOWN,
         "unsupported Vulkan color format silently translated");
     s->vulkan_bridge.reset();

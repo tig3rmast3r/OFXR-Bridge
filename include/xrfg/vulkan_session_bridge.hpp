@@ -20,6 +20,21 @@
 
 namespace xrfg {
 [[nodiscard]] bool vulkan_queue_serialized(const struct VulkanSessionBinding&) noexcept;
+[[nodiscard]] bool vulkan_queue_layer_loaded() noexcept;
+
+// How the bridge may use the application's queue. With the OFXR queue layer
+// every submission is serialized. An application that admits no implicit
+// Vulkan layer (Star Citizen) has no layer at all: then the bridge touches
+// the queue only inside the calls XR_KHR_vulkan_enable lets the runtime use
+// it (xrBeginFrame, xrEndFrame, xrAcquireSwapchainImage,
+// xrReleaseSwapchainImage), which the application already synchronizes.
+// A loaded layer that does not serialize this device is not trusted.
+enum class VulkanQueueAccess { refused, serialized, synchronized_calls };
+[[nodiscard]] constexpr VulkanQueueAccess vulkan_queue_access(
+    bool serialized, bool layer_loaded) noexcept {
+    return serialized ? VulkanQueueAccess::serialized
+        : layer_loaded ? VulkanQueueAccess::refused : VulkanQueueAccess::synchronized_calls;
+}
 
 // The application's Vulkan session as XrGraphicsBindingVulkanKHR describes
 // it. The runtime works on this queue inside the frame calls, and Vulkan
@@ -115,9 +130,16 @@ public:
     [[nodiscard]] std::span<const VkImage> vulkan_images() const noexcept;
     [[nodiscard]] std::span<ID3D12Resource* const> shared_images() const noexcept;
 
+    // The application acquired image `index`. In synchronized-calls mode the
+    // queue work of initialize (the initial layout) and of before_write is
+    // made here instead, since xrCreateSwapchain and xrWaitSwapchainImage may
+    // not use the queue; queued before the application's rendering either way.
+    [[nodiscard]] HRESULT after_acquire(std::uint32_t index) noexcept;
+    [[nodiscard]] bool synchronized_calls_only() const noexcept;
+
     // The application is about to render into image `index` (its wait
     // returned): its queue waits, on the GPU, for the layer's last read of
-    // the shared texture.
+    // the shared texture. A no-op in synchronized-calls mode (after_acquire).
     [[nodiscard]] HRESULT before_write(std::uint32_t index) noexcept;
 
     // The application released image `index`: its queue signals once the

@@ -5860,16 +5860,21 @@ XrResult layer_create_session_impl(
         }
     }
     // Bit per unmet precondition, logged when a Vulkan session stays native:
-    // 1 runtime/instance bridge, 2 ini switch, 4 queue not serialized (no
-    // OFXR Vulkan queue layer in the process, e.g. Star Citizen), 8 no D3D12
-    // requirements entry point, 16 no create info or device.
+    // 1 runtime/instance bridge, 2 ini switch, 4 the OFXR queue layer is
+    // loaded but does not serialize this device, 8 no D3D12 requirements
+    // entry point, 16 no create info or device. Without any queue layer (Star
+    // Citizen admits no implicit Vulkan layer) the bridge runs in
+    // synchronized-calls mode; see xrfg::vulkan_queue_access.
     std::uint64_t vulkan_bridge_unmet = 0;
+    auto vulkan_access = xrfg::VulkanQueueAccess::refused;
     if (state->graphics_binding == SessionGraphicsBinding::vulkan) {
         if (!dispatch->vulkan_bridge) vulkan_bridge_unmet |= 1;
         if (GetPrivateProfileIntW(L"ofxr", L"vulkan_bridge", 1,
                 (current_layer_directory() / L"ofxr_bridge.ini").c_str()) != 1)
             vulkan_bridge_unmet |= 2;
-        if (!xrfg::vulkan_queue_serialized(state->vulkan_binding)) vulkan_bridge_unmet |= 4;
+        vulkan_access = xrfg::vulkan_queue_access(
+            xrfg::vulkan_queue_serialized(state->vulkan_binding), xrfg::vulkan_queue_layer_loaded());
+        if (vulkan_access == xrfg::VulkanQueueAccess::refused) vulkan_bridge_unmet |= 4;
         if (dispatch->get_d3d12_graphics_requirements == nullptr) vulkan_bridge_unmet |= 8;
         if (create_info == nullptr || state->vulkan_binding.device == VK_NULL_HANDLE)
             vulkan_bridge_unmet |= 16;
@@ -5908,11 +5913,12 @@ XrResult layer_create_session_impl(
             substituted_info = *create_info;
             substituted_info.next = &bridge_binding;
             forwarded_info = &substituted_info;
+            // b=1: synchronized-calls mode (no queue layer in the process).
             xrfg::bridge_flight_logger().event(
                 xrfg::BridgeFlightOperation::vulkan_bridge,
                 1,
                 0,
-                0,
+                vulkan_access == xrfg::VulkanQueueAccess::synchronized_calls ? 1 : 0,
                 static_cast<std::uint64_t>(requirements.adapterLuid.LowPart));
         } else {
             xrfg::bridge_flight_logger().event(
@@ -7604,6 +7610,10 @@ XrResult layer_acquire_swapchain_image_impl(
                 state->ownership_tracking_valid = false;
             }
         }
+        // Synchronized-calls mode: the queue work before the application's
+        // rendering belongs to this call, not to xrWaitSwapchainImage.
+        if (state->vulkan_bridge && FAILED(state->vulkan_bridge->after_acquire(*index)))
+            return XR_ERROR_RUNTIME_FAILURE;
     }
     return result;
 }

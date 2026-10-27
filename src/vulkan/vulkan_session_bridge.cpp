@@ -413,6 +413,10 @@ HRESULT create_d3d12_device_for_vulkan(
 // ---------------------------------------------------------------------------
 // The Vulkan bridge.
 
+bool vulkan_queue_layer_loaded() noexcept {
+    return GetModuleHandleW(L"OFXR_vulkan_queue_layer.dll") != nullptr;
+}
+
 bool vulkan_queue_serialized(const VulkanSessionBinding& binding) noexcept {
     if (binding.device == VK_NULL_HANDLE) return false;
     const HMODULE module = GetModuleHandleW(L"OFXR_vulkan_queue_layer.dll");
@@ -463,6 +467,10 @@ struct VulkanBridgeSwapchain::Impl {
     std::array<CopyList, kCopyListCount> copy_lists;
     std::size_t next_copy_list{};
     std::vector<std::uint64_t> last_read;
+    // Synchronized-calls mode (no queue layer): queue work only at acquire
+    // and release; the initial layout waits for the first acquire.
+    bool calls_only{};
+    bool initial_layout_pending{};
     std::uint64_t next_value{1};
     std::uint64_t last_signalled{};
     bool enabled{};
@@ -717,7 +725,8 @@ struct VulkanBridgeSwapchain::Impl {
     // buffer, a wait for the shared fence at wait_value (0: none) and a
     // signal at signal_value once it has run. Made from the thread the
     // application makes its OpenXR calls on; the queue layer serialises it
-    // against the application's own submissions.
+    // against the application's own submissions, or, without the layer, it
+    // is made only inside the calls the application synchronizes.
     [[nodiscard]] HRESULT submit(
         VkCommandBuffer buffer,
         std::uint64_t wait_value,
@@ -981,9 +990,13 @@ struct VulkanBridgeSwapchain::Impl {
                 return result;
             }
         }
-        result = transition_to_initial_layout(failure_stage);
-        if (FAILED(result)) {
-            return result;
+        if (calls_only) {
+            initial_layout_pending = true;
+        } else {
+            result = transition_to_initial_layout(failure_stage);
+            if (FAILED(result)) {
+                return result;
+            }
         }
         enabled = true;
         return S_OK;
@@ -1012,7 +1025,7 @@ struct VulkanBridgeSwapchain::Impl {
         return S_OK;
     }
 
-    [[nodiscard]] HRESULT before_write(std::uint32_t index) noexcept {
+    [[nodiscard]] HRESULT wait_for_last_read(std::uint32_t index) noexcept {
         if (!enabled || index >= runtime_images.size()) {
             return E_INVALIDARG;
         }
@@ -1020,6 +1033,32 @@ struct VulkanBridgeSwapchain::Impl {
             return S_OK;
         }
         return submit(VK_NULL_HANDLE, last_read[index], allocate());
+    }
+
+    [[nodiscard]] HRESULT after_acquire(std::uint32_t index) noexcept {
+        if (!calls_only) {
+            return S_OK;
+        }
+        if (!enabled || index >= runtime_images.size()) {
+            return E_INVALIDARG;
+        }
+        if (initial_layout_pending) {
+            std::uint32_t stage = 0;
+            const HRESULT result = transition_to_initial_layout(&stage);
+            if (FAILED(result)) {
+                enabled = false;
+                return result;
+            }
+            initial_layout_pending = false;
+        }
+        return wait_for_last_read(index);
+    }
+
+    [[nodiscard]] HRESULT before_write(std::uint32_t index) noexcept {
+        if (calls_only) {
+            return enabled && index < runtime_images.size() ? S_OK : E_INVALIDARG;
+        }
+        return wait_for_last_read(index);
     }
 
     [[nodiscard]] HRESULT release(std::uint32_t index) noexcept {
@@ -1152,13 +1191,15 @@ HRESULT VulkanBridgeSwapchain::initialize(
     const VulkanBridgeSwapchainDescription& description,
     std::uint32_t* failure_stage) noexcept {
     std::uint32_t stage = 0;
-    if (!vulkan_queue_serialized(binding)) {
+    const auto access = vulkan_queue_access(vulkan_queue_serialized(binding), vulkan_queue_layer_loaded());
+    if (access == VulkanQueueAccess::refused) {
         if (failure_stage) *failure_stage = 100;
         return E_NOINTERFACE;
     }
     try {
         std::scoped_lock lock(mutex_);
         auto candidate = std::make_unique<Impl>();
+        candidate->calls_only = access == VulkanQueueAccess::synchronized_calls;
         const HRESULT result = candidate->initialize(
             binding, d3d12_device, d3d12_queue, runtime_images, description, &stage);
         if (failure_stage != nullptr) {
@@ -1196,6 +1237,20 @@ std::span<ID3D12Resource* const> VulkanBridgeSwapchain::shared_images() const no
     std::scoped_lock lock(mutex_);
     return impl_ ? std::span<ID3D12Resource* const>(impl_->shared_views)
                  : std::span<ID3D12Resource* const>();
+}
+
+HRESULT VulkanBridgeSwapchain::after_acquire(std::uint32_t index) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ ? impl_->after_acquire(index) : E_UNEXPECTED;
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+bool VulkanBridgeSwapchain::synchronized_calls_only() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return impl_ && impl_->calls_only;
 }
 
 HRESULT VulkanBridgeSwapchain::before_write(std::uint32_t index) noexcept {
