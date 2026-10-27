@@ -172,6 +172,41 @@ void djules_v474_bridge_test() {
     std::cout<<"V474 actual D11 bridge late runtime/history GPU pixels and ordering PASS\n";
 }
 
+// A Vulkan bridge's release waits for xrEndFrame from any thread: Star Citizen
+// releases at the top of its frame, before rendering, and ends from three
+// threads. No GPU here; the bridge is never initialized, so its copy fails
+// and the runtime is never reached.
+unsigned vulkan_deferred_runtime_releases{};
+void vulkan_deferred_release_test() {
+    auto s=session();s->presenter_active=false;s->three_slot_director=false;
+    s->graphics_binding=SessionGraphicsBinding::d3d12;s->luke_afw_enabled=false;s->dlss_motion_vectors=false;
+    s->graphics_binding_capabilities|=8ULL; // its own synthesis queue, as every bridged Vulkan session
+    s->dispatch->release_swapchain_image=+[](XrSwapchain,const XrSwapchainImageReleaseInfo*)->XrResult {
+        ++vulkan_deferred_runtime_releases;return XR_SUCCESS;
+    };
+    s->dispatch->destroy_swapchain=+[](XrSwapchain)->XrResult{return XR_SUCCESS;};
+    XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};ci.width=ci.height=8;ci.arraySize=ci.faceCount=ci.mipCount=ci.sampleCount=1;
+    ci.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;ci.format=DXGI_FORMAT_R8G8B8A8_UNORM;
+    auto chain=std::make_shared<SwapchainState>(s,ci);chain->handle=reinterpret_cast<XrSwapchain>(0x474003);
+    chain->vulkan_bridge=std::make_shared<xrfg::VulkanBridgeSwapchain>();
+    const auto waited=[&]{chain->acquired_indices={0};chain->waited_count=1;chain->ownership_tracking_valid=true;};
+    {std::scoped_lock lock(g_state_mutex);g_swapchains[chain->handle]=chain;}
+    struct Remove {XrSwapchain h;~Remove(){std::scoped_lock lock(g_state_mutex);g_swapchains.erase(h);}} cleanup{chain->handle};
+    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    waited();s->application_end_thread=0;
+    static_cast<void>(layer_release_swapchain_image_impl(chain->handle,&release));
+    check(!chain->pending_bridge_release,"no deferral before the first xrEndFrame");
+    observe_application_frame_thread(*s,true);vulkan_deferred_runtime_releases=0;
+    waited();check(XR_SUCCEEDED(layer_release_swapchain_image_impl(chain->handle,&release)),"Vulkan release deferred");
+    check(chain->pending_bridge_release==0U && vulkan_deferred_runtime_releases==0,"Vulkan copy waits for xrEndFrame");
+    release_pending_bridge_images(s);
+    check(!chain->pending_bridge_release,"xrEndFrame runs the deferred Vulkan release");
+    waited();std::thread other([&]{check(XR_SUCCEEDED(layer_release_swapchain_image_impl(chain->handle,&release)),"cross-thread Vulkan release");});other.join();
+    check(chain->pending_bridge_release==0U && vulkan_deferred_runtime_releases==0,"Vulkan release deferred from another thread");
+    check(XR_SUCCEEDED(layer_destroy_swapchain_impl(chain->handle)) && vulkan_deferred_runtime_releases==0,"destroy drops the deferred Vulkan release");
+    std::cout<<"Vulkan bridge release deferred to xrEndFrame PASS\n";
+}
+
 void djules_v474_vd_restore_test() {
     auto s=session();s->presenter_active=false;s->three_slot_director=false;
     s->graphics_binding=SessionGraphicsBinding::d3d12;

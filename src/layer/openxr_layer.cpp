@@ -7639,7 +7639,14 @@ XrResult layer_wait_swapchain_image_impl(
     }
 
     std::scoped_lock call_lock(state->call_mutex);
-    release_pending_bridge_image_locked(state);
+    // Without the queue layer the game's Vulkan queue is not ours in
+    // xrWaitSwapchainImage: that release waits for the next acquire or end.
+    bool queue_unowned=false;
+    {
+        std::scoped_lock lock(state->mutex);
+        queue_unowned=state->vulkan_bridge && state->vulkan_bridge->synchronized_calls_only();
+    }
+    if (!queue_unowned) release_pending_bridge_image_locked(state);
     const XrResult result = with_runtime_entry(state->session.get(), [&] {
         return state->session->dispatch->wait_swapchain_image(
             swapchain, wait_info);
@@ -8278,13 +8285,27 @@ XrResult release_swapchain_with_identity(
     }
     std::scoped_lock call_lock(state->call_mutex);
     release_pending_bridge_image_locked(state);
+    // A bridge's copy reads what the application had submitted when it
+    // released, so the release waits for its xrEndFrame. Star Citizen releases
+    // its Vulkan swapchains at the top of its frame, before it renders them:
+    // copied there, each image held its previous contents under the frame's
+    // own pose, a lag under every head motion whatever the layer generated.
+    // The D3D11 bridge's copy needs the application's context, so on the
+    // xrEndFrame thread only; the Vulkan copy runs on any thread that is in
+    // xrEndFrame, where the queue is ours (Star Citizen ends from three).
+    // Never before the first xrEndFrame, which nothing would follow.
+    // Capability 8 is Luke's native context on the D3D11 bridge, but on a
+    // D3D12 binding it is also the layer's own synthesis queue, which every
+    // bridged Vulkan session has: it must not keep those copies at release.
     const DWORD end_thread=state->session->application_end_thread.load(std::memory_order_relaxed);
     if (!afw_producer && !state->session->luke_afw_enabled && !luke_identity &&
-        (state->session->graphics_binding_capabilities & 8ULL)==0 &&
-        end_thread && end_thread==GetCurrentThreadId() && release_info &&
+        end_thread && release_info &&
         release_info->type==XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO && !release_info->next) {
+        const bool luke_native=(state->session->graphics_binding_capabilities & 8ULL)!=0;
         std::scoped_lock lock(state->mutex);
-        if (state->bridge && !state->vulkan_bridge && state->ownership_tracking_valid &&
+        const bool vulkan=state->vulkan_bridge!=nullptr;
+        const bool d3d11=state->bridge && !vulkan && !luke_native && end_thread==GetCurrentThreadId();
+        if ((vulkan || d3d11) && state->ownership_tracking_valid &&
             state->waited_count>0 && !state->acquired_indices.empty()) {
             state->pending_bridge_release=state->acquired_indices.front();
             state->pending_bridge_release_at=std::chrono::steady_clock::now();
@@ -8303,9 +8324,15 @@ void release_pending_bridge_image_locked(const std::shared_ptr<SwapchainState>& 
             std::chrono::steady_clock::now()-state->pending_bridge_release_at).count();
         const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         const auto result=release_swapchain_image_locked(state,&release,std::nullopt);
-        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::d3d11_bridge,
-            XR_SUCCEEDED(result)?4:static_cast<std::int64_t>(result),handle_value(state->handle),
-            XR_SUCCEEDED(result)?index:4,XR_SUCCEEDED(result)?static_cast<std::uint64_t>(std::max<std::int64_t>(0,elapsed)):index);
+        // d3d11_bridge 4 or vulkan_bridge 10: a deferred release ran; a the
+        // swapchain, b the image, c us since the application's release. A
+        // failure is the runtime's code, b the stage, c the image.
+        bool vulkan=false;
+        { std::scoped_lock lock(state->mutex); vulkan=state->vulkan_bridge!=nullptr; }
+        const std::uint64_t stage=vulkan?10:4;
+        xrfg::bridge_flight_logger().event(vulkan?xrfg::BridgeFlightOperation::vulkan_bridge:xrfg::BridgeFlightOperation::d3d11_bridge,
+            XR_SUCCEEDED(result)?static_cast<std::int64_t>(stage):static_cast<std::int64_t>(result),handle_value(state->handle),
+            XR_SUCCEEDED(result)?index:stage,XR_SUCCEEDED(result)?static_cast<std::uint64_t>(std::max<std::int64_t>(0,elapsed)):index);
     } catch (...) {
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::d3d11_bridge,
             XR_ERROR_RUNTIME_FAILURE,handle_value(state->handle),4,0);

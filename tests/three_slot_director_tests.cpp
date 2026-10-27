@@ -2443,6 +2443,10 @@ int main(int argc, char** argv) {
         try {djules_v474_policy_lifecycle_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
+    if(argc>1 && std::string_view(argv[1])=="vulkan-deferred-release") {
+        try {vulkan_deferred_release_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="v474-bridge") {
         try {djules_v474_bridge_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
