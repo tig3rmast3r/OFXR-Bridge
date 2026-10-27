@@ -33,7 +33,8 @@ constexpr bool luke_origin_bit(std::uint32_t token, unsigned bit) noexcept {
 constexpr bool luke_origin_white(std::uint32_t token, unsigned x) noexcept {
     return (x % 4 < 2) == luke_origin_bit(token, x / 4);
 }
-struct LukeColorOriginDecode { std::uint32_t token{}; bool ambiguous{}; };
+// Image batches also report the first/last scanned row holding the token.
+struct LukeColorOriginDecode { std::uint32_t token{}; bool ambiguous{}; int first_row{-1}, last_row{-1}; };
 inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) noexcept {
     try {
         if (row.size() < 96 || row.size() > 16384) return {};
@@ -241,6 +242,23 @@ struct LukeColorOriginImage {
 // Optional diagnostic receipt: any finite nonzero RGB luma in this read ROI,
 // not a whole-frame visibility or scene-validity decision. CRC is unchanged.
 void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
+    std::span<LukeColorOriginDecode> results, std::span<bool> nonblack = {}) noexcept;
+// A final color is cropped from a taller producer at an offset fixed by the
+// host (Luke's square render to a wider eye: 591 Pimax rows). The scan must
+// cover every possible offset, but once a CRC-valid band is found the same
+// geometry puts it in the same rows. Decode those rows plus the protected
+// translation margin first; any miss, ambiguity or geometry change decodes
+// the whole scan in the same read. A conflicting token outside the window is
+// seen at the next whole scan, not before: a periodic whole scan to look for
+// one cost a 3-6 ms hitch every 32 frames for a case never observed.
+inline constexpr unsigned kLukeOriginWindowMargin = 16;
+struct LukeOriginRowWindow {
+    std::uint64_t geometry{}; // 0: unknown; caller-defined scan identity
+    unsigned first{}, last{}; // inclusive scan rows of the last decoded band
+};
+// Returns one bit per image whose result came from its window alone.
+unsigned decode_luke_origin_images_windowed(std::span<const LukeColorOriginImage> images,
+    std::span<const std::uint64_t> geometry, std::span<LukeOriginRowWindow> windows,
     std::span<LukeColorOriginDecode> results, std::span<bool> nonblack = {}) noexcept;
 struct LukeColorOriginRect { unsigned x{}, y{}, width{}, height{}; };
 inline constexpr unsigned kLukeOriginHeight = 8;

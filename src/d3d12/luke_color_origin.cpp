@@ -52,6 +52,7 @@ struct Reader {
     UINT64 bytes{}, last_fence{}, next_fence{1};
     HANDLE event{};
     bool poisoned{};
+    std::array<LukeOriginRowWindow, 2> windows{}; // per color slot, under mutex
     ~Reader() { if (event) CloseHandle(event); }
 };
 // Three sleeping helpers plus the caller: bounded CPU parallelism, no frame
@@ -488,14 +489,24 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
         if (FAILED(result)) return finish(result);
         std::array<LukeColorOriginImage,2> image_rows{};
         std::array<LukeColorOriginDecode,2> decoded{};
+        std::array<std::uint64_t,2> geometry{};
         for(unsigned i=0;i<count;++i)if(plans[i].valid) {
             const auto& p=plans[i];
             image_rows[i]={static_cast<const std::byte*>(mapped)+p.footprint.Offset,
                 p.original.Format,p.layout.scan.width,p.layout.scan.height,p.footprint.Footprint.RowPitch};
+            // FNV-1a over everything that places the band inside this scan.
+            std::uint64_t key=1469598103934665603ULL;
+            for(const std::uint64_t value:{p.original.Width,std::uint64_t(p.original.Height),
+                    std::uint64_t(p.original.Format),std::uint64_t(p.layout.scan.x),std::uint64_t(p.layout.scan.y),
+                    std::uint64_t(p.layout.scan.width),std::uint64_t(p.layout.scan.height)})
+                {key^=value;key*=1099511628211ULL;}
+            geometry[i]=key|1;
         }
         for(unsigned i=0;i<count;++i)image_rows[i].rgb_fallback=gta_color_origin();
-        decode_luke_origin_images(std::span(image_rows.data(),count),std::span(decoded.data(),count),
-            nonblack?std::span<bool>(nonblack,count):std::span<bool>{});
+        const auto narrowed=decode_luke_origin_images_windowed(std::span(image_rows.data(),count),
+            std::span(geometry.data(),count),std::span(reader->windows.data(),count),
+            std::span(decoded.data(),count),nonblack?std::span<bool>(nonblack,count):std::span<bool>{});
+        phase(127,static_cast<HRESULT>(narrowed)); // Bit per color decoded from its learned rows.
         HRESULT decode_status=S_OK;
         for(unsigned i=0;i<count;++i)if(plans[i].valid) {
             results[i]=decoded[i].ambiguous ? HRESULT_FROM_WIN32(ERROR_INVALID_DATA) :
@@ -550,7 +561,12 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
         for(unsigned i=0;i<images.size();++i)for(std::size_t y=offsets[i];y<offsets[i+1];++y) {
             const auto row=rows[y];auto& result=results[i];result.ambiguous|=row.ambiguous;
             if(observe_color)nonblack[i]=nonblack[i]||color_rows[y]!=0;
-            if(row.token) {if(result.token&&result.token!=row.token)result.ambiguous=true;result.token=row.token;}
+            if(row.token) {
+                if(result.token&&result.token!=row.token)result.ambiguous=true;result.token=row.token;
+                const auto scan_row=static_cast<int>(y-offsets[i]);
+                if(result.first_row<0)result.first_row=scan_row;
+                result.last_row=scan_row;
+            }
         }
         for(unsigned i=0;i<images.size();++i) {
             const auto& image=images[i];auto& result=results[i];
@@ -571,6 +587,65 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
             }
         }
     } catch(...) {for(auto& result:results)result={0,true};}
+}
+unsigned decode_luke_origin_images_windowed(std::span<const LukeColorOriginImage> images,
+    std::span<const std::uint64_t> geometry, std::span<LukeOriginRowWindow> windows,
+    std::span<LukeColorOriginDecode> results,std::span<bool> nonblack) noexcept {
+    constexpr std::size_t capacity=8;
+    const auto count=images.size();
+    if(geometry.size()!=count||windows.size()!=count||results.size()!=count||count>capacity) {
+        decode_luke_origin_images(images,results,nonblack);return 0;
+    }
+    std::array<LukeColorOriginImage,capacity> first{};
+    std::array<unsigned,capacity> top{};
+    unsigned narrowed{};
+    for(std::size_t i=0;i<count;++i) {
+        first[i]=images[i];
+        auto& window=windows[i];
+        if(!geometry[i]||window.geometry!=geometry[i]) {window={};continue;}
+        const auto& image=images[i];
+        if(!image.pixels||window.first>window.last||window.last>=image.height)continue;
+        const unsigned begin=window.first>kLukeOriginWindowMargin?window.first-kLukeOriginWindowMargin:0;
+        const unsigned end=std::min(image.height-1,window.last+kLukeOriginWindowMargin);
+        if(end-begin+1>=image.height)continue;
+        first[i].pixels=image.pixels+static_cast<std::size_t>(begin)*image.row_pitch;
+        first[i].height=end-begin+1;
+        top[i]=begin;narrowed|=1U<<i;
+    }
+    decode_luke_origin_images(std::span(first.data(),count),results,nonblack);
+    std::array<LukeColorOriginImage,capacity> retry{};
+    std::array<std::size_t,capacity> retry_index{};
+    std::size_t retries{};
+    for(std::size_t i=0;i<count;++i) {
+        if(!(narrowed&(1U<<i)))continue;
+        auto& result=results[i];
+        if(result.token&&!result.ambiguous&&result.first_row>=0) {
+            // Follow small drift; the margin still bounds what is skipped.
+            result.first_row+=static_cast<int>(top[i]);result.last_row+=static_cast<int>(top[i]);
+            auto& window=windows[i];
+            window.first=static_cast<unsigned>(result.first_row);
+            window.last=static_cast<unsigned>(result.last_row);
+            continue;
+        }
+        narrowed&=~(1U<<i);
+        retry[retries]=images[i];retry_index[retries++]=i;
+    }
+    if(retries) {
+        std::array<LukeColorOriginDecode,capacity> whole{};
+        std::array<bool,capacity> whole_nonblack{};
+        decode_luke_origin_images(std::span(retry.data(),retries),std::span(whole.data(),retries),nonblack.empty()?std::span<bool>{}:std::span<bool>(whole_nonblack.data(),retries));
+        for(std::size_t k=0;k<retries;++k){results[retry_index[k]]=whole[k];if(!nonblack.empty())nonblack[retry_index[k]]=whole_nonblack[k];}
+    }
+    for(std::size_t i=0;i<count;++i) {
+        if(narrowed&(1U<<i))continue;
+        // Whole-scan result: learn its rows, or forget a stale window.
+        const auto& result=results[i];
+        windows[i]=geometry[i]&&result.token&&!result.ambiguous&&result.first_row>=0
+            ? LukeOriginRowWindow{geometry[i],static_cast<unsigned>(result.first_row),
+                static_cast<unsigned>(result.last_row)}
+            : LukeOriginRowWindow{};
+    }
+    return narrowed;
 }
 HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
     std::uint32_t* token, D3D12_RESOURCE_STATES state, DWORD timeout_ms) noexcept {
