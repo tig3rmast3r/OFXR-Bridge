@@ -1726,6 +1726,7 @@ void install_feature_hooks() {
     native_ingress::poll_streamline();
     native_ingress::poll_d3d11_ngx();
     native_vulkan::poll_capture();
+    native_vulkan::poll_guide_capture();
 }
 void start_hook_monitor() {
     static std::atomic_bool started{};if(started.exchange(true))return;

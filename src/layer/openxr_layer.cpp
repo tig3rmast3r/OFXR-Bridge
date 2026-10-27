@@ -2534,6 +2534,9 @@ void configure_session_guide_capture(const SessionState& state) {
     if(!enabled)
         xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::configure_ngx_guide_capture(state.d3d12_queue.Get(),enabled);
+    if(state.vulkan_bridge)
+        xrfg::native_vulkan::configure_guide_capture(state.vulkan_binding,state.d3d12_device.Get(),
+            state.d3d12_queue.Get(),enabled);
 }
 // Physical Wait/Begin/End belong to actual outputs only. Virtual app polling
 // never closes an empty physical frame or resubmits old color with newer poses.
@@ -6175,7 +6178,10 @@ XrResult layer_destroy_session_impl(XrSession session) {
         destroy_frame_generation_swapchains(swapchain_state);
     }
 
-    if (state->vulkan_bridge) xrfg::native_vulkan::stop_owner(state->vulkan_binding.device);
+    if (state->vulkan_bridge) {
+        xrfg::native_vulkan::stop_owner(state->vulkan_binding.device);
+        xrfg::native_vulkan::stop_guide_capture(state->d3d12_queue.Get());
+    }
     if(state->luke_vulkan_device)xrfg::native_vulkan::stop_owner(state->luke_vulkan_device);
     const XrResult result = state->dispatch->destroy_session(session);
     std::size_t remaining_sessions{};
@@ -7801,6 +7807,10 @@ XrResult release_swapchain_image_locked(
                 copied, handle_value(state->handle), *candidate_index, 3);
             return XR_ERROR_RUNTIME_FAILURE;
         }
+        // The D3D12 queue now waits for the game's: the DLSS guides the game
+        // copied this frame are published behind that wait, before this
+        // release's guide snapshot below.
+        xrfg::native_vulkan::flush_guide_capture();
     }
 
     const bool idle_luke = state->session->luke_fresh_only &&
