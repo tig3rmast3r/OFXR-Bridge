@@ -25,6 +25,7 @@ bool query_luke_context(ID3D12Device**, ID3D12CommandQueue**) noexcept;
 void configure_guide_capture(const VulkanSessionBinding&, ID3D12Device*, ID3D12CommandQueue*, bool enabled) noexcept;
 void stop_guide_capture(ID3D12CommandQueue*) noexcept;
 // After the bridge's release has made the D3D12 queue wait for the game's.
-void flush_guide_capture() noexcept;
+std::uint64_t guide_capture_cutoff() noexcept;
+void flush_guide_capture(std::uint64_t cutoff) noexcept;
 void poll_guide_capture() noexcept;
 }

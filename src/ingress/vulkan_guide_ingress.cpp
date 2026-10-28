@@ -9,17 +9,12 @@
 // entry point, which is what made the native Vulkan ingress too costly for
 // No Man's Sky (V457) and why that one stays REAL VR-only.
 //
-// The command buffer runs whenever the game submits it, which the layer does
-// not see. The copies are published at the bridged xrReleaseSwapchainImage:
-// by then the game has submitted the frame's work, and the bridge has just
-// made the D3D12 queue wait for the game's queue; the snapshot copies are
-// queued behind that wait (0.2's untracked mode, confirmed in Star Citizen).
-// A game recording ahead may have one copy published before its submission,
-// and DLSS on another queue than the session's is not ordered by that wait.
-// A copy whose slot comes round again unpublished is dropped, never reused.
-// DLSS's inputs are taken to be in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-// as NVIDIA asks of them.
+// Minimal lifetime and submit observation proves the exact one-time recording,
+// queue and submission before the bridge signal. Unobserved/foreign/future
+// recordings are never published. Slots stay owned until both command disposal
+// and the D3D12 consumer fence; full rings skip new capture before recording.
 #include "xrfg/vulkan_native_ingress.hpp"
+#include "xrfg/vulkan_command_stream.hpp"
 #include "xrfg/native_ingress.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/luke_vulkan_scope.hpp"
@@ -53,6 +48,7 @@ enum Skip : unsigned {
 struct VulkanApi {
     VulkanSessionBinding binding{};
     VkPhysicalDeviceMemoryProperties memory{};
+    VkQueue producer_queue{};
     PFN_vkCreateImage create_image{};
     PFN_vkDestroyImage destroy_image{};
     PFN_vkGetImageMemoryRequirements image_requirements{};
@@ -79,6 +75,10 @@ struct VulkanApi {
         const auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
             gipa(binding.instance, "vkGetPhysicalDeviceMemoryProperties"));
         if (gdpa == nullptr || properties == nullptr) return false;
+        if(!initialize_guide_commands(binding.instance,binding.physical_device,binding.device,gipa,gdpa))return false;
+        const auto get_queue=reinterpret_cast<PFN_vkGetDeviceQueue>(gdpa(binding.device,"vkGetDeviceQueue"));
+        if(!get_queue)return false;get_queue(binding.device,binding.queue_family,binding.queue_index,&producer_queue);
+        if(!producer_queue)return false;
         properties(binding.physical_device, &memory);
         const auto load = [&](auto& target, const char* name) {
             target = reinterpret_cast<std::remove_reference_t<decltype(target)>>(gdpa(binding.device, name));
@@ -150,12 +150,13 @@ struct DepthRoute {
         : static_cast<HRESULT>(0x887A0000L | (static_cast<std::uint32_t>(-result) & 0xFFFFU));
 }
 
-class GuideTransport {
+class GuideTransport : public std::enable_shared_from_this<GuideTransport> {
 public:
     struct Staged {
         ID3D12Resource* motion{};
         ID3D12Resource* depth{};
-        bool dropped{}; // a copy one round of slots old, never published
+        bool dropped{}; // full ring: skip before recording a new copy
+        unsigned index{UINT32_MAX};
     };
 
     explicit GuideTransport(std::shared_ptr<VulkanApi> api) : vk_(std::move(api)) {}
@@ -184,10 +185,10 @@ public:
     [[nodiscard]] bool quiescent() noexcept {
         try {
             std::scoped_lock lock(mutex_);
-            for (const Slot& slot : slots_) if (slot.pending) return false;
-            if (!done_ || done_->GetCompletedValue() >= submitted_) return true;
-            return event_ != nullptr && SUCCEEDED(done_->SetEventOnCompletion(submitted_, event_)) &&
-                WaitForSingleObject(event_, 2000) == WAIT_OBJECT_0;
+            for (const Slot& slot : slots_) if (slot.recording && !slot.recording->disposed.load(std::memory_order_acquire)) return false;
+            if(!done_)return true;
+            const auto completed=done_->GetCompletedValue();
+            return completed!=~std::uint64_t{0}&&completed>=submitted_;
         } catch (...) {
             return false;
         }
@@ -220,11 +221,20 @@ public:
         try {
             *staged = {};
             std::scoped_lock lock(mutex_);
-            Slot& slot = slots_[next_];
-            if (slot.pending) {
-                slot.pending = false;
-                staged->dropped = true;
+            const auto receipt=guide_recording_receipt(buffer);
+            if(!receipt)return E_PENDING; // cached/unobserved or reusable command buffer
+            bool available=false;
+            for(unsigned n=0;n<kSlots;++n) {
+                auto& candidate=slots_[(next_+n)%kSlots];
+                if(!guide_recording_reusable(candidate.recording,candidate.read_done,done_->GetCompletedValue()))continue;
+                next_=(next_+n)%kSlots;available=true;break;
             }
+            if(!available){staged->dropped=true;return E_PENDING;}
+            Slot& slot=slots_[next_];slot.pending=false;
+            // Keep transport resources alive even if the feature is released
+            // while this original command buffer has not been submitted/reset.
+            if(!retain_recording(buffer,shared_from_this()))return E_PENDING;
+            slot.recording=receipt;
             // The slot's last snapshot copy reads these textures on D3D12.
             if (slot.read_done != 0 && done_->GetCompletedValue() < slot.read_done) {
                 const HRESULT result = done_->SetEventOnCompletion(slot.read_done, event_);
@@ -247,7 +257,8 @@ public:
                 }
             }
             record(buffer, motion, slot.motion, depth_ready ? depth : nullptr, slot.depth, route, slot.buffer);
-            recording_ = true;
+            staged->index=next_;
+            next_=(next_+1U)%kSlots;
             staged->motion = slot.motion.d3d12.Get();
             staged->depth = depth_ready ? slot.depth.d3d12.Get() : nullptr;
             return S_OK;
@@ -256,26 +267,26 @@ public:
         }
     }
 
-    void hold(const DlssMotionVectorPublication& publication) noexcept {
+    void hold(unsigned index,const DlssMotionVectorPublication& publication) noexcept {
         std::scoped_lock lock(mutex_);
-        if (!recording_) return;
-        recording_ = false;
-        Slot& slot = slots_[next_];
+        if(index>=kSlots)return;
+        Slot& slot = slots_[index];
         slot.publication = publication;
+        slot.output_owner=publication.output;
         slot.order = ++order_;
         slot.pending = true;
-        next_ = (next_ + 1U) % kSlots;
     }
 
     // Publishes every held copy, oldest first: `publish` records the guide
     // registry's snapshot copy into the slot's list, which then goes to the
     // queue the bridge has just made wait for the game's queue.
     template <typename Publish>
-    void flush(Publish&& publish) noexcept {
+    void flush(std::uint64_t cutoff,Publish&& publish) noexcept {
         std::scoped_lock lock(mutex_);
         std::array<Slot*, kSlots> ready{};
         std::uint32_t count = 0;
-        for (Slot& slot : slots_) if (slot.pending) ready[count++] = &slot;
+        for (Slot& slot : slots_) if (slot.pending && slot.recording &&
+            guide_submission_precedes(*slot.recording,vk_->producer_queue,cutoff))ready[count++]=&slot;
         std::sort(ready.begin(), ready.begin() + count, [](const Slot* a, const Slot* b) { return a->order < b->order; });
         for (std::uint32_t i = 0; i < count; ++i) {
             Slot& slot = *ready[i];
@@ -286,7 +297,8 @@ public:
             if (FAILED(slot.list->Close())) continue;
             ID3D12CommandList* lists[]{slot.list.Get()};
             queue_->ExecuteCommandLists(1, lists);
-            if (SUCCEEDED(queue_->Signal(done_.Get(), ++submitted_))) slot.read_done = submitted_;
+            slot.read_done=++submitted_; // failed signal quarantines this slot too
+            static_cast<void>(queue_->Signal(done_.Get(),slot.read_done));
         }
     }
 
@@ -311,6 +323,8 @@ private:
         std::uint64_t read_done{};
         std::uint64_t order{};
         bool pending{};
+        std::shared_ptr<RecordingReceipt> recording;
+        ComPtr<ID3D12Resource> output_owner;
         DlssMotionVectorPublication publication{};
     };
 
@@ -537,7 +551,6 @@ private:
     std::uint32_t next_{};
     std::uint64_t order_{};
     std::uint64_t submitted_{};
-    bool recording_{};
     HANDLE event_{};
     std::mutex mutex_;
 };
@@ -655,8 +668,8 @@ ComPtr<ID3D12Resource> output_placeholder(ID3D12Device* device, std::uint32_t wi
     return resource;
 }
 
-void flush_transport(GuideTransport& transport) noexcept {
-    transport.flush([](DlssMotionVectorPublication& publication) {
+void flush_transport(GuideTransport& transport,std::uint64_t cutoff) noexcept {
+    transport.flush(cutoff,[](DlssMotionVectorPublication& publication) {
         try {
             const auto frame = publish_dlss_motion_vectors(publication);
             if (!frame) return;
@@ -818,7 +831,7 @@ void capture(VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const NVSDK
         if (!(g.frame_time_delta_ms > 0.0F) || g.frame_time_delta_ms > 1000.0F) g.frame_time_delta_ms = 16.6667F;
         g.resource_state = g.depth_resource_state = g.output_resource_state = D3D12_RESOURCE_STATE_COMMON;
         static_cast<void>(native_ingress::apply_camera(g, nullptr));
-        transport->hold(g);
+        transport->hold(staged.index,g);
     } catch (...) {
     }
 }
@@ -962,13 +975,14 @@ std::uint64_t installed_modules() noexcept {
 void configure_guide_capture(const VulkanSessionBinding& binding, ID3D12Device* device,
     ID3D12CommandQueue* queue, bool enabled) noexcept {
     try {
-        // Capture stays disabled until the following submission/lifetime safety prerequisite.
-        enabled=false;
         // REAL VR's Vulkan titles keep the native ingress; it hooks these exports.
         if (luke_vulkan_process()) return;
         auto& s = state();
         if (!enabled || !device || !queue || binding.device == VK_NULL_HANDLE) {
             s.active.store(false, std::memory_order_release);
+            {std::scoped_lock lock(s.mutex);for(auto& [handle,feature]:s.features)if(feature.transport) {
+                s.retired.push_back(std::move(feature.transport));feature.output_placeholder.Reset();
+            }}
             if (s.recorded.exchange(0) != 0)
                 bridge_flight_logger().event(BridgeFlightOperation::vulkan_bridge, 6, 0, installed_modules(), 0);
             return;
@@ -988,6 +1002,8 @@ void configure_guide_capture(const VulkanSessionBinding& binding, ID3D12Device* 
         }
         {
             std::scoped_lock lock(s.mutex);
+            if(s.device.Get()!=device||s.queue.Get()!=queue)for(auto& [handle,feature]:s.features)
+                if(feature.transport){s.retired.push_back(std::move(feature.transport));feature.output_placeholder.Reset();}
             s.api = api;
             s.device = device;
             s.queue = queue;
@@ -1012,12 +1028,16 @@ void stop_guide_capture(ID3D12CommandQueue* queue) noexcept {
         if (s.queue.Get() == queue) {
             s.active.store(false, std::memory_order_release);
             s.recorded.store(-1);
+            for(auto& [handle,feature]:s.features)if(feature.transport) {
+                s.retired.push_back(std::move(feature.transport));feature.output_placeholder.Reset();
+            }
         }
     } catch (...) {
     }
 }
 
-void flush_guide_capture() noexcept {
+std::uint64_t guide_capture_cutoff() noexcept {return guide_submission_cutoff();}
+void flush_guide_capture(std::uint64_t cutoff) noexcept {
     try {
         auto& s = state();
         if (!s.active.load(std::memory_order_acquire)) return;
@@ -1029,13 +1049,15 @@ void flush_guide_capture() noexcept {
                 if (feature.transport) transports.push_back(feature.transport);
             }
         }
-        for (const auto& transport : transports) flush_transport(*transport);
+        for (const auto& transport : transports) flush_transport(*transport,cutoff);
     } catch (...) {
     }
 }
 
 void poll_guide_capture() noexcept {
     try {
+        {auto& s=state();std::scoped_lock lock(s.mutex);
+         std::erase_if(s.retired,[](const auto& transport){return transport->quiescent();});}
         // Only once a bridged Vulkan session asked for it; the hooks then stay.
         if (!state().configured.load(std::memory_order_acquire) || luke_vulkan_process()) return;
         static std::mutex installing;

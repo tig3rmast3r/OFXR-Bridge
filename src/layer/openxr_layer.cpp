@@ -7801,6 +7801,7 @@ XrResult release_swapchain_image_locked(
     }
 
     if (vulkan_bridge && candidate_index) {
+        const auto guide_cutoff=xrfg::native_vulkan::guide_capture_cutoff();
         const HRESULT copied = vulkan_bridge->release(*candidate_index);
         if (FAILED(copied)) {
             xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::vulkan_bridge,
@@ -7810,7 +7811,7 @@ XrResult release_swapchain_image_locked(
         // The D3D12 queue now waits for the game's: the DLSS guides the game
         // copied this frame are published behind that wait, before this
         // release's guide snapshot below.
-        xrfg::native_vulkan::flush_guide_capture();
+        xrfg::native_vulkan::flush_guide_capture(guide_cutoff);
     }
 
     const bool idle_luke = state->session->luke_fresh_only &&

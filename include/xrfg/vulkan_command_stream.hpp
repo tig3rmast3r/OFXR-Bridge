@@ -12,7 +12,20 @@ enum class RecordingDisposition : unsigned char { recording, submitted, abandone
 struct RecordingReceipt {
     std::atomic<RecordingDisposition> disposition{RecordingDisposition::recording};
     uint64_t epoch{};
+    std::atomic<bool> disposed{false};
+    std::atomic<VkQueue> submitted_queue{VK_NULL_HANDLE};
+    std::atomic<uint64_t> submission_serial{};
 };
+inline bool guide_submission_precedes(const RecordingReceipt& receipt,VkQueue queue,uint64_t cutoff) noexcept {
+ const auto serial=receipt.submission_serial.load(std::memory_order_acquire);
+ return serial&&serial<=cutoff&&receipt.disposition.load(std::memory_order_acquire)==RecordingDisposition::submitted&&
+     receipt.submitted_queue.load(std::memory_order_acquire)==queue;
+}
+inline bool guide_recording_reusable(const std::shared_ptr<RecordingReceipt>& receipt,
+ uint64_t read_done,uint64_t completed) noexcept {
+ return (!receipt||receipt->disposed.load(std::memory_order_acquire))&&
+     completed!=~uint64_t{0}&&completed>=read_done;
+}
 // Shared identity belongs to one successful split in one recording epoch.
 // Abandonment is an exact reset/free/begin event, never an elapsed-frame guess.
 struct RecordingLifetime {
@@ -73,6 +86,11 @@ bool retain_recording(VkCommandBuffer original,std::shared_ptr<void> resources) 
 // exact epoch receipt; failed driver submission leaves it recording. It adds
 // no segments, callbacks, waits or submission mutations.
 std::shared_ptr<RecordingReceipt> recording_receipt(VkCommandBuffer original) noexcept;
+// Minimal lifetime/submit observation: no draw/descriptor/image interception.
+bool initialize_guide_commands(VkInstance,VkPhysicalDevice,VkDevice,
+    PFN_vkGetInstanceProcAddr,PFN_vkGetDeviceProcAddr) noexcept;
+std::shared_ptr<RecordingReceipt> guide_recording_receipt(VkCommandBuffer) noexcept;
+uint64_t guide_submission_cutoff() noexcept;
 using RecordCopyback = VkResult(*)(VkCommandBuffer continuation,void* context);
 // Ends current prefix, begins an owned suffix, records optional native copyback
 // before replaying accepted bindings/push constants/dynamic state. Original

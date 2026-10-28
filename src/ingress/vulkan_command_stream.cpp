@@ -47,7 +47,9 @@ struct Registry {
     std::unordered_map<void*,std::shared_ptr<DeviceState>> dispatch;
     std::unordered_map<VkCommandBuffer,std::weak_ptr<DeviceState>> commands;
     std::unordered_map<void*,SafetyHookInline> entry_hooks;
+    std::unordered_map<std::string,PFN_vkVoidFunction> guide_fallbacks;
 };
+std::atomic<uint64_t> submission_serial{};
 Registry& registry(){static auto* value=new Registry;return *value;}
 void* dispatch_key(const void* object){return object?*static_cast<void* const*>(object):nullptr;}
 std::shared_ptr<DeviceState> device_state(VkDevice device) {
@@ -69,6 +71,11 @@ template<class T>T load(DeviceState& device,const char* name) {
     if(found!=device.functions.end())return reinterpret_cast<T>(unhooked_command(found->second));
     auto function=device.gdpa?device.gdpa(device.device,name):nullptr;
     device.functions.emplace(name,function);return reinterpret_cast<T>(unhooked_command(function));
+}
+template<class T>T guide_fallback(const char* name) {
+    auto& r=registry();PFN_vkVoidFunction fn{};
+    {std::scoped_lock lock(r.mutex);auto it=r.guide_fallbacks.find(name);if(it!=r.guide_fallbacks.end())fn=it->second;}
+    return reinterpret_cast<T>(unhooked_command(fn));
 }
 void original_locked(DeviceState& device,VkCommandBuffer& original) {
     if(auto alias=device.continuation_owners.find(original);alias!=device.continuation_owners.end())original=alias->second;
@@ -110,6 +117,7 @@ void release_chain(DeviceState& device,CommandChain& chain,DisposedRecordings& a
     if(chain.receipt) {
         auto expected=RecordingDisposition::recording;
         (void)chain.receipt->disposition.compare_exchange_strong(expected,RecordingDisposition::abandoned);
+        chain.receipt->disposed.store(true,std::memory_order_release);
         chain.receipt.reset();
     }
     auto free=load<PFN_vkFreeCommandBuffers>(device,"vkFreeCommandBuffers");
@@ -132,7 +140,7 @@ void notify_abandoned(const DisposedRecordings& abandoned) noexcept {
 }
 VKAPI_ATTR VkResult VKAPI_CALL hook_vkCreateCommandPool(VkDevice handle,
     const VkCommandPoolCreateInfo* info,const VkAllocationCallbacks* allocator,VkCommandPool* pool) {
-    auto d=device_state(handle);if(!d)return VK_ERROR_INITIALIZATION_FAILED;
+    auto d=device_state(handle);if(!d){auto f=guide_fallback<PFN_vkCreateCommandPool>("vkCreateCommandPool");return f?f(handle,info,allocator,pool):VK_ERROR_INITIALIZATION_FAILED;}
     auto fn=load<PFN_vkCreateCommandPool>(*d,"vkCreateCommandPool");if(!fn)return VK_ERROR_INITIALIZATION_FAILED;
     auto result=fn(handle,info,allocator,pool);if(result==VK_SUCCESS&&info&&pool) {
         std::scoped_lock lock(d->mutex);d->pools[*pool]=info->queueFamilyIndex;
@@ -140,7 +148,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_vkCreateCommandPool(VkDevice handle,
 }
 VKAPI_ATTR VkResult VKAPI_CALL hook_vkAllocateCommandBuffers(VkDevice handle,
     const VkCommandBufferAllocateInfo* info,VkCommandBuffer* commands) {
-    auto d=device_state(handle);if(!d)return VK_ERROR_INITIALIZATION_FAILED;
+    auto d=device_state(handle);if(!d){auto f=guide_fallback<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers");return f?f(handle,info,commands):VK_ERROR_INITIALIZATION_FAILED;}
     auto fn=load<PFN_vkAllocateCommandBuffers>(*d,"vkAllocateCommandBuffers");if(!fn)return VK_ERROR_INITIALIZATION_FAILED;
     auto result=fn(handle,info,commands);if(result!=VK_SUCCESS||!info||!commands)return result;
     std::scoped_lock lock(d->mutex);auto family=d->pools.find(info->commandPool);
@@ -153,7 +161,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_vkAllocateCommandBuffers(VkDevice handle,
 }
 VKAPI_ATTR VkResult VKAPI_CALL hook_vkBeginCommandBuffer(VkCommandBuffer original,
     const VkCommandBufferBeginInfo* info) {
-    auto d=command_device(original);if(!d)return VK_ERROR_INITIALIZATION_FAILED;
+    auto d=command_device(original);if(!d){auto f=guide_fallback<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer");return f?f(original,info):VK_ERROR_INITIALIZATION_FAILED;}
     auto fn=load<PFN_vkBeginCommandBuffer>(*d,"vkBeginCommandBuffer");if(!fn)return VK_ERROR_INITIALIZATION_FAILED;
     std::unique_lock lock(d->mutex);DisposedRecordings abandoned;
     auto& chain=d->commands[original];release_chain(*d,chain,abandoned);
@@ -163,13 +171,13 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_vkBeginCommandBuffer(VkCommandBuffer origina
     }lock.unlock();notify_abandoned(abandoned);return result;
 }
 VKAPI_ATTR VkResult VKAPI_CALL hook_vkEndCommandBuffer(VkCommandBuffer original) {
-    auto d=command_device(original);if(!d)return VK_ERROR_INITIALIZATION_FAILED;
+    auto d=command_device(original);if(!d){auto f=guide_fallback<PFN_vkEndCommandBuffer>("vkEndCommandBuffer");return f?f(original):VK_ERROR_INITIALIZATION_FAILED;}
     auto fn=load<PFN_vkEndCommandBuffer>(*d,"vkEndCommandBuffer");if(!fn)return VK_ERROR_INITIALIZATION_FAILED;
     std::scoped_lock lock(d->mutex);auto result=fn(native_locked(*d,original));
     if(result==VK_SUCCESS){d->commands[original].recording=false;d->tracker.OnEnd(original);}return result;
 }
 VKAPI_ATTR VkResult VKAPI_CALL hook_vkResetCommandBuffer(VkCommandBuffer original,VkCommandBufferResetFlags flags) {
-    auto d=command_device(original);if(!d)return VK_ERROR_INITIALIZATION_FAILED;
+    auto d=command_device(original);if(!d){auto f=guide_fallback<PFN_vkResetCommandBuffer>("vkResetCommandBuffer");return f?f(original,flags):VK_ERROR_INITIALIZATION_FAILED;}
     auto fn=load<PFN_vkResetCommandBuffer>(*d,"vkResetCommandBuffer");if(!fn)return VK_ERROR_INITIALIZATION_FAILED;
     std::unique_lock lock(d->mutex);DisposedRecordings abandoned;auto result=fn(original,flags);
     if(result==VK_SUCCESS){release_chain(*d,d->commands[original],abandoned);d->tracker.OnReset(original);}
@@ -177,14 +185,14 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_vkResetCommandBuffer(VkCommandBuffer origina
 }
 VKAPI_ATTR void VKAPI_CALL hook_vkFreeCommandBuffers(VkDevice handle,VkCommandPool pool,uint32_t count,
     const VkCommandBuffer* commands) {
-    auto d=device_state(handle);if(!d)return;auto fn=load<PFN_vkFreeCommandBuffers>(*d,"vkFreeCommandBuffers");if(!fn)return;
+    auto d=device_state(handle);if(!d){auto f=guide_fallback<PFN_vkFreeCommandBuffers>("vkFreeCommandBuffers");if(f)f(handle,pool,count,commands);return;}auto fn=load<PFN_vkFreeCommandBuffers>(*d,"vkFreeCommandBuffers");if(!fn)return;
     std::unique_lock lock(d->mutex);DisposedRecordings abandoned;for(uint32_t i=0;commands&&i<count;++i) {
         if(auto found=d->commands.find(commands[i]);found!=d->commands.end()){release_chain(*d,found->second,abandoned);d->commands.erase(found);}
     }d->tracker.OnFreeCommandBuffers(pool,count,commands);fn(handle,pool,count,commands);
     lock.unlock();notify_abandoned(abandoned);
 }
 VKAPI_ATTR VkResult VKAPI_CALL hook_vkResetCommandPool(VkDevice handle,VkCommandPool pool,VkCommandPoolResetFlags flags) {
-    auto d=device_state(handle);if(!d)return VK_ERROR_INITIALIZATION_FAILED;
+    auto d=device_state(handle);if(!d){auto f=guide_fallback<PFN_vkResetCommandPool>("vkResetCommandPool");return f?f(handle,pool,flags):VK_ERROR_INITIALIZATION_FAILED;}
     auto fn=load<PFN_vkResetCommandPool>(*d,"vkResetCommandPool");if(!fn)return VK_ERROR_INITIALIZATION_FAILED;
     std::unique_lock lock(d->mutex);DisposedRecordings abandoned;auto result=fn(handle,pool,flags);if(result==VK_SUCCESS) {
         for(auto& [command,chain]:d->commands)if(chain.pool==pool)release_chain(*d,chain,abandoned);
@@ -193,7 +201,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_vkResetCommandPool(VkDevice handle,VkCommand
 }
 VKAPI_ATTR void VKAPI_CALL hook_vkDestroyCommandPool(VkDevice handle,VkCommandPool pool,
     const VkAllocationCallbacks* allocator) {
-    auto d=device_state(handle);if(!d)return;auto fn=load<PFN_vkDestroyCommandPool>(*d,"vkDestroyCommandPool");if(!fn)return;
+    auto d=device_state(handle);if(!d){auto f=guide_fallback<PFN_vkDestroyCommandPool>("vkDestroyCommandPool");if(f)f(handle,pool,allocator);return;}auto fn=load<PFN_vkDestroyCommandPool>(*d,"vkDestroyCommandPool");if(!fn)return;
     std::unique_lock lock(d->mutex);DisposedRecordings abandoned;
     for(auto iterator=d->commands.begin();iterator!=d->commands.end();) {
         if(iterator->second.pool==pool){release_chain(*d,iterator->second,abandoned);iterator=d->commands.erase(iterator);}else ++iterator;
@@ -219,9 +227,11 @@ void mark_submitted(const std::vector<Segment>& segments) noexcept {
         (void)segment.lifetime->disposition.compare_exchange_strong(expected,RecordingDisposition::submitted);
     }
 }
-void mark_original_submitted(CommandChain& chain) noexcept {
+void mark_original_submitted(CommandChain& chain,VkQueue queue) noexcept {
     chain.submitted=true;
     if(chain.receipt) {
+        chain.receipt->submitted_queue.store(queue,std::memory_order_relaxed);
+        chain.receipt->submission_serial.store(++submission_serial,std::memory_order_release);
         auto expected=RecordingDisposition::recording;
         (void)chain.receipt->disposition.compare_exchange_strong(expected,RecordingDisposition::submitted);
     }
@@ -233,7 +243,7 @@ void notify_submitted(VkQueue queue,const std::vector<Segment>& segments) noexce
         segment.handoff.submitted(queue,segment.handoff.submission_context.get());
 }
 VKAPI_ATTR VkResult VKAPI_CALL hook_vkQueueSubmit(VkQueue queue,uint32_t count,const VkSubmitInfo* submits,VkFence fence) {
-    auto d=queue_device(queue);if(!d)return VK_ERROR_INITIALIZATION_FAILED;
+    auto d=queue_device(queue);if(!d){auto f=guide_fallback<PFN_vkQueueSubmit>("vkQueueSubmit");return f?f(queue,count,submits,fence):VK_ERROR_INITIALIZATION_FAILED;}
     auto fn=load<PFN_vkQueueSubmit>(*d,"vkQueueSubmit");if(!fn)return VK_ERROR_INITIALIZATION_FAILED;
     try {
         std::unique_lock lock(d->mutex);auto segments=submitted_segments(*d,count,submits);
@@ -245,7 +255,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_vkQueueSubmit(VkQueue queue,uint32_t count,c
         }auto result=fn(queue,current_count,current,fence);
         if(result==VK_SUCCESS) {
             for(uint32_t i=0;i<count;++i)for(uint32_t j=0;j<submits[i].commandBufferCount;++j)
-                if(auto found=d->commands.find(submits[i].pCommandBuffers[j]);found!=d->commands.end())mark_original_submitted(found->second);
+                if(auto found=d->commands.find(submits[i].pCommandBuffers[j]);found!=d->commands.end())mark_original_submitted(found->second,queue);
             mark_submitted(segments);
         }
         // Evaluate may hold its transport-owner mutex while recording a split.
@@ -272,7 +282,7 @@ VkResult submit2(PFN_vkQueueSubmit2 fn,VkQueue queue,uint32_t count,const VkSubm
         }auto result=fn(queue,current_count,current,fence);
         if(result==VK_SUCCESS) {
             for(uint32_t i=0;i<count;++i)for(uint32_t j=0;j<submits[i].commandBufferInfoCount;++j)
-                if(auto found=d->commands.find(submits[i].pCommandBufferInfos[j].commandBuffer);found!=d->commands.end())mark_original_submitted(found->second);
+                if(auto found=d->commands.find(submits[i].pCommandBufferInfos[j].commandBuffer);found!=d->commands.end())mark_original_submitted(found->second,queue);
             mark_submitted(segments);
         }
         lock.unlock();if(result==VK_SUCCESS)notify_submitted(queue,segments);
@@ -280,10 +290,10 @@ VkResult submit2(PFN_vkQueueSubmit2 fn,VkQueue queue,uint32_t count,const VkSubm
     }catch(...){return VK_ERROR_OUT_OF_HOST_MEMORY;}
 }
 VKAPI_ATTR VkResult VKAPI_CALL hook_vkQueueSubmit2(VkQueue queue,uint32_t count,const VkSubmitInfo2* submits,VkFence fence) {
-    auto d=queue_device(queue);return d?submit2(load<PFN_vkQueueSubmit2>(*d,"vkQueueSubmit2"),queue,count,submits,fence):VK_ERROR_INITIALIZATION_FAILED;
+    auto d=queue_device(queue);if(d)return submit2(load<PFN_vkQueueSubmit2>(*d,"vkQueueSubmit2"),queue,count,submits,fence);auto f=guide_fallback<PFN_vkQueueSubmit2>("vkQueueSubmit2");return f?f(queue,count,submits,fence):VK_ERROR_INITIALIZATION_FAILED;
 }
 VKAPI_ATTR VkResult VKAPI_CALL hook_vkQueueSubmit2KHR(VkQueue queue,uint32_t count,const VkSubmitInfo2* submits,VkFence fence) {
-    auto d=queue_device(queue);return d?submit2(load<PFN_vkQueueSubmit2>(*d,"vkQueueSubmit2KHR"),queue,count,submits,fence):VK_ERROR_INITIALIZATION_FAILED;
+    auto d=queue_device(queue);if(d)return submit2(load<PFN_vkQueueSubmit2>(*d,"vkQueueSubmit2KHR"),queue,count,submits,fence);auto f=guide_fallback<PFN_vkQueueSubmit2>("vkQueueSubmit2KHR");return f?f(queue,count,submits,fence):VK_ERROR_INITIALIZATION_FAILED;
 }
 
 #include "vulkan_command_dispatch.inc"
@@ -401,6 +411,38 @@ std::shared_ptr<RecordingReceipt> recording_receipt(VkCommandBuffer original) no
         }
         return chain.receipt;
     }catch(...){return {};}
+}
+uint64_t guide_submission_cutoff() noexcept {return submission_serial.load(std::memory_order_acquire);}
+std::shared_ptr<RecordingReceipt> guide_recording_receipt(VkCommandBuffer original) noexcept {
+    auto d=command_device(original);if(!d)return {};
+    {std::scoped_lock lock(d->mutex);auto it=d->commands.find(original);
+     if(it==d->commands.end()||!it->second.recording||it->second.submitted||
+        it->second.level!=VK_COMMAND_BUFFER_LEVEL_PRIMARY||
+        !(it->second.flags&VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT))return {};}
+    return recording_receipt(original);
+}
+bool initialize_guide_commands(VkInstance instance,VkPhysicalDevice physical,VkDevice device,
+    PFN_vkGetInstanceProcAddr gipa,PFN_vkGetDeviceProcAddr gdpa) noexcept {
+    try {
+        if(!initialize_commands(instance,physical,device,gipa,gdpa))return false;
+        const char* names[]{"vkCreateCommandPool","vkAllocateCommandBuffers","vkBeginCommandBuffer",
+            "vkEndCommandBuffer","vkResetCommandBuffer","vkFreeCommandBuffers","vkResetCommandPool",
+            "vkDestroyCommandPool","vkQueueSubmit","vkQueueSubmit2","vkQueueSubmit2KHR"};
+        auto& r=registry();
+        for(const char* name:names) {
+            const auto address=gdpa(device,name);if(!address)continue;
+            const auto replacement=resolve_command(device,name,address);
+            if(address==replacement)return false;
+            std::scoped_lock lock(r.mutex);auto* key=reinterpret_cast<void*>(address);
+            if(const auto found=r.guide_fallbacks.find(name);found!=r.guide_fallbacks.end()&&found->second!=address)return false;
+            r.guide_fallbacks[name]=address;
+            if(r.entry_hooks.contains(key))continue;
+            auto hook=safetyhook::create_inline(key,reinterpret_cast<void*>(replacement),SafetyHookInline::StartDisabled);
+            if(!hook)return false;r.entry_hooks.emplace(key,std::move(hook));
+        }
+        std::scoped_lock lock(r.mutex);for(auto& [address,hook]:r.entry_hooks)(void)hook.enable();
+        return true;
+    }catch(...){return false;}
 }
 CommandSplit split(VkCommandBuffer original,const CommandHandoff& handoff,
     RecordCopyback copyback,void* context) noexcept {
