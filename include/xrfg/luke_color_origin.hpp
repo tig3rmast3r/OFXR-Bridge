@@ -196,9 +196,10 @@ inline DXGI_FORMAT luke_origin_upload_format(DXGI_FORMAT resource, DXGI_FORMAT p
 // in the eye image and never decoded; the decoder needs only a few levels of
 // contrast. Exact in half, 11/10-bit and 32-bit floats.
 inline constexpr float kLukeOriginHdrWhite = 1.f / 16.f;
-inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white) noexcept {
+// bright: 1.0 on float outputs (see LukeColorOriginLayout::bright).
+inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white, bool bright = false) noexcept {
     if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
-        const auto level = static_cast<std::uint16_t>(white ? 0x2c00 : 0); // 2^-4
+        const auto level = static_cast<std::uint16_t>(white ? (bright ? 0x3c00 : 0x2c00) : 0); // 1 or 2^-4
         const std::uint16_t values[]{level, level, level, 0x3c00};
         std::memcpy(pixel, values, sizeof(values));
     } else if (format == DXGI_FORMAT_R16G16B16A16_UNORM) {
@@ -206,11 +207,12 @@ inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white) 
         const std::uint16_t values[]{level, level, level, 0xffff};
         std::memcpy(pixel, values, sizeof(values));
     } else if (format == DXGI_FORMAT_R11G11B10_FLOAT) {
-        // Unsigned 5-bit exponents, 6/6/5-bit mantissas. Exactly 2^-4 RGB.
-        const std::uint32_t value = white ? (0x2c0U | (0x2c0U << 11) | (0x160U << 22)) : 0;
+        // Unsigned 5-bit exponents, 6/6/5-bit mantissas. Exactly 2^-4 (or 1) RGB.
+        const std::uint32_t value = !white ? 0 : bright ? (0x3c0U | (0x3c0U << 11) | (0x1e0U << 22))
+            : (0x2c0U | (0x2c0U << 11) | (0x160U << 22));
         std::memcpy(pixel, &value, sizeof(value));
     } else if (format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
-        const float level = white ? kLukeOriginHdrWhite : 0.f, values[]{level, level, level, 1.f};
+        const float level = white ? (bright ? 1.f : kLukeOriginHdrWhite) : 0.f, values[]{level, level, level, 1.f};
         std::memcpy(pixel, values, sizeof(values));
     } else {
         const std::uint32_t value = format == DXGI_FORMAT_R10G10B10A2_UNORM
@@ -306,15 +308,25 @@ inline constexpr unsigned kLukeOriginHeight = 8;
 inline constexpr unsigned kLukeOriginMargin = 2;
 struct LukeColorOriginLayout {
     std::array<LukeColorOriginRect,8> bands{};
+    // A band stamped at full white instead of kLukeOriginHdrWhite: survives a
+    // heavily vignetted corner, where the dim band's contrast shrinks with it
+    // (Uncharted at night: 8 of 255 at the bottom-left). Its bloom in a bright
+    // corner is why the dim band stays, kLukeOriginBrightGap rows apart.
+    std::array<bool,8> bright{};
     unsigned band_count{};
     LukeColorOriginRect scan;
 };
+inline constexpr unsigned kLukeOriginBrightGap = 64;
 // Cover every possible unscaled horizontal eye crop with complete, disjoint
 // copies of ONE token. A narrow common intersection need not contain a marker.
 // Geometry selects positions, never an eye, frame or alternate metadata source.
+// from_bottom: the band sits inset_y above the bottom edge instead of below
+// the top one (Uncharted's night sky and rain are drawn over the top of the
+// image after DLSS). With a vertical crop of dy rows the eye shows the band
+// up to dy rows higher; the scan covers every such crop.
 inline bool compact_luke_origin_layout(unsigned output_width, unsigned output_height,
     unsigned color_width, unsigned color_height, LukeColorOriginLayout& layout,
-    unsigned inset_x = 0, unsigned inset_y = 0) noexcept {
+    unsigned inset_x = 0, unsigned inset_y = 0, bool from_bottom = false) noexcept {
     layout = {};
     if (!color_width || !color_height || output_width>16384 || output_height>8192 ||
         color_width > output_width || color_height > output_height ||
@@ -348,13 +360,34 @@ inline bool compact_luke_origin_layout(unsigned output_width, unsigned output_he
     // the empty inset/FPS area. Default geometry remains byte-for-byte equal.
     // 32: The Last of Us Part I's left eye places the band 15 pixels further
     // left than any crop of its output, losing its first 13 pixels at the edge.
-    const unsigned translation_x=std::min(inset_x,32U),translation_y=std::min(inset_y,32U);
+    // 256 for a bottom band: Uncharted's eye shows its output magnified about
+    // 1.05 and moved left by up to 43 pixels at 3600 wide, cutting a band 32
+    // pixels in; the search window must cover the band's whole possible travel.
+    const unsigned translation_x=std::min(inset_x,from_bottom?256U:32U),translation_y=std::min(inset_y,32U);
     candidate.scan.x=inset_x-translation_x;
     candidate.scan.y=inset_y-translation_y;
     candidate.scan.width=std::min(color_width,candidate.bands[candidate.band_count-1].x+
         kLukeOriginWidth+kLukeOriginMargin+translation_x)-candidate.scan.x;
     candidate.scan.height=dy+kLukeOriginHeight+2*kLukeOriginMargin+inset_y+
         translation_y-candidate.scan.y;
+    if(from_bottom) {
+        // In output rows; eye row = y - crop, crop anywhere in [0, dy]. The
+        // dim band, and a bright copy of each band kLukeOriginBrightGap above.
+        const unsigned y=color_height-kLukeOriginHeight-kLukeOriginMargin-inset_y;
+        if(static_cast<std::uint64_t>(dy)+kLukeOriginMargin+translation_y+kLukeOriginBrightGap>y)return false;
+        if(candidate.band_count*2>candidate.bands.size())return false;
+        const unsigned count=candidate.band_count;
+        for(unsigned band=0;band<count;++band) {
+            candidate.bands[band].y=y;
+            candidate.bands[count+band]=candidate.bands[band];
+            candidate.bands[count+band].y=y-kLukeOriginBrightGap;
+            candidate.bright[count+band]=true;
+        }
+        candidate.band_count=count*2;
+        candidate.scan.y=y-kLukeOriginBrightGap-dy-kLukeOriginMargin-translation_y;
+        candidate.scan.height=std::min(color_height-candidate.scan.y,
+            kLukeOriginBrightGap+dy+kLukeOriginHeight+2*kLukeOriginMargin+2*translation_y);
+    }
     layout=candidate;
     return true;
 }

@@ -130,6 +130,62 @@ void codec_tests() {
         const auto decoded=xrfg::decode_luke_origin_row(std::span<const float>(projected).subspan(tlou.scan.x,tlou.scan.width));
         require(decoded.token==0x2036u&&!decoded.ambiguous,"TLOU1 shifted band lost its token");
     }
+    for(const auto* name:{L"tll.exe",L"TLL-L.exe",L"u4.exe",L"u4-l.exe"})
+        require(xrfg::luke_origin_inset_for_title(name)==std::array<unsigned,2>{256,32},"Uncharted margins missing");
+    {
+        // Uncharted 4080 -> 4079: without an inset the band began at eye
+        // pixel 1 of its 261-pixel scan, 2 pixels left of where it was
+        // written. With the inset that placement has room on both sides.
+        xrfg::LukeColorOriginLayout uncharted;
+        require(xrfg::compact_luke_origin_layout(4080,3424,4079,3424,uncharted,32,32),"Uncharted protected layout");
+        const int eye_x=int(uncharted.bands[0].x)-2;
+        require(eye_x>=int(uncharted.scan.x)+16 && eye_x+256+16<=int(uncharted.scan.x+uncharted.scan.width),
+            "Uncharted observed placement without margin in the reader's scan");
+        std::vector<float> projected(4079,.02F);
+        for(unsigned cell=0;cell<256;++cell)
+            projected[eye_x+cell]=xrfg::luke_origin_white(0x2036u,cell)?1.F:0.F;
+        const auto decoded=xrfg::decode_luke_origin_row(std::span<const float>(projected).subspan(uncharted.scan.x,uncharted.scan.width));
+        require(decoded.token==0x2036u&&!decoded.ambiguous,"Uncharted shifted band lost its token");
+    }
+    {
+        // Uncharted 3488x2928: the band 32 px above the bottom edge, the
+        // reader's scan around it, a 2-pixel shift still inside.
+        require(xrfg::luke_origin_from_bottom_for_title(L"TLL.exe")&&xrfg::luke_origin_from_bottom_for_title(L"u4-l.exe")&&
+            !xrfg::luke_origin_from_bottom_for_title(L"tlou-i.exe"),"bottom placement policy");
+        xrfg::LukeColorOriginLayout bottom;
+        require(xrfg::compact_luke_origin_layout(3488,2928,3488,2928,bottom,32,32,true)&&bottom.band_count==2&&
+            bottom.bands[0].y==2928-8-2-32&&!bottom.bright[0]&&bottom.bands[1].y==bottom.bands[0].y-64&&bottom.bright[1]&&
+            bottom.bands[1].x==bottom.bands[0].x&&bottom.scan.y+bottom.scan.height<=2928&&
+            bottom.scan.y+16<=bottom.bands[1].y&&bottom.bands[0].y+8+16<=bottom.scan.y+bottom.scan.height,
+            "Uncharted bottom layout: dim band and a bright band 64 rows above, both in the scan");
+        // 2800x2352 output shown in a 2800x2350 eye (measured): either crop
+        // keeps both bands inside the eye and inside the scan.
+        require(xrfg::compact_luke_origin_layout(2800,2352,2800,2350,bottom,32,32,true)&&bottom.band_count==2,
+            "Uncharted bottom layout under a 2-row crop");
+        for(const unsigned crop:{0U,2U})for(unsigned band=0;band<2;++band) {
+            const unsigned eye_y=bottom.bands[band].y-crop;
+            require(eye_y+8<=2350&&eye_y>=bottom.scan.y+16&&eye_y+8+16<=bottom.scan.y+bottom.scan.height,
+                "bottom band outside the eye or the scan for a crop");
+        }
+        // Measured at 3600x3024 -> 3600x3022: the band drawn 258 pixels in
+        // appears magnified 1.05 and 43 pixels further left. Still inside the
+        // scan with its sync prefix, and decodable at that pitch.
+        require(xrfg::compact_luke_origin_layout(3600,3024,3600,3022,bottom,256,32,true)&&bottom.scan.x==0&&
+            bottom.bands[0].x==258&&bottom.scan.width>=258+256+8,"Uncharted wide search window");
+        {
+            std::vector<float> eye(bottom.scan.width,.02F);
+            const double origin=258*1.05-43;
+            for(unsigned x=0;x<eye.size();++x) {
+                const double cell=(x-origin)/1.05;
+                if(cell>=0&&cell<256)eye[x]=xrfg::luke_origin_white(0x2036u,unsigned(cell))?1.F:0.F;
+            }
+            const auto decoded=xrfg::decode_luke_origin_row(eye);
+            require(decoded.token==0x2036u&&!decoded.ambiguous,"magnified, shifted bottom band lost its token");
+        }
+        std::array<std::byte,4> bright{};
+        xrfg::luke_origin_pixel(bright.data(),DXGI_FORMAT_R11G11B10_FLOAT,true,true);
+        require(std::fabs(xrfg::luke_origin_luma(bright.data(),DXGI_FORMAT_R11G11B10_FLOAT)-1.F)<1e-4F,"bright stamp is not full white");
+    }
     for(const float scene:{.02F,.1F,.3F,.6F}) {
         // Uncharted: a 1/16 band right after brighter scenery, blurred over
         // a pixel. The scenery-to-band drop and bit0's own merge into one

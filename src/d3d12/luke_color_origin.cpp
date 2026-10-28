@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <mutex>
@@ -34,12 +35,23 @@ bool gta_color_origin() noexcept {
         const auto* n=wcsrchr(p,L'\\');return !_wcsicmp(n?n+1:p,L"GTA5_Enhanced.exe");}();
     return result;
 }
+// Uncharted: bottom-left, below its post-DLSS night sky and rain.
+bool origin_from_bottom() noexcept {
+    static const bool bottom=[] {
+        wchar_t path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr,path,MAX_PATH);
+        const auto* name=wcsrchr(path,L'\\');
+        return luke_origin_from_bottom_for_title(name?name+1:path);
+    }();
+    return bottom;
+}
 using Microsoft::WRL::ComPtr;
 struct Uploads {
     ComPtr<ID3D12Device> device;
     DXGI_FORMAT format{};
     UINT height{};
-    std::array<ComPtr<ID3D12Resource>, 2> colors;
+    std::array<ComPtr<ID3D12Resource>, 2> colors;        // black, dim white
+    std::array<ComPtr<ID3D12Resource>, 2> bright_colors; // black, full white (float outputs)
 };
 struct Reader {
     std::mutex mutex;
@@ -109,7 +121,7 @@ D3D12_RESOURCE_BARRIER transition(ID3D12Resource* color, D3D12_RESOURCE_STATES f
     return barrier;
 }
 HRESULT immutable_upload(ID3D12Device* device, DXGI_FORMAT format, UINT height,
-    bool white, ComPtr<ID3D12Resource>& output) {
+    bool white, ComPtr<ID3D12Resource>& output, bool bright = false) {
     D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_UPLOAD;
     heap.CreationNodeMask = heap.VisibleNodeMask = 1;
     D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -127,7 +139,7 @@ HRESULT immutable_upload(ID3D12Device* device, DXGI_FORMAT format, UINT height,
     const auto pixel_bytes = luke_origin_pixel_bytes(format);
     for (UINT y = 0; y < height; ++y)
         for (UINT x = 0; x < 2; ++x)
-            luke_origin_pixel(bytes + static_cast<UINT64>(y) * 256 + x * pixel_bytes, format, white);
+            luke_origin_pixel(bytes + static_cast<UINT64>(y) * 256 + x * pixel_bytes, format, white, bright);
     const D3D12_RANGE written{0, static_cast<SIZE_T>(desc.Width)};
     output->Unmap(0, &written);
     return S_OK;
@@ -144,6 +156,8 @@ HRESULT get_uploads(ID3D12Device* device, DXGI_FORMAT format, UINT height,
     created->device = device; created->format = format; created->height = height;
     HRESULT result = immutable_upload(device, format, height, false, created->colors[0]);
     if (SUCCEEDED(result)) result = immutable_upload(device, format, height, true, created->colors[1]);
+    if (SUCCEEDED(result)) result = immutable_upload(device, format, height, false, created->bright_colors[0], true);
+    if (SUCCEEDED(result)) result = immutable_upload(device, format, height, true, created->bright_colors[1], true);
     if (FAILED(result)) return result;
     c.uploads.push_back(created); output = std::move(created);
     return S_OK;
@@ -302,7 +316,8 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
         LukeColorOriginLayout layout;
         const auto inset=origin_inset(static_cast<UINT>(color_extent));
         if (!compact_luke_origin_layout(rect.width, rect.height,
-                static_cast<UINT>(color_extent >> 32), static_cast<UINT>(color_extent), layout,inset[0],inset[1]))
+                static_cast<UINT>(color_extent >> 32), static_cast<UINT>(color_extent), layout,inset[0],inset[1],
+                origin_from_bottom()))
         {
             report_origin_layout(true,2,extent_bits(rect.width,rect.height),color_extent);
             return E_PENDING;
@@ -326,7 +341,7 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             for (unsigned cell = 0; cell < kLukeOriginBits * 2; ++cell) {
             const bool white = luke_origin_white(token, cell * 2);
             D3D12_TEXTURE_COPY_LOCATION source{};
-            source.pResource = patterns->colors[white ? 1 : 0].Get();
+            source.pResource = (layout.bright[band] ? patterns->bright_colors : patterns->colors)[white ? 1 : 0].Get();
             source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
             source.PlacedFootprint.Footprint = {format, 2, kLukeOriginHeight, 1, 256};
                 list->CopyTextureRegion(&destination, x + cell * 2, y, 0, &source, nullptr);
@@ -397,7 +412,7 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             }
             const auto inset=origin_inset(original.Height);
             if (!compact_luke_origin_layout(static_cast<UINT>(output_extent>>32),static_cast<UINT>(output_extent),
-                    static_cast<UINT>(original.Width),original.Height,plan.layout,inset[0],inset[1])) {
+                    static_cast<UINT>(original.Width),original.Height,plan.layout,inset[0],inset[1],origin_from_bottom())) {
                 report_origin_layout(false,2,output_extent,extent_bits(static_cast<UINT>(original.Width),original.Height));
                 results[i]=E_PENDING; continue;
             }
