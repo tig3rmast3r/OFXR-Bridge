@@ -78,7 +78,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 70901;
+constexpr std::uint32_t kAbi = 71001;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -89,7 +89,7 @@ struct Shared {
     std::uint32_t bytes{};
     Snapshot snapshot{};
     wchar_t configuration_file[32768]{};
-    alignas(8) std::uint64_t visible_until_ms[3]{};
+    alignas(8) std::uint64_t visible_until_ms[4]{};
     alignas(8) std::uint64_t benchmark_metrics_until_ms{};
     Settings benchmark_saved{};
     alignas(8) std::uint64_t benchmark_memory_request{};
@@ -430,7 +430,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(nr_max_ratio) READ_FIELD(nr_working_scale) READ_FIELD(nr_white_point_scale)
         READ_FIELD(nr_debug_view) READ_FIELD(nr_compare) READ_FIELD(nr_compare_split)
         READ_FIELD(nr_compare_zoom) READ_FIELD(nr_compare_swap)
-        READ_FIELD(diagnostics) READ_FIELD(benchmark_csv) READ_FIELD(benchmark_auto_pick) READ_FIELD(overlay_position)
+        READ_FIELD(diagnostics) READ_FIELD(status_json) READ_FIELD(benchmark_csv) READ_FIELD(benchmark_auto_pick) READ_FIELD(overlay_position)
         READ_FIELD(menu_scale) READ_FIELD(menu_offset_x) READ_FIELD(menu_offset_y)
         READ_FIELD(luke_shared_swapchains)
 #undef READ_FIELD
@@ -467,7 +467,7 @@ std::string serialize_settings(const Settings& settings) {
     WRITE_FIELD(nr_max_ratio) WRITE_FIELD(nr_working_scale) WRITE_FIELD(nr_white_point_scale)
     WRITE_FIELD(nr_debug_view) WRITE_FIELD(nr_compare) WRITE_FIELD(nr_compare_split)
     WRITE_FIELD(nr_compare_zoom) WRITE_FIELD(nr_compare_swap)
-    WRITE_FIELD(diagnostics) WRITE_FIELD(benchmark_csv) WRITE_FIELD(benchmark_auto_pick) WRITE_FIELD(overlay_position)
+    WRITE_FIELD(diagnostics) WRITE_FIELD(status_json) WRITE_FIELD(benchmark_csv) WRITE_FIELD(benchmark_auto_pick) WRITE_FIELD(overlay_position)
     WRITE_FIELD(menu_scale) WRITE_FIELD(menu_offset_x) WRITE_FIELD(menu_offset_y)
     WRITE_FIELD(luke_shared_swapchains)
 #undef WRITE_FIELD
@@ -652,7 +652,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
     MERGE_FIELD(nr_max_ratio) MERGE_FIELD(nr_working_scale) MERGE_FIELD(nr_white_point_scale)
     MERGE_FIELD(nr_debug_view) MERGE_FIELD(nr_compare) MERGE_FIELD(nr_compare_split)
     MERGE_FIELD(nr_compare_zoom) MERGE_FIELD(nr_compare_swap)
-    MERGE_FIELD(diagnostics) MERGE_FIELD(benchmark_csv) MERGE_FIELD(benchmark_auto_pick) MERGE_FIELD(overlay_position)
+    MERGE_FIELD(diagnostics) MERGE_FIELD(status_json) MERGE_FIELD(benchmark_csv) MERGE_FIELD(benchmark_auto_pick) MERGE_FIELD(overlay_position)
     MERGE_FIELD(menu_scale) MERGE_FIELD(menu_offset_x) MERGE_FIELD(menu_offset_y)
     MERGE_FIELD(luke_shared_swapchains)
 #undef MERGE_FIELD
@@ -1110,7 +1110,7 @@ void report_overlay_limit(OverlaySwapchain surface, bool refused) noexcept {
 void set_interface_visible(InterfaceSurface surface, bool visible) noexcept {
     try {
         auto& c = channel(); if (!c.data) return;
-        const auto index = static_cast<unsigned>(surface); if (index > 2) return;
+        const auto index = static_cast<unsigned>(surface); if (index > 3) return;
         std::atomic_ref<std::uint64_t>(c.data->visible_until_ms[index]).store(
             visible ? GetTickCount64() + 1000 : 0, std::memory_order_release);
     } catch (...) {}

@@ -223,6 +223,15 @@ Test system: Intel 265K and RTX 4090. Quest 3 uses VDXR; MeganeX uses SteamVR. L
 | The Callisto Protocol (Native) | 1. 0.2.13 89 fps<br>2. 0.3.0 89 fps | 1. Framework 0.2.13 + Buffer 87 fps 67 ms<br>2. Framework 0.3.0 86 fps 65 ms<br>3. Framework 0.2.1 + Buffer 83 fps 55 ms |
 | The Planet Crafter | 1. 0.2.1 90 fps<br>2. 0.2.1 Fast 90 fps | 1. Framework 0.2.13 Fast 90 fps 52 ms<br>2. Framework 0.3.0 Fast 90 fps 52 ms<br>3. Framework 0.2.1 Fast 90 fps 54 ms |
 
+### Other tools: status.json
+
+The tray writes OFXR's live state to a small file, `status.json`, once a
+second: armed, paused, the multiplier, the game's and the headset's frame
+rates and the frame latency. [MSFS AutoFPS](https://github.com/ResetXPDR/MSFS_AutoFPS)
+reads the 0.2 file to keep the simulator at its target frame rate; the 0.3
+file keeps that format. Other tools can read it too: see
+[status.json](docs/STATUS_JSON.md).
+
 ## What the tray changes on your PC
 
 When you select **Enable**, the tray prepares a versioned runtime cache under **`%LOCALAPPDATA%\ofxr-bridge\RuntimeLayer`** and registers the bridge's OpenXR implicit-layer manifest for the current Windows user. It also manages its Vulkan layer registration when that support is enabled. The OpenXR loader loads the bridge DLL into participating game processes. Your active OpenXR runtime is unchanged.

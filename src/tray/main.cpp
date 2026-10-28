@@ -4,6 +4,7 @@
 #include "xrfg/autonomous_ui.hpp"
 #include "xrfg/benchmark_suite.hpp"
 #include "xrfg/dlssg_profile.hpp"
+#include "xrfg/presented_output_rate.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -13,6 +14,8 @@
 
 #include <array>
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -96,6 +99,7 @@ struct AppState {
     HICON disarmed_icon{};
     UINT taskbar_created_message{};
     bool armed{};
+    bool status_export_active{};
     std::wstring crash_debug_status;
 };
 
@@ -892,6 +896,80 @@ void prepare_crash_debug(AppState& state,const std::filesystem::path& game={}) {
     }
 }
 
+// status.json beside tray.ini (docs/STATUS_JSON.md): the tray's state and the
+// running game as its layer reports it through the control channel, the
+// settings. Written to a temporary file and moved over the old one, so a
+// reader never sees half a file; a reader holding it open only delays the
+// next write. `final`: the tray is exiting, so no session is reported.
+void write_status(const AppState& state, bool final = false) {
+    try {
+        if(!xrfg::autonomous::snapshot().desired.status_json && !(final&&state.status_export_active))return;
+        xrfg::standalone::StatusInputs inputs;
+        inputs.armed = state.armed;
+        inputs.paused = state.paused;
+        inputs.build = kImplementationVersion;
+        inputs.settings = state.settings;
+        SYSTEMTIME now{};
+        GetSystemTime(&now);
+        char updated[40]{};
+        std::snprintf(updated, sizeof(updated), "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",
+            now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
+            now.wMilliseconds);
+        inputs.updated = updated;
+        const auto current = xrfg::autonomous::snapshot();
+        if (!final && current.connected && current.runtime.process_id) {
+            const auto& runtime = current.runtime;
+            const auto& m = runtime.telemetry;
+            const auto tick = GetTickCount64();
+            const bool fresh = m.updated_ms && tick >= m.updated_ms && tick - m.updated_ms < 2000;
+            inputs.session_present = true;
+            auto& session = inputs.session;
+            session.pid = runtime.process_id;
+            const auto name = xrfg::standalone::game_executable(runtime.process_id).filename().wstring();
+            if (!name.empty()) {
+                const int bytes = WideCharToMultiByte(CP_UTF8, 0, name.data(), static_cast<int>(name.size()),
+                    nullptr, 0, nullptr, nullptr);
+                session.process.assign(static_cast<std::size_t>(std::max(bytes, 0)), '\0');
+                if (bytes > 0)
+                    WideCharToMultiByte(CP_UTF8, 0, name.data(), static_cast<int>(name.size()),
+                        session.process.data(), bytes, nullptr, nullptr);
+            }
+            // As the benchmark CSV names it; the control channel carries no
+            // runtime name string.
+            session.runtime = runtime.vdxr_runtime ? "VDXR" : runtime.steamvr_runtime ? "SteamVR" : "Other";
+            // Luke Ross's R.E.A.L. VR runs at 2X whatever the multiplier asked for.
+            session.multiplier = runtime.luke_detected ? 2U : current.desired.triple_frame_gen ? 3U : 2U;
+            session.deep_pipeline = current.desired.prefer_fps;
+            // Frames generated in the last second, by OFXR or by AFW alone.
+            session.generating = (fresh && m.generating) ||
+                xrfg::autonomous::interface_afw_only_active(current, tick);
+            session.rates_valid = fresh && m.rates_valid && std::isfinite(m.game_fps);
+            session.app_fps = m.game_fps;
+            session.output_valid = fresh && xrfg::output_rate_valid(m);
+            session.output_fps = m.output_fps;
+            session.display_hz = fresh && std::isfinite(m.display_hz) && m.display_hz > 0 ? m.display_hz : 0.f;
+            // The settings window's "Cycle minimum": WaitFrame entry through
+            // the real frame's observed runtime completion, one-second median.
+            session.latency_valid = fresh && m.cycle_estimated_valid &&
+                std::isfinite(m.cycle_estimated_ms) && m.cycle_estimated_ms >= 0;
+            session.latency_ms = m.cycle_estimated_ms;
+        }
+        const std::string json = xrfg::standalone::build_status_json(inputs);
+        const auto target = state.local_directory / L"status.json";
+        auto temporary = target;
+        temporary += L".tmp";
+        {
+            std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+            if (!file) return;
+            file.write(json.data(), static_cast<std::streamsize>(json.size()));
+            if (!file) return;
+        }
+        static_cast<void>(MoveFileExW(temporary.c_str(), target.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH));
+    } catch (...) {
+    }
+}
+
 void handle_command(AppState& state, UINT command) {
     switch (command) {
     case toggle_arm:
@@ -906,6 +984,7 @@ void handle_command(AppState& state, UINT command) {
                 show_error(state.window, error);
             }
         }
+        write_status(state);
         break;
     case toggle_pause:
         if (!state.armed || !state.pause_signal) break;
@@ -929,6 +1008,7 @@ void handle_command(AppState& state, UINT command) {
             show_error(
                 state.window, last_error_message(L"Switching the frame generation pause"));
         }
+        write_status(state);
         break;
     case change_pause_key:
         change_pause_hotkey(state);
@@ -1107,6 +1187,17 @@ LRESULT CALLBACK window_procedure(
                     }
                 }
             } catch (...) {}
+            const bool exporting=xrfg::autonomous::snapshot().desired.status_json;
+            xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::status_export,exporting);
+            static ULONGLONG next_status{};
+            if(exporting) {
+                state->status_export_active=true;
+                if(now>=next_status){next_status=now+1000;write_status(*state);}
+            } else if(state->status_export_active) {
+                state->status_export_active=false;
+                std::error_code ignored;
+                std::filesystem::remove(state->local_directory/L"status.json",ignored);
+            }
             xrfg::autonomous::tick_benchmark();return 0;
         }
         return DefWindowProcW(window,message,wparam,lparam);
@@ -1152,6 +1243,7 @@ LRESULT CALLBACK window_procedure(
         std::wstring error;
         if (!disarm_bridge(*state, &error))
             log_lifecycle(state->local_directory, L"destroy-cleanup", error);
+        write_status(*state, true);
         Shell_NotifyIconW(NIM_DELETE, &state->icon);
         PostQuitMessage(0);
         return 0;

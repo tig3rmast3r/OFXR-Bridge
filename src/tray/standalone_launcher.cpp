@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <stdexcept>
 
@@ -296,6 +298,62 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\noverlay_position=" + overlay_position_name(settings.overlay_position) +
            "\r\npause_hotkey=" + settings.pause_hotkey +
            "\r\n";
+}
+
+namespace {
+
+[[nodiscard]] std::string json_string(std::string_view value) {
+    return "\"" + escape_json(value) + "\"";
+}
+
+[[nodiscard]] std::string json_rate(float value) {
+    char text[32]{};
+    std::snprintf(text, sizeof(text), "%.1f",
+        std::isfinite(value) ? static_cast<double>(value) : 0.0);
+    return text;
+}
+
+[[nodiscard]] const char* json_bool(bool value) { return value ? "true" : "false"; }
+
+}  // namespace
+
+// The 0.2 format (schema 1) plus latency_ms. Fields may be added within a
+// schema; none changes meaning or disappears without a new number.
+std::string build_status_json(const StatusInputs& inputs) {
+    const std::uint32_t configured = inputs.settings.triple_frame_gen ? 3U : 2U;
+    const bool session = inputs.session_present;
+    const StatusSession& running = inputs.session;
+    std::string json = "{\n";
+    json += "  \"schema\": 1,\n";
+    json += std::string("  \"armed\": ") + json_bool(inputs.armed) + ",\n";
+    json += std::string("  \"paused\": ") + json_bool(inputs.paused) + ",\n";
+    json += "  \"multiplier\": " +
+        std::to_string(session ? running.multiplier : configured) + ",\n";
+    json += std::string("  \"generating\": ") +
+        (session ? json_bool(running.generating) : "null") + ",\n";
+    json += "  \"app_fps\": " +
+        (session && running.rates_valid ? json_rate(running.app_fps) : "null") + ",\n";
+    json += "  \"output_fps\": " +
+        (session && running.output_valid ? json_rate(running.output_fps) : "null") + ",\n";
+    json += "  \"display_hz\": " +
+        (session && running.display_hz > 0.0f ? json_rate(running.display_hz) : "null") +
+        ",\n";
+    json += "  \"latency_ms\": " +
+        (session && running.latency_valid ? json_rate(running.latency_ms) : "null") + ",\n";
+    json += "  \"updated\": " + json_string(inputs.updated) + ",\n";
+    json += "  \"ofxr\": { \"build\": " + std::to_string(inputs.build) + " },\n";
+    if (session) {
+        json += "  \"session\": {\n";
+        json += "    \"process\": " + json_string(running.process) + ",\n";
+        json += "    \"pid\": " + std::to_string(running.pid) + ",\n";
+        json += "    \"runtime\": " + json_string(running.runtime) + ",\n";
+        json += std::string("    \"deep_pipeline\": ") + json_bool(running.deep_pipeline) + "\n";
+        json += "  }\n";
+    } else {
+        json += "  \"session\": null\n";
+    }
+    json += "}\n";
+    return json;
 }
 
 namespace {

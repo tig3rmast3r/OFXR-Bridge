@@ -37,6 +37,12 @@ void codec() {
         "passive observation distinguishes motion from depth without activating guide capture");
     xrfg::autonomous::Settings desired;
     require(desired.benchmark_auto_pick,"automatic benchmark choice defaults on");
+    require(!desired.status_json,"status export defaults off");
+    auto exported=desired;exported.status_json=true;
+    require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(exported)).status_json,"status exporter setting roundtrips in game profile");
+    auto concurrent_export=desired;concurrent_export.nr_enabled=true;
+    const auto merged_export=xrfg::autonomous::merge_changes(concurrent_export,desired,exported);
+    require(merged_export.status_json&&merged_export.nr_enabled,"export edit preserves concurrent generation settings");
     auto automatic=desired;automatic.benchmark_auto_pick=true;
     require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(automatic)).benchmark_auto_pick,
         "automatic benchmark preference roundtrips in the existing game INI");
@@ -384,6 +390,17 @@ int wmain(int count, wchar_t** arguments) {
         require(xrfg::autonomous::interface_status_text(queue_report).find("Shared queue")==std::string::npos &&
             xrfg::autonomous::interface_generation_active(queue_report)==active_before,
             "queue warning clears without changing actual generator activity");
+        using Surface=xrfg::autonomous::InterfaceSurface;
+        for(auto surface:{Surface::desktop,Surface::headset,Surface::meter,Surface::status_export})
+            xrfg::autonomous::set_interface_visible(surface,false);
+        require(!xrfg::autonomous::interface_telemetry_requested(),"all hidden surfaces allow telemetry suspension");
+        xrfg::autonomous::set_interface_visible(Surface::status_export,true);
+        require(xrfg::autonomous::interface_telemetry_requested(),"exporter alone holds telemetry without an invisible desktop");
+        xrfg::autonomous::set_interface_visible(Surface::headset,true);
+        xrfg::autonomous::set_interface_visible(Surface::status_export,false);
+        require(xrfg::autonomous::interface_telemetry_requested(),"exporter OFF cannot release headset lease");
+        xrfg::autonomous::set_interface_visible(Surface::headset,false);
+        require(!xrfg::autonomous::interface_telemetry_requested(),"exporter OFF releases its own telemetry request");
         // Only delete the single file/directory this fixture created.
         std::filesystem::remove(xrfg::autonomous::configuration_path());
         std::filesystem::remove(fixture);

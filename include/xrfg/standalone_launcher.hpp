@@ -103,6 +103,34 @@ struct LauncherSettings {
     std::string pause_hotkey{"ctrl+alt+f7"}; // kDefaultPauseHotkey
 };
 
+// status.json (docs/STATUS_JSON.md): the tray's state and the running game as
+// its layer reports it; the settings only for the configured multiplier,
+// written without a game. `session_present` false writes the session and its
+// rates as null; a rate whose `*_valid` is false is null too.
+struct StatusSession {
+    std::uint32_t pid{};
+    std::string process;  // UTF-8
+    std::string runtime;  // UTF-8
+    std::uint32_t multiplier{2};
+    bool deep_pipeline{};
+    bool generating{};
+    float app_fps{};
+    float output_fps{};
+    float display_hz{};
+    float latency_ms{};
+    bool rates_valid{true}, output_valid{true}, latency_valid{};
+};
+struct StatusInputs {
+    bool armed{};
+    bool paused{};
+    std::uint32_t build{};
+    std::string updated;  // ISO 8601 UTC, e.g. 2026-10-17T09:12:03.512Z
+    bool session_present{};
+    StatusSession session;
+    LauncherSettings settings;
+};
+[[nodiscard]] std::string build_status_json(const StatusInputs& inputs);
+
 // A key chord for RegisterHotKey: `modifiers` in its MOD_ALT (1),
 // MOD_CONTROL (2), MOD_SHIFT (4), MOD_WIN (8) bits and a virtual-key code.
 struct Hotkey {

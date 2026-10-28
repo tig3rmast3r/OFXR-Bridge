@@ -364,6 +364,8 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     auto& draft=ui.draft;
     bool changed = ImGui::Combo("Headset FPS counter", &draft.overlay_position,
         "Off\0Upper left\0Upper right\0Lower left\0Lower right\0Elliottate's follow controller\0Elliottate's stick to bottom\0");
+    changed |= ImGui::Checkbox("Export status.json", &draft.status_json);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keeps FPS and latency readings active when all panels are closed.");
     changed |= ImGui::Checkbox("Diagnostic logging", &draft.diagnostics);
     ImGui::TextWrapped("Logging can be switched during the current game session");
     if (state.connected) ImGui::TextDisabled(state.runtime.logging_active

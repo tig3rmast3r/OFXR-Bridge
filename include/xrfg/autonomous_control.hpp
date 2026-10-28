@@ -72,6 +72,7 @@ struct Settings {
     bool nr_compare_swap{};
     bool r19_camera{}; // opt-in own camera for every FG route; live pair snapshot
     bool diagnostics{};
+    bool status_json{}; // explicit external telemetry/export request; per profile, default off
     bool benchmark_csv{true}; // automatic suite CSV; independent of the flight log
     bool benchmark_auto_pick{true}; // per-profile, apply a measured winner only on completion
     int overlay_position{6}; // 0 off, 1 upper-left, 2 upper-right, 3 lower-left, 4 lower-right, 5 Elliott controller, 6 Elliott bottom
@@ -199,7 +200,7 @@ enum class OverlaySwapchain : unsigned { fps=1, meter=2, menu=4 };
 void report_overlay_limit(OverlaySwapchain surface, bool refused) noexcept;
 std::string_view overlay_limit_text(std::uint32_t mask) noexcept;
 // Visibility leases are independent of settings revisions and persistence.
-enum class InterfaceSurface : unsigned { desktop, headset, meter };
+enum class InterfaceSurface : unsigned { desktop, headset, meter, status_export };
 void set_interface_visible(InterfaceSurface surface, bool visible) noexcept;
 bool interface_telemetry_requested() noexcept;
 void report_interface_telemetry(InterfaceTelemetry value) noexcept;

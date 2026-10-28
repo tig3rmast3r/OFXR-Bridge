@@ -536,6 +536,61 @@ int main() {
         return 1;
     }
 
+    // status.json: the top-level keys, null without a session, no settings
+    // section, the running session's multiplier over the setting's, escaping,
+    // null for a rate or latency not measured.
+    {
+        StatusInputs idle;
+        idle.armed = true;
+        idle.build = 710;
+        idle.updated = "2026-10-28T09:12:03.512Z";
+        const std::string without = build_status_json(idle);
+        StatusInputs running = idle;
+        running.paused = true;
+        running.settings.triple_frame_gen = false;
+        running.session_present = true;
+        running.session.pid = 23456;
+        running.session.process = "Flight\"Sim\\2024.exe";
+        running.session.runtime = "SteamVR";
+        running.session.multiplier = 3;
+        running.session.generating = true;
+        running.session.app_fps = 29.84f;
+        running.session.output_fps = 89.36f;
+        running.session.display_hz = 90.0f;
+        running.session.latency_ms = 41.26f;
+        running.session.latency_valid = true;
+        const std::string with = build_status_json(running);
+        StatusInputs unmeasured = running;
+        unmeasured.session.rates_valid = unmeasured.session.output_valid = unmeasured.session.latency_valid = false;
+        const std::string without_rates = build_status_json(unmeasured);
+        if (!contains(without, "\"schema\": 1,") || !contains(without, "\"armed\": true,") ||
+            !contains(without, "\"paused\": false,") ||
+            !contains(without, "\"multiplier\": 2,") ||
+            !contains(without, "\"generating\": null,") ||
+            !contains(without, "\"output_fps\": null,") ||
+            !contains(without, "\"latency_ms\": null,") ||
+            !contains(without, "\"build\": 710") ||
+            !contains(without, "\"updated\": \"2026-10-28T09:12:03.512Z\"") ||
+            !contains(with, "\"paused\": true,") || !contains(with, "\"multiplier\": 3,") ||
+            !contains(with, "\"generating\": true,") ||
+            !contains(with, "\"app_fps\": 29.8,") ||
+            !contains(with, "\"output_fps\": 89.4,") ||
+            !contains(with, "\"display_hz\": 90.0,") ||
+            !contains(with, "\"latency_ms\": 41.3,") ||
+            !contains(with, "\"process\": \"Flight\\\"Sim\\\\2024.exe\"") ||
+            !contains(with, "\"pid\": 23456,") ||
+            !contains(without_rates, "\"app_fps\": null,") ||
+            !contains(without_rates, "\"output_fps\": null,") ||
+            !contains(without_rates, "\"latency_ms\": null,") ||
+            !contains(without_rates, "\"display_hz\": 90.0,") ||
+            contains(without, "settings") || contains(with, "settings") ||
+            !contains(without, "\"session\": null\n}\n") ||
+            !contains(with, "\"deep_pipeline\": false\n  }\n}\n")) {
+            std::cerr << "status.json was not as documented\n";
+            return 1;
+        }
+    }
+
     std::cout << "OFXR manual persistent launcher support tests passed\n";
     return 0;
 }
