@@ -11,6 +11,7 @@ class DlssNr_Dx12 {
     Microsoft::WRL::ComPtr<ID3D12Device> _device;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> _rootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> _pipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> _guidePipelineState;
     bool _init=false;
     uint64_t _recording{};
 public:

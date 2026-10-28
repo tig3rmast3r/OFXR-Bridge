@@ -104,7 +104,66 @@ int main()try {
         const auto actual=static_cast<const char*>(mapped)+footprint.Offset+y*footprint.Footprint.RowPitch+x*sizeof(pixel);
         if(memcmp(actual,pixel.data(),sizeof(pixel)))throw std::runtime_error("second recording must be bit-identical");++verified;
     }
-    readback->Unmap(0,&empty);unsigned errors{};
+    readback->Unmap(0,&empty);
+    // Independent offset/extent patterns make swapped guides, filtered motion,
+    // scaled values and reading outside the ROI observable on the actual GPU.
+    demand(upload->Map(0,&empty,&mapped));
+    for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
+        const std::array<float,4> value{float(x+10*y),float(100+y)-float(x),0.f,1.f};
+        memcpy(static_cast<char*>(mapped)+footprint.Offset+y*footprint.Footprint.RowPitch+x*sizeof(value),value.data(),sizeof(value));
+    }
+    upload->Unmap(0,nullptr);
+    auto patterned=create(D3D12_RESOURCE_STATE_COPY_DEST);
+    UINT64 serial=2;
+    for(unsigned percent:{100u,75u,50u,25u}) {
+        const UINT work=width*percent/100;
+        demand(allocator->Reset());demand(list->Reset(allocator.Get(),nullptr));
+        if(percent==100) {
+            dest.pResource=patterned.Get();list->CopyTextureRegion(&dest,0,0,0,&input,nullptr);
+            transition(list.Get(),patterned.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+        auto guideDesc=texture;guideDesc.Width=guideDesc.Height=work;
+        std::array<ComPtr<ID3D12Resource>,2> guides,reads;
+        std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT,2> layouts{};
+        std::array<UINT64,2> lengths{};
+        for(unsigned i=0;i<2;++i) {
+            guideDesc.Format=i?DXGI_FORMAT_R32G32_FLOAT:DXGI_FORMAT_R32_FLOAT;
+            demand(device->CreateCommittedResource(&local,D3D12_HEAP_FLAG_NONE,&guideDesc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(&guides[i])));
+            device->GetCopyableFootprints(&guideDesc,0,1,0,&layouts[i],&rows,&rowbytes,&lengths[i]);
+            auto rb=buffer;rb.Width=lengths[i];
+            demand(device->CreateCommittedResource(&read_heap,D3D12_HEAP_FLAG_NONE,&rb,
+                D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&reads[i])));
+        }
+        codec.begin_recording();DlssNrConstants c{};
+        c.Mode=DlssNrMode_ResizePrivateGuides;c.Width=c.Height=work;
+        c.DepthX=2;c.DepthY=1;c.DepthWidth=4;c.DepthHeight=6;
+        c.MotionX=1;c.MotionY=3;c.MotionWidth=6;c.MotionHeight=4;
+        if(!codec.Dispatch(list.Get(),c,patterned.Get(),patterned.Get(),nullptr,nullptr,nullptr,guides[0].Get(),guides[1].Get()))
+            throw std::runtime_error("matched guide dispatch");
+        for(unsigned i=0;i<2;++i) {
+            transition(list.Get(),guides[i].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
+            D3D12_TEXTURE_COPY_LOCATION dst{};dst.pResource=reads[i].Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint=layouts[i];
+            D3D12_TEXTURE_COPY_LOCATION src{};src.pResource=guides[i].Get();src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        }
+        demand(list->Close());codec.end_recording();queue->ExecuteCommandLists(1,submitted);
+        demand(queue->Signal(fence.Get(),++serial));
+        event=CreateEventW(nullptr,FALSE,FALSE,nullptr);demand(fence->SetEventOnCompletion(serial,event));
+        waited=WaitForSingleObject(event,10000);CloseHandle(event);if(waited!=WAIT_OBJECT_0)throw std::runtime_error("guide GPU retirement");
+        for(unsigned i=0;i<2;++i) {
+            D3D12_RANGE range{0,size_t(lengths[i])};demand(reads[i]->Map(0,&range,&mapped));
+            for(UINT y=0;y<work;++y)for(UINT x=0;x<work;++x) {
+                const UINT sx=(i?1:2)+UINT((float(x)+.5f)/float(work)*float(i?6:4));
+                const UINT sy=(i?3:1)+UINT((float(y)+.5f)/float(work)*float(i?4:6));
+                const auto* actual=reinterpret_cast<const float*>(static_cast<const char*>(mapped)+layouts[i].Offset+y*layouts[i].Footprint.RowPitch+x*sizeof(float)*(i?2:1));
+                if(actual[0]!=float(sx+10*sy)||(i&&actual[1]!=float(100+sy)-float(sx)))throw std::runtime_error("guide ROI, point sampling or vector units changed");
+                ++verified;
+            }
+            reads[i]->Unmap(0,&empty);
+        }
+    }
+    unsigned errors{};
     if(messages)for(UINT64 i=0;i<messages->GetNumStoredMessages();++i) {
         SIZE_T size{};messages->GetMessage(i,nullptr,&size);std::vector<char> storage(size);
         auto* message=reinterpret_cast<D3D12_MESSAGE*>(storage.data());demand(messages->GetMessage(i,message,&size));

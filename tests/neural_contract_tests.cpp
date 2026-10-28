@@ -1,4 +1,5 @@
 #include "NrBeforeSrContract.h"
+#include "NrGuideRegion.h"
 #include "NrSubmissionLedger.h"
 #include "NrHistoryContract.h"
 #include "NrForwarderContract.h"
@@ -9,6 +10,13 @@ int main() {
     unsigned checks=0,failures=0;
     auto check=[&](bool result,const char* label){++checks;if(!result){++failures;printf("FAIL %s\n",label);}};
     using namespace DlssNr;
+    check(GuideFits({3,2,7,5},12,8)&&!GuideFits({3,2,10,5},12,8),"independent private guide ROI stays in bounds");
+    check(!GuideFits({0,0,0,5},12,8)&&!GuideFits({~0u,0,2,2},12,8),"empty and overflow guide rectangles rejected");
+    for(unsigned percent:{100u,75u,50u,25u}) {
+        check(GuideScale(1280.f,1280u*percent/100u,1280)==float(1280u*percent/100u),"low-resolution MV units match supplied working guide");
+        check(GuideScale(1920.f,1280u*percent/100u,1920)==float(1280u*percent/100u),"high-resolution MV units scale independently of colour size");
+        check(GuideScale(720.f,720u*percent/100u,720)==float(720u*percent/100u),"Y scale remains independent of X");
+    }
     auto padded=BeforeSrExtent({1280,720},true,{1920,1080},{1920,1080});
     check(padded.width==1280&&padded.height==720,"active render extent survives padded allocation");
     auto partial=BeforeSrExtent({1280,0},false,{1600,900},{1920,1080});

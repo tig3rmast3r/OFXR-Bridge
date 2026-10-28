@@ -2,6 +2,7 @@
 // RenoDX/clshortfuse composition attribution and licence are in licenses/.
 #include "nr_codec.hpp"
 #include "DlssNr_Shader.h"
+#include "NrResizeGuides.h"
 #include <d3dcompiler.h>
 
 using Microsoft::WRL::ComPtr;
@@ -26,7 +27,9 @@ bool equal_constants(const DlssNrConstants& a,const DlssNrConstants& b) {
         a.DebugView==b.DebugView&&a.MaxRatio==b.MaxRatio&&a.Passthrough==b.Passthrough&&
         a.MvScaleX==b.MvScaleX&&a.MvScaleY==b.MvScaleY&&a.GuideWidth==b.GuideWidth&&
         a.GuideHeight==b.GuideHeight&&a.CompareMode==b.CompareMode&&a.CompareSplit==b.CompareSplit&&
-        a.CompareZoom==b.CompareZoom&&a.CompareSwap==b.CompareSwap;
+        a.CompareZoom==b.CompareZoom&&a.CompareSwap==b.CompareSwap&&
+        a.DepthX==b.DepthX&&a.DepthY==b.DepthY&&a.DepthWidth==b.DepthWidth&&a.DepthHeight==b.DepthHeight&&
+        a.MotionX==b.MotionX&&a.MotionY==b.MotionY&&a.MotionWidth==b.MotionWidth&&a.MotionHeight==b.MotionHeight;
 }
 }
 struct DlssNr_Dx12::DispatchBinding {
@@ -64,6 +67,12 @@ DlssNr_Dx12::DlssNr_Dx12(std::string,ID3D12Device* device):_device(device) {
     D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};pipeline.pRootSignature=_rootSignature.Get();
     pipeline.CS={DlssNr_cso,sizeof(DlssNr_cso)};
     _init=SUCCEEDED(device->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&_pipelineState)));
+    if(!_init)return;
+    ComPtr<ID3DBlob> guides;
+    if(FAILED(D3DCompile(kNrResizeGuidesShader,sizeof(kNrResizeGuidesShader)-1,"NR private guides",nullptr,nullptr,
+        "main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&guides,&errors))){_init=false;return;}
+    pipeline.CS={guides->GetBufferPointer(),guides->GetBufferSize()};
+    _init=SUCCEEDED(device->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&_guidePipelineState)));
 }
 DlssNr_Dx12::~DlssNr_Dx12()=default;
 void DlssNr_Dx12::begin_recording(){std::scoped_lock lock(_bindingsMutex);++_recording;}
@@ -119,7 +128,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* list,const DlssNrConstants
     }
     ID3D12DescriptorHeap* heaps[]={binding->heap.Get()};list->SetDescriptorHeaps(1,heaps);
     binding->recording=_recording;
-    list->SetComputeRootSignature(_rootSignature.Get());list->SetPipelineState(_pipelineState.Get());
+    list->SetComputeRootSignature(_rootSignature.Get());list->SetPipelineState(constants.Mode==DlssNrMode_ResizePrivateGuides?_guidePipelineState.Get():_pipelineState.Get());
     list->SetComputeRootDescriptorTable(0,binding->heap->GetGPUDescriptorHandleForHeapStart());
     list->Dispatch((constants.Width+7)/8,(constants.Height+7)/8,1);return true;
 }

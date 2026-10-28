@@ -18,6 +18,7 @@ enum DlssNrMode : uint32_t
 {
     DlssNrMode_Encode = 0,    // the frame -> a tone-mapped proxy, plus an untouched copy
     DlssNrMode_Resolve = 1,   // proxy + the model's answer + the untouched copy -> the edited frame
+    DlssNrMode_ResizePrivateGuides = 3,
     DlssNrMode_Downsample = 2 // the proxy -> a smaller proxy, when the model works below full size
 };
 
@@ -76,6 +77,8 @@ struct alignas(256) DlssNrConstants
     // Which side the edited frame is on. Swapping matters because the eye is not even-handed about
     // left and right, so a difference can look like an improvement purely from where it sits.
     uint32_t CompareSwap;
+    uint32_t DepthX, DepthY, DepthWidth, DepthHeight;
+    uint32_t MotionX, MotionY, MotionWidth, MotionHeight;
 };
 
 class DlssNr_Common
