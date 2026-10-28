@@ -1202,6 +1202,27 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     if(!scoped_camera)exact_camera=native_ingress::apply_camera(g,cmd.Get());
     g.native_production_sequence=production_sequence;
     if(exact_camera)g.depth=depth.Get();
+    if(luke && exact_camera && g.camera_matrices_valid && g.camera_view_to_clip[0]<0) {
+        // A REAL VR title whose view space has x to the left: its projection
+        // mirrors x back (The Last of Us Part I, view_to_clip[0] = -0.866)
+        // while Streamline's cameraRight is the physical right (its right eye
+        // lies along +cameraRight, and its stereo disparity says so). Its
+        // vectors follow the view's x: F8 while turning, the camera's turn
+        // direction mapped to the screen expects negative x, the field stores
+        // positive (Cyberpunk: expected and stored agree on both axes).
+        // Normalise to the common convention: x column of the projection
+        // positive, clip-space history mirrored to match. cameraRight is left
+        // alone: with the projection positive it is the view's x axis again,
+        // so every basis built from it is proper, and the stored vectors then
+        // match the camera flow as they are (F8 while turning: .07 px at the
+        // centre, 2.3 px at the edge of 138 px); negating them doubled it.
+        for(unsigned i:{0u,4u,8u,12u})g.camera_view_to_clip[i]=-g.camera_view_to_clip[i];
+        for(unsigned i:{0u,1u,2u,3u})g.camera_clip_to_view[i]=-g.camera_clip_to_view[i];
+        for(auto* m:{&g.raw_clip_to_previous_clip,&g.raw_previous_clip_to_clip})
+            for(unsigned i:{1u,2u,3u,4u,8u,12u})(*m)[i]=-(*m)[i];
+        static std::atomic_bool reported{};
+        if(!reported.exchange(true))log("luke_view_x_mirrored",call,g.stream);
+    }
     if(luke && !exact_camera) {
         if(embedded::afw_snapshot().desired.mode!=0)embedded::report_afw_ingress(false,false);
         if(dead_space_process() && two_frame_capture_images_active())
