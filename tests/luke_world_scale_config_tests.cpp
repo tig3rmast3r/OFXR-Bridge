@@ -108,6 +108,14 @@ int main() {
     write("[GOT]\nWorldScale=0.8\n[HFW]\nWorldScale=1.1\n");
     check(xrfg::luke_world_scale_from_ini(ini) == 0.0F,
         "Multiple WorldScale keys reject ambiguous configuration");
+    write("[GOT]\nWorldScale=1.1\n[HFW]\nWorldScale=1.1\n");
+    check(xrfg::luke_world_scale_from_ini(ini) == 0.0F,
+        "Equal scales with different camera axes stay ambiguous");
+    // Uncharted: Legacy of Thieves keeps both of its games in one ini.
+    write("[RVR]\nRenderMode2=6\n[U4ATE]\nFixDLSS=1\nWorldScale=1.0\n[UTLL]\nFixDLSS=1\nWorldScale=1.0\n");
+    check(xrfg::luke_world_scale_from_ini(ini) == 1.0F &&
+        xrfg::luke_game_camera_config_from_ini(ini).axes == xrfg::LukeProducerCameraAxes::view,
+        "Title sections that agree on the camera contract identify it");
     write("[GENERAL]\nEnabled=1\n");
     check(xrfg::luke_world_scale_from_ini(ini) == 0.0F,
         "Missing WorldScale rejects instead of assuming a default");
