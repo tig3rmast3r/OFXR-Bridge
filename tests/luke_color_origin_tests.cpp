@@ -244,9 +244,13 @@ void luma_tests() {
         DXGI_FORMAT_R10G10B10A2_UNORM,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT,
         DXGI_FORMAT_R11G11B10_FLOAT,DXGI_FORMAT_R16G16B16A16_UNORM}) {
         std::array<std::byte,16> pixel{};
+        // Float outputs are scene-referred: their white stays under exposure/bloom.
+        const bool scene_referred=format==DXGI_FORMAT_R16G16B16A16_FLOAT||
+            format==DXGI_FORMAT_R32G32B32A32_FLOAT||format==DXGI_FORMAT_R11G11B10_FLOAT;
         for(bool white:{false,true}) {
             xrfg::luke_origin_pixel(pixel.data(),format,white);
-            require(close(xrfg::luke_origin_luma(pixel.data(),format),white?1.F:0.F),"black/white stamp luminance changed");
+            require(close(xrfg::luke_origin_luma(pixel.data(),format),
+                white?(scene_referred?xrfg::kLukeOriginHdrWhite:1.F):0.F),"black/white stamp luminance changed");
         }
     }
     const std::uint32_t packed_hdr=0x3c0U|(0x380U<<11)|(0x1a0U<<22); // 1,.5,.25

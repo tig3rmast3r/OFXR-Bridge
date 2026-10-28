@@ -155,9 +155,15 @@ inline DXGI_FORMAT luke_origin_upload_format(DXGI_FORMAT resource, DXGI_FORMAT p
         (resource == DXGI_FORMAT_R32G32B32A32_TYPELESS && proven_view == DXGI_FORMAT_R32G32B32A32_FLOAT)) return proven_view;
     return DXGI_FORMAT_UNKNOWN;
 }
+// White on a float (scene-referred) output, before the game's exposure,
+// bloom and tone mapping. The Last of Us Part I (R11G11B10) under REAL VR
+// turned a 1.0 marker into a clipped glow reaching 20 pixels around the band
+// in the eye image and never decoded; the decoder needs only a few levels of
+// contrast. Exact in half, 11/10-bit and 32-bit floats.
+inline constexpr float kLukeOriginHdrWhite = 1.f / 16.f;
 inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white) noexcept {
     if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
-        const auto level = static_cast<std::uint16_t>(white ? 0x3c00 : 0);
+        const auto level = static_cast<std::uint16_t>(white ? 0x2c00 : 0); // 2^-4
         const std::uint16_t values[]{level, level, level, 0x3c00};
         std::memcpy(pixel, values, sizeof(values));
     } else if (format == DXGI_FORMAT_R16G16B16A16_UNORM) {
@@ -165,11 +171,11 @@ inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white) 
         const std::uint16_t values[]{level, level, level, 0xffff};
         std::memcpy(pixel, values, sizeof(values));
     } else if (format == DXGI_FORMAT_R11G11B10_FLOAT) {
-        // Unsigned 5-bit exponents, 6/6/5-bit mantissas. Exactly 1.0 RGB.
-        const std::uint32_t value = white ? (0x3c0U | (0x3c0U << 11) | (0x1e0U << 22)) : 0;
+        // Unsigned 5-bit exponents, 6/6/5-bit mantissas. Exactly 2^-4 RGB.
+        const std::uint32_t value = white ? (0x2c0U | (0x2c0U << 11) | (0x160U << 22)) : 0;
         std::memcpy(pixel, &value, sizeof(value));
     } else if (format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
-        const float level = white ? 1.f : 0.f, values[]{level, level, level, 1.f};
+        const float level = white ? kLukeOriginHdrWhite : 0.f, values[]{level, level, level, 1.f};
         std::memcpy(pixel, values, sizeof(values));
     } else {
         const std::uint32_t value = format == DXGI_FORMAT_R10G10B10A2_UNORM
