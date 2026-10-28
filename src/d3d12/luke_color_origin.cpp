@@ -558,15 +558,24 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
             static auto* workers=new OriginDecodeWorkers;
             workers->run([&](unsigned worker) noexcept {decode(worker,4);});
         } else decode(0,1);
-        for(unsigned i=0;i<images.size();++i)for(std::size_t y=offsets[i];y<offsets[i+1];++y) {
-            const auto row=rows[y];auto& result=results[i];result.ambiguous|=row.ambiguous;
-            if(observe_color)nonblack[i]=nonblack[i]||color_rows[y]!=0;
-            if(row.token) {
+        for(unsigned i=0;i<images.size();++i) {
+            // The rows reported are one band: the longest run of decoded rows
+            // (later on a tie). A layout with a bright copy 64 rows above the
+            // band (Uncharted at night) otherwise learned both bands and the
+            // gap, so every narrowed read decoded 104 rows for 8 that matter.
+            int run_first=-1,run_last=-1,best_first=-1,best_last=-1;
+            auto& result=results[i];
+            for(std::size_t y=offsets[i];y<offsets[i+1];++y) {
+                const auto row=rows[y];result.ambiguous|=row.ambiguous;
+                if(observe_color)nonblack[i]=nonblack[i]||color_rows[y]!=0;
+                if(!row.token)continue;
                 if(result.token&&result.token!=row.token)result.ambiguous=true;result.token=row.token;
                 const auto scan_row=static_cast<int>(y-offsets[i]);
-                if(result.first_row<0)result.first_row=scan_row;
-                result.last_row=scan_row;
+                if(run_first<0||scan_row>run_last+2)run_first=scan_row;
+                run_last=scan_row;
+                if(best_first<0||run_last-run_first>=best_last-best_first) {best_first=run_first;best_last=run_last;}
             }
+            result.first_row=best_first;result.last_row=best_last;
         }
         for(unsigned i=0;i<images.size();++i) {
             const auto& image=images[i];auto& result=results[i];

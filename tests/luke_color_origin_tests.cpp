@@ -130,6 +130,17 @@ void codec_tests() {
         const auto decoded=xrfg::decode_luke_origin_row(std::span<const float>(projected).subspan(tlou.scan.x,tlou.scan.width));
         require(decoded.token==0x2036u&&!decoded.ambiguous,"TLOU1 shifted band lost its token");
     }
+    for(const float scene:{.02F,.1F,.3F,.6F}) {
+        // Uncharted: a 1/16 band right after brighter scenery, blurred over
+        // a pixel. The scenery-to-band drop and bit0's own merge into one
+        // edge 1.85 px early; the band must still decode, from bit1.
+        std::vector<float> row(325,scene),blurred(325);
+        for(unsigned cell=0;cell<256;++cell)row[34+cell]=xrfg::luke_origin_white(0x10DCu,cell)?.05F:0.F;
+        for(std::size_t x=0;x<row.size();++x)
+            blurred[x]=.25F*row[x?x-1:0]+.5F*row[x]+.25F*row[x+1<row.size()?x+1:x];
+        const auto decoded=xrfg::decode_luke_origin_row(blurred);
+        require(decoded.token==0x10DCu&&!decoded.ambiguous,"dim band beside brighter scenery lost its token");
+    }
     for(const auto* name:{L"GTA5.exe",L"Dead Space.exe",L"KingdomCome.exe",L"HorizonForbiddenWest.exe"})
         require(xrfg::luke_origin_inset_for_title(name)==std::array<unsigned,2>{0,0},"unrelated title got GTA inset");
     require(xrfg::compact_luke_origin_layout(2128,1696,1553,1696,layout,0,32)&&layout.band_count==1&&
@@ -703,6 +714,14 @@ void windowed_decode_tests() {
     require(windows[0].geometry==7&&windows[0].first==297&&windows[0].last==304,"whole scan learned band rows");
     require(decode()==1&&results[0].token==0x51a7e3&&results[0].first_row==297&&results[0].last_row==304,
         "learned rows decoded alone, in scan coordinates");
+    // A bright copy of the band 64 rows above it (bottom layouts) carries the
+    // same token. The window learns one band, not both and the gap between.
+    band(0,297-64,0x51a7e3);windows[0]={};
+    require(decode()==0&&results[0].token==0x51a7e3&&windows[0].first==297&&windows[0].last==304,
+        "whole scan learned both bands and the gap instead of one band");
+    require(decode()==1&&results[0].first_row==297&&results[0].last_row==304,"one band decoded alone");
+    clear(0);band(0,297,0x51a7e3);windows[0]={};
+    require(decode()==0&&windows[0].first==297&&windows[0].last==304,"single band relearned");
     clear(0);band(0,297+xrfg::kLukeOriginWindowMargin,0x51a7e4);
     require(decode()==1&&results[0].token==0x51a7e4&&windows[0].first==297+xrfg::kLukeOriginWindowMargin,
         "drift inside the margin followed without a whole scan");

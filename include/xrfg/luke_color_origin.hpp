@@ -63,27 +63,35 @@ inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) 
             const auto a = static_cast<std::size_t>(x), b = std::min(a + 1, row.size() - 1);
             return row[a] + (row[b] - row[a]) * (x - a);
         };
-        const auto prefix_matches = [&](double origin, double cell) {
-            for (unsigned bit = 0; bit < 16; ++bit) {
+        const auto prefix_bit = [](unsigned bit) { return ((0xd3a5U >> (15 - bit)) & 1) != 0; };
+        // Sampled Manchester test of sync bits [from, to): cheapest first.
+        const auto prefix_matches = [&](double origin, double cell, unsigned from = 0, unsigned to = 16) {
+            for (unsigned bit = from; bit < to; ++bit) {
                 const double difference = sample(origin + (2. * bit - .5) * cell)
                     - sample(origin + (2. * bit + .5) * cell);
                 if (!std::isfinite(difference) || std::abs(difference) < bit_contrast ||
-                    (difference > 0) != (((0xd3a5U >> (15 - bit)) & 1) != 0)) return false;
+                    (difference > 0) != prefix_bit(bit)) return false;
             }
             return true;
         };
-        const auto fit_edges = [&](double& origin, double& cell, unsigned count, bool known_prefix) {
+        // Least-squares refit of origin/cell on the edges nearest the bit
+        // middles, walking the sorted edges forward from `hint` (an index at or
+        // before the first middle) instead of a binary search per bit.
+        const auto fit_edges = [&](double& origin, double& cell, unsigned count, bool known_prefix,
+                double minimum, std::size_t hint) {
             double n{}, sx{}, sy{}, sxx{}, sxy{};
+            const double window = .4 * cell;
+            std::size_t at = hint;
+            while (at > 0 && edges[at - 1].x >= origin - window) --at;
             for (unsigned bit = 0; bit < count; ++bit) {
                 const double target = origin + 2. * bit * cell;
-                double distance = .4 * cell;
+                while (at < edges.size() && edges[at].x < target - window) ++at;
+                double distance = window;
                 const Edge* best{};
-                auto it = std::lower_bound(edges.begin(), edges.end(), target - distance,
-                    [](const Edge& edge, double value) { return edge.x < value; });
-                for (; it != edges.end() && it->x <= target + distance; ++it) {
-                    if (known_prefix && it->falling != (((0xd3a5U >> (15 - bit)) & 1) != 0)) continue;
-                    const double error = std::abs(it->x - target);
-                    if (error < distance) { distance = error; best = &*it; }
+                for (std::size_t k = at; k < edges.size() && edges[k].x <= target + window; ++k) {
+                    if (known_prefix && edges[k].falling != prefix_bit(bit)) continue;
+                    const double error = std::abs(edges[k].x - target);
+                    if (error < distance) { distance = error; best = &edges[k]; }
                 }
                 if (!best) continue;
                 const double x = 2. * bit, y = best->x - origin;
@@ -92,47 +100,74 @@ inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) 
             // One blended midpoint can disappear into the overlay/background
             // gradient. Fit the remaining sync edges; every decoded sync bit
             // and the complete payload CRC are still required below.
-            if (n < (known_prefix ? 15. : 64.)) return false;
+            if (n < minimum) return false;
             const double pitch = (n * sxy - sx * sy) / (n * sxx - sx * sx);
             if (pitch < .7 || pitch > 4.05) return false;
             origin += (sy - pitch * sx) / n; cell = pitch;
             return true;
         };
         LukeColorOriginDecode result{};
-        // Infer continuous pitch from bit0 and either final sync midpoint.
-        // Bit14 rises, bit15 falls. Using only bit15 loses a valid marker when
-        // that one edge is blended into the changing overlay/background.
-        // No rigid scale grid, guessed publication or partial-prefix identity.
+        // The sync prefix 0xd3a5 begins 1,1,0,1 (Manchester 1 = falling middle):
+        // from bit0's middle the edges rise one cell on and fall two cells on;
+        // from bit1's middle they rise two and fall four cells on. Bit1 is
+        // the anchor when a dim band's bit0 edge merged into brighter scenery
+        // beside it (Uncharted, band at the image's left edge). So each
+        // candidate is a pair of falling edges at most four cells apart with
+        // a rising edge midway, screened by sampled sync bits 2..5: linear in
+        // the edges, where pairing every falling edge with every edge up to
+        // 120 px on tried 5,500 pairs a row on a grainy dark corner (11 ms a
+        // frame, Uncharted at night). The pitch from two cells is too rough
+        // for the far sync bits (a 0.3 px edge error is 7% of the span), so
+        // the pitch comes from bit14's rising or bit15's falling edge near
+        // its predicted place, as before. No rigid scale grid, guessed
+        // publication or partial-prefix identity: every sync bit and the CRC
+        // still decide.
         for (std::size_t first = 0; first < edges.size(); ++first) {
             if (!edges[first].falling) continue;
-            for (std::size_t last = first + 1; last < edges.size(); ++last) {
-                const double length = edges[last].x - edges[first].x;
-                if (length > 120.) break;
-                if (length < 21.) continue;
-                const unsigned anchor = edges[last].falling ? 15 : 14;
-                double origin = edges[first].x, cell = length / (2. * anchor);
-                // Necessary full-payload extent, NOT another decode tolerance.
-                // The existing fits move origin <8px and retain >.94 of this
-                // pitch (15/16 prefix edges, then all64 payload edges). Even
-                // the looser 100-cell extent cannot fit here: its last sample
-                // would be outside the row. Keep every remaining fit/CRC check.
-                if (origin + 100. * cell > static_cast<double>(row.size()-1) + 8.) continue;
-                if (!prefix_matches(origin, cell) || !fit_edges(origin, cell, 16, true)) continue;
-                fit_edges(origin, cell, kLukeOriginBits, false);
-                std::uint16_t checksum{}; std::uint32_t token{}; bool valid = true;
-                for (unsigned bit = 0; bit < kLukeOriginBits; ++bit) {
-                    const double difference = sample(origin + (2. * bit - .5) * cell)
-                        - sample(origin + (2. * bit + .5) * cell);
-                    if (!std::isfinite(difference) || std::abs(difference) < bit_contrast) { valid = false; break; }
-                    const unsigned value = difference > 0 ? 1 : 0;
-                    if (bit < 16) {
-                        if (value != ((0xd3a5U >> (15 - bit)) & 1)) { valid = false; break; }
-                    } else if (bit < 48) token = (token << 1) | value;
-                    else checksum = static_cast<std::uint16_t>((checksum << 1) | value);
+            const double x0 = edges[first].x;
+            for (std::size_t second = first + 1; second < edges.size(); ++second) {
+                const double span = edges[second].x - x0;
+                if (span > 4. * 4.05) break;
+                if (!edges[second].falling || span < 2. * .7) continue;
+                // The rising edge midway: bit0's end for bit1's anchor, bit2's
+                // middle for bit1's. Within .4 cell, as the fits below allow.
+                double nearest = span;
+                for (std::size_t k = first + 1; k < second; ++k)
+                    if (!edges[k].falling) nearest = std::min(nearest, std::abs(edges[k].x - x0 - span / 2.));
+                for (unsigned start = 0; start < 2; ++start) {
+                    const double rough = span / (start ? 4. : 2.);
+                    if (rough < .7 || rough > 4.05 || nearest > .4 * rough) continue;
+                    const double rough_origin = x0 - 2. * start * rough;
+                    // Necessary full-payload extent, NOT another decode tolerance.
+                    // The fits move origin <8px and retain >.94 of this pitch.
+                    if (rough_origin + 100. * rough > static_cast<double>(row.size()-1) + 8.) continue;
+                    if (!prefix_matches(rough_origin, rough, 2, 6) || !prefix_matches(rough_origin, rough, 0, 2)) continue;
+                    for (std::size_t last = second + 1; last < edges.size(); ++last) {
+                        const double length = edges[last].x - rough_origin;
+                        if (length > 30. * rough * 1.1 + 1.5) break;
+                        const unsigned anchor = edges[last].falling ? 15 : 14;
+                        const double predicted = 2. * anchor * rough;
+                        if (std::abs(length - predicted) > std::max(.1 * predicted, 1.5)) continue;
+                        double cell = length / (2. * anchor), origin = x0 - 2. * start * cell;
+                        if (cell < .7 || cell > 4.05) continue;
+                        if (!prefix_matches(origin, cell) || !fit_edges(origin, cell, 16, true, 15, first)) continue;
+                        fit_edges(origin, cell, kLukeOriginBits, false, 64, first);
+                        std::uint16_t checksum{}; std::uint32_t token{}; bool valid = true;
+                        for (unsigned bit = 0; bit < kLukeOriginBits; ++bit) {
+                            const double difference = sample(origin + (2. * bit - .5) * cell)
+                                - sample(origin + (2. * bit + .5) * cell);
+                            if (!std::isfinite(difference) || std::abs(difference) < bit_contrast) { valid = false; break; }
+                            const unsigned value = difference > 0 ? 1 : 0;
+                            if (bit < 16) {
+                                if (value != ((0xd3a5U >> (15 - bit)) & 1)) { valid = false; break; }
+                            } else if (bit < 48) token = (token << 1) | value;
+                            else checksum = static_cast<std::uint16_t>((checksum << 1) | value);
+                        }
+                        if (!valid || !token || checksum != luke_origin_crc(token)) continue;
+                        if (result.token && result.token != token) result.ambiguous = true;
+                        result.token = token;
+                    }
                 }
-                if (!valid || !token || checksum != luke_origin_crc(token)) continue;
-                if (result.token && result.token != token) result.ambiguous = true;
-                result.token = token;
             }
         }
         return result;
