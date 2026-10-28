@@ -311,7 +311,9 @@ inline bool compact_luke_origin_layout(unsigned output_width, unsigned output_he
     }
     // Read only the protected band plus bounded final-color translation, not
     // the empty inset/FPS area. Default geometry remains byte-for-byte equal.
-    const unsigned translation_x=std::min(inset_x,16U),translation_y=std::min(inset_y,16U);
+    // 32: The Last of Us Part I's left eye places the band 15 pixels further
+    // left than any crop of its output, losing its first 13 pixels at the edge.
+    const unsigned translation_x=std::min(inset_x,32U),translation_y=std::min(inset_y,32U);
     candidate.scan.x=inset_x-translation_x;
     candidate.scan.y=inset_y-translation_y;
     candidate.scan.width=std::min(color_width,candidate.bands[candidate.band_count-1].x+

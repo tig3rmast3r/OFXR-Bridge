@@ -16,6 +16,7 @@ inline constexpr std::array<unsigned,2> luke_origin_inset_for_title(std::wstring
     // margin. Both writer and reader use the observed full-size eye height;
     // AFW quality scaling happens later and must not move this location.
     if(origin_title_equal(name,L"GTA5_Enhanced.exe"))return {0,color_height/6>32?color_height/6:32};
+    if(origin_title_equal(name,L"tlou-i.exe"))return {32,32};
     return {0,0};
 }
 }

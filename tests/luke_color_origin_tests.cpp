@@ -113,18 +113,35 @@ void codec_tests() {
     xrfg::LukeColorOriginLayout layout;
     require(xrfg::luke_origin_inset_for_title(L"gta5_enhanced.EXE")==std::array<unsigned,2>{0,32},"GTA Enhanced case-insensitive protected policy");
     require(xrfg::luke_origin_inset_for_title(L"Outlaws.exe")==std::array<unsigned,2>{256,32},"Outlaws protected policy changed");
+    require(xrfg::luke_origin_inset_for_title(L"TLOU-I.exe")==std::array<unsigned,2>{32,32},"TLOU1 margins missing");
+    {
+        // TLOU1 3920 -> 3907: its left eye showed the band starting 13 pixels
+        // before its edge with no margin. With it, that placement is inside
+        // the scan with room to spare, and the whole band decodes.
+        xrfg::LukeColorOriginLayout tlou;
+        require(xrfg::compact_luke_origin_layout(3920,3280,3907,3280,tlou,32,32),"TLOU1 protected layout");
+        const int observed_shift=28; // eye column 0 = output column 28
+        const int eye_x=int(tlou.bands[0].x)-observed_shift;
+        require(eye_x>=int(tlou.scan.x)+8 && eye_x+256+8<=int(tlou.scan.x+tlou.scan.width),
+            "TLOU1 observed placement outside the reader's scan");
+        std::vector<float> projected(3907,.02F);
+        for(unsigned cell=0;cell<256;++cell)
+            projected[eye_x+cell]=xrfg::luke_origin_white(0x2036u,cell)?1.F:0.F;
+        const auto decoded=xrfg::decode_luke_origin_row(std::span<const float>(projected).subspan(tlou.scan.x,tlou.scan.width));
+        require(decoded.token==0x2036u&&!decoded.ambiguous,"TLOU1 shifted band lost its token");
+    }
     for(const auto* name:{L"GTA5.exe",L"Dead Space.exe",L"KingdomCome.exe",L"HorizonForbiddenWest.exe"})
         require(xrfg::luke_origin_inset_for_title(name)==std::array<unsigned,2>{0,0},"unrelated title got GTA inset");
     require(xrfg::compact_luke_origin_layout(2128,1696,1553,1696,layout,0,32)&&layout.band_count==1&&
-        layout.bands[0].x==577&&layout.bands[0].y==34&&layout.scan.y==16&&layout.scan.height==44,
+        layout.bands[0].x==577&&layout.bands[0].y==34&&layout.scan.y==0&&layout.scan.height==76,
         "GTA measured final-color protected geometry");
     for(unsigned height:{1696U,2736U,3344U}) {
         const auto gta=xrfg::luke_origin_inset_for_title(L"GTA5_Enhanced.exe",height);
         require(gta[1]==height/6,"GTA scripted inset did not follow full-size eye height");
         require(xrfg::compact_luke_origin_layout(3424,height,2987,height,layout,gta[0],gta[1]),
             "GTA scripted full-size layout rejected");
-        require(layout.bands[0].y>height/8+16&&layout.scan.height==44&&layout.scan.width==697,
-            "GTA scripted mask clips band or increases readback area");
+        require(layout.bands[0].y>height/8+16&&layout.scan.height==76&&layout.scan.width==697,
+            "GTA scripted inset must retain its band and the wider 32-row translation window");
         for(const auto* name:{L"Outlaws.exe",L"GTA5.exe",L"DeadSpace.exe",L"KingdomCome.exe",L"HorizonForbiddenWest.exe"})
             require(xrfg::luke_origin_inset_for_title(name,height)==xrfg::luke_origin_inset_for_title(name),
                 "scripted inset changed another title");
@@ -170,8 +187,8 @@ void codec_tests() {
     require(xrfg::compact_luke_origin_layout(3056,3344,3056,3337,protected_layout,256,32),
         "Outlaws protected origin layout");
     require(protected_layout.band_count==1 && protected_layout.bands[0].x==258 &&
-        protected_layout.bands[0].y==41 && protected_layout.scan.x==240 && protected_layout.scan.y==16 &&
-        protected_layout.scan.width==292 && protected_layout.scan.height==51,"Outlaws bounded protected scan");
+        protected_layout.bands[0].y==41 && protected_layout.scan.x==224 && protected_layout.scan.y==0 &&
+        protected_layout.scan.width==324 && protected_layout.scan.height==83,"Outlaws bounded protected scan");
     for(int shift=-16;shift<=16;++shift) {
         std::vector<float> projected(3056,.15F);
         const int x=static_cast<int>(protected_layout.bands[0].x)+shift;
