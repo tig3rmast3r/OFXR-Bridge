@@ -35,7 +35,10 @@ struct Resource { D3D12_GPU_VIRTUAL_ADDRESS gpu{}; std::uint64_t size{}; };
 struct Roots {
     std::array<ID3D12RootSignature*,2> signatures{};
     std::array<std::array<D3D12_GPU_VIRTUAL_ADDRESS,32>,2> bindings{};
+    std::uint64_t last_bind{}; // order of the list's latest root binding
+    std::array<std::array<std::uint64_t,32>,2> bound_at{}; // order of each slot's binding
 };
+inline std::uint64_t bind_sequence{};
 inline std::recursive_mutex mutex;
 inline std::recursive_mutex install_mutex;
 inline std::unordered_map<ID3D12Resource*,Resource> resources;
@@ -78,11 +81,15 @@ inline unsigned denied_entry_count{};
 inline std::uint64_t observed_addresses{},observed_maps{},observed_creations{},resource_drops{};
 inline std::atomic_uint resource_family_count{};
 inline thread_local bool observing_resource{},reading_camera{};
-inline ListRelease original_list_release{};
-inline Reset original_reset{};
-inline Bind original_compute{},original_graphics{};
-inline Signature original_compute_signature{},original_graphics_signature{};
-inline std::array<void*,6> root_entries{};
+// Two list families: the lists the application records on, and, under a
+// proxy (REAL VR wraps lists, then records its own work on the native one),
+// the native lists behind them.
+constexpr unsigned list_families=2;
+inline std::array<ListRelease,list_families> original_list_release{};
+inline std::array<Reset,list_families> original_reset{};
+inline std::array<Bind,list_families> original_compute{},original_graphics{};
+inline std::array<Signature,list_families> original_compute_signature{},original_graphics_signature{};
+inline std::array<void*,6*list_families> root_entries{};
 template<class Child> inline Microsoft::WRL::ComPtr<ID3D12Device> device_of(Child* child) {
     Microsoft::WRL::ComPtr<ID3D12Device> reported,retained;
     if(FAILED(child->GetDevice(IID_PPV_ARGS(reported.GetAddressOf()))))return retained;
@@ -142,8 +149,8 @@ template<unsigned Index>inline ULONG STDMETHODCALLTYPE release_resource(ID3D12Re
     }
     return result;
 }
-inline ULONG STDMETHODCALLTYPE release_list(ID3D12GraphicsCommandList* list) {
-    std::scoped_lock lock(mutex);const auto result=original_list_release(list);
+template<unsigned Family>inline ULONG STDMETHODCALLTYPE release_list(ID3D12GraphicsCommandList* list) {
+    std::scoped_lock lock(mutex);const auto result=original_list_release[Family](list);
     if(!result)roots.erase(list);return result;
 }
 inline Roots* context(ID3D12GraphicsCommandList* list) {
@@ -154,13 +161,15 @@ inline Roots* context(ID3D12GraphicsCommandList* list) {
 inline void bind(ID3D12GraphicsCommandList* list,bool graphics,UINT slot,D3D12_GPU_VIRTUAL_ADDRESS gpu) {
     if(slot>=32)return;
     std::scoped_lock lock(mutex);
-    if(installed)if(auto* ctx=context(list))ctx->bindings[graphics?1:0][slot]=gpu;
+    if(installed)if(auto* ctx=context(list)){
+        ctx->bindings[graphics?1:0][slot]=gpu;ctx->last_bind=++bind_sequence;ctx->bound_at[graphics?1:0][slot]=bind_sequence;
+    }
 }
-inline void STDMETHODCALLTYPE compute(ID3D12GraphicsCommandList* list,UINT slot,D3D12_GPU_VIRTUAL_ADDRESS gpu) {
-    bind(list,false,slot,gpu);original_compute(list,slot,gpu);
+template<unsigned Family>inline void STDMETHODCALLTYPE compute(ID3D12GraphicsCommandList* list,UINT slot,D3D12_GPU_VIRTUAL_ADDRESS gpu) {
+    bind(list,false,slot,gpu);original_compute[Family](list,slot,gpu);
 }
-inline void STDMETHODCALLTYPE graphics(ID3D12GraphicsCommandList* list,UINT slot,D3D12_GPU_VIRTUAL_ADDRESS gpu) {
-    bind(list,true,slot,gpu);original_graphics(list,slot,gpu);
+template<unsigned Family>inline void STDMETHODCALLTYPE graphics(ID3D12GraphicsCommandList* list,UINT slot,D3D12_GPU_VIRTUAL_ADDRESS gpu) {
+    bind(list,true,slot,gpu);original_graphics[Family](list,slot,gpu);
 }
 inline void signature(ID3D12GraphicsCommandList* list,bool graphics,ID3D12RootSignature* value) {
     std::scoped_lock lock(mutex);
@@ -171,14 +180,14 @@ inline void signature(ID3D12GraphicsCommandList* list,bool graphics,ID3D12RootSi
         ctx->signatures[domain]=value;
     }
 }
-inline void STDMETHODCALLTYPE compute_signature(ID3D12GraphicsCommandList* list,ID3D12RootSignature* value) {
-    signature(list,false,value);original_compute_signature(list,value);
+template<unsigned Family>inline void STDMETHODCALLTYPE compute_signature(ID3D12GraphicsCommandList* list,ID3D12RootSignature* value) {
+    signature(list,false,value);original_compute_signature[Family](list,value);
 }
-inline void STDMETHODCALLTYPE graphics_signature(ID3D12GraphicsCommandList* list,ID3D12RootSignature* value) {
-    signature(list,true,value);original_graphics_signature(list,value);
+template<unsigned Family>inline void STDMETHODCALLTYPE graphics_signature(ID3D12GraphicsCommandList* list,ID3D12RootSignature* value) {
+    signature(list,true,value);original_graphics_signature[Family](list,value);
 }
-inline HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* list,ID3D12CommandAllocator* allocator,ID3D12PipelineState* pipeline) {
-    const auto result=original_reset(list,allocator,pipeline);
+template<unsigned Family>inline HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* list,ID3D12CommandAllocator* allocator,ID3D12PipelineState* pipeline) {
+    const auto result=original_reset[Family](list,allocator,pipeline);
     if(SUCCEEDED(result)){std::scoped_lock lock(mutex);roots.erase(list);}return result;
 }
 template<class Function>inline Function attach_entry(void* entry,Function callback) {
@@ -344,22 +353,39 @@ inline bool install(ID3D12Device* device) {
     }
     if(!detail::install_creation_methods(device)||
         (owner&&owner.Get()!=device&&!detail::install_creation_methods(owner.Get())))error=ERROR_NOT_SUPPORTED;
-    const auto attach = [&](unsigned index,unsigned slot,auto& original,auto callback) {
+    const auto attach = [&](void** vtable,unsigned index,unsigned slot,auto& original,auto callback) {
         if(error!=NO_ERROR)return;
-        if(detail::root_entries[index]&&detail::root_entries[index]!=list_vtable[slot]){error=ERROR_NOT_SUPPORTED;return;}
-        const auto resolved=detail::attach_entry(list_vtable[slot],callback);
+        if(detail::root_entries[index]&&detail::root_entries[index]!=vtable[slot]){error=ERROR_NOT_SUPPORTED;return;}
+        const auto resolved=detail::attach_entry(vtable[slot],callback);
         if(!resolved){error=ERROR_NOT_SUPPORTED;return;}
-        original=resolved;detail::root_entries[index]=list_vtable[slot];
+        original=resolved;detail::root_entries[index]=vtable[slot];
     };
     // A shared release entry already retires both exact resource and list keys.
-    attach(0,2,detail::original_list_release,detail::release_list);
-    attach(1,10,detail::original_reset,detail::reset);
-    attach(2,29,detail::original_compute_signature,detail::compute_signature);
-    attach(3,30,detail::original_graphics_signature,detail::graphics_signature);
-    attach(4,37,detail::original_compute,detail::compute);
-    attach(5,38,detail::original_graphics,detail::graphics);
+    const auto attach_family=[&]<unsigned Family>(void** vtable) {
+        attach(vtable,Family*6+0,2,detail::original_list_release[Family],detail::release_list<Family>);
+        attach(vtable,Family*6+1,10,detail::original_reset[Family],detail::reset<Family>);
+        attach(vtable,Family*6+2,29,detail::original_compute_signature[Family],detail::compute_signature<Family>);
+        attach(vtable,Family*6+3,30,detail::original_graphics_signature[Family],detail::graphics_signature<Family>);
+        attach(vtable,Family*6+4,37,detail::original_compute[Family],detail::compute<Family>);
+        attach(vtable,Family*6+5,38,detail::original_graphics[Family],detail::graphics<Family>);
+    };
+    attach_family.template operator()<0>(list_vtable);
+    // The native lists behind a proxy device's: a proxy's own recording
+    // (REAL VR's DLSS fix) reaches only these entries.
+    ID3D12CommandAllocator* owner_allocator = nullptr;
+    ID3D12GraphicsCommandList* owner_list = nullptr;
+    if(error==NO_ERROR&&owner&&owner.Get()!=device&&
+        SUCCEEDED(owner->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&owner_allocator)))&&
+        SUCCEEDED(owner->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,owner_allocator,nullptr,IID_PPV_ARGS(&owner_list)))) {
+        auto** owner_vtable=*reinterpret_cast<void***>(owner_list);
+        bool distinct=false;
+        for(const unsigned slot:{2u,10u,29u,30u,37u,38u})distinct|=owner_vtable[slot]!=list_vtable[slot];
+        if(distinct)attach_family.template operator()<1>(owner_vtable);
+    }
+    if(owner_list){owner_list->Close();owner_list->Release();}
+    if(owner_allocator)owner_allocator->Release();
     if (error == NO_ERROR) {
-        for(const auto entry:detail::root_entries)if(!detail::activate_entry(entry))error=ERROR_NOT_SUPPORTED;
+        for(const auto entry:detail::root_entries)if(entry&&!detail::activate_entry(entry))error=ERROR_NOT_SUPPORTED;
     }
     {
         std::scoped_lock lock(detail::mutex);

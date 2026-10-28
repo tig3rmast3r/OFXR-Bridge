@@ -69,9 +69,11 @@ inline HRESULT allocation_owner(ID3D12Device* input,
     // Pin successful device identities: an injector can log every otherwise
     // valid video-interface query. Do not repeat that query per guide/frame.
     // No failed result is cached; a full cache uses the same verified path.
+    // The pins last the process: releasing a device while the layer detaches,
+    // after the application has torn down its own, faults inside D3D12.
     struct Entry {ComPtr<IUnknown> identity;ComPtr<ID3D12Device> owner;};
     struct Cache {std::mutex mutex;std::array<Entry,16> entries;};
-    static Cache cache;
+    static Cache& cache=*new Cache;
     ComPtr<IUnknown> identity;
     auto result=retained_input.As(&identity);
     if(FAILED(result))return result;

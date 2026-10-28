@@ -102,7 +102,7 @@ public:
     }
 };
 inline Cache<ID3D12Device>& cache() {
-    static Cache<ID3D12Device> instance;
+    static auto& instance = *new Cache<ID3D12Device>; // pinned for the process, never released at detach
     return instance;
 }
 inline bool same(ID3D12Device* left, ID3D12Device* right, Receipt* receipt = nullptr) {
