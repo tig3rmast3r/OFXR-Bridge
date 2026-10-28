@@ -26,4 +26,22 @@ namespace xrfg {
         equal(name,L"GTA5_Enhanced.exe") || equal(name,L"Dead Space.exe") ||
         equal(name,L"Cyberpunk2077.exe") || equal(name,L"afop.exe");
 }
+
+// A REAL VR title no measured rule covers. With FixDLSS on, REAL VR's NGX
+// hook replaces the game's MotionVectors with its own field, same-eye N-2,
+// before the typed DLSS call where OFXR captures. OFXR's public NGX hook
+// runs before REAL VR's, so the two calls' vectors tell whether it did.
+enum class LukeMotionSource : unsigned {
+    unobserved = 0, // no public call on this thread: keep the N-1 default
+    original = 1,   // the game's own field, N-1 (the other eye's frame)
+    replaced = 2,   // REAL VR's field, N-2 (the same eye's frame)
+};
+[[nodiscard]] constexpr LukeMotionSource luke_motion_source(
+    const void* public_motion, const void* typed_motion) noexcept {
+    if (!public_motion || !typed_motion) return LukeMotionSource::unobserved;
+    return public_motion == typed_motion ? LukeMotionSource::original : LukeMotionSource::replaced;
+}
+[[nodiscard]] constexpr unsigned luke_motion_span(LukeMotionSource source) noexcept {
+    return source == LukeMotionSource::replaced ? 2u : 1u;
+}
 } // namespace xrfg

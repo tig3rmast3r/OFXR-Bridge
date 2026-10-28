@@ -418,6 +418,17 @@ NVSDK_NGX_Result actual_crimson_public_forwarder(ID3D12GraphicsCommandList* list
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,c.composited_color,D3D12_RESOURCE_STATE_COPY_SOURCE);
     return result;
 }
+// REAL VR's NGX hook with FixDLSS on: it hands the typed SR call its own
+// MotionVectors in place of the game's (pointer replaced, not overwritten).
+NVSDK_NGX_Result actual_unlisted_public_forwarder(ID3D12GraphicsCommandList* list,
+    const NVSDK_NGX_Handle* handle,const NVSDK_NGX_Parameter* parameters,void* callback) {
+    auto& dispatch=*const_cast<DispatchParameters*>(static_cast<const DispatchParameters*>(parameters));
+    auto* game_motion=dispatch.motion;
+    if(test_unlisted_motion_swap&&game_motion)dispatch.motion=actual_ngx_capture_context->injector_motion;
+    const auto result=evaluate<0>(list,handle,parameters,callback);
+    dispatch.motion=game_motion;
+    return result;
+}
 NVSDK_NGX_Result actual_outlaws_native_original(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
     const NVSDK_NGX_Parameter* parameters,void*) {
     actual_family_stage_mask|=1u;
@@ -768,7 +779,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         auto depth=texture(7,3,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         ComPtr<ID3D12Resource> injector_motion,injector_depth,injector_output,composited_color;
-        if(scene_camera||outlaws||final_public_color) {
+        if(scene_camera||outlaws||final_public_color||test_unlisted_typed_dispatch) {
             injector_motion=texture(7,3,DXGI_FORMAT_R32G32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             injector_depth=texture(7,3,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             injector_output=texture(512,32,DXGI_FORMAT_R8G8B8A8_UNORM,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -797,6 +808,12 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             state().modules[0].typed_implementation=true;
             state().modules[0].evaluate=state().modules[3].evaluate;
             state().modules[3].evaluate=&actual_crimson_public_forwarder;
+        }
+        if(test_unlisted_typed_dispatch) {
+            // Public generic call outside, REAL VR in between, typed SR inside.
+            state().modules[0].typed_implementation=true;
+            state().modules[0].evaluate=state().modules[3].evaluate;
+            state().modules[3].evaluate=&actual_unlisted_public_forwarder;
         }
         if(logical_family) {
             actual_family_alias=reinterpret_cast<const NVSDK_NGX_Handle*>(alias_storage.data());
@@ -1121,7 +1138,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                 "actual capture original Streamline results");
             if(context.frame && !scene_camera)require(
                 context.frame->raw_motion_native_span==((dead_space || test_ghost_native_motion ||
-                    test_horizon_native_motion)?2u:1u),
+                    test_horizon_native_motion||test_unlisted_motion_swap)?2u:1u),
                 "actual title/runtime capture used the wrong native motion interval");
             const unsigned successful=n>=recycle_production?n-recycle_production+1:
                 n-(logical_family&&n>=12?1:0);
@@ -1633,6 +1650,15 @@ int run_horizon_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline
 }
 int run_crimson_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline) {
     test_crimson_native_motion=true;
+    return run_actual_ngx_capture_pipeline(realvr,streamline,false);
+}
+// An unlisted REAL VR title: N-2 exactly when its typed SR call received
+// other MotionVectors than the public call, N-1 when it received the game's.
+int run_unlisted_motion_capture_test(const wchar_t* realvr,const wchar_t* streamline,bool swap) {
+    test_unlisted_typed_dispatch=true;test_unlisted_motion_swap=swap;
+    if(same_eye_native_motion()) {
+        std::cerr<<"the unlisted fixture is on the measured same-eye title list\n";return 1;
+    }
     return run_actual_ngx_capture_pipeline(realvr,streamline,false);
 }
 int run_kcd_logical_capture_test(const wchar_t* realvr,const wchar_t* streamline) {

@@ -1642,6 +1642,12 @@ if(TARGET xrfg_three_slot_director_tests AND TARGET xrfg_sl_fixture_legacy)
         crimson-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
     set_tests_properties(xrfg_crimson_ngx_actual_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    foreach(unlisted_motion swap original)
+      add_test(NAME xrfg_unlisted_motion_${unlisted_motion}_capture COMMAND xrfg_three_slot_director_tests
+          unlisted-motion-${unlisted_motion}-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+          "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+      set_tests_properties(xrfg_unlisted_motion_${unlisted_motion}_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    endforeach()
     add_test(NAME xrfg_kcd_logical_capture COMMAND xrfg_three_slot_director_tests
         kcd-ngx-logical-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")

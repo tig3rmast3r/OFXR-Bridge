@@ -454,6 +454,18 @@ int main() {
         !xrfg::luke_same_eye_native_motion_title(L"Outlaws.exe") &&
         !xrfg::luke_same_eye_native_motion_title(L"Spider-Man2.exe"),
         "measured same-eye interval includes Remastered without guessing other games");
+    {
+        int game{}, injector{};
+        using xrfg::LukeMotionSource;
+        expect(xrfg::luke_motion_source(&game, &injector) == LukeMotionSource::replaced &&
+            xrfg::luke_motion_source(&game, &game) == LukeMotionSource::original &&
+            xrfg::luke_motion_source(nullptr, &game) == LukeMotionSource::unobserved &&
+            xrfg::luke_motion_source(&game, nullptr) == LukeMotionSource::unobserved &&
+            xrfg::luke_motion_span(LukeMotionSource::replaced) == 2 &&
+            xrfg::luke_motion_span(LukeMotionSource::original) == 1 &&
+            xrfg::luke_motion_span(LukeMotionSource::unobserved) == 1,
+            "unlisted REAL VR motion is N-2 only when the typed call's vectors were replaced");
+    }
     // Spider-Man Remastered PID28936: the native view uses down for Y,
     // compensated by a negative projection focal term. Physical XR up still
     // samples the upper raster half; rejecting the sign prevents all AFW.

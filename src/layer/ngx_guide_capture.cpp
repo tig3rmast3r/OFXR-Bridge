@@ -36,6 +36,7 @@
 #include <share.h>
 #include <mutex>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -126,6 +127,10 @@ bool test_ghost_native_motion{};
 bool test_horizon_native_motion{};
 bool test_dead_space_production_identity{};
 bool test_gta_enhanced_production_identity{};
+// An unlisted REAL VR title whose public call reaches a typed SR module,
+// with (swap) or without REAL VR replacing MotionVectors in between.
+bool test_unlisted_typed_dispatch{};
+bool test_unlisted_motion_swap{};
 #endif
 bool dead_space_process() {
     static const bool selected=[] {
@@ -295,6 +300,25 @@ bool same_eye_native_motion() noexcept {
 bool outlaws_public_process() {
     return outlaws_process()&&native_ingress::luke_detected();
 }
+// The MotionVectors a public (generic) SR evaluation received, recorded by
+// the outermost one on this thread before it forwards, so before REAL VR's
+// own NGX hook can replace them. The typed call it reaches compares its own.
+// Identity only: the pointer is never dereferenced.
+class PublicMotionScope {
+    inline static thread_local const PublicMotionScope* current_{};
+    const PublicMotionScope* parent_{};
+    const void* motion_{};
+public:
+    explicit PublicMotionScope(const void* motion) noexcept : parent_(current_), motion_(motion) {current_=this;}
+    ~PublicMotionScope() {current_=parent_;}
+    PublicMotionScope(const PublicMotionScope&)=delete;
+    PublicMotionScope& operator=(const PublicMotionScope&)=delete;
+    static const void* outermost_motion() noexcept {
+        auto* scope=current_;
+        while(scope&&scope->parent_)scope=scope->parent_;
+        return scope?scope->motion_:nullptr;
+    }
+};
 class KcdCameraInvocationScope;
 template<class T> ComPtr<T> native(T* object);
 bool same(IUnknown*,IUnknown*);
@@ -1050,6 +1074,17 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     // The advertised SL clip matrix is not the field's temporal endpoint.
     if(luke && !invocation_camera && (crimson_desert_process()||same_eye_native_motion()))
         g.raw_motion_native_span=2;
+    else if(luke && !invocation_camera && !observed_motion_span && !outlaws_public_process()) {
+        // No measured rule covers this REAL VR title: its interval follows
+        // whether REAL VR replaced the public call's vectors before this one.
+        const auto source=luke_motion_source(PublicMotionScope::outermost_motion(),motion.Get());
+        g.raw_motion_native_span=luke_motion_span(source);
+        // a=source (0 unobserved, 1 original N-1, 2 replaced N-2), b=span,
+        // c=the evaluation, d=the guide stream. Logged when the source changes.
+        static std::atomic_uint reported{~0u};
+        if(reported.exchange(static_cast<unsigned>(source),std::memory_order_relaxed)!=static_cast<unsigned>(source))
+            log("luke_motion_source",static_cast<unsigned>(source),g.raw_motion_native_span,call,guide_stream);
+    }
     if(observed_motion_span)g.raw_motion_native_span=observed_motion_span;
     g.compose_native_object_history=luke && gta_enhanced_process() && g.raw_motion_native_span==1;
     if(luke&&gta_enhanced_process())
@@ -1417,6 +1452,11 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         (evaluation_metadata.flags_known?1U:0U)|(evaluation_metadata.creation_observed?2U:0U),identity);
     if(replaced_native_generation)
         invalidate_dlss_motion_vector_stream_history(previous_native_stream);
+    // Before this call forwards, and so before REAL VR's hook, which OFXR's
+    // generic hooks wrap, can replace them: what the game passed.
+    std::optional<PublicMotionScope> public_motion;
+    if(!state().modules[slot].typed_implementation&&native_ingress::luke_detected()&&p)
+        public_motion.emplace(native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_MotionVectors)).Get());
     // An untyped core dispatch may reach the typed SR module, where recovery
     // is exact. Generic core parameters never classify a feature as SR.
     if(!sr) {

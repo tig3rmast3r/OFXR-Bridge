@@ -12,6 +12,7 @@ namespace xrfg {int run_dead_space_ngx_capture_test(const wchar_t*,const wchar_t
 namespace xrfg {int run_gta_enhanced_ngx_capture_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_dead_space_ingress_diagnostics_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_ghost_ngx_capture_test(const wchar_t*,const wchar_t*,bool);}
+namespace xrfg {int run_unlisted_motion_capture_test(const wchar_t*,const wchar_t*,bool);}
 namespace xrfg {int run_horizon_ngx_capture_test(const wchar_t*,const wchar_t*,bool);}
 namespace xrfg {int run_actual_ngx_capture_test(const wchar_t*,const wchar_t*); int run_crimson_ngx_capture_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_kcd_logical_capture_test(const wchar_t*,const wchar_t*);}
@@ -2522,6 +2523,14 @@ int main(int argc, char** argv) {
         return std::string_view(argv[1])=="crimson-ngx-actual-capture" ?
             xrfg::run_crimson_ngx_capture_test(wide_realvr.c_str(),wide_streamline.c_str()) :
             xrfg::run_actual_ngx_capture_test(wide_realvr.c_str(),wide_streamline.c_str());
+    }
+    if(argc>3 && (std::string_view(argv[1])=="unlisted-motion-swap-capture" ||
+        std::string_view(argv[1])=="unlisted-motion-original-capture")) {
+        const std::string realvr=argv[2],streamline=argv[3];
+        const std::wstring wide_realvr(realvr.begin(),realvr.end());
+        const std::wstring wide_streamline(streamline.begin(),streamline.end());
+        return xrfg::run_unlisted_motion_capture_test(wide_realvr.c_str(),wide_streamline.c_str(),
+            std::string_view(argv[1])=="unlisted-motion-swap-capture");
     }
     if(argc>3 && std::string_view(argv[1])=="kcd-ngx-logical-capture") {
         const std::string realvr=argv[2],streamline=argv[3];
