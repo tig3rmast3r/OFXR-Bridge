@@ -574,6 +574,29 @@ int main() {
         near(game_baseline, 6.406F), "centimetre-scale producer camera uses its measured units");
     expect(!xrfg::luke_game_eye_baseline(0.06406F, 1.0F, 0, game_baseline),
         "missing calibration never falls back to metres");
+    {
+        // The Last of Us Part I F8 (projection x mirrored): right eye's
+        // publication 202 against the left eye's 201, 5.7 cm along +right.
+        const std::array<float, 3> right_eye{-246.112595F, -18.5818462F, -11.1235952F};
+        const std::array<float, 3> left_eye{-246.087296F, -18.5860825F, -11.0724058F};
+        const std::array<float, 3> right_axis{-0.442002326F, 0.0729873255F, -0.894039571F};
+        expect(xrfg::luke_measured_right_axis(1, right_eye, left_eye, right_axis, .057F) == 1.F &&
+            xrfg::luke_measured_right_axis(0, left_eye, right_eye, right_axis, .057F) == 1.F,
+            "TLOU1 camera_right points to the right eye");
+        expect(xrfg::luke_measured_right_axis(0, right_eye, left_eye, right_axis, .057F) == -1.F,
+            "a mirrored camera_right is measured as such");
+        expect(xrfg::luke_measured_right_axis(1, right_eye, left_eye, right_axis, .2F) == 0 &&
+            xrfg::luke_measured_right_axis(1, right_eye, right_eye, right_axis, .057F) == 0 &&
+            xrfg::luke_measured_right_axis(2, right_eye, left_eye, right_axis, .057F) == 0,
+            "a separation that is not one eye baseline decides nothing");
+        xrfg::LukeRightAxisSign sign;
+        expect(sign.observe(1) == 0 && sign.observe(0) == 0 && sign.observe(1) == 0 &&
+            sign.observe(1) == 1, "direction adopted only after three agreeing frames");
+        for (int i = 0; i < 12; ++i) expect(sign.observe(-1) == 1, "swapped-eye frames flipped an adopted direction");
+        xrfg::LukeRightAxisSign interrupted;
+        expect(interrupted.observe(1) == 0 && interrupted.observe(-1) == 0 && interrupted.observe(1) == 0 &&
+            interrupted.observe(1) == 0 && interrupted.observe(1) == 1, "a disagreeing frame did not restart the count");
+    }
     for (float units : {1.0F, 100.0F}) {
         for (float world_scale : {0.5F, 1.0F, 2.0F}) {
             const float baseline = 0.064F * units / world_scale;

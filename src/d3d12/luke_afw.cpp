@@ -308,7 +308,7 @@ bool camera_data(const D3D12ReprojectionView& source,
     const DlssMotionVectorFrame& guide, std::uint32_t source_eye,
     float world_scale, float xr_eye_baseline, float units_per_metre,
     const LukeCameraOrigin& origin, LukeProducerCameraAxes axes,
-    CameraData& output,bool native_peer_camera=false) noexcept {
+    CameraData& output,bool native_peer_camera=false,float measured_right_axis=0) noexcept {
     output = {};
     if (!guide.camera_data_valid || !guide.camera_matrices_valid ||
         source_eye > 1) return false;
@@ -350,7 +350,12 @@ bool camera_data(const D3D12ReprojectionView& source,
         return false;
     const float view_x_sign = std::copysign(1.F, guide.camera_view_to_clip[0]);
     const float view_y_sign = std::copysign(1.F, guide.camera_view_to_clip[5]);
-    const float direction = (source_eye == 0 ? 1.0F : -1.0F) * view_x_sign;
+    // Whether camera_right points to the viewer's right, as measured from the
+    // producer's alternating cameras; the projection's x sign only until that
+    // is known. It places the peer eye and maps the XR rotation into these
+    // axes: a mirrored guess there turns the generated eye against the head.
+    const float right_axis = !native_peer_camera && measured_right_axis != 0 ? measured_right_axis : view_x_sign;
+    const float direction = (source_eye == 0 ? 1.0F : -1.0F) * right_axis;
     std::array<float, 3> destination_position{
         source_position[0] + direction * guide.camera_right[0] * game_baseline,
         source_position[1] + direction * guide.camera_right[1] * game_baseline,
@@ -381,7 +386,7 @@ bool camera_data(const D3D12ReprojectionView& source,
     }
     if(!luke_destination_view_camera_basis(source.pose.orientation,
             destination.pose.orientation,source_basis,guide.camera_view_to_clip[11],
-            destination_basis,view_x_sign,view_y_sign))return false;
+            destination_basis,right_axis,view_y_sign))return false;
     if(native_peer_camera && source_eye==1) {
         // GTA's locked producer anchors the right eye at zero. Its left-eye
         // offset follows the left head orientation, not the newer right one.
@@ -538,6 +543,7 @@ struct LukeAfwSynthesizer::Impl {
     LukeCameraOrigin camera_origin;
     LukeProducerCameraAxes camera_axes{LukeProducerCameraAxes::view};
     float calibrated_units_per_metre{};
+    LukeRightAxisSign right_axis;
     std::uint64_t unit_epoch{};
     std::uint64_t unit_stream{};
     std::array<ULONGLONG, 64> input_rejection_report_ticks{};
@@ -1367,6 +1373,7 @@ bool LukeAfwSynthesizer::history_reset_ready() noexcept {
             return false;
         }
         candidate->camera_origin=impl_->camera_origin;
+        candidate->right_axis=impl_->right_axis;
         candidate->calibrated_units_per_metre=impl_->calibrated_units_per_metre;
         candidate->unit_epoch=impl_->unit_epoch;candidate->unit_stream=impl_->unit_stream;
         candidate->paired_unit_identity=impl_->paired_unit_identity;
@@ -1593,6 +1600,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             const auto provider=impl_->provider_path;
             const auto camera_origin=impl_->camera_origin;
             const auto calibrated_units=impl_->calibrated_units_per_metre;
+            const auto saved_right_axis=impl_->right_axis;
             const auto unit_epoch=impl_->unit_epoch;const auto unit_stream=impl_->unit_stream;
             const auto paired_unit_identity=impl_->paired_unit_identity;
             const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true);
@@ -1600,6 +1608,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             if (FAILED(result)) return result;
             impl_->camera_origin=camera_origin;
             impl_->calibrated_units_per_metre=calibrated_units;
+            impl_->right_axis=saved_right_axis;
             impl_->unit_epoch=unit_epoch;impl_->unit_stream=unit_stream;
             impl_->paired_unit_identity=paired_unit_identity;
         }
@@ -1623,6 +1632,19 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             units_ready ? S_OK : S_FALSE, 104, guide.publication,
             (std::uint64_t(baseline_bits_units) << 32) | units_bits);
         if (!units_ready) return HRESULT_FROM_WIN32(ERROR_NOT_READY);
+        if (const auto& other = guide.previous_opposite_guide;
+            other && other->camera_data_valid && guide.camera_data_valid && !guide.reset) {
+            const float before = impl_->right_axis.sign();
+            const float after = impl_->right_axis.observe(luke_measured_right_axis(source_eye,
+                guide.camera_position, other->camera_position, guide.camera_right, game_baseline));
+            // 105: the eye direction along camera_right was adopted or changed;
+            // b = the projection's x sign it replaces (1/-1), c = publication.
+            if (after != before)
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                    static_cast<std::int64_t>(after), 105,
+                    guide.camera_view_to_clip[0] < 0 ? std::uint64_t(-1) : 1, guide.publication);
+        }
+        const float right_axis = impl_->right_axis.sign();
         const auto origin_changed = interleaved
             ? impl_->camera_origin.update_producers(paired_key,guide.camera_position,guide.reset)
             : impl_->camera_origin.update(guide.stream, guide.epoch, guide.camera_position, guide.reset);
@@ -1651,6 +1673,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             const auto provider=impl_->provider_path;
             const auto camera_origin=impl_->camera_origin;
             const auto calibrated_units=impl_->calibrated_units_per_metre;
+            const auto saved_right_axis=impl_->right_axis;
             const auto unit_epoch=impl_->unit_epoch;const auto unit_stream=impl_->unit_stream;
             const auto paired_unit_identity=impl_->paired_unit_identity;
             const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true);
@@ -1660,6 +1683,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             if(FAILED(result))return result;
             impl_->camera_origin=camera_origin;
             impl_->calibrated_units_per_metre=calibrated_units;
+            impl_->right_axis=saved_right_axis;
             impl_->unit_epoch=unit_epoch;impl_->unit_stream=unit_stream;
             impl_->paired_unit_identity=paired_unit_identity;
         }
@@ -1676,7 +1700,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         CameraData camera{};
         if (!camera_data(source_view, destination_view, guide, source_eye,
                          impl_->world_scale, xr_eye_baseline, units, impl_->camera_origin,
-                         impl_->camera_axes, camera,native_peer_camera)) return E_INVALIDARG;
+                         impl_->camera_axes, camera,native_peer_camera,native_peer_camera?0.F:right_axis)) return E_INVALIDARG;
         if(native_peer_camera) {
             const unsigned peer_eye=1-source_eye;
             bool corrected=false;
@@ -1984,7 +2008,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 destination_view.pose.orientation;
             if (camera_data(destination_view, middle_peer_view, *middle,
                     1U - source_eye, impl_->world_scale, xr_eye_baseline, units, impl_->camera_origin,
-                    impl_->camera_axes, middle_camera)) {
+                    impl_->camera_axes, middle_camera, false, right_axis)) {
                 const Matrix4x4 current_clip_to_world = multiply(
                     camera.source_clip_to_view, camera.source_view_to_world);
                 audit_middle_opposite_transform = multiply(multiply(
@@ -2010,7 +2034,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     native_previous->publication + 2 == guide.publication &&
                     camera_data(source_view, source_view, *native_previous,
                         source_eye, impl_->world_scale, xr_eye_baseline, units,
-                        impl_->camera_origin, impl_->camera_axes, native_previous_camera)) {
+                        impl_->camera_origin, impl_->camera_axes, native_previous_camera, false, right_axis)) {
                     native_previous_same_transform = multiply(multiply(
                         current_clip_to_world, native_previous_camera.source_world_to_view),
                         native_previous_camera.source_view_to_clip);
