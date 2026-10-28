@@ -304,12 +304,21 @@ bool outlaws_public_process() {
 // the outermost one on this thread before it forwards, so before REAL VR's
 // own NGX hook can replace them. The typed call it reaches compares its own.
 // Identity only: the pointer is never dereferenced.
+// It also records how far root bindings had got, so REAL VR's DLSS-fix
+// constants are only taken when bound inside this evaluation.
 class PublicMotionScope {
     inline static thread_local const PublicMotionScope* current_{};
     const PublicMotionScope* parent_{};
     const void* motion_{};
+    std::uint64_t bind_mark_{};
 public:
-    explicit PublicMotionScope(const void* motion) noexcept : parent_(current_), motion_(motion) {current_=this;}
+    PublicMotionScope(const void* motion,std::uint64_t bind_mark) noexcept
+        : parent_(current_), motion_(motion), bind_mark_(bind_mark) {current_=this;}
+    static std::uint64_t outermost_bind_mark() noexcept {
+        auto* scope=current_;
+        while(scope&&scope->parent_)scope=scope->parent_;
+        return scope?scope->bind_mark_:0;
+    }
     ~PublicMotionScope() {current_=parent_;}
     PublicMotionScope(const PublicMotionScope&)=delete;
     PublicMotionScope& operator=(const PublicMotionScope&)=delete;
@@ -1223,7 +1232,15 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
         static std::atomic_bool reported{};
         if(!reported.exchange(true))log("luke_view_x_mirrored",call,g.stream);
     }
-    if(luke && !exact_camera) {
+    // A REAL VR title without Streamline (Uncharted): REAL VR's own DLSS-fix
+    // constants, bound on this list, carry the camera. They are filled when
+    // the list executes, so the guide is published now and its camera
+    // attached then (native_ingress::attach at the execute hook).
+    const bool camera_at_submission=luke && !exact_camera && !invocation_camera &&
+        native_ingress::take_real_vr_camera_binding(cmd.Get(),g.motion_width,g.motion_height,
+            PublicMotionScope::outermost_bind_mark());
+    if(camera_at_submission){g.camera_pending=true;g.depth=depth.Get();}
+    if(luke && !exact_camera && !camera_at_submission) {
         if(embedded::afw_snapshot().desired.mode!=0)embedded::report_afw_ingress(false,false);
         if(dead_space_process() && two_frame_capture_images_active())
             two_frame_capture_guide_contract(dead_space_rejected_camera_contract(
@@ -1233,6 +1250,11 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     }
     if(snapshot_attempted)*snapshot_attempted=true;
     auto frame=publish_dlss_motion_vectors(g);
+    if(frame && camera_at_submission) {
+        native_ingress::register_pending_real_vr_camera(frame->stream,frame->publication);
+        static std::atomic_bool reported{};
+        if(!reported.exchange(true))log("luke_camera_at_submission",call,g.stream,frame->publication);
+    }
     if(diagnostic)report_dead_space_capture(frame?0:13,call,g.stream);
     if(frame && !invocation_camera && two_frame_capture_images_active()) {
         // Generic Luke titles may refuse AFW before its input captures run.
@@ -1477,7 +1499,8 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
     // generic hooks wrap, can replace them: what the game passed.
     std::optional<PublicMotionScope> public_motion;
     if(!state().modules[slot].typed_implementation&&native_ingress::luke_detected()&&p)
-        public_motion.emplace(native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_MotionVectors)).Get());
+        public_motion.emplace(native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_MotionVectors)).Get(),
+            native_ingress::real_vr_bind_mark());
     // An untyped core dispatch may reach the typed SR module, where recovery
     // is exact. Generic core parameters never classify a feature as SR.
     if(!sr) {

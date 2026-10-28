@@ -679,6 +679,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->raw_motion_native_span = publication.raw_motion_native_span;
         frame->compose_native_object_history = publication.compose_native_object_history;
         frame->gta_headlock=publication.gta_headlock;
+        frame->camera_pending = publication.camera_pending && !publication.camera_data_valid;
         frame->depth_x = publication.depth_x;
         frame->depth_y = publication.depth_y;
         frame->source_depth_x = publication.depth_x;
@@ -711,7 +712,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         const auto interleaved_older = may_interleave
             ? protected_publication(state, frame->publication - 2) : nullptr;
         const bool interleaved = interleaved_frames(*frame, interleaved_middle, interleaved_older);
-        if (publication.protect_snapshot_lifetime) {
+        if (publication.protect_snapshot_lifetime && !frame->camera_pending) {
             // Calibrate exactly once in immutable production order. Consumer
             // queries may lag, repeat or skip; none may select newer cameras
             // to calibrate an older color-carried identity.
@@ -897,6 +898,84 @@ void invalidate_dlss_motion_vector_stream_history(std::uint64_t stream_id) noexc
         state.statistics.status = DlssMotionVectorStatus::temporal_mismatch;
     } catch (...) {
     }
+}
+
+bool attach_dlss_motion_vector_camera(std::uint64_t stream_id, std::uint64_t publication,
+    const DlssCameraAttachment& camera) noexcept {
+    try {
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        const auto it = state.streams.find(stream_id);
+        if (it == state.streams.end()) return false;
+        auto& stream = it->second;
+        std::shared_ptr<const DlssMotionVectorFrame> found;
+        for (const auto& candidate : {stream.latest, stream.previous, stream.previous2})
+            if (candidate && candidate->publication == publication) { found = candidate; break; }
+        if (!found) for (const auto& candidate : stream.luke_origin_history)
+            if (candidate->publication == publication) { found = candidate; break; }
+        if (!found || !found->camera_pending || found->camera_data_valid) return false;
+        for (const auto* values : {&camera.view_to_clip, &camera.clip_to_view})
+            for (float v : *values) if (!std::isfinite(v)) return false;
+        for (const auto* values : {&camera.position, &camera.right, &camera.up, &camera.forward})
+            for (float v : *values) if (!std::isfinite(v)) return false;
+        // The frames were made here and handed out as const; this one is still
+        // incomplete by its own contract (camera_pending).
+        auto& frame = const_cast<DlssMotionVectorFrame&>(*found);
+        frame.camera_position = camera.position;
+        frame.camera_right = camera.right;
+        frame.camera_up = camera.up;
+        frame.camera_forward = camera.forward;
+        frame.camera_view_to_clip = camera.view_to_clip;
+        frame.camera_clip_to_view = camera.clip_to_view;
+        frame.camera_near = camera.near_z;
+        frame.camera_far = camera.far_z;
+        frame.camera_fov_vertical = camera.fov_vertical;
+        frame.camera_data_valid = frame.camera_matrices_valid = true;
+        // The camera belongs to this exact frame: its publication is its token,
+        // consecutive like a producer's frame index, as interleaved history
+        // and AFW's native-motion contract require.
+        frame.camera_frame_token = static_cast<decltype(frame.camera_frame_token)>(frame.publication);
+        frame.camera_frame_token_valid = true;
+        frame.camera_world = camera.world;
+        frame.camera_pending = false;
+        // A later frame has already taken its N-2 scalar camera from this one
+        // without it; that copy stays invalid, so that frame will not join.
+        const bool late = stream.latest && stream.latest.get() != found.get();
+        if (!late) {
+            // As publish decides for a camera that arrives with its frame: under
+            // alternate-eye rendering the other eye's frame lies between this
+            // one and its same-eye predecessor, and calibration spans the three.
+            const bool may_interleave = !frame.native_production_sequence && frame.publication >= 3 &&
+                stream.previous && stream.previous->publication + 1 != frame.publication;
+            const auto interleaved_middle = may_interleave ? protected_publication(state, frame.publication - 1) : nullptr;
+            const auto interleaved_older = may_interleave ? protected_publication(state, frame.publication - 2) : nullptr;
+            const bool interleaved = interleaved_frames(frame, interleaved_middle, interleaved_older);
+            const auto middle = interleaved ? interleaved_middle : stream.previous;
+            const auto older = interleaved ? interleaved_older : stream.previous2;
+            const auto camera_sample = [](const auto& value) {
+                return LukeUnitCamera{value->camera_position, value->camera_right,
+                    value->frame_time_delta_ms, value->camera_data_valid && !value->reset};
+            };
+            const bool consecutive = interleaved || (older && middle &&
+                older->stream == frame.stream && middle->stream == frame.stream &&
+                older->epoch == frame.epoch && middle->epoch == frame.epoch &&
+                older->serial + 1 == middle->serial && middle->serial + 1 == frame.serial &&
+                older->publication + 1 == middle->publication &&
+                middle->publication + 1 == frame.publication &&
+                older->color_origin_token != 0 &&
+                std::uint64_t(older->color_origin_token) + 1 == middle->color_origin_token &&
+                std::uint64_t(middle->color_origin_token) + 1 == frame.color_origin_token);
+            const float sample = consecutive && older && middle
+                ? luke_camera_separation(camera_sample(older), camera_sample(middle), camera_sample(&frame)) : 0;
+            frame.calibrated_game_eye_baseline = stream.camera_units.observe(frame.epoch, frame.publication, sample);
+            if (stream.previous && stream.previous->epoch == frame.epoch &&
+                stream.previous->serial + 2 == frame.serial && stream.previous->publication + 2 == frame.publication)
+                frame.previous_same_native_camera = dlss_native_camera_history(*stream.previous);
+            if (interleaved && older) frame.previous_same_native_camera = dlss_native_camera_history(*older);
+        }
+        report_luke_ingress_contract(frame);
+        return !late;
+    } catch (...) { return false; }
 }
 
 void begin_dlss_motion_vector_submission(std::uint32_t count,ID3D12CommandList* const* lists) noexcept {

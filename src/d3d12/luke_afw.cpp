@@ -1569,12 +1569,17 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             guide.previous_same_native_camera && luke_interleaved_history_matches(
                 dlss_native_camera_history(guide), dlss_native_camera_history(*guide.previous_opposite_guide),
                 *guide.previous_same_native_camera);
-        const auto paired_key = interleaved ? luke_interleaved_producer_key(
+        // A camera source with one world for all its frames (camera_world)
+        // keys origin and calibration on that world: its producer may switch
+        // between one NGX handle and one per eye without any discontinuity.
+        const auto paired_key = guide.camera_world
+            ? std::array<std::uint64_t,4>{0, guide.camera_world, 0, 0}
+            : interleaved ? luke_interleaved_producer_key(
             dlss_native_camera_history(guide), dlss_native_camera_history(*guide.previous_opposite_guide))
             : std::array<std::uint64_t,4>{};
-        if (impl_->paired_unit_identity != paired_key || (!interleaved &&
+        if (impl_->paired_unit_identity != paired_key || (!interleaved && !guide.camera_world &&
             (impl_->unit_epoch != guide.epoch||impl_->unit_stream!=guide.stream))) {
-            const bool same_domain=interleaved ? impl_->paired_unit_identity[0]==paired_key[0]&&
+            const bool same_domain=guide.camera_world ? impl_->paired_unit_identity==paired_key : interleaved ? impl_->paired_unit_identity[0]==paired_key[0]&&
                 impl_->paired_unit_identity[2]==paired_key[2]&&paired_key[0]&&paired_key[2]
                 : impl_->unit_stream==guide.stream&&guide.stream;
             const bool keep_units=same_domain&&compatible_color(impl_->color_description,color_desc);
@@ -1646,7 +1651,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     guide.camera_view_to_clip[0] < 0 ? std::uint64_t(-1) : 1, guide.publication);
         }
         const float right_axis = impl_->right_axis.sign();
-        const auto origin_changed = interleaved
+        const auto origin_changed = interleaved || guide.camera_world
             ? impl_->camera_origin.update_producers(paired_key,guide.camera_position,guide.reset)
             : impl_->camera_origin.update(guide.stream, guide.epoch, guide.camera_position, guide.reset);
         if (!origin_changed) return E_INVALIDARG;

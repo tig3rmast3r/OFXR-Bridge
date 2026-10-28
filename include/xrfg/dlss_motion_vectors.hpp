@@ -93,7 +93,24 @@ struct DlssMotionVectorPublication {
     // Original one-step GTA inputs need both immutable object-motion intervals.
     bool compose_native_object_history{};
     std::optional<LukeGtaHeadlock> gta_headlock;
+    // The camera arrives at submission (attach_dlss_motion_vector_camera):
+    // REAL VR fills its DLSS-fix constants when the list executes, after the
+    // evaluation that publishes this guide. Calibration waits for it.
+    bool camera_pending{};
 };
+
+// A camera attached to a published frame at its submission.
+struct DlssCameraAttachment {
+    std::array<float, 3> position{}, right{}, up{}, forward{};
+    std::array<float, 16> view_to_clip{}, clip_to_view{};
+    float near_z{}, far_z{}, fov_vertical{};
+    std::uint64_t world{}; // see DlssMotionVectorFrame::camera_world
+};
+// Fills the camera of the frame `publication` of `stream`, published with
+// camera_pending, and runs what its publication deferred. False when the
+// frame is gone, already has a camera, or a later frame already read it.
+bool attach_dlss_motion_vector_camera(std::uint64_t stream, std::uint64_t publication,
+    const DlssCameraAttachment& camera) noexcept;
 
 // Scalar native camera history: no retained older GPU resources or SL metadata.
 struct DlssNativeCameraHistory {
@@ -193,6 +210,12 @@ struct DlssMotionVectorFrame {
     std::uint32_t camera_frame_token{};
     bool camera_frame_token_valid{};
     std::uint64_t native_production_sequence{};
+    bool camera_pending{}; // see DlssMotionVectorPublication::camera_pending
+    // Nonzero: the camera source places every frame in this one world,
+    // whichever NGX handle produced it (REAL VR's chained DLSS-fix steps;
+    // Uncharted switches between one handle and one per eye every second
+    // or so). AFW keys its origin and calibration on it instead.
+    std::uint64_t camera_world{};
     // Where the game's motion and depth rectangles started before the
     // snapshot cropped them: what tells eyes sharing one target apart.
     std::uint32_t source_motion_x{};

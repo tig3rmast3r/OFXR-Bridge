@@ -18,6 +18,16 @@ void observe_guide_list(ID3D12GraphicsCommandList* list) noexcept;
 // Layer-created queues and queue creation alone are not producer evidence.
 void observe_luke_production(ID3D12GraphicsCommandList* list) noexcept;
 bool query_luke_context(ID3D12Device** device, ID3D12CommandQueue** queue) noexcept;
+// REAL VR's DLSS-fix constant buffer as the camera source for a REAL VR title
+// without Streamline (Uncharted). At capture, the fix's buffer is found among
+// the list's bound compute constants by its shape and remembered for the
+// guide about to be published; at that list's execution, after REAL VR has
+// filled it, its camera is attached to the guide.
+// bound_after: real_vr_bind_mark() taken when the evaluation began.
+bool take_real_vr_camera_binding(ID3D12GraphicsCommandList* list,
+    std::uint32_t motion_width, std::uint32_t motion_height, std::uint64_t bound_after) noexcept;
+std::uint64_t real_vr_bind_mark() noexcept;
+void register_pending_real_vr_camera(std::uint64_t stream, std::uint64_t publication) noexcept;
 void poll_streamline() noexcept;
 void poll_d3d11_ngx() noexcept;
 // The public NGX SDK intentionally makes native handles opaque. Each observed

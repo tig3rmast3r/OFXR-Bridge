@@ -5,13 +5,16 @@
 #include "xrfg/two_frame_capture.hpp"
 #include "xrfg/native_ingress/D3D_DeviceOwner.h"
 #include "xrfg/native_ingress/LukeNativeSceneCamera.h"
+#include "xrfg/native_ingress/RealVrDlssCamera.h"
 #include "xrfg/native_ingress/streamline_camera.hpp"
 #include <safetyhook.hpp>
 #include <windows.h>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <mutex>
+#include <optional>
 #include <vector>
 #include <atomic>
 
@@ -46,6 +49,7 @@ template<std::size_t N> bool finite(const std::array<float,N>& values) {
     for(float v:values)if(!std::isfinite(v))return false;
     return true;
 }
+void attach_real_vr_cameras(unsigned count,ID3D12CommandList* const* lists) noexcept;
 void STDMETHODCALLTYPE execute(ID3D12CommandQueue* queue,UINT count,ID3D12CommandList* const* lists) {
     ++submissions;
     std::vector<ComPtr<ID3D12CommandList>> owners;
@@ -73,6 +77,10 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue* queue,UINT count,ID3D12Comman
         abandon_dlss_motion_vector_submission(static_cast<unsigned>(native_lists.size()),native_lists.data());
         throw;
     }
+    // REAL VR's queue proxy fills its DLSS-fix constants inside its own
+    // ExecuteCommandLists, which this entry may sit on or behind: after the
+    // forwarded call they are complete either way, and stay until its next.
+    attach_real_vr_cameras(count,lists);
     IUnknown* unwrapped{};ComPtr<ID3D12CommandQueue> actual;
     if(d3d_native::get_borrowed(queue,&unwrapped))unwrapped->QueryInterface(IID_PPV_ARGS(&actual));
     if(actual) {
@@ -133,6 +141,28 @@ bool kcd() {
     auto* basename=wcsrchr(path,L'\\');basename=basename?basename+1:path;
     return _wcsicmp(basename,L"KingdomCome.exe")==0;
 }
+// A guide published without its camera: REAL VR's DLSS-fix buffer bound on
+// its list, to be read when that list executes.
+struct PendingRealVrCamera {
+    std::uint64_t stream{},publication{};
+    ComPtr<ID3D12Resource> resource;std::uint64_t offset{};
+    ComPtr<IUnknown> list; // canonical identity of the producer list
+    ULONGLONG recorded_ms{};
+    std::uint32_t motion_width{},motion_height{}; // the guide's, to recognise REAL VR's buffers
+};
+struct RealVrCameraState {
+    std::mutex mutex;
+    std::vector<PendingRealVrCamera> pending;
+    std::optional<PendingRealVrCamera> taken; // the binding found by the capture in progress
+    real_vr_dlss_camera::Chain chain; // attach order is publication order
+    std::vector<std::pair<ComPtr<ID3D12Resource>,std::uint64_t>> slots; // REAL VR's constant buffers seen bound
+    ULONGLONG last_discovery{};
+    std::atomic_uint attached{},unreadable{},restarts{};
+};
+RealVrCameraState& real_vr_camera(){static auto* value=new RealVrCameraState;return *value;}
+bool scene_camera_wanted() {
+    return kcd() || (luke_detected() && GetModuleHandleW(L"sl.interposer.dll")==nullptr);
+}
 }
 // Caller owns Hooks::mutex. Installing an entry point does not establish a
 // producer: only an observed SR/RR list submitted through it can do that.
@@ -151,7 +181,7 @@ void configure_queue(ID3D12CommandQueue* input) noexcept {
         auto& s=hooks();std::scoped_lock lock(s.mutex);
         if(std::none_of(s.queues.begin(),s.queues.end(),[&](auto& q){return q.Get()==queue.Get();}))s.queues.push_back(queue);
         static_cast<void>(install_execute_hook(s,queue.Get()));
-        ComPtr<ID3D12Device> device;if(SUCCEEDED(queue->GetDevice(IID_PPV_ARGS(&device)))&&kcd())
+        ComPtr<ID3D12Device> device;if(SUCCEEDED(queue->GetDevice(IID_PPV_ARGS(&device)))&&scene_camera_wanted())
             luke_scene_camera::install(device.Get());
     }catch(...) {}
 }
@@ -200,7 +230,7 @@ void install_device(ID3D12Device* input) noexcept {
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,result,961,
                 reinterpret_cast<std::uintptr_t>(device.Get()),0);
         }
-        if(kcd())luke_scene_camera::install(device.Get());
+        if(scene_camera_wanted())luke_scene_camera::install(device.Get());
     }catch(...) {
         if(probing){auto& s=hooks();std::scoped_lock lock(s.mutex);s.execute_probe_active=false;}
     }
@@ -243,6 +273,210 @@ void observe_luke_production(ID3D12GraphicsCommandList* input) noexcept {
             pending_luke_lists.store(static_cast<unsigned>(h.luke_lists.size()),std::memory_order_release);
         }
     }catch(...) {}
+}
+namespace {
+bool real_vr_camera_source_wanted() noexcept {
+    return luke_detected() && !kcd() && GetModuleHandleW(L"sl.interposer.dll")==nullptr;
+}
+// Reads `bytes` of the buffer at `offset` through the resource's own Map.
+bool read_buffer(ID3D12Resource* resource,std::uint64_t offset,unsigned char* out,std::size_t bytes) noexcept {
+    try {
+        void* cpu=nullptr;const D3D12_RANGE range{static_cast<SIZE_T>(offset),static_cast<SIZE_T>(offset+bytes)};
+        if(FAILED(resource->Map(0,&range,&cpu))||!cpu)return false;
+        SIZE_T read{};
+        const bool copied=ReadProcessMemory(GetCurrentProcess(),static_cast<const unsigned char*>(cpu)+offset,out,bytes,&read)&&read==bytes;
+        const D3D12_RANGE no_write{};resource->Unmap(0,&no_write);
+        return copied;
+    }catch(...){return false;}
+}
+void report_real_vr_camera(std::int64_t result,std::uint64_t code,std::uint64_t b,std::uint64_t c) noexcept {
+    bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,result,code,b,c);
+}
+}
+std::uint64_t real_vr_bind_mark() noexcept {
+    if(!real_vr_camera_source_wanted())return 0;
+    try {std::scoped_lock scene(luke_scene_camera::detail::mutex);return luke_scene_camera::detail::bind_sequence;}
+    catch(...){return 0;}
+}
+bool take_real_vr_camera_binding(ID3D12GraphicsCommandList* list,
+    std::uint32_t motion_width,std::uint32_t motion_height,std::uint64_t bound_after) noexcept {
+    auto& state=real_vr_camera();
+    // Lock order is the scene tracker's mutex, then state.mutex. Never
+    // release a list or resource while holding state.mutex alone: their
+    // Release is hooked and takes the scene mutex (Uncharted froze at start).
+    std::optional<PendingRealVrCamera> stale;
+    {std::scoped_lock lock(state.mutex);stale=std::move(state.taken);state.taken.reset();}
+    stale.reset();
+    if(!list || !real_vr_camera_source_wanted())return false;
+    try {
+        IUnknown* native=nullptr;
+        if(!d3d_native::get_borrowed(list,&native))return false;
+        auto* actual=reinterpret_cast<ID3D12GraphicsCommandList*>(native);
+        ComPtr<IUnknown> identity;
+        if(FAILED(actual->QueryInterface(IID_PPV_ARGS(identity.GetAddressOf()))))return false;
+        std::scoped_lock scene(luke_scene_camera::detail::mutex);
+        if(!luke_scene_camera::detail::installed)return false;
+        // REAL VR records its fix dispatch inside its own EvaluateFeature
+        // hook, just before this call, on the native list behind the proxy
+        // it hands the game: not necessarily the list this call sees. The
+        // most recently bound compute constants of that shape are its, and
+        // only if bound since this evaluation began (bound_after): when REAL
+        // VR leaves a frame unfixed, an older binding belongs to another
+        // frame. The bytes hold an older frame's constants, enough for the shape.
+        std::vector<std::pair<std::uint64_t,D3D12_GPU_VIRTUAL_ADDRESS>> recent;
+        for(const auto& [unused,ctx]:luke_scene_camera::detail::roots)
+            for(unsigned slot=0;slot<ctx.bindings[0].size();++slot)
+                if(ctx.bindings[0][slot]&&ctx.bound_at[0][slot]>bound_after)
+                    recent.emplace_back(ctx.bound_at[0][slot],ctx.bindings[0][slot]);
+        std::sort(recent.begin(),recent.end(),[](const auto& a,const auto& b){return a.first>b.first;});
+        for(const auto& [unused,gpu]:recent) {
+            for(const auto& [resource,range]:luke_scene_camera::detail::resources) {
+                if(gpu<range.gpu || gpu-range.gpu>=range.size)continue;
+                const auto offset=gpu-range.gpu;
+                if(range.size-offset<real_vr_dlss_camera::buffer_bytes)break;
+                std::array<unsigned char,real_vr_dlss_camera::buffer_bytes> bytes{};
+                if(!read_buffer(resource,offset,bytes.data(),bytes.size()))break;
+                if(!real_vr_dlss_camera::looks_like(bytes.data(),bytes.size(),motion_width,motion_height))break;
+                PendingRealVrCamera taken{};
+                taken.resource=resource;taken.offset=offset;taken.list=identity;taken.recorded_ms=GetTickCount64();
+                std::scoped_lock lock(state.mutex);
+                // Remember REAL VR's constant buffers for evaluations whose
+                // binding is not seen.
+                if(std::none_of(state.slots.begin(),state.slots.end(),[&](const auto& slot) {
+                        return slot.first.Get()==resource&&slot.second==offset;}) && state.slots.size()<64)
+                    state.slots.emplace_back(resource,offset);
+                state.taken=std::move(taken);
+                return true;
+            }
+        }
+        std::scoped_lock lock(state.mutex);
+        // Not seen bound: still publish, and at execution take whichever of
+        // REAL VR's buffers holds the frame that continues the chain. Its
+        // buffers are 464 bytes exactly; any tracked one makes that possible.
+        if(state.slots.empty() && std::none_of(luke_scene_camera::detail::resources.begin(),luke_scene_camera::detail::resources.end(),
+                [](const auto& entry){return entry.second.size>=real_vr_dlss_camera::buffer_bytes&&entry.second.size<=4096;}))
+            return false;
+        PendingRealVrCamera taken{};
+        taken.list=identity;taken.recorded_ms=GetTickCount64(); // no resource: chosen by content
+        taken.motion_width=motion_width;taken.motion_height=motion_height;
+        state.taken=std::move(taken);
+        return true;
+    }catch(...){return false;}
+}
+void register_pending_real_vr_camera(std::uint64_t stream,std::uint64_t publication) noexcept {
+    auto& state=real_vr_camera();
+    std::optional<PendingRealVrCamera> dropped; // released after the lock (see take_real_vr_camera_binding)
+    try {
+        std::scoped_lock lock(state.mutex);
+        if(!state.taken)return;
+        auto pending=std::move(*state.taken);state.taken.reset();
+        pending.stream=stream;pending.publication=publication;
+        if(state.pending.size()>=16){dropped=std::move(state.pending.front());state.pending.erase(state.pending.begin());}
+        state.pending.push_back(std::move(pending));
+    }catch(...){}
+}
+namespace {
+// At a submission that executes a pending guide's list: read the buffer REAL
+// VR has filled for it and attach the camera.
+void attach_real_vr_cameras(unsigned count,ID3D12CommandList* const* lists) noexcept {
+    auto& state=real_vr_camera();
+    // Everything holding a list or resource reference is released after the
+    // lock: see take_real_vr_camera_binding.
+    std::vector<PendingRealVrCamera> due,expired;
+    std::vector<ComPtr<IUnknown>> identities;
+    try {
+        {std::scoped_lock lock(state.mutex);if(state.pending.empty())return;}
+        identities.reserve(count);
+        for(unsigned i=0;i<count;++i){ComPtr<IUnknown> id;if(lists[i])lists[i]->QueryInterface(IID_PPV_ARGS(id.GetAddressOf()));identities.push_back(std::move(id));}
+        std::scoped_lock lock(state.mutex);
+        const auto now=GetTickCount64();
+        for(auto it=state.pending.begin();it!=state.pending.end();) {
+            bool submitted=false;
+            for(unsigned i=0;i<count && !submitted;++i)submitted=identities[i]&&identities[i].Get()==it->list.Get();
+            if(submitted){due.push_back(std::move(*it));it=state.pending.erase(it);}
+            else if(now-it->recorded_ms>2000) {
+                // 1184: a pending guide's list was never seen executing here.
+                if(state.unreadable.fetch_add(1,std::memory_order_relaxed)<8)report_real_vr_camera(-1,1184,it->publication,count);
+                expired.push_back(std::move(*it));it=state.pending.erase(it);
+            }
+            else ++it;
+        }
+    }catch(...){return;}
+    for(const auto& entry:due) {
+        std::array<unsigned char,real_vr_dlss_camera::buffer_bytes> bytes{};
+        real_vr_dlss_camera::Camera relative{};
+        if(!entry.resource) {
+            // Binding not seen: the known buffer whose constants are a new
+            // frame stepping from a held one, the nearest such step first.
+            // REAL VR creates four 464-byte constant buffers per DLSS instance
+            // ("DLSS constant buffer #"), likely rounded up to 512; after a
+            // handle switch the new instance's may never have been seen
+            // bound. At most twice a second, take every tracked buffer of
+            // 464 bytes to 4 KB whose start holds constants of REAL VR's
+            // shape for this frame's motion size.
+            const auto now=GetTickCount64();
+            bool discover{};
+            {std::scoped_lock lock(state.mutex);
+                discover=now-state.last_discovery>=500;if(discover)state.last_discovery=now;}
+            if(discover)try {
+                std::vector<ComPtr<ID3D12Resource>> sized;
+                {std::scoped_lock scene(luke_scene_camera::detail::mutex);
+                    for(const auto& [resource,range]:luke_scene_camera::detail::resources)
+                        if(range.size>=real_vr_dlss_camera::buffer_bytes&&range.size<=4096)sized.emplace_back(resource);}
+                for(auto& resource:sized) {
+                    std::array<unsigned char,real_vr_dlss_camera::buffer_bytes> head{};
+                    if(!read_buffer(resource.Get(),0,head.data(),head.size()) ||
+                        !real_vr_dlss_camera::looks_like(head.data(),head.size(),entry.motion_width,entry.motion_height))continue;
+                    std::scoped_lock lock(state.mutex);
+                    if(std::none_of(state.slots.begin(),state.slots.end(),[&](const auto& slot){return slot.first==resource&&slot.second==0;})
+                        && state.slots.size()<64)state.slots.emplace_back(std::move(resource),0);
+                }
+            }catch(...){}
+            std::vector<std::pair<ComPtr<ID3D12Resource>,std::uint64_t>> slots;
+            {std::scoped_lock lock(state.mutex);slots=state.slots;}
+            unsigned best{};
+            for(const auto& [resource,offset]:slots) {
+                std::array<unsigned char,real_vr_dlss_camera::buffer_bytes> candidate{};
+                if(!read_buffer(resource.Get(),offset,candidate.data(),candidate.size()))continue;
+                const auto decoded=real_vr_dlss_camera::decode(candidate.data(),candidate.size());
+                if(!decoded.valid)continue;
+                unsigned back{};
+                {std::scoped_lock lock(state.mutex);back=state.chain.continues(decoded);}
+                if(back && (!best || back<best)){best=back;relative=decoded;}
+            }
+            if(!best)continue; // the guide stays without a camera
+        } else {
+            if(!read_buffer(entry.resource.Get(),entry.offset,bytes.data(),bytes.size())) {
+                if(state.unreadable.fetch_add(1,std::memory_order_relaxed)<8)report_real_vr_camera(-1,1181,entry.publication,1);
+                continue;
+            }
+            relative=real_vr_dlss_camera::decode(bytes.data(),bytes.size());
+        }
+        if(!relative.valid) {
+            if(state.unreadable.fetch_add(1,std::memory_order_relaxed)<8)report_real_vr_camera(-1,1181,entry.publication,2);
+            continue;
+        }
+        real_vr_dlss_camera::Camera camera;
+        int depth{};std::uint64_t world{};
+        {std::scoped_lock lock(state.mutex);depth=state.chain.advance(relative,camera);world=state.chain.world();}
+        // 1185: the world starts on this frame.
+        if(depth==real_vr_dlss_camera::Chain::kRestarted && state.restarts.fetch_add(1,std::memory_order_relaxed)<16)
+            report_real_vr_camera(0,1185,entry.publication,0);
+        DlssCameraAttachment attachment{};
+        attachment.position=camera.position;attachment.right=camera.right;attachment.up=camera.up;attachment.forward=camera.forward;
+        attachment.view_to_clip=camera.view_to_clip;attachment.clip_to_view=camera.clip_to_view;
+        attachment.near_z=camera.near_z;attachment.far_z=camera.far_z;attachment.fov_vertical=camera.fov_vertical;
+        attachment.world=world;
+        const bool attached=attach_dlss_motion_vector_camera(entry.stream,entry.publication,attachment);
+        const auto n=state.attached.fetch_add(1,std::memory_order_relaxed);
+        if(n<4 || n%512==0) {
+            // 1182: a camera attached (result 1) or refused (0); b packs the
+            // world position x/z as float bits, c the near plane and FOV.
+            const auto pair=[](float a,float b){return (std::uint64_t(std::bit_cast<std::uint32_t>(a))<<32)|std::bit_cast<std::uint32_t>(b);};
+            report_real_vr_camera(attached?1:0,1182,pair(camera.position[0],camera.position[2]),pair(camera.near_z,camera.fov_vertical));
+        }
+    }
+}
 }
 bool query_luke_context(ID3D12Device** device,ID3D12CommandQueue** queue) noexcept {
     if(device)*device=nullptr;if(queue)*queue=nullptr;
