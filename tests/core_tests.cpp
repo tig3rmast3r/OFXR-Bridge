@@ -449,6 +449,8 @@ int main() {
         xrfg::luke_same_eye_native_motion_title(L"Cyberpunk2077.exe") &&
         xrfg::luke_same_eye_native_motion_title(L"CYBERPUNK2077.EXE") &&
         !xrfg::luke_same_eye_native_motion_title(L"Cyberpunk2077Launcher.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"afop.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"AFOP.EXE") &&
         !xrfg::luke_same_eye_native_motion_title(L"Outlaws.exe") &&
         !xrfg::luke_same_eye_native_motion_title(L"Spider-Man2.exe"),
         "measured same-eye interval includes Remastered without guessing other games");
