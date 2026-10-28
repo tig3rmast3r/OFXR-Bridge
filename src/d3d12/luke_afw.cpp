@@ -882,7 +882,8 @@ struct LukeAfwSynthesizer::Impl {
         static_assert(sizeof(DepthConstants) == 52 * sizeof(UINT));
         DepthConstants depth_options{};
         depth_options.inverted = depth_inverted ? 1U : 0U;
-        depth_options.dilate = static_cast<UINT>(depth_dilate_mode);
+        // Bit 8: the provider receives reversed depth (see provider_camera).
+        depth_options.dilate = static_cast<UINT>(depth_dilate_mode) | (depth_inverted ? 0U : 0x100U);
         depth_options.x = source_x; depth_options.y = source_y;
         depth_options.current_x = guide.motion_x + motion_crop_x;
         depth_options.current_y = guide.motion_y + motion_crop_y;
@@ -2171,6 +2172,28 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             capture_plugin_input(calibration, "afw_depth_remap_calibration");
         }
 
+        // The provider gets no depth convention, only the depth and these
+        // matrices. Every other REAL VR title here renders reversed-Z; The
+        // Last of Us Part I does not (DLSS flags 67, no DepthInverted), and
+        // its AFW output parallaxes wrongly while the layer's own fit of its
+        // depth against stereo disparity is exact. So the provider receives
+        // its depth reversed (convert_depth, bit 8) with the projection that
+        // produces that reversed depth: z' = w - z, i.e. rows [10] = 1 - [10],
+        // [14] = -[14] for a w = z projection. The layer's own transforms
+        // keep the native convention.
+        CameraData provider_camera = camera;
+        if (!guide.depth_inverted) {
+            const auto reverse = [](Matrix4x4& view_to_clip, Matrix4x4& clip_to_view) {
+                view_to_clip.values[10] = view_to_clip.values[11] - view_to_clip.values[10];
+                view_to_clip.values[14] = view_to_clip.values[15] - view_to_clip.values[14];
+                view_to_clip.values[2] = view_to_clip.values[3] - view_to_clip.values[2];
+                view_to_clip.values[6] = view_to_clip.values[7] - view_to_clip.values[6];
+                return invert(view_to_clip, clip_to_view);
+            };
+            if (!reverse(provider_camera.source_view_to_clip, provider_camera.source_clip_to_view) ||
+                !reverse(provider_camera.destination_view_to_clip, provider_camera.destination_clip_to_view))
+                return E_INVALIDARG;
+        }
         FrameWarpEvaluateParams params{};
         params.command_list = command_list;
         params.input_eye_frame_buffer = &input;
@@ -2197,7 +2220,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             effective_mode, 952, guide.publication, impl_->last_evaluated_publication);
         const std::uint32_t interpreted_eye = source_eye;
         params.eye_index = source_eye == 0 ? EyeLeft : EyeRight;
-        params.camera_data = &camera;
+        params.camera_data = &provider_camera;
         params.clear_before_warping = settings.clear_before_warping;
         params.ignore_motion_threshold = settings.ignore_motion_threshold;
         params.is_hudless_color = true;

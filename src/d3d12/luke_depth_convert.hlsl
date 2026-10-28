@@ -207,16 +207,25 @@ float RemappedDepth(int2 pixel)
     return result;
 }
 
+// DilateMode's low byte is the dilation; bit 8 hands the provider the depth
+// reversed (1 - z) with the matching projection, for a game that does not
+// render reversed-Z itself (The Last of Us Part I).
 [numthreads(8, 8, 1)]
 void ConvertLukeDepth(uint3 thread_id : SV_DispatchThreadID)
 {
     uint width, height;
     ConvertedDepth.GetDimensions(width, height);
     if (thread_id.x >= width || thread_id.y >= height) return;
-    if (DilateMode == 0) { ConvertedDepth[thread_id.xy] = RemappedDepth(int2(thread_id.xy)); return; }
+    uint dilate = DilateMode & 0xFF;
+    bool reverse = (DilateMode & 0x100) != 0;
+    if (dilate == 0) {
+        float value = RemappedDepth(int2(thread_id.xy));
+        ConvertedDepth[thread_id.xy] = reverse ? 1 - value : value;
+        return;
+    }
     float nearest = DepthInverted != 0 ? 0 : 1;
     [unroll] for (int y = -1; y <= 1; ++y) {
-        if (DilateMode == 1 && y != 0) continue;
+        if (dilate == 1 && y != 0) continue;
         int sample_y = clamp(int(thread_id.y) + y, 0, int(height) - 1);
         [unroll] for (int x = -1; x <= 1; ++x) {
             int sample_x = clamp(int(thread_id.x) + x, 0, int(width) - 1);
@@ -224,5 +233,5 @@ void ConvertLukeDepth(uint3 thread_id : SV_DispatchThreadID)
             nearest = DepthInverted != 0 ? max(nearest, candidate) : min(nearest, candidate);
         }
     }
-    ConvertedDepth[thread_id.xy] = nearest;
+    ConvertedDepth[thread_id.xy] = reverse ? 1 - nearest : nearest;
 }
