@@ -171,33 +171,28 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         if(luke && !benchmark_afw_quality_allowed(s.shading,s.eye_long_side))continue;
         pool.push_back(i);
     }
+    // AFW-only is an explicit quality/latency preference, before the ordinary
+    // full-refresh lock. Both qualities must independently reach 90% of Hz.
+    if(luke) {
+        std::vector<std::size_t> afw;
+        for(const auto i:pool)if(scores[i].afw_only && scores[i].display_hz>0 &&
+            scores[i].fps+1e-3>=scores[i].display_hz*.9)afw.push_back(i);
+        if(!afw.empty()) {
+            const bool full=std::any_of(afw.begin(),afw.end(),[&](auto i){return scores[i].shading==0;});
+            if(full)std::erase_if(afw,[&](auto i){return scores[i].shading!=0;});
+            pool=std::move(afw);
+        }
+    }
     const auto at_refresh=[&](const auto& score) {
         return score.display_hz>0 && score.fps+1e-3>=score.display_hz;
     };
     const bool capped_pool=std::any_of(pool.begin(),pool.end(),[&](auto i) {return at_refresh(scores[i]);});
-    // Once an eligible measured route reaches the headset, sub-refresh
-    // results cannot enter ANY later preference or ordinary one-FPS tie.
     if(capped_pool)std::erase_if(pool,[&](auto i) {return !at_refresh(scores[i]);});
-    // Within the admitted refresh group, 3X remains a last resort. Below
-    // refresh the original 66% gate applies. Unknown refresh cannot permit 3X.
     const bool normal_sufficient=std::any_of(pool.begin(),pool.end(),[&](auto i) {
         const auto& s=scores[i];return !s.triple && (s.display_hz<=0 || s.fps+1e-3>=s.display_hz*.66);
     });
     std::erase_if(pool,[&](auto i){return scores[i].triple && (normal_sufficient || scores[i].display_hz<=0);});
     if(luke) {
-        std::vector<std::size_t> afw;
-        for(const auto i:pool)if(scores[i].afw_only && scores[i].display_hz>0 &&
-            scores[i].fps+1e-3>=scores[i].display_hz*.8)afw.push_back(i);
-        if(!afw.empty()) {
-            // Both qualities must independently pass the 80%-of-refresh gate.
-            // Keep full-resolution AFW unless 2x2 buys at least 10% more FPS.
-            double full_fps=0;
-            for(const auto i:afw)if(scores[i].shading==0)full_fps=std::max(full_fps,scores[i].fps);
-            if(full_fps>0)std::erase_if(afw,[&](auto i) {
-                return scores[i].shading==4 && scores[i].fps+epsilon<full_fps*1.10;
-            });
-            pool=std::move(afw);
-        }
         const bool full_quality=std::any_of(pool.begin(),pool.end(),[&](auto i) {
             return scores[i].shading==0 && scores[i].display_hz>0 && scores[i].fps+1e-3>=scores[i].display_hz*.9;
         });
@@ -254,7 +249,7 @@ inline bool benchmark_luke_early_complete(const std::vector<BenchmarkScore>& sco
     const auto winner=benchmark_best(scores,true);
     if(!winner)return false;
     const auto& score=scores[*winner];
-    return score.display_hz>0 && (score.afw_only ? score.fps+1e-3>=score.display_hz*.8 :
+    return score.display_hz>0 && (score.afw_only ? score.fps+1e-3>=score.display_hz*.9 :
         score.fps+1e-3>=score.display_hz-1.0);
 }
 // UI commands; the tray/desktop timer drives the suite while menus are hidden.

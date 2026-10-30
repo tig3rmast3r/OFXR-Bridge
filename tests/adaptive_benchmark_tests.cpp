@@ -75,15 +75,15 @@ void controller(bool modern,bool full,bool luke,unsigned side,double hz,
             require(text.find("Djules 3X")!=std::string::npos && text.find("n.a.")!=std::string::npos,"omitted X3 lost its export columns");
         }
     } else {
-        const bool early=hz>0 && (generated_fps>=hz-1 || afw_full>=hz*.8 || (side>=3000 && afw_half>=hz*.8));
+        const bool early=hz>0 && (generated_fps>=hz-1 || afw_full>=hz*.9 || (side>=3000 && afw_half>=hz*.9));
         const auto pass=modern?13U:4U;
         require(done==(early && side>=3000?pass+1:benchmark_execution_plan(full,true,modern,false,side).size()),"Luke early checkpoint or quality pruning wrong");
         require(half_refs==(side>=3000?1U:0U),"half reference missing or duplicated");
-        if(hz>0 && afw_full>=hz*.8 && afw_half<afw_full*1.1) {
+        if(hz>0 && afw_full>=hz*.9) {
             require(result.desired.afw_only && result.desired.afw_shading_rate==0,"full-quality AFW preference lost at early finish");
             require(std::string(result.benchmark.message).find("Restart the game")!=std::string::npos,"AFW-only restart notice lost");
         }
-        if(hz>0 && afw_half>=hz*.8 && afw_half>=afw_full*1.1)
+        if(hz>0 && afw_half>=hz*.9 && afw_full<hz*.9)
             require(result.desired.afw_only && result.desired.afw_shading_rate==4,"winning half-quality AFW not applied");
     }
     require(result.desired.nr_enabled && result.desired.luke_shared_swapchains==saved.luke_shared_swapchains,
@@ -105,8 +105,8 @@ int main() {
         for(bool modern:{false,true}) {
             controller(modern,false,true,3376,90,90);
             controller(modern,false,true,4100,90,90);
-            controller(modern,false,true,3376,90,85,72,75);
-            controller(modern,false,true,3376,90,85,72,80);
+            controller(modern,false,true,3376,90,90,81,89);
+            controller(modern,false,true,3376,90,90,80,81);
             controller(modern,false,true,3376,90,85);
             controller(modern,false,true,2999,90,85);
             controller(modern,false,true,4100,0,85);
