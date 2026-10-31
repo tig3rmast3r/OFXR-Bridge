@@ -33,6 +33,7 @@ static int unbridged_vulkan_session_test() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
     if(route=="unbridged-vulkan-session")return unbridged_vulkan_session_test();
     const bool steady_benchmark=route=="steady-benchmark-sequence" || route=="vram-steady-benchmark-sequence";
@@ -591,6 +592,16 @@ int main(int argc,char** argv) {
         for(auto& image:right_images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
         xr_ok(layer_enumerate_swapchain_images_impl(right,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(right_images.data())),"right-eye capture setup");
     }
+    XrSwapchain panel_chain{};
+    if(panel_test) {
+        const auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
+        auto ci=info;ci.arraySize=1;
+        xr_ok(layer_create_swapchain_impl(state->handle,&ci,&panel_chain),"independent panel atlas");
+        f.create_state=saved;
+        std::array<XrSwapchainImageD3D12KHR,3> pi;for(auto& i:pi)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
+        unsigned pc{};xr_ok(layer_enumerate_swapchain_images_impl(panel_chain,3,&pc,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(pi.data())),"panel atlas capture setup");
+    }
     ComPtr<IDXGIAdapter3> memory_adapter;
     std::unique_ptr<steamvr_vram_test::Ledger> memory_ledger;
     std::vector<XrSwapchain> memory_applications{chain};if(split_eyes)memory_applications.push_back(right);
@@ -751,6 +762,7 @@ int main(int argc,char** argv) {
         }
         std::fprintf(stderr,"frame %u write (physical=%u)\n",n,f.real_ends.load());
         const auto color=((n-1)%8+1)*20;f.write(chain,color);if(split_eyes)f.write(right,color+7);
+        if(panel_test)f.write(panel_chain,30+n);
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=image_width;g->output_height=g->depth_height=g->motion_height=image_height;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
         XrFrameState prediction{XR_TYPE_FRAME_STATE};xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
@@ -759,6 +771,15 @@ int main(int argc,char** argv) {
         for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={int(image_width),int(image_height)};}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
+        std::array<XrCompositionLayerQuad,2> panel_quads;
+        std::array<const XrCompositionLayerBaseHeader*,3> panel_layers{layer};
+        if(panel_test) {
+            for(unsigned i=0;i<2;++i){auto& q=panel_quads[i];q={XR_TYPE_COMPOSITION_LAYER_QUAD};
+                q.space=projection.space;q.pose.orientation.w=1;q.pose.position.x=i?5.f:.1f*n;
+                q.size={1,1};q.subImage.swapchain=panel_chain;q.subImage.imageRect={{int(i*image_width/2),0},{int(image_width/2),int(image_height)}};
+                panel_layers[i+1]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);}
+            end.layerCount=3;end.layers=panel_layers.data();
+        }
         if(hfw) std::fprintf(stderr,"HFW before%u active%u worker%u request%u forbidden%u mode%u enabled%u\n",n,
             unsigned(continuous_presenter_active(state)),unsigned(state->three_slot_director),unsigned(state->presenter_start_requested),
             unsigned(presenter_forbidden(*state)),unsigned(state->single_director_requested.load()),unsigned(state->menu_enabled.load()));
@@ -930,9 +951,23 @@ int main(int argc,char** argv) {
             "actual generation OFF kept physical/private/interop output allocations");
         for(const auto& app:find_swapchains(state))check(!app->frame_generation,"actual generation OFF retained its provider context");
     }
+    if(panel_test) {
+        xr_ok(wait_for_synthesis_handoff(state),"panel worker finished");
+        if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"panel presenter finished");
+        xr_ok(f.transport->drain(),"panel physical FIFO drained");
+        const auto p=find_swapchain(panel_chain);
+        check(p&&p->panel_source&&p->frame_generation,"independent panel engine armed");
+        check(!state->panel_generated.empty(),"panel engine actually produced output");
+        unsigned fractional{};check(!f.panel_positions.empty(),"physical frames retain both kneeboards");
+        for(const auto& v:f.panel_positions){check(v[1]==5.f,"second kneeboard moved toward first");
+            if(std::abs(v[0]*10-std::round(v[0]*10))>.05f)++fractional;}
+        check(fractional>0,"private outputs lost interpolated panel poses");
+        std::printf("Private panel atlas: %zu physical frames, %u fractional poses PASS\n",f.panel_positions.size(),fractional);
+    }
     f.transport->stop();
     for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
     xr_ok(layer_destroy_swapchain_impl(chain),"shipping destroy");
+    if(panel_test)xr_ok(layer_destroy_swapchain_impl(panel_chain),"panel atlas cleanup");
     if(split_eyes){xr_ok(layer_destroy_swapchain_impl(right),"shipping right destroy");check(f.chains.empty(),"shipping pool cleanup leaves no native handles");}
     if(steady_memory) {
         depth.Reset();motion.Reset();f.release_callback={};sample_memory("application-teardown",input_count);

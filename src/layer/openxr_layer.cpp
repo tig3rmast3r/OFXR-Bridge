@@ -610,6 +610,7 @@ struct ProjectionCaptureOrder {
 struct ProjectionSnapshot {
     std::vector<xrfg::panels::Pose> panels, previous_panels;
     bool panel_corrections{};
+    XrTime previous_panel_time{};
     BlackBarPoseTime blackbar_pose{};
     xrfg::InterfaceFrameStamp interface_stamp{};
     XrTime display_time{};
@@ -739,6 +740,7 @@ enum class GenerationQuarantineReason : std::int64_t {
 struct CompositionImageSlot;
 
 struct SessionState {
+    std::vector<std::pair<XrSwapchain,XrTime>> panel_generated;
     bool uevr_application{}; // captured once at session creation, never inferred from game name
     bool steamvr_separate_queue{true}; // immutable session preference, tray-only
     bool afw_only{}; // immutable session transport; does not disable Neural Rendering
@@ -2377,6 +2379,7 @@ struct SwapchainState {
     bool presentation_transform_known{};
     bool presentation_transform_active{};
     std::shared_ptr<FrameGenerationSwapchainState> frame_generation;
+    std::atomic_bool panel_source{};
     // Release-time private snapshot, never a read of an already released app
     // image. Output leases are held by A and by B/S(A,B) until presentation.
     // call_mutex guards capture/pool mutations; gpu_mutex guards D3D11 calls.
@@ -3513,14 +3516,19 @@ create_d3d12_frame_generation_swapchains(
         }
         auto synthesizer = std::make_shared<xrfg::D3D12FrameSynthesizer>();
         const xrfg::D3D12OpticalFlowBackend backend =
-            state->session->optical_flow_backend;
+            state->panel_source ? xrfg::D3D12OpticalFlowBackend::fidelity_fx : state->session->optical_flow_backend;
+        auto options=state->session->nvidia_options;
+        if(state->panel_source) {
+            options.input_scale=xrfg::D3D12NvidiaInputScale::full;
+            options.hybrid=false;
+        }
         const auto initialize_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::synthesis_initialize,
             handle_value(state->session->handle),
             (static_cast<std::uint64_t>(state->create_info.width) << 32) |
                 state->create_info.height,
             optical_flow_configuration_code(
-                backend, state->session->nvidia_options));
+                backend, options));
         const HRESULT gpu_result = synthesizer->initialize(
             state->session->d3d12_device.Get(),
             state->session->d3d12_synthesis_queue
@@ -3557,9 +3565,9 @@ create_d3d12_frame_generation_swapchains(
                 ? D3D12_RESOURCE_STATE_COMMON
                 : D3D12_RESOURCE_STATE_RENDER_TARGET,
             backend,
-            state->session->nvidia_options,
+            options,
             xrfg::bridge_flight_logger().gpu_instrumentation_enabled(),
-            state->session->frame_generation_mode,
+            state->panel_source ? xrfg::D3D12FrameGenerationMode::ofxr : state->session->frame_generation_mode,
             (state->session->graphics_binding_capabilities & 8ULL) != 0, state->session->afw_only);
         xrfg::bridge_flight_logger().end(
             initialize_token,
@@ -4174,7 +4182,7 @@ void release_session_generation_budget(
             bool unused{},had_generation{};
             { std::scoped_lock lock(chain->mutex);
               had_generation=bool(chain->frame_generation);
-              unused=!session->luke_afw_enabled || (chain->diagnostic_layer_roles&3)==2; }
+              unused=(!session->luke_afw_enabled || (chain->diagnostic_layer_roles&3)==2) && !chain->panel_source; }
             if (!unused || (!had_generation && !chain->projection_history_needed.load(std::memory_order_acquire)))continue;
             if(had_generation) {
                 drain_swapchain_gpu(chain);
@@ -8538,6 +8546,7 @@ struct GeneratedFrameEndInfo {
     std::vector<ProjectionLayerCopy> projections;
     std::vector<OwnedCompositionLayer> composition_layers;
     std::vector<OwnedCompositionLayer> adjusted_layers;
+    std::vector<XrSwapchain> generated_panels;
     std::vector<const XrCompositionLayerBaseHeader*> layer_pointers;
     std::vector<std::shared_ptr<CompositionImageSlot>> composition_images;
     // Synthesizers whose current copy is recorded but not yet submitted.
@@ -8684,7 +8693,24 @@ struct CompletedAfwFrame {
     std::uint64_t application_serial{};
 };
 
+// A panel capture is pinned at producer admission, before handing a job to
+// another thread. The pin is handed to its synthesizer under call_mutex.
+struct PanelSource { XrSwapchain swapchain{}; uint32_t slice{}; };
+struct PanelInput {
+    PanelSource source;
+    std::shared_ptr<FrameGenerationSwapchainState> generation;
+    std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
+    xrfg::D3D12HistoryCaptureTicket capture;
+    xrfg::D3D12HistoryConsumerLease lease;
+    Microsoft::WRL::ComPtr<ID3D12Resource> image;
+    Microsoft::WRL::ComPtr<ID3D12Fence> producer;
+    mutable std::atomic_bool pinned{false};
+    void release_pin() const {if(pinned.exchange(false))history->cancel_consumer(lease);}
+    ~PanelInput(){release_pin();}
+};
+
 struct SynthesisJob {
+    std::vector<std::shared_ptr<PanelInput>> panels;
     xrfg::D3D12PresentationTransform presentation_transform{};
     ProjectionSnapshot snapshot;
     std::optional<ProjectionSnapshot> synthetic_camera, extra_camera;
@@ -11541,6 +11567,7 @@ struct ProjectionResourceDestination {
     XrSwapchain application_swapchain{XR_NULL_HANDLE};
     XrSwapchain destination_swapchain{XR_NULL_HANDLE};
     bool synthetic_camera{};
+    bool panel{};
 };
 
 // A synthetic's own camera. A synthetic is shown between the two real frames
@@ -11688,7 +11715,7 @@ void place_snapshot_panels(const ProjectionSnapshot& snapshot,float fraction,
                 destinations.begin(),
                 destinations.end(),
                 [&](const ProjectionResourceDestination& candidate) {
-                    return candidate.application_swapchain ==
+                    return !candidate.panel && candidate.application_swapchain ==
                            view.subImage.swapchain;
                 });
             if (destination == destinations.end() ||
@@ -11716,6 +11743,21 @@ void place_snapshot_panels(const ProjectionSnapshot& snapshot,float fraction,
         const auto* stored_header =
             reinterpret_cast<const XrCompositionLayerBaseHeader*>(&stored.layer);
         output->layer_pointers[metadata.layer_index] = stored_header;
+    }
+    output->adjusted_layers.reserve(output->layer_pointers.size()*2);
+    for(const auto& panel:current_snapshot.panels) {
+        const auto d=std::find_if(destinations.begin(),destinations.end(),[&](const auto& d) {
+            return d.panel&&d.application_swapchain==panel.swapchain&&d.destination_swapchain!=XR_NULL_HANDLE;
+        });
+        if(d==destinations.end()||panel.layer>=output->layer_pointers.size())continue;
+        auto copy=copy_composition_layer_for_presenter(output->layer_pointers[panel.layer]);
+        if(!copy)continue;
+        if(auto* q=std::get_if<XrCompositionLayerQuad>(&*copy))q->subImage.swapchain=d->destination_swapchain;
+        else if(auto* q=std::get_if<XrCompositionLayerCylinderKHR>(&*copy))q->subImage.swapchain=d->destination_swapchain;
+        else continue;
+        output->adjusted_layers.push_back(std::move(*copy));
+        output->layer_pointers[panel.layer]=composition_layer_header(output->adjusted_layers.back());
+        output->generated_panels.push_back(d->destination_swapchain);
     }
     if(synthetic)place_snapshot_panels(current_snapshot,panel_fraction,*output);
     output->info.layerCount =
@@ -11930,6 +11972,7 @@ struct PreparedGeneration {
 struct PreparedProjectionResource {
     XrSwapchain application_swapchain{XR_NULL_HANDLE};
     PreparedGeneration generation;
+    bool panel{};
 };
 
 struct LukeAfwStartupCandidate {
@@ -11955,31 +11998,33 @@ void attach_djules_outputs(PreparedProjectionFrame& prepared,
     GeneratedFrameEndInfo* extra=nullptr) {
     for(auto& resource:prepared.resources) {
         auto& output=resource.generation;
+        auto* panel_synthetic=resource.panel&&output.kind!=PreparedGenerationKind::pair?nullptr:synthetic;
+        auto* panel_extra=resource.panel&&(output.kind!=PreparedGenerationKind::pair||!output.extra_handle)?nullptr:extra;
         if(output.native_result) {
             real.native_results.push_back(output.native_result);
-            if(synthetic) synthetic->native_results.push_back(output.native_result);
-            if(extra) { extra->native_results.push_back(output.native_result); extra->native_output=1; }
+            if(panel_synthetic) panel_synthetic->native_results.push_back(output.native_result);
+            if(panel_extra) { panel_extra->native_results.push_back(output.native_result); panel_extra->native_output=1; }
         }
         if (output.reference_fence) {
             real.reference_readiness.push_back({output.reference_fence, output.reference_current_value, output.reference_requires_application_release,output.reference_inputs});
-            if (synthetic) synthetic->reference_readiness.push_back({output.reference_fence, output.reference_synthetic_value, output.reference_requires_application_release,output.reference_inputs});
-            if (extra) extra->reference_readiness.push_back({output.reference_fence, output.reference_synthetic_value, output.reference_requires_application_release,output.reference_inputs});
+            if (panel_synthetic) panel_synthetic->reference_readiness.push_back({output.reference_fence, output.reference_synthetic_value, output.reference_requires_application_release,output.reference_inputs});
+            if (panel_extra) panel_extra->reference_readiness.push_back({output.reference_fence, output.reference_synthetic_value, output.reference_requires_application_release,output.reference_inputs});
         }
         if(output.direct_current_publication) real.direct_publications.push_back(output.direct_current_publication);
-        if(synthetic && output.direct_synthetic_publication) synthetic->direct_publications.push_back(output.direct_synthetic_publication);
-        if(synthetic && output.direct_synthetic_lease)
-            synthetic->direct_synthetic_leases.push_back(output.direct_synthetic_lease);
-        if(extra && output.direct_extra_lease)
-            extra->direct_synthetic_leases.push_back(output.direct_extra_lease);
+        if(panel_synthetic && output.direct_synthetic_publication) panel_synthetic->direct_publications.push_back(output.direct_synthetic_publication);
+        if(panel_synthetic && output.direct_synthetic_lease)
+            panel_synthetic->direct_synthetic_leases.push_back(output.direct_synthetic_lease);
+        if(panel_extra && output.direct_extra_lease)
+            panel_extra->direct_synthetic_leases.push_back(output.direct_extra_lease);
         if(!output.staging_generation) continue;
         auto generation=output.staging_generation;
         real.pending_outputs.push_back({generation,generation->current_staging[output.current_slot],
             output.synthesizer,output.staging_ticket,false,
             static_cast<std::uint32_t>(output.current_slot % generation->current_runtime_rings)});
-        if(synthetic) synthetic->pending_outputs.push_back({generation,generation->synthetic_staging[output.synthetic_slot*generation->staging_stride],
+        if(panel_synthetic) panel_synthetic->pending_outputs.push_back({generation,generation->synthetic_staging[output.synthetic_slot*generation->staging_stride],
             output.synthesizer,output.staging_ticket,true,
             static_cast<std::uint32_t>(output.synthetic_slot % generation->synthetic_runtime_rings)});
-        if(extra) extra->pending_outputs.push_back({generation,generation->synthetic_staging[output.synthetic_slot*generation->staging_stride+1],
+        if(panel_extra) panel_extra->pending_outputs.push_back({generation,generation->synthetic_staging[output.synthetic_slot*generation->staging_stride+1],
             output.synthesizer,output.staging_ticket,true,
             static_cast<std::uint32_t>((output.synthetic_slot + (generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings)});
     }
@@ -12117,7 +12162,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     const AfwSourceCapture* afw_source = nullptr,
     float extra_fraction=2.0F/3.0F,
     std::span<const xrfg::D3D12ReprojectionView> synthetic_views = {},
-    std::span<const xrfg::D3D12ReprojectionView> extra_views = {}) noexcept {
+    std::span<const xrfg::D3D12ReprojectionView> extra_views = {},
+    const PanelInput* panel_input = nullptr) noexcept {
     PreparedGeneration output{};
     try {
         // AFW's frozen source is transport, never a temporal OFXR prime.
@@ -12157,6 +12203,12 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                     return output;
                 }
                 capture = afw_source->capture;
+            } else if(panel_input) {
+                if(generation!=panel_input->generation) {
+                    output.reason=GenerationPrepareReason::missing_generation;return output;
+                }
+                panel_input->release_pin();
+                capture=panel_input->capture;
             } else {
                 capture = state->last_released_capture;
                 motion_vectors = state->last_released_motion_vectors;
@@ -12356,7 +12408,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             (generation->staged_outputs || late_luke_publication ? 0 : synthetic_image.acquired_index);
 
         xrfg::D3D12FrameSynthesisTicket ticket{};
-        const auto debug_marker = request_pair && state->session->fsr_cadence.marker_enabled() &&
+        const auto debug_marker = !panel_input && request_pair && state->session->fsr_cadence.marker_enabled() &&
                 state->session->fps_overlay
             ? state->session->fps_overlay->marker_placement()
             : std::nullopt;
@@ -12894,6 +12946,90 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     return success;
 }
 
+// Upstream V509/V511, adapted to immutable captures and all current sinks.
+std::vector<PanelSource> panel_sources(const SessionState& state,
+    const ProjectionSnapshot& snapshot,std::span<const ProjectionResourceMapping> mappings) {
+    std::vector<PanelSource> out;std::vector<XrSwapchain> conflicts;
+    if(!snapshot.panel_corrections||state.graphics_binding!=SessionGraphicsBinding::d3d12||
+        state.d3d11_bridge||state.vulkan_bridge||!state.d3d12_queue)return out;
+    for(const auto& panel:snapshot.panels) {
+        if(std::any_of(mappings.begin(),mappings.end(),[&](const auto& m){return m.application_swapchain==panel.swapchain;}))continue;
+        const auto chain=find_swapchain(panel.swapchain);
+        if(!chain||chain->session.get()!=&state||panel.slice>=chain->create_info.arraySize)continue;
+        // Extended layers remain passthrough; never discard their next chain.
+        const auto found=std::find_if(out.begin(),out.end(),[&](const auto& p){return p.swapchain==panel.swapchain;});
+        if(found!=out.end()) {
+            if(found->slice!=panel.slice)conflicts.push_back(panel.swapchain);
+        } else out.push_back({panel.swapchain,panel.slice});
+    }
+    std::erase_if(out,[&](const auto& p){return std::find(conflicts.begin(),conflicts.end(),p.swapchain)!=conflicts.end();});
+    if(out.size()>2)out.resize(2);
+    return out;
+}
+bool panel_generation_pending(std::span<const PanelSource> panels) {
+    for(const auto& p:panels)if(const auto chain=find_swapchain(p.swapchain)) {
+        std::scoped_lock lock(chain->mutex);
+        if(!chain->panel_source||(!chain->frame_generation&&chain->generation_eligible_pending&&!chain->generation_declined))return true;
+    }
+    return false;
+}
+void arm_panel_generation(const std::shared_ptr<SessionState>& state,std::span<const PanelSource> panels) {
+    for(const auto& p:panels)if(const auto chain=find_swapchain(p.swapchain)) {
+        // Only known non-projection sources enter here, after the triggering
+        // frame has gone downstream and the preceding presenter is drained.
+        bool replace_existing{};
+        {std::scoped_lock lock(chain->mutex);replace_existing=!chain->panel_source&&bool(chain->frame_generation);chain->panel_source=true;}
+        if(replace_existing) {
+            destroy_frame_generation_swapchains(chain);
+            chain->generation_eligible_pending=true;
+        }
+        chain->projection_history_needed.store(true,std::memory_order_release);
+        static_cast<void>(ensure_frame_generation(chain));
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+            761,chain->frame_generation?1:0,handle_value(p.swapchain));
+    }
+}
+std::vector<std::shared_ptr<PanelInput>> freeze_panel_inputs(const SessionState& state,
+    const ProjectionSnapshot& snapshot,std::span<const ProjectionResourceMapping> mappings) {
+    std::vector<std::shared_ptr<PanelInput>> out;
+    for(const auto& p:panel_sources(state,snapshot,mappings))if(const auto chain=find_swapchain(p.swapchain)) {
+        std::scoped_lock call_lock(chain->call_mutex);
+        auto input=std::make_shared<PanelInput>();input->source=p;
+        {std::scoped_lock lock(chain->mutex);
+            if(!chain->panel_source||!chain->frame_generation||!chain->d3d12_history||!chain->last_released_capture)continue;
+            input->generation=chain->frame_generation;input->history=chain->d3d12_history;
+            input->capture=*chain->last_released_capture;}
+        if(FAILED(input->history->acquire_consumer(input->capture,&input->lease,
+            &input->image,&input->producer)))continue;
+        input->pinned=true;out.push_back(std::move(input));
+    }
+    return out;
+}
+void prepare_panel_generation(SessionState& state,const ProjectionSnapshot& snapshot,
+    std::span<const std::shared_ptr<PanelInput>> inputs,PreparedProjectionFrame& prepared,
+    float fraction,float extra_fraction,bool worker) {
+    std::vector<std::pair<XrSwapchain,XrTime>> generated;
+    for(const auto& input:inputs)if(const auto chain=find_swapchain(input->source.swapchain)) {
+        const auto before=std::find_if(state.panel_generated.begin(),state.panel_generated.end(),
+            [&](const auto& p){return p.first==input->source.swapchain;});
+        const bool pair=prepared.kind==PreparedGenerationKind::pair&&before!=state.panel_generated.end()&&
+            before->second==snapshot.previous_panel_time&&snapshot.previous_panel_time!=0;
+        xrfg::D3D12ReprojectionView view{};
+        view.fov={-.785398f,.785398f,.785398f,-.785398f};
+        view.image_rect={0,0,chain->create_info.width,chain->create_info.height};view.array_slice=input->source.slice;
+        const xrfg::D3D12PresentationTransform identity{};
+        auto result=prepare_frame_generation(input->source.swapchain,pair,std::span(&view,1),fraction,
+            worker,&identity,false,nullptr,nullptr,extra_fraction,{},{},input.get());
+        if(result.kind==PreparedGenerationKind::none)continue;
+        if(result.kind!=PreparedGenerationKind::pair) {
+            result.synthetic_handle=XR_NULL_HANDLE;result.extra_handle=XR_NULL_HANDLE;
+        }
+        generated.emplace_back(input->source.swapchain,snapshot.display_time);
+        prepared.resources.push_back({input->source.swapchain,std::move(result),true});
+    }
+    state.panel_generated=std::move(generated);
+}
+
 void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept {
     try {
         for (;;) {
@@ -12928,6 +13064,8 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 prepared.kind == PreparedGenerationKind::none ? -1 : 0,
                 job->current->source_sequence, job->current->previous_sequence,
                 static_cast<std::uint64_t>(prepared.kind));
+            if(prepared.kind!=PreparedGenerationKind::none)
+                prepare_panel_generation(*state,job->snapshot,job->panels,prepared,job->fraction,job->extra_fraction,true);
             bool success = finish_worker_outputs(state, prepared, job->current->source_sequence);
             const auto auxiliary_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_aux_complete,
@@ -12959,10 +13097,10 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                         source = found->completed_swapchain;
                     }
                     real_destinations.push_back({source,
-                                                resource.generation.current_handle});
+                                                resource.generation.current_handle,false,resource.panel});
                     synthetic_destinations.push_back({source,
-                                                     resource.generation.synthetic_handle, resource.generation.synthetics_in_target_camera});
-                    extra_destinations.push_back({source, resource.generation.extra_handle, resource.generation.synthetics_in_target_camera});
+                                                     resource.generation.synthetic_handle, resource.generation.synthetics_in_target_camera, resource.panel});
+                    extra_destinations.push_back({source, resource.generation.extra_handle, resource.generation.synthetics_in_target_camera, resource.panel});
                 }
                 GeneratedFrameEndInfo real_info, synthetic_info;
                 success = success && build_generated_frame_end_info(&job->metadata->info, job->snapshot,
@@ -13399,6 +13537,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     for (auto& layer : metadata.composition_layers) {
         auto* handle = composition_swapchain(layer);
         if (!handle) return XR_ERROR_LAYER_INVALID;
+        if(std::find(metadata.generated_panels.begin(),metadata.generated_panels.end(),*handle)!=metadata.generated_panels.end())continue;
         if (const auto found = leased.find(*handle); found != leased.end()) {
             *handle = found->second->image.handle;
             continue;
@@ -13800,6 +13939,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         const XrResult composition = job->post_afw_frame ? XR_SUCCESS
             : own_composition_images(state, *job->metadata);
         if (XR_FAILED(composition)) return composition;
+        job->panels=freeze_panel_inputs(*state,job->snapshot,mappings);
         lock.lock();
         if (XR_FAILED(state->presenter_failure)) return state->presenter_failure;
         if (state->presenter_stop_requested) return XR_ERROR_SESSION_NOT_RUNNING;
@@ -15400,7 +15540,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         // interpolation outputs at all. Application images/captures survive.
         const bool auxiliary_only=(chain->diagnostic_layer_roles&3)==2;
         const bool unused_projection=submitted_sources_known && !projected &&
-            (!state->luke_afw_enabled || auxiliary_only);
+            (!state->luke_afw_enabled || auxiliary_only) && !chain->panel_source;
         // Outlaws can create these on its original SINGLETHREADED owner only
         // before the first frame. Off pauses their use; it must not retire the
         // warmed set that the sealed initialization window cannot recreate.
@@ -15534,7 +15674,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             result = synthesis->wait_for_idle();
             if(SUCCEEDED(result) && !control.desired.enabled)
                 result=synthesis->suspend_flow_resources();
-            if (SUCCEEDED(result) && changed) {
+            if (SUCCEEDED(result) && changed && !chain->panel_source) {
                 result = synthesis->reconfigure(backend, options,
                     state->luke_afw_enabled
                         ? xrfg::D3D12FrameGenerationMode::ofxr
@@ -15547,7 +15687,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             result = temporal->wait_for_idle();
             if(SUCCEEDED(result) && (!control.desired.enabled || !afw_needed))
                 result=temporal->suspend_flow_resources();
-            if (SUCCEEDED(result) && changed) {
+            if (SUCCEEDED(result) && changed && !chain->panel_source) {
                 result = temporal->reconfigure(
                     backend, options, xrfg::D3D12FrameGenerationMode::ofxr);
             }
@@ -16534,7 +16674,10 @@ XrResult layer_end_frame_impl(
     current_snapshot.blackbar_pose=blackbar_pose_time(*state,*end_info);
     current_snapshot.panel_corrections=!xrfg::native_ingress::luke_detected();
     { std::scoped_lock lock(state->mutex);
-      if(state->previous_projection)current_snapshot.previous_panels=state->previous_projection->panels; }
+      if(state->previous_projection) {
+          current_snapshot.previous_panels=state->previous_projection->panels;
+          current_snapshot.previous_panel_time=state->previous_projection->display_time;
+      } }
     ProjectionMappingResult resource_mappings{};
     if (has_projection) {
         resource_mappings = build_projection_resource_mappings(current_snapshot);
@@ -16581,6 +16724,8 @@ XrResult layer_end_frame_impl(
     const bool generation_arming_pending =
         resource_mappings.ready() &&
         projection_frame_generation_pending(state, projection_mappings);
+    const auto panels=panel_sources(*state,current_snapshot,projection_mappings);
+    const bool panel_arming_pending=!generation_arming_pending&&panel_generation_pending(panels);
     const bool stereo_projection = !current_snapshot.layers.empty() &&
         std::all_of(current_snapshot.layers.begin(), current_snapshot.layers.end(),
             [](const auto& layer) { return layer.views.size() == 2; });
@@ -16629,7 +16774,7 @@ XrResult layer_end_frame_impl(
     } else if (state->frame_generation_mode != xrfg::D3D12FrameGenerationMode::fsr3) {
         state->fsr_stereo_admission = {};
     }
-    if (!resource_mappings.ready() || generation_arming_pending) {
+    if (!resource_mappings.ready() || generation_arming_pending || panel_arming_pending) {
         clear_generation_continuity(state);
         if (!resource_mappings.ready() &&
             resource_mappings.reason !=
@@ -16642,7 +16787,7 @@ XrResult layer_end_frame_impl(
         }
         const XrResult passthrough_result =
             bypass_generation(GenerationPrepareReason::empty_mappings);
-        if (!generation_arming_pending) {
+        if (!generation_arming_pending && !panel_arming_pending) {
             return passthrough_result;
         }
         // The application's frame is already downstream; nothing this costs is
@@ -16664,7 +16809,7 @@ XrResult layer_end_frame_impl(
                 return exclusive_result;
             }
             release_session_generation_budget(state);
-        }
+        } else arm_panel_generation(state,panels);
         return passthrough_result;
     }
     const std::optional<PendingApplicationFrame> application_frame =
@@ -16981,6 +17126,10 @@ XrResult layer_end_frame_impl(
         : prepare_projection_frame(
               current_snapshot, mapping_span, metadata_pairable, interpolation_fraction, false, nullptr, {},
               extra_fraction, synthetic_camera ? &*synthetic_camera : nullptr, extra_camera ? &*extra_camera : nullptr);
+    if(prepared.kind!=PreparedGenerationKind::none) {
+        const auto panel_inputs=freeze_panel_inputs(*state,current_snapshot,mapping_span);
+        prepare_panel_generation(*state,current_snapshot,panel_inputs,prepared,interpolation_fraction,extra_fraction,false);
+    }
     state->generation_status = prepared.kind == PreparedGenerationKind::pair
         ? xrfg::autonomous::GenerationState::ready : prepared.kind == PreparedGenerationKind::prime
         ? xrfg::autonomous::GenerationState::recovering : xrfg::autonomous::GenerationState::waiting;
@@ -17099,12 +17248,12 @@ XrResult layer_end_frame_impl(
         }
         current_destinations.push_back({
             produced_swapchain,
-            resource.generation.current_handle,
+            resource.generation.current_handle,false,resource.panel,
         });
         synthetic_destinations.push_back({
             produced_swapchain,
             resource.generation.synthetic_handle,
-            resource.generation.synthetics_in_target_camera,
+            resource.generation.synthetics_in_target_camera,resource.panel,
         });
     }
     if (afw_selected && !completed_afw) {
@@ -17271,7 +17420,8 @@ XrResult layer_end_frame_impl(
                         for(size_t i=0;i<current.composition_layers.size();++i) {
                             auto* target=composition_swapchain(current.composition_layers[i]);
                             auto* source=composition_swapchain(presenter_first_frame->composition_layers[i]);
-                            if(target&&source)*target=*source;
+                            const bool generated=target&&std::find(current.generated_panels.begin(),current.generated_panels.end(),*target)!=current.generated_panels.end();
+                            if(target&&source&&!generated)*target=*source;
                         }
                         current.composition_images = presenter_first_frame->composition_images;
                         std::size_t auxiliary = 0;

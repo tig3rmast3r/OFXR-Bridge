@@ -78,6 +78,7 @@ bool g_steamvr_presenter_mode = false;
 // the two waits apart by what is happening rather than by counting calls.
 std::atomic<bool> g_application_in_end_frame{false};
 bool g_flight_simulator_mode = false;
+bool g_shared_panel_mode=false;
 bool g_native_time_rewrite_mode = false;
 bool g_acquire_ahead_mode = false;
 std::atomic<bool> g_acquire_ahead_active{false};
@@ -153,6 +154,7 @@ struct EndFrameRecord {
     bool passthrough_layer_preserved{};
     std::uint32_t passthrough_layer_index{
         std::numeric_limits<std::uint32_t>::max()};
+    float quad_x{},second_quad_x{};
     std::uint32_t quad_layer_count{};
     std::uint32_t quad_layer_index{
         std::numeric_limits<std::uint32_t>::max()};
@@ -419,8 +421,10 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
             }
             if (layer != nullptr &&
                 layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
-                ++record.quad_layer_count;
-                record.quad_layer_index = layer_index;
+                const auto* q=reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+                if(++record.quad_layer_count==1)record.quad_x=q->pose.position.x;
+                else record.second_quad_x=q->pose.position.x;
+                if(record.quad_layer_count==1)record.quad_layer_index = layer_index;
             }
             if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
                 continue;
@@ -1218,7 +1222,8 @@ int main(int argc, char** argv) {
         (argc == 4 && std::strcmp(argv[3], "steamvr-inline") == 0);
     g_destroy_pending_swapchain =
         argc == 4 && std::strcmp(argv[3], "flight-destroy-swapchain") == 0;
-    g_flight_simulator_mode = g_destroy_pending_swapchain ||
+    g_shared_panel_mode=argc==4&&std::strcmp(argv[3],"flight-shared-panels")==0;
+    g_flight_simulator_mode = g_shared_panel_mode || g_destroy_pending_swapchain ||
         (argc == 4 && std::strcmp(argv[3], "flight-simulator") == 0);
     g_native_time_rewrite_mode =
         argc == 4 && std::strcmp(argv[3], "native-time-rewrite") == 0;
@@ -1948,9 +1953,13 @@ int main(int argc, char** argv) {
     flight_quad.subImage.imageRect.extent = {4, 4};
     flight_quad.pose.orientation.w = 1.0F;
     flight_quad.size = {1.0F, 1.0F};
+    XrCompositionLayerQuad kneeboard=flight_quad;
+    kneeboard.subImage.imageRect.offset={2,0};kneeboard.subImage.imageRect.extent={2,4};
+    kneeboard.pose.position.x=5.f;
     const XrCompositionLayerBaseHeader* layers[] = {
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&flight_quad),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&kneeboard),
     };
 
     auto submit_frame = [&](XrTime display_time) {
@@ -1982,7 +1991,8 @@ int main(int argc, char** argv) {
         XrFrameEndInfo frame_end_info{XR_TYPE_FRAME_END_INFO};
         frame_end_info.displayTime = display_time;
         frame_end_info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        frame_end_info.layerCount = g_flight_simulator_mode ? 2 : 1;
+        if(g_shared_panel_mode)flight_quad.pose.position.x+=.1f;
+        frame_end_info.layerCount = g_flight_simulator_mode ? (g_shared_panel_mode?3:2) : 1;
         frame_end_info.layers = layers;
         // SteamVR throttles the *inline* second cycle, not the application's
         // own wait. Mark the window so the fake runtime can tell them apart by
@@ -2187,6 +2197,7 @@ int main(int argc, char** argv) {
         application_space = fake_handle<XrSpace>(0x405);
         projection.space = application_space;
         flight_quad.space = application_space;
+        kneeboard.space=application_space;
         g_valid_composition_space.store(
             application_space,
             std::memory_order_release);
@@ -2227,6 +2238,27 @@ int main(int argc, char** argv) {
         };
         std::size_t matched_targets = 0;
         std::size_t empty_frames = 0;
+        if(g_shared_panel_mode) {
+            size_t checked=0;
+            for(size_t i=1;i+1<end_records.size();++i) {
+                const auto& r=end_records[i];
+                if(r.quad_layer_count!=2)continue;
+                if(r.second_quad_x!=5.f){std::cerr<<"Shared atlas kneeboard moved: "<<r.second_quad_x;return EXIT_FAILURE;}
+                if(r.target!=SubmittedTarget::synthetic)continue;
+                size_t a=i,b=i;
+                while(a&&end_records[a].target!=SubmittedTarget::current)--a;
+                while(b+1<end_records.size()&&end_records[b].target!=SubmittedTarget::current)++b;
+                if(end_records[a].target==SubmittedTarget::current&&end_records[b].target==SubmittedTarget::current&&
+                    end_records[b].quad_x-end_records[a].quad_x>.05f) {
+                    if(!(r.quad_x>end_records[a].quad_x&&r.quad_x<end_records[b].quad_x)) {
+                        std::cerr<<"Panel pose outside source interval: "<<end_records[a].quad_x<<" / "<<r.quad_x<<" / "<<end_records[b].quad_x;return EXIT_FAILURE;
+                    }
+                    ++checked;
+                }
+            }
+            if(!checked){std::cerr<<"No synthetic panel poses checked";return EXIT_FAILURE;}
+            std::cout<<"Shared atlas panel positions checked: "<<checked<<'\n';
+        }
         bool composition_preserved = true;
         for (const EndFrameRecord& record : end_records) {
             if (matched_targets < expected_generated_order.size() &&
@@ -2237,8 +2269,8 @@ int main(int argc, char** argv) {
                 ++empty_frames;
             } else {
                 composition_preserved = composition_preserved &&
-                    record.layer_count == 2 &&
-                    record.quad_layer_count == 1 &&
+                    record.layer_count == (g_shared_panel_mode?3:2) &&
+                    record.quad_layer_count == (g_shared_panel_mode?2:1) &&
                     record.quad_layer_index == 1;
             }
         }

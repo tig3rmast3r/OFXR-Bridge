@@ -5594,6 +5594,8 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 
 #include "native_dlssg_gpu.inc"
 
+#include "panel_synthesis_tests.inc"
+
 }  // namespace
 
 #include "r19_upstream_camera.inc"
@@ -5603,6 +5605,13 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 #include "synthesis_memory_lifecycle_tests.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1&&std::string_view(argv[1])=="panel") {
+        try {
+            D3D12WarpFixture fixture(true);
+            test_flat_panel_marker_synthesis(fixture,xrfg::D3D12OpticalFlowBackend::fidelity_fx,false,true);
+            fixture.require_no_debug_errors();return 0;
+        } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     const bool trace_test = std::getenv("XRFG_TEST_GPU_TRACE") != nullptr;
     const auto trace_dir = std::filesystem::temp_directory_path() /
         ("xrfg-v072-gpu-" + std::to_string(GetCurrentProcessId()));

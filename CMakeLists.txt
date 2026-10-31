@@ -1969,3 +1969,18 @@ if(WIN32 AND XRFG_BUILD_TESTS)
   target_include_directories(xrfg_composition_panels_tests PRIVATE include external/OpenXR-SDK/include)
   add_test(NAME xrfg_composition_panels_tests COMMAND xrfg_composition_panels_tests)
 endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
+  add_test(NAME xrfg_layer_shared_swapchain_panels COMMAND xrfg_layer_call_chain
+    $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+    "${CMAKE_CURRENT_BINARY_DIR}/shared-panels.log" flight-shared-panels)
+  add_test(NAME xrfg_panel_synthesis_gpu COMMAND xrfg_d3d12_history_tests panel)
+  set_tests_properties(xrfg_layer_shared_swapchain_panels xrfg_panel_synthesis_gpu PROPERTIES TIMEOUT 90)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
+  foreach(route new solo-new solo-djules3 solo-fsr solo-hybrid solo-dlssg)
+    add_test(NAME xrfg_private_panels_${route}_gpu COMMAND xrfg_private_runtime_layer_tests panels-${route})
+    set_tests_properties(xrfg_private_panels_${route}_gpu PROPERTIES TIMEOUT 90)
+  endforeach()
+endif()

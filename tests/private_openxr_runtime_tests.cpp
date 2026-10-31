@@ -84,6 +84,7 @@ struct Fixture {
     std::vector<std::array<XrSwapchain,2>> stereo_handles;
     std::size_t native_chain_limit{1000};
     std::vector<float> positions;
+    std::vector<std::array<float,2>> panel_positions;
     std::vector<std::int64_t> handoffs,submit_receipts;
     std::vector<bool> director_policies;
     std::int64_t simulated_submit_ns{};
@@ -231,6 +232,12 @@ struct Fixture {
                 overlay_color=f.read_pixel(f.chains.at(quad->subImage.swapchain));has_overlay=true;
             }
         }
+        std::array<float,2> panels{};unsigned panel_count{};
+        for(unsigned i=0;i<info->layerCount;++i)if(info->layers[i]&&info->layers[i]->type==XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            if(panel_count<2)panels[panel_count]=reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[i])->pose.position.x;
+            ++panel_count;
+        }
+        if(panel_count==2){std::scoped_lock lock(f.mutex);f.panel_positions.push_back(panels);}
         {std::scoped_lock lock(f.mutex);f.pixels.push_back(color);if(has_overlay)f.overlay_pixels.push_back(overlay_color);f.positions.push_back(position);f.handoffs.push_back(start);f.director_policies.push_back(f.transport?f.transport->director_enabled():true);f.targets.push_back(info->displayTime);++f.real_ends;}
         f.changed.notify_all();return f.fail_end?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;
     }

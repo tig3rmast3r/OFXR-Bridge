@@ -21,7 +21,7 @@ struct Pose {
     uint32_t layer{};
 };
 inline std::optional<Pose> pose(const XrCompositionLayerBaseHeader* h,uint32_t layer=0) {
-    if(!h)return {};
+    if(!h||h->next)return {};
     if(h->type==XR_TYPE_COMPOSITION_LAYER_QUAD) {
         const auto& q=*reinterpret_cast<const XrCompositionLayerQuad*>(h);
         return Pose{h->type,q.subImage.swapchain,q.space,q.pose,q.subImage.imageRect,
@@ -51,9 +51,9 @@ inline std::vector<size_t> match(std::span<const Pose> before,std::span<const Po
         if(!taken[j]&&same_image(now[i],before[j])){result[i]=j;taken[j]=true;break;}
     for(size_t i=0;i<now.size();++i)if(result[i]==before.size()) {
         size_t left_before=0,left_now=0,candidate=before.size();
-        for(size_t j=0;j<before.size();++j)if(!taken[j]&&same_source(now[i],before[j]))
+        for(size_t j=0;j<before.size();++j)if(!taken[j]&&same_source(now[i],before[j])&&now[i].slice==before[j].slice&&now[i].eyes==before[j].eyes)
             {++left_before;candidate=j;}
-        for(size_t j=0;j<now.size();++j)if(result[j]==before.size()&&same_source(now[i],now[j]))++left_now;
+        for(size_t j=0;j<now.size();++j)if(result[j]==before.size()&&same_source(now[i],now[j])&&now[i].slice==now[j].slice&&now[i].eyes==now[j].eyes)++left_now;
         if(left_before==1&&left_now==1){result[i]=candidate;taken[candidate]=true;}
     }
     return result;

@@ -1131,6 +1131,7 @@ struct D3D12FrameSynthesizer::Impl {
     bool fsr_stale_guide_gap{};
     bool ffx_context_created{};
     bool flow_output_consumed{};
+    bool fidelityfx_packed_readable{};
     bool nvidia_gpu_timing_enabled{};
     bool allow_luke_guide_device_alias{};
     ~Impl() {
@@ -4289,6 +4290,12 @@ struct D3D12FrameSynthesizer::Impl {
             static_cast<UINT>(before_copy.size()),
             before_copy.data());
 
+        if(fidelityfx_packed_readable) {
+            const auto to_write=transition_barrier(packed_color.Get(),
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            slot.command_list->ResourceBarrier(1,&to_write);
+        }
+        fidelityfx_packed_readable=true;
         ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
         slot.command_list->SetDescriptorHeaps(1, heaps);
         slot.command_list->SetComputeRootSignature(root_signature.Get());

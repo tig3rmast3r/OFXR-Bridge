@@ -17,7 +17,7 @@ int main(){
     now[0].rect.offset.x=700;now[1].rect.offset.x=800;m=match(before,now);
     check(m[0]==2&&m[1]==2); // two resized panels are ambiguous
     now={a,a};now[1].slice=1;m=match(before,now);
-    check(m[0]==0); // exact match cannot be stolen by another panel
+    check(m[0]==0&&m[1]==2); // exact match cannot be stolen by another panel
     auto cylinder=a;cylinder.type=XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR;
     check(!same_source(a,cylinder));auto other=a;other.space=reinterpret_cast<XrSpace>(3);
     check(match(std::span(&a,1),std::span(&other,1))[0]==1);
