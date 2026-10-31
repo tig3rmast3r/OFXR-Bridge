@@ -1,3 +1,4 @@
+#include "xrfg/composition_panels.hpp"
 #include "xrfg/luke_vulkan_scope.hpp"
 #define XR_USE_GRAPHICS_API_VULKAN
 #include "xrfg/vulkan_session_bridge.hpp"
@@ -607,6 +608,8 @@ struct ProjectionCaptureOrder {
 };
 
 struct ProjectionSnapshot {
+    std::vector<xrfg::panels::Pose> panels, previous_panels;
+    bool panel_corrections{};
     BlackBarPoseTime blackbar_pose{};
     xrfg::InterfaceFrameStamp interface_stamp{};
     XrTime display_time{};
@@ -8534,6 +8537,7 @@ struct GeneratedFrameEndInfo {
     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
     std::vector<ProjectionLayerCopy> projections;
     std::vector<OwnedCompositionLayer> composition_layers;
+    std::vector<OwnedCompositionLayer> adjusted_layers;
     std::vector<const XrCompositionLayerBaseHeader*> layer_pointers;
     std::vector<std::shared_ptr<CompositionImageSlot>> composition_images;
     // Synthesizers whose current copy is recorded but not yet submitted.
@@ -10723,6 +10727,7 @@ enqueue_presenter_submission(
     snapshot.environment_blend_mode = source->environmentBlendMode;
     for (std::uint32_t layer_index = 0; layer_index < source->layerCount; ++layer_index) {
         const XrCompositionLayerBaseHeader* layer = source->layers[layer_index];
+        if(auto panel=xrfg::panels::pose(layer,layer_index))snapshot.panels.push_back(*panel);
         if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
             continue;
         }
@@ -11606,13 +11611,40 @@ constexpr float kMaxSyntheticCameraMoveMeters = 0.5F;
     }
 }
 
+// Snapshots retain application panel identities even after auxiliary ownership
+// remaps their swapchains to private tokens. Never match a private token to a
+// previous application handle, or read the next producer frame on a worker.
+void place_snapshot_panels(const ProjectionSnapshot& snapshot,float fraction,
+    GeneratedFrameEndInfo& output) {
+    if(!snapshot.panel_corrections||snapshot.previous_panels.empty()||
+        !(fraction>0.f&&fraction<1.f))return;
+    const auto matches=xrfg::panels::match(snapshot.previous_panels,snapshot.panels);
+    output.adjusted_layers.reserve(output.layer_pointers.size()*2);
+    for(size_t i=0;i<matches.size();++i) {
+        if(matches[i]==snapshot.previous_panels.size())continue;
+        const auto& now=snapshot.panels[i];
+        if(now.layer>=output.layer_pointers.size())continue;
+        const auto* h=output.layer_pointers[now.layer];
+        if(!h||h->next||h->type!=now.type)continue;
+        auto copy=copy_composition_layer_for_presenter(h);
+        if(!copy)continue;
+        const auto pose=xrfg::panels::between(snapshot.previous_panels[matches[i]].pose,now.pose,fraction);
+        if(auto* q=std::get_if<XrCompositionLayerQuad>(&*copy))q->pose=pose;
+        else if(auto* q=std::get_if<XrCompositionLayerCylinderKHR>(&*copy))q->pose=pose;
+        else continue;
+        output.adjusted_layers.push_back(std::move(*copy));
+        output.layer_pointers[now.layer]=composition_layer_header(output.adjusted_layers.back());
+    }
+    output.info.layers=output.layer_pointers.data();
+}
+
 [[nodiscard]] bool build_generated_frame_end_info(
     const XrFrameEndInfo* source,
     const ProjectionSnapshot& current_snapshot,
     bool synthetic,
     std::span<const ProjectionResourceDestination> destinations,
     GeneratedFrameEndInfo* output,
-    const ProjectionSnapshot* camera = nullptr) {
+    const ProjectionSnapshot* camera = nullptr, float panel_fraction = .5f) {
     if (source == nullptr || output == nullptr || destinations.empty() ||
         source->layerCount == 0 || source->layers == nullptr ||
         current_snapshot.layers.empty()) {
@@ -11685,6 +11717,7 @@ constexpr float kMaxSyntheticCameraMoveMeters = 0.5F;
             reinterpret_cast<const XrCompositionLayerBaseHeader*>(&stored.layer);
         output->layer_pointers[metadata.layer_index] = stored_header;
     }
+    if(synthetic)place_snapshot_panels(current_snapshot,panel_fraction,*output);
     output->info.layerCount =
         static_cast<std::uint32_t>(output->layer_pointers.size());
     output->info.layers = output->layer_pointers.data();
@@ -12943,7 +12976,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 success = success && real != nullptr;
                 if (success && job->pair) {
                     success = build_generated_frame_end_info(&job->metadata->info, job->snapshot,
-                        true, synthetic_destinations, &synthetic_info, job->synthetic_camera ? &*job->synthetic_camera : nullptr);
+                        true, synthetic_destinations, &synthetic_info, job->synthetic_camera ? &*job->synthetic_camera : nullptr, job->fraction);
                     synthetic_info.pending_outputs=std::move(pending_synthetic.pending_outputs);
                     synthetic_info.native_results=std::move(pending_synthetic.native_results);
                     synthetic_info.direct_synthetic_leases=std::move(pending_synthetic.direct_synthetic_leases);
@@ -12955,7 +12988,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                     if(success && job->triple) {
                         GeneratedFrameEndInfo extra_info;
                         success=build_generated_frame_end_info(&job->metadata->info,job->snapshot,true,
-                            extra_destinations,&extra_info, job->extra_camera ? &*job->extra_camera : nullptr);
+                            extra_destinations,&extra_info, job->extra_camera ? &*job->extra_camera : nullptr, job->extra_fraction);
                         extra_info.pending_outputs=std::move(pending_extra.pending_outputs);
                         extra_info.native_results=std::move(pending_extra.native_results);
                         extra_info.direct_synthetic_leases=std::move(pending_extra.direct_synthetic_leases);
@@ -16499,6 +16532,9 @@ XrResult layer_end_frame_impl(
     current_snapshot.app_release_value = state->app_end_frame_release_value;
     current_snapshot.interface_stamp = interface_stamp;
     current_snapshot.blackbar_pose=blackbar_pose_time(*state,*end_info);
+    current_snapshot.panel_corrections=!xrfg::native_ingress::luke_detected();
+    { std::scoped_lock lock(state->mutex);
+      if(state->previous_projection)current_snapshot.previous_panels=state->previous_projection->panels; }
     ProjectionMappingResult resource_mappings{};
     if (has_projection) {
         resource_mappings = build_projection_resource_mappings(current_snapshot);
@@ -17098,7 +17134,7 @@ XrResult layer_end_frame_impl(
             true,
             std::span<const ProjectionResourceDestination>(
                 synthetic_destinations.data(), synthetic_destinations.size()),
-            &first_generated, synthetic_camera ? &*synthetic_camera : nullptr);
+            &first_generated, synthetic_camera ? &*synthetic_camera : nullptr, interpolation_fraction);
         const bool current_built = build_generated_frame_end_info(
             produced_end_info,
             produced_snapshot,
@@ -17137,7 +17173,7 @@ XrResult layer_end_frame_impl(
         for (std::size_t i=0; i<prepared.resources.size(); ++i)
             extra_destinations[i].destination_swapchain = prepared.resources[i].generation.extra_handle;
         extra_ready=build_generated_frame_end_info(produced_end_info,produced_snapshot,true,
-            extra_destinations,&extra_generated, extra_camera ? &*extra_camera : nullptr);
+            extra_destinations,&extra_generated, extra_camera ? &*extra_camera : nullptr, extra_fraction);
         if(!extra_ready) {
             enter_generation_quarantine(state,GenerationQuarantineReason::generated_end_info_failed);
             return bypass_generation(GenerationPrepareReason::generated_end_info_failed);
@@ -17230,7 +17266,13 @@ XrResult layer_end_frame_impl(
                     for(auto& owned:{presenter_current_frame,presenter_extra_frame}) {
                         if(!owned) continue;
                         auto& current=*owned;
-                        current.composition_layers = presenter_first_frame->composition_layers;
+                        // Share the owned pixels, never another output's panel
+                        // poses: S, middle and B have different presentation times.
+                        for(size_t i=0;i<current.composition_layers.size();++i) {
+                            auto* target=composition_swapchain(current.composition_layers[i]);
+                            auto* source=composition_swapchain(presenter_first_frame->composition_layers[i]);
+                            if(target&&source)*target=*source;
+                        }
                         current.composition_images = presenter_first_frame->composition_images;
                         std::size_t auxiliary = 0;
                         for (std::size_t index = 0; index < current.layer_pointers.size(); ++index) {
