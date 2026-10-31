@@ -874,6 +874,51 @@ bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
     return found;
 }
 
+// djules75 V510: compare colour AND opacity, trying still motion and the
+// motion of nearby panel content at disagreeing transparent edges. This
+// implementation uses this branch's flow_for_pixel/sample_* entry points.
+float panel_error(CameraSample a,CameraSample b) {
+    return a.valid>=.5 && b.valid>=.5 ? max(rgb_error(a.color,b.color),abs(a.color.a-b.color.a)) : 1.e6;
+}
+void consider_panel_motion(float2 pixel,float2 motion,float t,inout float error,inout float4 best) {
+    CameraSample a=sample_previous_target(pixel+motion*t,Slice,ViewIndex);
+    CameraSample b=sample_current_target(pixel-motion*(1-t),Slice,ViewIndex);
+    float e=panel_error(a,b);
+    if(e+1./255.<error){error=e;best=lerp(a.color,b.color,t);}
+}
+float4 synthesize_panel(float2 pixel,float value_scale,bool nvidia) {
+    const float t=synthesis_fraction();
+    float2 motion=repeated_capture_flag()!=0?float2(0,0):flow_for_pixel(pixel,Slice,ViewIndex,value_scale,nvidia);
+    CameraSample a=sample_previous_target(pixel+motion*t,Slice,ViewIndex);
+    CameraSample b=sample_current_target(pixel-motion*(1-t),Slice,ViewIndex);
+    float error=panel_error(a,b);
+    float4 best=lerp(a.color,b.color,t);
+    if(repeated_capture_flag()==0 && error>2./255.) {
+        CameraSample still_a=sample_previous_target(pixel,Slice,ViewIndex);
+        CameraSample still_b=sample_current_target(pixel,Slice,ViewIndex);
+        float still_error=panel_error(still_a,still_b);
+        if(still_error+1./255.<error){error=still_error;best=lerp(still_a.color,still_b.color,t);}
+        // Raster UI edges often move in whole texels. Keep the fractional
+        // estimate unless the neighbouring integer estimate actually agrees
+        // better in both colour and alpha; never quantize all panel motion.
+        consider_panel_motion(pixel,round(motion),t,error,best);
+        static const float2 directions[8]={float2(1,0),float2(-1,0),float2(0,1),float2(0,-1),
+            float2(.7071,.7071),float2(-.7071,.7071),float2(.7071,-.7071),float2(-.7071,-.7071)};
+        static const float reach[4]={6,12,24,40};
+        float2 tried[3]={motion,float2(0,0),float2(1.e6,1.e6)};
+        for(uint ring=0;ring<4&&error>2./255.;++ring)for(uint direction=0;direction<8;++direction) {
+            float2 candidate=flow_for_pixel(pixel+directions[direction]*reach[ring],Slice,ViewIndex,value_scale,nvidia);
+            if(length(candidate)<.5 || length(candidate-tried[0])<.5 ||
+                length(candidate-tried[1])<.5 || length(candidate-tried[2])<.5)continue;
+            tried[2]=tried[1];tried[1]=candidate;
+            consider_panel_motion(pixel,candidate,t,error,best);
+            if(error>2./255. && length(candidate-round(candidate))>.05)
+                consider_panel_motion(pixel,round(candidate),t,error,best);
+        }
+    }
+    last_disagreement=error;return saturate(best);
+}
+
 float4 synthesize_midpoint(
     FullscreenVertex input,
     float flow_value_scale,
@@ -1156,6 +1201,7 @@ float4 synthesize_midpoint(
 }
 
 float4 SynthesizeMidpointPS(FullscreenVertex input) : SV_Target {
+    if((SynthesisFlags&128u)!=0u)return synthesize_panel(floor(input.position.xy),1.0,false);
     return synthesize_midpoint(input, 1.0, false, false, false, false, false);
 }
 
@@ -1180,20 +1226,24 @@ float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
 // The NVIDIA variants read flow in signed S10.5 fixed point, and from a
 // previous input the pack warped into the current camera (PackNvidiaFlowInput).
 float4 SynthesizeNvidiaMidpointPS(FullscreenVertex input) : SV_Target {
+    if((SynthesisFlags&128u)!=0u)return synthesize_panel(floor(input.position.xy),1.0/32.0,true);
     return synthesize_midpoint(input, 1.0 / 32.0, true, false, false, false, (SynthesisFlags & 4u) != 0u);
 }
 
 float4 SynthesizeNvidiaBidirectionalMidpointPS(
     FullscreenVertex input) : SV_Target {
+    if((SynthesisFlags&128u)!=0u)return synthesize_panel(floor(input.position.xy),1.0/32.0,true);
     return synthesize_midpoint(input, 1.0 / 32.0, true, true, false, false, (SynthesisFlags & 4u) != 0u);
 }
 
 float4 SynthesizeNvidiaFastMidpointPS(FullscreenVertex input) : SV_Target {
+    if((SynthesisFlags&128u)!=0u)return synthesize_panel(floor(input.position.xy),1.0/32.0,true);
     return synthesize_midpoint(input, 1.0 / 32.0, true, false, true, false, (SynthesisFlags & 4u) != 0u);
 }
 
 float4 SynthesizeNvidiaFastBidirectionalMidpointPS(
     FullscreenVertex input) : SV_Target {
+    if((SynthesisFlags&128u)!=0u)return synthesize_panel(floor(input.position.xy),1.0/32.0,true);
     return synthesize_midpoint(input, 1.0 / 32.0, true, true, true, false, (SynthesisFlags & 4u) != 0u);
 }
 

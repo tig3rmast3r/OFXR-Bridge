@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.759.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.763.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1983,4 +1983,8 @@ if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
     add_test(NAME xrfg_private_panels_${route}_gpu COMMAND xrfg_private_runtime_layer_tests panels-${route})
     set_tests_properties(xrfg_private_panels_${route}_gpu PROPERTIES TIMEOUT 90)
   endforeach()
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
+  add_test(NAME xrfg_panel_metadata_ownership COMMAND xrfg_private_runtime_layer_tests panel-metadata)
 endif()

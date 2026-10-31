@@ -11650,6 +11650,14 @@ void place_snapshot_panels(const ProjectionSnapshot& snapshot,float fraction,
     for(size_t i=0;i<matches.size();++i) {
         if(matches[i]==snapshot.previous_panels.size())continue;
         const auto& now=snapshot.panels[i];
+        const auto& previous=snapshot.previous_panels[matches[i]].pose;
+        // Preserve passthrough ownership when the panel has not moved. In
+        // particular, a quad sharing an eye swapchain needs no replacement.
+        const auto& current=now.pose;
+        if(previous.position.x==current.position.x&&previous.position.y==current.position.y&&
+           previous.position.z==current.position.z&&previous.orientation.x==current.orientation.x&&
+           previous.orientation.y==current.orientation.y&&previous.orientation.z==current.orientation.z&&
+           previous.orientation.w==current.orientation.w)continue;
         if(now.layer>=output.layer_pointers.size())continue;
         const auto* h=output.layer_pointers[now.layer];
         if(!h||h->next||h->type!=now.type)continue;
@@ -12227,6 +12235,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             capture = post_afw_input->capture;
             motion_vectors.reset(); // post-AFW OFA consumes owned final color, not AER guides
         }
+        if(panel_input && synthesizer)synthesizer->set_flat_panel(true);
         if (!generation || !synthesizer) {
             output.reason = GenerationPrepareReason::missing_generation;
             return output;
@@ -12978,7 +12987,7 @@ void arm_panel_generation(const std::shared_ptr<SessionState>& state,std::span<c
         // Only known non-projection sources enter here, after the triggering
         // frame has gone downstream and the preceding presenter is drained.
         bool replace_existing{};
-        {std::scoped_lock lock(chain->mutex);replace_existing=!chain->panel_source&&bool(chain->frame_generation);chain->panel_source=true;}
+        {std::scoped_lock lock(chain->mutex);replace_existing=!chain->panel_source&&bool(chain->frame_generation);chain->panel_source=true;chain->composition_referenced=true;}
         if(replace_existing) {
             destroy_frame_generation_swapchains(chain);
             chain->generation_eligible_pending=true;

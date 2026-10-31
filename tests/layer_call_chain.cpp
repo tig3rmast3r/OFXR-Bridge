@@ -1959,7 +1959,9 @@ int main(int argc, char** argv) {
     const XrCompositionLayerBaseHeader* layers[] = {
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&flight_quad),
-        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&kneeboard),
+    };
+    const XrCompositionLayerBaseHeader* shared_panel_layers[] = {
+        layers[0],layers[1],reinterpret_cast<const XrCompositionLayerBaseHeader*>(&kneeboard),
     };
 
     auto submit_frame = [&](XrTime display_time) {
@@ -1993,7 +1995,7 @@ int main(int argc, char** argv) {
         frame_end_info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         if(g_shared_panel_mode)flight_quad.pose.position.x+=.1f;
         frame_end_info.layerCount = g_flight_simulator_mode ? (g_shared_panel_mode?3:2) : 1;
-        frame_end_info.layers = layers;
+        frame_end_info.layers = g_shared_panel_mode?shared_panel_layers:layers;
         // SteamVR throttles the *inline* second cycle, not the application's
         // own wait. Mark the window so the fake runtime can tell them apart by
         // what is happening rather than by counting calls: the layer runs its

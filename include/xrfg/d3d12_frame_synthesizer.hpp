@@ -9,6 +9,7 @@
 
 #include <d3d12.h>
 
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -385,6 +386,9 @@ public:
 
     [[nodiscard]] bool initialized() const noexcept;
 
+    // Panel-only endpoint selection (djules75 V510). Remains off for eye images.
+    void set_flat_panel(bool enabled) noexcept;
+
     // Failure-only observations; never signal, wait, flush or release GPU work.
     void report_pending_submission() const noexcept;
 
@@ -397,6 +401,7 @@ private:
 
     mutable std::mutex mutex_;
     std::unique_ptr<Impl> impl_;
+    std::atomic_bool flat_panel_{false};
 };
 
 }  // namespace xrfg

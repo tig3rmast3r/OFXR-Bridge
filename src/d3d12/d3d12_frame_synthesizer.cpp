@@ -1132,6 +1132,7 @@ struct D3D12FrameSynthesizer::Impl {
     bool ffx_context_created{};
     bool flow_output_consumed{};
     bool fidelityfx_packed_readable{};
+    bool flat_panel{};
     bool nvidia_gpu_timing_enabled{};
     bool allow_luke_guide_device_alias{};
     ~Impl() {
@@ -4627,6 +4628,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         synthesis->SetDescriptorHeaps(1, heaps);
         synthesis->SetGraphicsRootSignature(root_signature.Get());
+        if(flat_panel)parameters.synthesis_flags|=128U;
         synthesis->SetPipelineState(
             nvidia_options.bidirectional
                 ? nvidia_bidirectional_graphics_pipeline.Get()
@@ -5106,6 +5108,7 @@ struct D3D12FrameSynthesizer::Impl {
                 gpu_start,
                 kSrvDescriptorCount,
                 descriptor_increment));
+        if(flat_panel)parameters.synthesis_flags|=128U;
         slot.command_list->SetPipelineState(guides ? hybrid_graphics_pipeline.Get() : graphics_pipeline.Get());
         // The guides' motion is read by the hybrid composition.
         const auto motion_barriers = [&](bool to_read) {
@@ -6878,6 +6881,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
         // A deferred copy engine has no temporal anchor: only a real prime
         // may upgrade it. Invalid pair calls must not allocate a flow engine.
         if(impl_->flow_resources_deferred){if(ticket)*ticket={};return E_INVALIDARG;}
+        impl_->flat_panel=flat_panel_.load(std::memory_order_relaxed);
         return impl_->submit_pair(
             current,
             current_source_views,
@@ -6896,6 +6900,10 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
         }
         return E_FAIL;
     }
+}
+
+void D3D12FrameSynthesizer::set_flat_panel(bool enabled) noexcept {
+    flat_panel_.store(enabled,std::memory_order_relaxed);
 }
 
 HRESULT D3D12FrameSynthesizer::flush_current_copy(

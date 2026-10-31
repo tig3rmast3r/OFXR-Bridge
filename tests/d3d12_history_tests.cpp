@@ -5609,6 +5609,7 @@ int main(int argc, char** argv) {
         try {
             D3D12WarpFixture fixture(true);
             test_flat_panel_marker_synthesis(fixture,xrfg::D3D12OpticalFlowBackend::fidelity_fx,false,true);
+            for(UINT move:{6U,10U})test_flat_panel_marker_synthesis(fixture,xrfg::D3D12OpticalFlowBackend::fidelity_fx,false,true,move,true);
             fixture.require_no_debug_errors();return 0;
         } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
     }

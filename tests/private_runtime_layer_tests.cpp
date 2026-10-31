@@ -31,11 +31,52 @@ static int unbridged_vulkan_session_test() {
     return 0;
 }
 
+static int panel_metadata_contract() {
+    XrCompositionLayerProjectionView view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+    view.pose.orientation.w=1;view.fov={-.7f,.7f,.7f,-.7f};
+    view.subImage.swapchain=reinterpret_cast<XrSwapchain>(50);view.subImage.imageRect.extent={4,4};
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=1;projection.views=&view;
+    XrCompositionLayerQuad q{XR_TYPE_COMPOSITION_LAYER_QUAD};q.space=projection.space;
+    q.pose.orientation.w=1;q.pose.position.x=1;q.size={1,1};
+    q.subImage.swapchain=reinterpret_cast<XrSwapchain>(99);q.subImage.imageRect.extent={2,4};
+    auto other=q;other.pose.position.x=5;other.subImage.imageRect.offset.x=2;
+    const XrCompositionLayerBaseHeader* layers[]={reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q),reinterpret_cast<const XrCompositionLayerBaseHeader*>(&other)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.layerCount=3;end.layers=layers;
+    ProjectionSnapshot snapshot;check(capture_projection_snapshot(&end,&snapshot),"capture panel metadata");
+    snapshot.panel_corrections=true;snapshot.previous_panels=snapshot.panels;
+    snapshot.previous_panels[0].pose.position.x=0;
+    std::array<ProjectionResourceDestination,2> destinations{{{view.subImage.swapchain,view.subImage.swapchain},
+        {q.subImage.swapchain,reinterpret_cast<XrSwapchain>(77),false,true}}};
+    for(const float fraction:{.25f,1.f/3,.5f,2.f/3,.75f}) {
+        GeneratedFrameEndInfo frame;
+        check(build_generated_frame_end_info(&end,snapshot,true,destinations,&frame,nullptr,fraction),"synthetic panel metadata");
+        auto owned=make_presenter_owned_frame(std::move(frame));check(bool(owned),"own interpolated panel metadata");
+        const auto* a=reinterpret_cast<const XrCompositionLayerQuad*>(owned->info.layers[1]);
+        const auto* b=reinterpret_cast<const XrCompositionLayerQuad*>(owned->info.layers[2]);
+        check(std::abs(a->pose.position.x-fraction)<1e-5f&&b->pose.position.x==5,"private atlas panel poses or fraction changed");
+        check(a->subImage.swapchain==reinterpret_cast<XrSwapchain>(77)&&b->subImage.swapchain==a->subImage.swapchain,
+            "generated atlas handle or second rectangle lost");
+        check(b->subImage.imageRect.offset.x==2,"generated atlas rectangle lost");
+        q.pose.position.x=999;check(std::abs(a->pose.position.x-fraction)<1e-5f,"async metadata borrowed the next application pose");q.pose.position.x=1;
+    }
+    GeneratedFrameEndInfo still;
+    check(build_generated_frame_end_info(&end,snapshot,true,std::span(destinations.data(),1),&still),"stationary panel metadata");
+    check(still.info.layers[2]==layers[2],"stationary passthrough panel was unnecessarily replaced");
+    snapshot.panel_corrections=false;GeneratedFrameEndInfo unchanged;
+    check(build_generated_frame_end_info(&end,snapshot,true,std::span(destinations.data(),1),&unchanged),"REAL VR panel passthrough");
+    check(reinterpret_cast<const XrCompositionLayerQuad*>(unchanged.info.layers[1])->pose.position.x==1,
+        "disabled panel corrections changed REAL VR placement");
+    std::puts("Shipping panel metadata ownership, atlas rects, 2X/3X/4X fractions and REAL VR passthrough PASS");return 0;
+}
+
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
     if(route=="unbridged-vulkan-session")return unbridged_vulkan_session_test();
+    if(route=="panel-metadata")return panel_metadata_contract();
     const bool steady_benchmark=route=="steady-benchmark-sequence" || route=="vram-steady-benchmark-sequence";
     const bool steady_memory=route.starts_with("vram-steady-") || steady_benchmark;
     if(steady_benchmark)route="benchmark-sequence";

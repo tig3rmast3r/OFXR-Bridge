@@ -45,25 +45,43 @@ void test_flat_panel_marker_synthesis(
     D3D12WarpFixture& fixture,
     xrfg::D3D12OpticalFlowBackend backend,
     bool hybrid,
-    bool require_motion) {
+    bool require_motion,
+    UINT move = 16,
+    // V511: a 24 px quest-marker glyph (a diamond with a dark rim and a clear
+    // hole) with the layer's panel flow, FidelityFX at full resolution.
+    bool glyph = false) {
     constexpr UINT kPanelWidth = 1024;
     constexpr UINT kPanelHeight = 512;
-    constexpr UINT kMarker = 64;
-    constexpr UINT kMarkerY = kPanelHeight / 2 - kMarker / 2;
+    const UINT kMarker = glyph ? 24U : 64U;
+    const UINT kMarkerY = kPanelHeight / 2 - kMarker / 2;
     constexpr UINT kPreviousX = 256;
-    constexpr UINT kCurrentX = 272;
+    const UINT kCurrentX = kPreviousX + move;
     const auto panel_image = [&](UINT marker_x) {
         std::vector<std::uint8_t> bytes(
             static_cast<std::size_t>(kPanelWidth) * kPanelHeight * kBytesPerPixel, 0);
         for (UINT y = kMarkerY; y < kMarkerY + kMarker; ++y) {
             for (UINT x = marker_x; x < marker_x + kMarker; ++x) {
-                const RgbaBytes texel = motion_texel((x - marker_x) * 3U, (y - kMarkerY) * 3U, 0);
+                RgbaBytes texel = motion_texel((x - marker_x) * 3U, (y - kMarkerY) * 3U, 0);
+                texel[3] = 255;
+                if (glyph) {
+                    const int cx = static_cast<int>(x - marker_x) * 2 - static_cast<int>(kMarker) + 1;
+                    const int cy = static_cast<int>(y - kMarkerY) * 2 - static_cast<int>(kMarker) + 1;
+                    const int d = (std::abs(cx) + std::abs(cy)) / 2;
+                    const int r = static_cast<int>(kMarker) / 2;
+                    if (d >= r || d < r / 4) {
+                        texel = {0, 0, 0, 0};
+                    } else if (d >= r - 2 || d < r / 4 + 2) {
+                        texel = {20, 20, 20, 255};
+                    } else {
+                        texel = {250, 230, 120, 255};
+                    }
+                }
                 const std::size_t offset =
                     (static_cast<std::size_t>(y) * kPanelWidth + x) * kBytesPerPixel;
                 bytes[offset + 0] = texel[0];
                 bytes[offset + 1] = texel[1];
                 bytes[offset + 2] = texel[2];
-                bytes[offset + 3] = 255;
+                bytes[offset + 3] = texel[3];
             }
         }
         return bytes;
@@ -96,12 +114,17 @@ void test_flat_panel_marker_synthesis(
     xrfg::D3D12NvidiaOpticalFlowOptions options{};
     options.hybrid = hybrid;
     options.input_scale=xrfg::D3D12NvidiaInputScale::full;
+    if (glyph) {
+        options.input_scale = xrfg::D3D12NvidiaInputScale::full;
+    }
     xrfg::D3D12FrameSynthesizer synthesizer;
     require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                 std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
                 std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
                 kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET, backend, options)),
         "flat panel synthesizer initialization failed");
+    // As the layer marks a panel's synthesizer (V510).
+    synthesizer.set_flat_panel(!std::getenv("XRFG_TEST_PANEL_BASELINE"));
     // The layer's panel view (prepare_panel_generation).
     std::array<xrfg::D3D12ReprojectionView, 1> view{};
     view[0].fov = {-0.785398F, 0.785398F, 0.785398F, -0.785398F};
@@ -114,20 +137,16 @@ void test_flat_panel_marker_synthesis(
     xrfg::D3D12FrameSynthesisTicket prime{};
     require(operation_succeeded(synthesizer.submit_prime(previous, view, 0, &prime)),
         "flat panel prime failed");
-    require(operation_succeeded(synthesizer.wait_for_previous_submission(5000)),"flat panel prime drain failed");
-    // Re-prime an already seeded engine, as a panel returning after a missing
-    // capture or hidden frame does. The D3D debug layer checks its barriers.
-    require(operation_succeeded(synthesizer.retire_previous()),"panel retire before reprime");
+    require(operation_succeeded(synthesizer.wait_for_previous_submission(5000)),"panel prime completion");
+    require(operation_succeeded(synthesizer.retire_previous()),"panel retire for reprime");
     require(operation_succeeded(synthesizer.submit_prime(previous,view,0,&prime)),"panel reprime");
-    require(operation_succeeded(synthesizer.wait_for_previous_submission(5000)),"panel reprime drain");
+    require(operation_succeeded(synthesizer.wait_for_previous_submission(5000)),"panel reprime completion");
     xrfg::D3D12HistoryCaptureTicket current{};
     require(operation_succeeded(history->capture(1, &current)) &&
             operation_succeeded(history->commit(current)),
         "flat panel current capture failed");
     xrfg::D3D12FrameSynthesisTicket pair{};
-    const auto pair_result=synthesizer.submit_pair(current, view, view, 0, 1, &pair);
-    if(FAILED(pair_result))std::cerr<<"Panel pair HRESULT="<<std::hex<<uint32_t(pair_result)<<std::dec<<'\n';
-    require(operation_succeeded(pair_result),
+    require(operation_succeeded(synthesizer.submit_pair(current, view, view, 0, 1, &pair)),
         "flat panel pair failed");
     require(operation_succeeded(synthesizer.wait_for_idle()), "flat panel drain failed");
     const std::vector<std::uint8_t> pixels = readback_single_slice(
@@ -164,20 +183,24 @@ void test_flat_panel_marker_synthesis(
     blend_error /= samples;
     const double centroid = alpha_sum > 0.0 ? alpha_x / alpha_sum : 0.0;
     const double expected = (kPreviousX + kCurrentX) * 0.5 + kMarker * 0.5;
-    const double area = static_cast<double>(kMarker) * kMarker;
+    std::size_t opaque_at_midpoint = 0;
+    for (std::size_t offset = 3; offset < midpoint_image.size(); offset += kBytesPerPixel) {
+        if (midpoint_image[offset] > 200) ++opaque_at_midpoint;
+    }
+    const double area = static_cast<double>(opaque_at_midpoint);
     std::cout << "flat panel marker backend=" << static_cast<int>(backend)
-              << (hybrid ? " hybrid" : "") << ": opaque=" << opaque << "/" << area
+              << (hybrid ? " hybrid" : "") << " move=" << move << ": opaque=" << opaque << "/" << area
               << " centroid=" << centroid << " expected=" << expected << " stray=" << stray
               << " synthetic_mae=" << synthetic_error << " blend_mae=" << blend_error << '\n';
     require(stray == 0, "flat panel background is no longer transparent");
     require(std::abs(centroid - expected) <= 3.0,
         "flat panel marker is not between the frames");
     if (require_motion) {
-        require(static_cast<double>(opaque) >= 0.8 * area,
+        // V510: the icon's edge strips follow the icon too.
+        require(static_cast<double>(opaque) >= (glyph ? 0.9 : 0.97) * area,
             "flat panel marker is doubled or faded, not moved");
-        require(synthetic_error < blend_error * 0.6,
+        require(synthetic_error < blend_error * 0.2,
             "flat panel synthetic is no closer to the midpoint than a blend");
     }
     require(operation_succeeded(history->invalidate()), "flat panel history invalidate failed");
 }
-
