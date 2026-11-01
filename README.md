@@ -2,7 +2,7 @@
 
 OFXR-BRIDGE is an experimental OpenXR API layer that inserts generated frames between rendered frames.
 
-Prepared beta release: **0.3.2 (v758)**. The internal build number is shown in the package name and the application.
+Prepared beta release: **0.3.2 (v764)**. The internal build number is shown in the package name and the application.
 
 Download builds from [GitHub Releases](https://github.com/tig3rmast3r/OFXR-Bridge/releases).
 
@@ -19,7 +19,7 @@ This build includes work from both the Djules and Elliottate forks, together wit
 - Hybrid FidelityFX + motion vectors.
 - FSR 3.1 Frame Generation.
 - DLSS Frame Generation.
-- AFW support for selected Luke Ross games.
+- OSR stereo reconstruction for selected Luke Ross games, with AFW (legacy) as an alternative.
 - Optional DLSS 5 Neural Rendering, applied **before Super Resolution (pre-SR)**, with a separately supplied model DLL.
 - Per-game settings and automated benchmarks.
 - An optional in-headset FPS counter with four corner positions.

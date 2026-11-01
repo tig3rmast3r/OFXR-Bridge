@@ -7,8 +7,14 @@ namespace xrfg {
 // eye itself from the inputs the AFW provider receives. The GPU passes are in
 // src/d3d12/osr_full_warp.hlsl; these are the CPU-side rules.
 //
-// Luke Ross tab, Reconstruction: 0 AFW, 1 AFW + OSR band fill, 2 Full OSR.
+// Persisted values stay stable: 0 AFW (legacy), 2 OSR. Retired band fill
+// value 1 migrates to OSR; it is no longer a selectable reconstruction.
 enum class OsrReconstruction : int { afw = 0, afw_band_fill = 1, full = 2 };
+constexpr int normalize_osr_reconstruction(int value) noexcept {
+    return value == static_cast<int>(OsrReconstruction::afw)
+        ? static_cast<int>(OsrReconstruction::afw)
+        : static_cast<int>(OsrReconstruction::full);
+}
 
 // Reversed depth is proportional to 1 / distance, so a relative tolerance on
 // it is a relative tolerance on distance. A reprojected texel that finds a

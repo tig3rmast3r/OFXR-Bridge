@@ -12,9 +12,12 @@ AFW works with it unchanged, and the provider (PDAFWPlugin.dll) is not loaded.
 
 | `luke_osr` | Label | Renderer of the peer eye |
 |---|---|---|
-| 0 | AFW | the provider (PDAFWPlugin) |
-| 1 | AFW + OSR band fill | the provider, OFXR fills the stereo band |
-| 2 | Full OSR | OFXR |
+| 2 | OSR (first choice, default) | OFXR |
+| 0 | AFW (legacy) | the provider (PDAFWPlugin) |
+
+V764 removes the combined AFW + OSR band-fill option. Saved value 1 migrates
+to OSR (2); an explicit AFW choice (0) stays AFW. Missing settings and Reset
+to defaults select OSR. Persisted values remain independent of menu order.
 
 The runtime ini carries the same key in `[experimental]`. The option applies
 live; each reconstruction keeps its own history, so the first frame per eye

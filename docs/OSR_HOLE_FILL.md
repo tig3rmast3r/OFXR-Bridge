@@ -1,5 +1,9 @@
 # OSR band fill: OFXR's fill of the stereo band in AFW output
 
+Historical implementation notes. V764 retires the AFW + OSR band-fill option;
+the Reconstruction menu now offers OSR (default) and AFW (legacy). Saved band-fill
+selections migrate to OSR. See [the current selector](V764_OSR_DEFAULT.md).
+
 OSR (OFXR Stereo Reconstruction) is OFXR's own work on the reconstructed eye
 of Luke Ross titles, written from the public provider ABI and OFXR's inputs
 only. This first piece keeps AFW as the renderer and removes its one artefact

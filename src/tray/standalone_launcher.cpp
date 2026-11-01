@@ -1,4 +1,5 @@
 #include "xrfg/standalone_launcher.hpp"
+#include "xrfg/osr_full_warp.hpp"
 
 #include <windows.h>
 
@@ -653,7 +654,7 @@ std::string build_runtime_ini(
         "\r\nluke_afw_ignore_motion_threshold=" + std::to_string(desired.afw_ignore_motion_threshold) +
         "\r\nluke_afw_depth_dilate_mode=" + std::to_string(desired.afw_depth_dilate_mode) + "\r\n" +
         "luke_afw_shading_rate=" + std::to_string(desired.afw_shading_rate) + "\r\n" +
-        "luke_osr=" + std::to_string(desired.luke_osr) + "\r\n" +
+        "luke_osr=" + std::to_string(normalize_osr_reconstruction(desired.luke_osr)) + "\r\n" +
         "luke_osr_cover=" + std::to_string(desired.luke_osr_cover) + "\r\n" +
         "luke_osr_trim=" + std::to_string(desired.luke_osr_trim) + "\r\n" +
         "luke_osr_fill=" + std::to_string(desired.luke_osr_fill) + "\r\n";

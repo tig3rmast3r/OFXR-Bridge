@@ -227,9 +227,9 @@ void wording() {
     Snapshot s{};
     check(interface_status_text(s)=="No active game" && interface_state_text(s)=="Waiting", "disconnected UI");
     s.connected=true;s.runtime.ready=1;s.runtime.applied_revision=s.revision;
-    check(interface_status_text(s)=="OFXR: Waiting | AFW: N/A | Neural Render: Off", "clean non-Luke session reports AFW not applicable");
+    check(interface_status_text(s)=="OFXR: Waiting | OSR: N/A | Neural Render: Off", "clean non-Luke session reports default OSR not applicable");
     s.desired.afw_mode=3;
-    check(interface_status_text(s).find("AFW: Active")==std::string::npos, "Luke selection cannot fake AFW activity");
+    check(interface_status_text(s).find("OSR: Active")==std::string::npos, "Luke selection cannot fake OSR activity");
     s.runtime.luke_detected=s.runtime.vulkan_detected=true;
     s.runtime.generation_state=GenerationState::invalid_stereo;
     const auto text=interface_status_text(s);
@@ -276,16 +276,18 @@ void wording() {
     check(interface_vram_text(memory)=="VRAM 75%","percent uses cached process usage and DXGI budget");
     memory.runtime.video_memory.budget_bytes=0;
     check(interface_vram_text(memory)=="VRAM N/A","zero budget cannot invent a percent");
+    s.desired.luke_osr=0;
     s.runtime.heartbeat_ms=GetTickCount64();s.runtime.afw_running=true;
     check(interface_state_text(s)=="FSR + AFW", "actual AFW is explicit");
     s.desired.nr_enabled=true;s.runtime.nr_running=true;
     check(interface_state_text(s)=="FSR + AFW + Neural", "actual neural processing is explicit");
     check(interface_status_text(s).find("AFW: Active | Neural Render: Active")!=std::string::npos, "all active effects reported independently");
     s.desired.luke_osr=1;
-    check(interface_state_text(s)=="FSR + AFW + OSR + Neural", "OSR band fill is explicit in the mode label");
-    check(interface_status_text(s).find("AFW + OSR: Active")!=std::string::npos, "OSR band fill is explicit in the status line");
+    check(interface_state_text(s)=="FSR + OSR + Neural", "retired band fill reports its migrated OSR mode");
+    check(interface_status_text(s).find("OSR: Active")!=std::string::npos &&
+        interface_status_text(s).find("AFW")==std::string::npos, "retired band fill reports OSR without legacy band label");
     s.desired.nr_enabled=false;s.runtime.nr_running=false;
-    check(interface_state_text(s)=="FSR + AFW + OSR", "OSR label without neural");
+    check(interface_state_text(s)=="FSR + OSR", "migrated OSR label without neural");
     s.desired.luke_osr=2;
     check(interface_state_text(s)=="FSR + OSR", "Full OSR replaces AFW in the mode label");
     check(interface_status_text(s).find("OSR: Active")!=std::string::npos && interface_status_text(s).find("AFW")==std::string::npos, "Full OSR replaces AFW in the status line");

@@ -1,5 +1,6 @@
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/implicit_layer.hpp"
+#include "xrfg/osr_full_warp.hpp"
 #include <windows.h>
 #include <map>
 #include <mutex>
@@ -94,8 +95,8 @@ struct AfwControl {
         settings.depth_dilate_mode = std::clamp(static_cast<int>(
             GetPrivateProfileIntW(L"experimental", L"luke_afw_depth_dilate_mode",
                 0, ini().c_str())), 0, 2);
-        settings.osr = std::clamp(static_cast<int>(GetPrivateProfileIntW(
-            L"experimental", L"luke_osr", 0, ini().c_str())), 0, 2);
+        settings.osr = normalize_osr_reconstruction(static_cast<int>(GetPrivateProfileIntW(
+            L"experimental", L"luke_osr", 2, ini().c_str())));
         settings.osr_cover = std::clamp(static_cast<int>(GetPrivateProfileIntW(
             L"experimental", L"luke_osr_cover", 0, ini().c_str())), 0, 8);
         settings.osr_trim = std::clamp(static_cast<int>(GetPrivateProfileIntW(
@@ -178,6 +179,7 @@ bool request_afw(AfwSettings settings) {
         !std::isfinite(settings.ignore_motion_threshold) ||
         settings.ignore_motion_threshold < 0.0F ||
         settings.ignore_motion_threshold > 64.0F) return false;
+    settings.osr = normalize_osr_reconstruction(settings.osr);
     auto& c = afw_control();
     std::scoped_lock lock(c.mutex);
     const auto old = c.snapshot.desired;

@@ -293,28 +293,20 @@ bool framewarp(Settings& draft, const Snapshot& state) {
     ImGui::TextWrapped("Removes OFXR frame generation from the pipeline: each Luke Ross frame goes straight to the headset, and only the missing eye is reconstructed, by AFW or OSR below. The best choice for latency.");
     if(state.connected && (state.runtime.pacing_mode==kAfwOnlyPacingMode)!=draft.afw_only)
         ImGui::TextWrapped("Frame Reconstruction only change saved. Restart the game to apply it.");
-    changed |= ImGui::Combo("Reconstruction", &draft.luke_osr,
-        "AFW\0AFW + OSR band fill\0Full OSR\0");
+    int reconstruction = draft.luke_osr==0 ? 1 : 0;
+    if (ImGui::Combo("Reconstruction", &reconstruction, "OSR\0AFW (legacy)\0")) {
+        draft.luke_osr = reconstruction==0 ? 2 : 0;
+        changed = true;
+    }
     ImGui::TextWrapped(draft.luke_osr==2
-        ? "Full OSR (OFXR Stereo Reconstruction): OFXR renders the other eye itself from the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame for what the real eye cannot see. Applies live."
-        : draft.luke_osr==1
-        ? "OSR (OFXR Stereo Reconstruction) band fill: OFXR's own fill of the band beside near objects that neither the other eye nor the previous frame can see, the streaks AFW leaves while strafing. Same inputs as AFW, applies live."
-        : "AFW output as is.");
+        ? "OSR (OFXR Stereo Reconstruction): OFXR renders the other eye itself from the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame for what the real eye cannot see. Applies live."
+        : "AFW (legacy): reconstructs the other eye with the AFW provider. Applies live.");
     changed |= ImGui::Checkbox("Advanced parameters", &draft.luke_advanced);
     if (draft.luke_advanced) {
         // Full OSR shows only the parameters it uses.
         const bool full_osr = draft.luke_osr==2;
         if (full_osr)
             ImGui::TextWrapped("Framewarp mode: Other eye only leaves out this eye's previous frame, for debugging. Debug framewarp tints previous-frame pixels green and inpainted pixels magenta.");
-        if (draft.luke_osr==1) {
-            changed |= ImGui::SliderInt("Band fill", &draft.luke_osr_fill, 1, 8, "x%d");
-            ImGui::TextWrapped("How much of the band is filled at slow strafes. 1 fills only what no viewpoint saw; 2 fills the whole band once the eye clearly leads. Nothing is filled standing still or in the trailing eye.");
-            changed |= ImGui::SliderInt("Band cover", &draft.luke_osr_cover, 0, 8, "%d texels");
-            ImGui::TextWrapped("Depth texels (two eye pixels each) the fill extends past the band on the background side, mirroring from beyond them. Raise it only if a dark outline remains on the background side of the band.");
-            changed |= ImGui::SliderInt("Object trim", &draft.luke_osr_trim, 0, 2, "%d texels");
-            ImGui::TextWrapped("Depth texels of the object's own smeared edge replaced with background as well. Thins the object; leave at 0 unless its edge keeps a dark line.");
-            ImGui::TextWrapped("With Debug framewarp on, OSR tints filled pixels magenta, cover and trim orange, and band pixels left to AFW cyan.");
-        }
         if (full_osr) {
             // Full OSR uses the previous frame in Previous frame and Combined
             // alike: one On entry. Off is the only switch that stops the

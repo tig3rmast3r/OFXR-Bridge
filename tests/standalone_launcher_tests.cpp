@@ -21,6 +21,11 @@ int main() {
     using namespace xrfg::standalone;
 
     const LauncherSettings release_defaults;
+    if(!contains(build_runtime_ini(release_defaults,xrfg::autonomous::Settings{}),"luke_osr=2\r\n"))return 1;
+    for(int saved:{0,1,2}) {
+        auto controls=xrfg::autonomous::Settings{};controls.luke_osr=saved;
+        if(!contains(build_runtime_ini(release_defaults,controls),saved==0?"luke_osr=0\r\n":"luke_osr=2\r\n"))return 1;
+    }
     if(release_defaults.crash_debug)return 1;
     for(bool enabled:{false,true}) {
         auto choice=release_defaults;choice.crash_debug=enabled;
