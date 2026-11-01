@@ -168,7 +168,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     if(afw_only) {
         generation=GenerationState::paused;out.generation_mode=0;out.motion_source=0;out.provider_error=0;
         char detail[sizeof(out.message)]{};std::copy(std::begin(out.message),std::end(out.message),std::begin(detail));
-        snprintf(out.message,sizeof(out.message),"AFW only: direct OpenXR; OFXR disabled.%s%.130s",detail[0]?" ":"",detail);
+        snprintf(out.message,sizeof(out.message),"Frame Reconstruction only: direct OpenXR, no frame generation.%s%.120s",detail[0]?" ":"",detail);
     }
     out.generation_state=generation;
     report_runtime(out);

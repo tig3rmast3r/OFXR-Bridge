@@ -160,7 +160,7 @@ void automatic_choice_controller() {
         check(std::string(result.benchmark.message).find("Selected "+plan[winner].label)!=std::string::npos,
             "result identifies the selected route with measured FPS and ms");
         if(luke)check(std::string(result.benchmark.message).find(plan[winner].shading==8?"4x4":"1x1")!=std::string::npos,"Luke result names selected AFW quality");
-        check((std::string(result.benchmark.message).find("Restart the game to activate AFW Only.")!=std::string::npos)==(luke && expected.afw_only),
+        check((std::string(result.benchmark.message).find("Restart the game to activate Frame Reconstruction only.")!=std::string::npos)==(luke && expected.afw_only),
             "AFW-only completion explicitly requests restart; OFXR winners do not");
         check(parse_settings(serialize_settings(result.desired))==expected,"automatic choice persists with route preferences");
         std::ifstream file(configuration_path());std::stringstream contents;contents<<file.rdbuf();

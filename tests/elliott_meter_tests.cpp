@@ -53,7 +53,7 @@ int main(int argc,char** argv){try{
     b.index=64;b.count=65;
     check(elliott_benchmark_text(bench,3500)=="Test 65/65 | measuring | 5.0s left","full matrix index64 is displayed as test65");
     b.phase=autonomous::BenchmarkPhase::complete;bench.desired.afw_only=true;
-    check(elliott_benchmark_text(bench,3500)=="Tests complete | restart game: AFW Only","AFW-only restart warning remains visible in the headset meter");
+    check(elliott_benchmark_text(bench,3500)=="Tests complete | restart game: Frame Reconstruction only","AFW-only restart warning remains visible in the headset meter");
     b.phase=autonomous::BenchmarkPhase::stopped;
     check(elliott_benchmark_text(bench,3500).empty(),"Stop removes the progress row");
     b.phase=autonomous::BenchmarkPhase::running;b.game_pid=8;

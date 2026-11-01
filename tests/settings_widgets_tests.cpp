@@ -241,8 +241,8 @@ void release_controls() {
         desktop.rendered_text.find("Output CSV")==std::string::npos &&
         desktop.rendered_text.find("Open ofxr-bridge.ini")==std::string::npos,"basic Display removes experimental and redundant controls");
     desktop.select_tab("Luke Ross");desktop.draw(true);
-    require(desktop.rendered_text.find("AFW Only (restart game)")!=std::string::npos && desktop.rendered_text.find("Clear before framewarp")==std::string::npos,"basic Luke UI exposes per-game AFW Only without Clear");
-    desktop.activate("/Framewarp_","AFW Only (restart game)");desktop.draw();
+    require(desktop.rendered_text.find("Frame Reconstruction only (AFW or OSR, restart game)")!=std::string::npos && desktop.rendered_text.find("Clear before framewarp")==std::string::npos,"basic Luke UI exposes per-game Frame Reconstruction only without Clear");
+    desktop.activate("/Framewarp_","Frame Reconstruction only (AFW or OSR, restart game)");desktop.draw();
     require(snapshot().desired.afw_only,"actual AFW Only control persists settings");
     auto advanced=snapshot().desired;advanced.advanced_mode=true;advanced.afw_only=false;require(request(advanced),"enable advanced UI by configuration");
     desktop.select_tab("Frame generation");desktop.draw(true);
@@ -378,6 +378,22 @@ void actual_widgets() {
     status.afw_shading_rate=4;report_runtime(status);tray.draw(true);
     require(tray.rendered_text.find("Quality change pending")==std::string::npos,
         "successful active quality update clears pending explanation");
+    auto osr_settings=snapshot().desired;osr_settings.luke_osr=2;
+    require(request(osr_settings),"select Full OSR");
+    tray.draw();tray.draw(true);
+    require(tray.rendered_text.find("AFW shading rate")==std::string::npos &&
+        tray.rendered_text.find("Ignore motion")==std::string::npos &&
+        tray.rendered_text.find("Depth dilation")==std::string::npos &&
+        tray.rendered_text.find("Framewarp mode")!=std::string::npos,
+        "Full OSR advanced parameters show only what it uses, Off included");
+    tray.choose("Framewarp mode",1,"Other eye only (for debug)","/Framewarp_");
+    require(snapshot().desired.afw_mode==1,"Full OSR Other eye only is the alternate-eye mode");
+    tray.choose("Framewarp mode",2,"On","/Framewarp_");
+    require(snapshot().desired.afw_mode==3,"Full OSR On is Combined");
+    tray.choose("Framewarp mode",0,"Off","/Framewarp_");
+    require(snapshot().desired.afw_mode==0,"Full OSR keeps Off");
+    osr_settings=snapshot().desired;osr_settings.afw_mode=3;
+    osr_settings.luke_osr=0;require(request(osr_settings),"back to AFW");tray.draw();tray.draw(true);
     const auto content_height=[&](Context& view) {
         for(auto* window:view.context->Windows)
             if(window->Active && std::strstr(window->Name,"/Framewarp_"))return window->ContentSize.y;

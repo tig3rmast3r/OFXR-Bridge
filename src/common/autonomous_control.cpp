@@ -897,7 +897,7 @@ void suite_complete(Shared& shared,const SuiteRecorder& rec,std::uint64_t now) {
     const auto latency=std::minmax_element(result.samples.latency.begin(),result.samples.latency.end());
     std::snprintf(b.message,sizeof(b.message),"Complete. Selected %s: %.1f FPS (%.1f-%.1f), %.1f ms (%.1f-%.1f).%s",
         label.c_str(),score.fps,*fps.first,*fps.second,score.latency,*latency.first,*latency.second,
-        restart_afw_only ? " Restart the game to activate AFW Only." : "");
+        restart_afw_only ? " Restart the game to activate Frame Reconstruction only." : "");
 }
 } // namespace
 
@@ -913,7 +913,7 @@ bool start_benchmark(bool full,bool luke) noexcept {
         }
         if(s.runtime.pacing_mode==kAfwOnlyPacingMode) {
             b={};b.phase=BenchmarkPhase::error;
-            std::snprintf(b.message,sizeof(b.message),"AFW only is active. Disable it in the Luke Ross tab and restart the game for the OFXR matrix.");return false;
+            std::snprintf(b.message,sizeof(b.message),"Frame Reconstruction only is active. Disable it in the Luke Ross tab and restart the game for the OFXR matrix.");return false;
         }
         if(luke && !s.runtime.luke_detected) {
             b={};b.phase=BenchmarkPhase::error;

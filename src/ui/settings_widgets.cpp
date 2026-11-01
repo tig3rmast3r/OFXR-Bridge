@@ -178,11 +178,11 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     ImGui::BeginDisabled(framework_only || (state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode));
     if(ImGui::Checkbox("Increase buffer",&draft.increase_buffer))changed=true;
     ImGui::EndDisabled();
-    if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Off: 2 frames in flight. On: 3, allowing more buffering at the cost of latency. Independent of Fast mode and the pacing choice. No effect on Legacy or direct AFW Only. Changes finish queued frames first; no game restart needed.");
+    if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Off: 2 frames in flight. On: 3, allowing more buffering at the cost of latency. Independent of Fast mode and the pacing choice. No effect on Legacy or Frame Reconstruction only. Changes finish queued frames first; no game restart needed.");
     if(state.connected && state.runtime.buffer_capacity)
         ImGui::Text("Active bridge buffer: %u deliveries",state.runtime.buffer_capacity);
     if(state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode) {
-        ImGui::TextWrapped("AFW Only: direct OpenXR delivery. Disable AFW Only in the Luke Ross tab and restart the game to restore OFXR. Neural Rendering remains available.");
+        ImGui::TextWrapped("Frame Reconstruction only: direct OpenXR delivery, no frame generation. Disable it in the Luke Ross tab and restart the game to restore OFXR frame generation. Neural Rendering remains available.");
         return changed;
     }
     int selected_generation = generation_ui_index(draft.frame_generation);
@@ -286,20 +286,26 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
 }
 
 bool framewarp(Settings& draft, const Snapshot& state) {
-    bool changed=ImGui::Checkbox("AFW Only (restart game)",&draft.afw_only);
+    ImGui::TextWrapped("1. In the Luke Ross menu, set the render mode to Legacy AER.");
+    ImGui::TextWrapped("2. Turn off Camera rotation compensation where the Luke Ross menu offers it. With it on, turns in vehicles happen in steps.");
+    ImGui::Separator();
+    bool changed=ImGui::Checkbox("Frame Reconstruction only (AFW or OSR, restart game)",&draft.afw_only);
+    ImGui::TextWrapped("Removes OFXR frame generation from the pipeline: each Luke Ross frame goes straight to the headset, and only the missing eye is reconstructed, by AFW or OSR below. The best choice for latency.");
     if(state.connected && (state.runtime.pacing_mode==kAfwOnlyPacingMode)!=draft.afw_only)
-        ImGui::TextWrapped("AFW Only change saved. Restart the game to apply it.");
+        ImGui::TextWrapped("Frame Reconstruction only change saved. Restart the game to apply it.");
     changed |= ImGui::Combo("Reconstruction", &draft.luke_osr,
         "AFW\0AFW + OSR band fill\0Full OSR\0");
     ImGui::TextWrapped(draft.luke_osr==2
-        ? "Full OSR (OFXR Stereo Reconstruction): OFXR renders the other eye itself from the same inputs AFW receives: the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame for what the real eye cannot see. PureDark's AFW plugin is not loaded. Applies live."
+        ? "Full OSR (OFXR Stereo Reconstruction): OFXR renders the other eye itself from the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame for what the real eye cannot see. Applies live."
         : draft.luke_osr==1
         ? "OSR (OFXR Stereo Reconstruction) band fill: OFXR's own fill of the band beside near objects that neither the other eye nor the previous frame can see, the streaks AFW leaves while strafing. Same inputs as AFW, applies live."
         : "AFW output as is.");
     changed |= ImGui::Checkbox("Advanced parameters", &draft.luke_advanced);
     if (draft.luke_advanced) {
-        if (draft.luke_osr==2)
-            ImGui::TextWrapped("Full OSR uses Framewarp mode (Alternate eye = no previous frame), Debug framewarp (previous-frame pixels green, inpainted pixels magenta) and Depth dilation. The shading rate and Ignore motion are AFW's own.");
+        // Full OSR shows only the parameters it uses.
+        const bool full_osr = draft.luke_osr==2;
+        if (full_osr)
+            ImGui::TextWrapped("Framewarp mode: Other eye only leaves out this eye's previous frame, for debugging. Debug framewarp tints previous-frame pixels green and inpainted pixels magenta.");
         if (draft.luke_osr==1) {
             changed |= ImGui::SliderInt("Band fill", &draft.luke_osr_fill, 1, 8, "x%d");
             ImGui::TextWrapped("How much of the band is filled at slow strafes. 1 fills only what no viewpoint saw; 2 fills the whole band once the eye clearly leads. Nothing is filled standing still or in the trailing eye.");
@@ -309,9 +315,19 @@ bool framewarp(Settings& draft, const Snapshot& state) {
             ImGui::TextWrapped("Depth texels of the object's own smeared edge replaced with background as well. Thins the object; leave at 0 unless its edge keeps a dark line.");
             ImGui::TextWrapped("With Debug framewarp on, OSR tints filled pixels magenta, cover and trim orange, and band pixels left to AFW cyan.");
         }
-        changed |= ImGui::Combo("Framewarp mode", &draft.afw_mode,
-            "Off\0Alternate eye (for debug)\0Previous frame (for debug)\0Combined\0");
-        if (draft.afw_mode == 3) {
+        if (full_osr) {
+            // Full OSR uses the previous frame in Previous frame and Combined
+            // alike: one On entry. Off is the only switch that stops the
+            // reconstruction, so it stays.
+            constexpr int modes[]{0,1,3};
+            int selected=draft.afw_mode==0 ? 0 : draft.afw_mode==1 ? 1 : 2;
+            if (ImGui::Combo("Framewarp mode", &selected, "Off\0Other eye only (for debug)\0On\0")) {
+                draft.afw_mode=modes[selected];changed=true;
+            }
+        } else
+            changed |= ImGui::Combo("Framewarp mode", &draft.afw_mode,
+                "Off\0Alternate eye (for debug)\0Previous frame (for debug)\0Combined\0");
+        if (draft.afw_mode == 3 && !full_osr) {
             constexpr int rates[]{0,4,8};
             int selected=draft.afw_shading_rate==8 ? 2 : draft.afw_shading_rate==4 ? 1 : 0;
             if(ImGui::Combo("AFW shading rate",&selected,
@@ -325,12 +341,16 @@ bool framewarp(Settings& draft, const Snapshot& state) {
         }
         changed |= ImGui::Checkbox("Debug framewarp", &draft.afw_debug);
         ImGui::TextWrapped("Requires Luke Ross and RealVR.ini. Camera and stereo motion correction is always applied; same-eye history reconstructs the missing camera interval.");
-        if(draft.advanced_mode)changed |= ImGui::Checkbox("Clear before framewarp", &draft.afw_clear_before_warping);
-        changed |= ImGui::SliderFloat("Ignore motion", &draft.afw_ignore_motion_threshold, 0, 16, "%.2f");
-        ImGui::TextWrapped("Threshold for ignoring per-object motion vectors.");
-        changed |= ImGui::Combo("Depth dilation", &draft.afw_depth_dilate_mode,
-            "Off\0Horizontal\0Square\0");
-        ImGui::TextWrapped("Reduces ghosting and flicker, with less precise object silhouettes. Off by default.");
+        if (!full_osr) {
+            if(draft.advanced_mode)changed |= ImGui::Checkbox("Clear before framewarp", &draft.afw_clear_before_warping);
+            changed |= ImGui::SliderFloat("Ignore motion", &draft.afw_ignore_motion_threshold, 0, 16, "%.2f");
+            ImGui::TextWrapped("Threshold for ignoring per-object motion vectors.");
+        }
+        if (!full_osr) {
+            changed |= ImGui::Combo("Depth dilation", &draft.afw_depth_dilate_mode,
+                "Off\0Horizontal\0Square\0");
+            ImGui::TextWrapped("Reduces ghosting and flicker, with less precise object silhouettes. Off by default.");
+        }
     }
     if (state.connected) ImGui::TextDisabled("Ready frames: %llu / projections: %llu",
         static_cast<unsigned long long>(state.runtime.afw_ready_frames),
