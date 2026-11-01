@@ -47,7 +47,7 @@ inline void apply_runtime_settings() {
     a.clear_before_warping=s.afw_clear_before_warping;
     a.ignore_motion_threshold=s.afw_ignore_motion_threshold;
     a.depth_dilate_mode=s.afw_depth_dilate_mode; a.shading_rate=s.afw_shading_rate;
-    a.osr=s.luke_osr!=0; a.osr_cover=s.luke_osr_cover; a.osr_trim=s.luke_osr_trim; a.osr_fill=s.luke_osr_fill;
+    a.osr=s.luke_osr; a.osr_cover=s.luke_osr_cover; a.osr_trim=s.luke_osr_trim; a.osr_fill=s.luke_osr_fill;
     if (!embedded::request_afw(a)) return;
     if (!embedded::set_djules_triple_frame_gen(s.triple_frame_gen)) return;
     if (!embedded::set_djules_prefer_fps(s.prefer_fps || s.triple_frame_gen)) return;

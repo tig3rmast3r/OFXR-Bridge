@@ -522,6 +522,16 @@ int main() {
     }
     std::filesystem::remove(support_source / L"nvngx_dlssnr.dll");
     std::filesystem::remove(support_cache / L"nvngx_dlssnr.dll");
+    // PureDark's AFW provider is optional: Full OSR needs none.
+    const wchar_t* without_provider[]{L"ofxr_amd_fidelityfx_framegeneration_dx12.dll",
+        L"nvngx.dll_dlssnr.dll", L"nvngx.dll_dlssg.dll"};
+    for (const auto* name : without_provider) write_file(support_source / name, "required-helper");
+    if (!stage_runtime_support_files(support_source, support_cache, &support_error) ||
+        std::filesystem::exists(support_cache / L"PDAFWPlugin.dll")) return 1;
+    for (const auto* name : without_provider) {
+        std::filesystem::remove(support_source / name);
+        std::filesystem::remove(support_cache / name);
+    }
     std::filesystem::remove(support_source);
     std::filesystem::remove(support_cache);
     std::filesystem::remove(support_fixture);

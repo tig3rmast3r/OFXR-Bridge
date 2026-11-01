@@ -327,7 +327,7 @@ Settings sanitize(Settings value) noexcept {
     value.afw_ignore_motion_threshold = bounded(value.afw_ignore_motion_threshold, 0.F, 16.F, 2.5F);
     value.afw_depth_dilate_mode = std::clamp(value.afw_depth_dilate_mode, 0, 2);
     value.afw_shading_rate = std::clamp(value.afw_shading_rate, 0, 8);
-    value.luke_osr = std::clamp(value.luke_osr, 0, 1);
+    value.luke_osr = std::clamp(value.luke_osr, 0, 2);
     value.luke_osr_cover = std::clamp(value.luke_osr_cover, 0, 8);
     value.luke_osr_trim = std::clamp(value.luke_osr_trim, 0, 2);
     value.luke_osr_fill = std::clamp(value.luke_osr_fill, 1, 8);
@@ -1152,7 +1152,8 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
     const auto& r = s.runtime;
     if(interface_afw_only_active(s,GetTickCount64())) {
         const bool nr=s.desired.nr_enabled && r.nr_running;
-        if(s.desired.luke_osr) return nr ? "AFW + OSR + Neural" : "AFW + OSR";
+        if(s.desired.luke_osr==2) return nr ? "OSR + Neural" : "OSR";
+        if(s.desired.luke_osr==1) return nr ? "AFW + OSR + Neural" : "AFW + OSR";
         return nr ? "AFW + Neural" : "AFW";
     }
     if (r.generation_state == GenerationState::paused) return "Paused";
@@ -1166,19 +1167,20 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
         const bool afw=fresh && r.afw_running && s.desired.afw_mode!=0;
         const bool nr=fresh && r.nr_running && s.desired.nr_enabled;
         // Static views retain noexcept/zero allocation on both UI surfaces.
-        // Columns: base, + AFW, + Neural, + AFW + Neural, + AFW + OSR, + AFW + OSR + Neural.
-        static constexpr std::string_view names[7][6]={
-            {"FidelityFX","FidelityFX + AFW","FidelityFX + Neural","FidelityFX + AFW + Neural","FidelityFX + AFW + OSR","FidelityFX + AFW + OSR + Neural"},
-            {"OFXR 0.2.1","OFXR 0.2.1 + AFW","OFXR 0.2.1 + Neural","OFXR 0.2.1 + AFW + Neural","OFXR 0.2.1 + AFW + OSR","OFXR 0.2.1 + AFW + OSR + Neural"},
-            {"OFXR 0.3.0","OFXR 0.3.0 + AFW","OFXR 0.3.0 + Neural","OFXR 0.3.0 + AFW + Neural","OFXR 0.3.0 + AFW + OSR","OFXR 0.3.0 + AFW + OSR + Neural"},
-            {"OFXR 0.2.13","OFXR 0.2.13 + AFW","OFXR 0.2.13 + Neural","OFXR 0.2.13 + AFW + Neural","OFXR 0.2.13 + AFW + OSR","OFXR 0.2.13 + AFW + OSR + Neural"},
-            {"Hybrid","Hybrid + AFW","Hybrid + Neural","Hybrid + AFW + Neural","Hybrid + AFW + OSR","Hybrid + AFW + OSR + Neural"},
-            {"FSR","FSR + AFW","FSR + Neural","FSR + AFW + Neural","FSR + AFW + OSR","FSR + AFW + OSR + Neural"},
-            {"DLSS-G","DLSS-G + AFW","DLSS-G + Neural","DLSS-G + AFW + Neural","DLSS-G + AFW + OSR","DLSS-G + AFW + OSR + Neural"}};
+        // Columns: base, + AFW, + Neural, + AFW + Neural, + AFW + OSR, + AFW + OSR + Neural, + OSR, + OSR + Neural.
+        static constexpr std::string_view names[7][8]={
+            {"FidelityFX","FidelityFX + AFW","FidelityFX + Neural","FidelityFX + AFW + Neural","FidelityFX + AFW + OSR","FidelityFX + AFW + OSR + Neural","FidelityFX + OSR","FidelityFX + OSR + Neural"},
+            {"OFXR 0.2.1","OFXR 0.2.1 + AFW","OFXR 0.2.1 + Neural","OFXR 0.2.1 + AFW + Neural","OFXR 0.2.1 + AFW + OSR","OFXR 0.2.1 + AFW + OSR + Neural","OFXR 0.2.1 + OSR","OFXR 0.2.1 + OSR + Neural"},
+            {"OFXR 0.3.0","OFXR 0.3.0 + AFW","OFXR 0.3.0 + Neural","OFXR 0.3.0 + AFW + Neural","OFXR 0.3.0 + AFW + OSR","OFXR 0.3.0 + AFW + OSR + Neural","OFXR 0.3.0 + OSR","OFXR 0.3.0 + OSR + Neural"},
+            {"OFXR 0.2.13","OFXR 0.2.13 + AFW","OFXR 0.2.13 + Neural","OFXR 0.2.13 + AFW + Neural","OFXR 0.2.13 + AFW + OSR","OFXR 0.2.13 + AFW + OSR + Neural","OFXR 0.2.13 + OSR","OFXR 0.2.13 + OSR + Neural"},
+            {"Hybrid","Hybrid + AFW","Hybrid + Neural","Hybrid + AFW + Neural","Hybrid + AFW + OSR","Hybrid + AFW + OSR + Neural","Hybrid + OSR","Hybrid + OSR + Neural"},
+            {"FSR","FSR + AFW","FSR + Neural","FSR + AFW + Neural","FSR + AFW + OSR","FSR + AFW + OSR + Neural","FSR + OSR","FSR + OSR + Neural"},
+            {"DLSS-G","DLSS-G + AFW","DLSS-G + Neural","DLSS-G + AFW + Neural","DLSS-G + AFW + OSR","DLSS-G + AFW + OSR + Neural","DLSS-G + OSR","DLSS-G + OSR + Neural"}};
         const int route=r.generation_mode==1 ? 5 : r.generation_mode==2 ? 6 :
             r.generation_mode==3 ? 4 : std::clamp(s.desired.backend,0,3);
-        const bool osr=afw && s.desired.luke_osr!=0;
-        return names[route][osr ? (nr?5:4) : (afw?1:0)+(nr?2:0)];
+        // Full OSR replaces AFW as the eye renderer; the band fill rides on AFW.
+        const int osr=afw ? std::clamp(s.desired.luke_osr,0,2) : 0;
+        return names[route][osr==2 ? (nr?7:6) : osr==1 ? (nr?5:4) : (afw?1:0)+(nr?2:0)];
     }
     return r.ready ? "Real frames only" : "Waiting";
 }
@@ -1250,7 +1252,7 @@ std::string interface_status_text(const Snapshot& s) {
     const bool runtime_fresh=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
     const auto generator=r.generation_mode==1 ? "FSR" : r.generation_mode==2 ? "DLSS-G" : "OFXR";
     add(std::string(generator)+(s.desired.enabled ? (generating ? ": Active" : ": Waiting") : ": Off"));
-    const char* afw_label=s.desired.luke_osr ? "AFW + OSR" : "AFW";
+    const char* afw_label=s.desired.luke_osr==2 ? "OSR" : s.desired.luke_osr==1 ? "AFW + OSR" : "AFW";
     add(!r.luke_detected ? std::string(afw_label)+": N/A" : s.desired.afw_mode==0 ? std::string(afw_label)+": Off" :
         runtime_fresh && r.afw_flat_scene ? std::string(afw_label)+": 2D scene (no stereo source)" :
         runtime_fresh && r.afw_running ? std::string(afw_label)+": Active" : std::string(afw_label)+": Waiting");

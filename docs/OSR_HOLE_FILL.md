@@ -58,8 +58,8 @@ one.
 
 ## Settings
 
-Luke Ross tab, **Reconstruction**: `AFW` or `AFW + OSR band fill`
-(`luke_osr`). **Advanced parameters** (`luke_advanced`, off by default)
+Luke Ross tab, **Reconstruction**: `AFW`, `AFW + OSR band fill` or `Full OSR`
+(`luke_osr`; Full OSR is described in `docs/OSR_FULL_WARP.md`). **Advanced parameters** (`luke_advanced`, off by default)
 reveals the OSR sliders and the provider controls (Framewarp mode, shading
 rate, Debug framewarp, Ignore motion, Depth dilation). All apply live:
 

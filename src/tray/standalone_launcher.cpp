@@ -707,7 +707,6 @@ bool stage_runtime_support_files(
     try {
         const wchar_t* required[]{
             L"ofxr_amd_fidelityfx_framegeneration_dx12.dll",
-            L"PDAFWPlugin.dll",
             L"nvngx.dll_dlssnr.dll", L"nvngx.dll_dlssg.dll"};
         // Validate the complete package before staging any support file.
         for (const auto* name : required) {
@@ -722,6 +721,14 @@ bool stage_runtime_support_files(
                 if (error) *error = L"Could not prepare standalone runtime helper:\r\n" + (destination_directory / name).wstring();
                 return false;
             }
+        }
+        // PureDark's AFW provider is optional: Full OSR renders the Luke Ross
+        // peer eye without it; only the AFW reconstructions load it.
+        const auto provider = source_directory / L"PDAFWPlugin.dll";
+        if (std::filesystem::is_regular_file(provider) &&
+            !install_runtime_layer_dll(provider, destination_directory / provider.filename())) {
+            if (error) *error = L"Could not prepare standalone runtime helper:\r\n" + (destination_directory / provider.filename()).wstring();
+            return false;
         }
         const auto vendor = source_directory / L"nvngx_dlssnr.dll";
         if (std::filesystem::is_regular_file(vendor) &&

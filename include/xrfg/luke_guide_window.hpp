@@ -19,6 +19,10 @@ enum class LukeGuideWindowFailure : std::uint32_t {
 struct LukeGuideWindow {
     std::uint32_t x{}, y{}, width{}, height{};
     bool raster_x{}, raster_y{};
+    // The projected origin before rounding, in guide texels: x + fraction_x is
+    // where the eye's left edge really falls. Sub-texel consumers (Full OSR)
+    // add the fraction back; the integer crop is unchanged.
+    float fraction_x{}, fraction_y{};
 };
 
 // Cropping preserves native pixel units. Integer ROI rounding must not change
@@ -109,6 +113,8 @@ struct LukeGuideWindow {
         static_cast<std::uint32_t>(std::min<std::int64_t>(rounded_y,
             guide_height - height)),
         width, height, raster_x, raster_y};
+    result.fraction_x = static_cast<float>(x0 * guide_width / output_width - double(result.x));
+    result.fraction_y = static_cast<float>(y0 * guide_height / output_height - double(result.y));
     return result;
 }
 

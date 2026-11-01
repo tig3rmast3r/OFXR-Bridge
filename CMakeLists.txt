@@ -184,6 +184,11 @@ if(XRFG_BUILD_TESTS)
         target_compile_features(xrfg_osr_hole_fill_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_osr_hole_fill_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         add_test(NAME xrfg_osr_hole_fill COMMAND xrfg_osr_hole_fill_tests)
+        add_executable(xrfg_osr_full_warp_tests tests/osr_full_warp_tests.cpp)
+        target_include_directories(xrfg_osr_full_warp_tests PRIVATE include)
+        target_compile_features(xrfg_osr_full_warp_tests PRIVATE cxx_std_20)
+        target_compile_definitions(xrfg_osr_full_warp_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        add_test(NAME xrfg_osr_full_warp COMMAND xrfg_osr_full_warp_tests)
     endif()
     add_executable(xrfg_fps_overlay_tests tests/fps_overlay_tests.cpp)
     target_link_libraries(xrfg_fps_overlay_tests PRIVATE xrfg_core)
@@ -264,6 +269,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_OSR_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_clear_shader.hpp")
     set(XRFG_OSR_SPLAT_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_splat_shader.hpp")
     set(XRFG_OSR_FILL_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_fill_shader.hpp")
+    set(XRFG_OSR_FULL_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_clear_shader.hpp")
+    set(XRFG_OSR_FULL_SPLAT_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_splat_shader.hpp")
+    set(XRFG_OSR_FULL_SPLAT_HISTORY_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_splat_history_shader.hpp")
+    set(XRFG_OSR_FULL_SPLAT_OFFSET_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_splat_offset_shader.hpp")
+    set(XRFG_OSR_FULL_RESOLVE_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_shader.hpp")
+    set(XRFG_OSR_FULL_INPAINT_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_inpaint_shader.hpp")
     set(XRFG_VULKAN_D24_DECODE_HEADER "${XRFG_GENERATED_SHADER_DIR}/vulkan_d24_decode_shader.hpp")
     set(XRFG_D3D11_DEPTH_UNPACK_HEADER "${XRFG_GENERATED_SHADER_DIR}/d3d11_depth_unpack_shader.hpp")
     add_custom_command(
@@ -293,6 +304,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_OSR_CLEAR_HEADER}"
             "${XRFG_OSR_SPLAT_HEADER}"
             "${XRFG_OSR_FILL_HEADER}"
+            "${XRFG_OSR_FULL_CLEAR_HEADER}"
+            "${XRFG_OSR_FULL_SPLAT_HEADER}"
+            "${XRFG_OSR_FULL_SPLAT_HISTORY_HEADER}"
+            "${XRFG_OSR_FULL_SPLAT_OFFSET_HEADER}"
+            "${XRFG_OSR_FULL_RESOLVE_HEADER}"
+            "${XRFG_OSR_FULL_INPAINT_HEADER}"
             "${XRFG_VULKAN_D24_DECODE_HEADER}"
             "${XRFG_D3D11_DEPTH_UNPACK_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
@@ -400,6 +417,30 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_OSR_FILL_HEADER}" /Vn g_xrfg_osr_fill_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullClear
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_CLEAR_HEADER}" /Vn g_xrfg_osr_full_clear_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullSplat
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_SPLAT_HEADER}" /Vn g_xrfg_osr_full_splat_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullSplatHistory
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_SPLAT_HISTORY_HEADER}" /Vn g_xrfg_osr_full_splat_history_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullSplatOffset
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_SPLAT_OFFSET_HEADER}" /Vn g_xrfg_osr_full_splat_offset_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullResolve
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_RESOLVE_HEADER}" /Vn g_xrfg_osr_full_resolve_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullInpaint
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_INPAINT_HEADER}" /Vn g_xrfg_osr_full_inpaint_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_0 /E UnpackDepth
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_D3D11_DEPTH_UNPACK_HEADER}" /Vn g_xrfg_d3d11_depth_unpack_shader
@@ -410,6 +451,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_depth_convert.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_compose_motion.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/ingress/vulkan_d24_decode.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d11/d3d11_depth_unpack.hlsl"
         VERBATIM)
@@ -454,6 +496,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_OSR_CLEAR_HEADER}"
         "${XRFG_OSR_SPLAT_HEADER}"
         "${XRFG_OSR_FILL_HEADER}"
+        "${XRFG_OSR_FULL_CLEAR_HEADER}"
+        "${XRFG_OSR_FULL_SPLAT_HEADER}"
+        "${XRFG_OSR_FULL_SPLAT_HISTORY_HEADER}"
+        "${XRFG_OSR_FULL_SPLAT_OFFSET_HEADER}"
+        "${XRFG_OSR_FULL_RESOLVE_HEADER}"
+        "${XRFG_OSR_FULL_INPAINT_HEADER}"
         "${XRFG_VULKAN_D24_DECODE_HEADER}"
         "${XRFG_D3D11_DEPTH_UNPACK_HEADER}")
     foreach(stage decide compose)

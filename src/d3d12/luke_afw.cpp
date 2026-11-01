@@ -22,6 +22,8 @@
 #include "luke_afw_color_scale.hpp"
 #include "osr_hole_fill_pass.hpp"
 #include "xrfg/osr_hole_fill.hpp"
+#include "osr_full_warp_pass.hpp"
+#include "xrfg/osr_full_warp.hpp"
 
 #include <Windows.h>
 
@@ -481,6 +483,12 @@ struct LukeAfwSynthesizer::Impl {
     InitFrameWarpFn init_frame_warp{};
     EvaluateFrameWarpFn evaluate{};
     RendererApi* renderer{};
+    // Native: no provider. Full OSR renders the peer eye, the layer allocates
+    // what the provider's factory did and records its own copies;
+    // PDAFWPlugin.dll is never loaded.
+    bool native{};
+    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, 2> native_eye_color;
+    Microsoft::WRL::ComPtr<ID3D12Resource> native_depth;
     Microsoft::WRL::ComPtr<ID3D12Device> device;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> command_allocator;
@@ -494,6 +502,7 @@ struct LukeAfwSynthesizer::Impl {
     EyeFrameBuffers eye_buffers{};
     AfwColorScale color_scale;
     OsrHoleFill osr; // OSR stereo hole fill, same inputs as the provider
+    OsrFullWarp osr_full; // Full OSR: the layer's own peer-eye reconstruction, same inputs
     UINT work_width{},work_height{},quality_divisor{1};
     DXGI_FORMAT checked_quality_format{DXGI_FORMAT_UNKNOWN};
     bool quality_can_scale{};
@@ -585,6 +594,75 @@ struct LukeAfwSynthesizer::Impl {
         return table == nullptr ? nullptr : reinterpret_cast<Function>(table[slot]);
     }
 
+    HRESULT create_native_texture(UINT width, UINT height, DXGI_FORMAT format,
+        D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state,
+        Microsoft::WRL::ComPtr<ID3D12Resource>& output) const noexcept {
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        heap.CreationNodeMask = 1;
+        heap.VisibleNodeMask = 1;
+        D3D12_RESOURCE_DESC description{};
+        description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        description.Width = width;
+        description.Height = height;
+        description.DepthOrArraySize = 1;
+        description.MipLevels = 1;
+        description.Format = format;
+        description.SampleDesc.Count = 1;
+        description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        description.Flags = flags;
+        return device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE,
+            &description, state, nullptr, IID_PPV_ARGS(output.ReleaseAndGetAddressOf()));
+    }
+
+    // What InitFrameWarp returns, for native: the colour of each eye's last
+    // real frame (the source copy lands there; F8 saves it as the prior eye).
+    HRESULT init_native_eye_buffers(UINT width, UINT height, DXGI_FORMAT format) noexcept {
+        eye_buffers = {};
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            const HRESULT result = create_native_texture(width, height, format,
+                D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON, native_eye_color[eye]);
+            if (FAILED(result)) return result;
+            TextureDesc& color = eye_buffers.eye_frame_buffers[eye].color;
+            color.type = Image;
+            color.texture = native_eye_color[eye].Get();
+            color.initial_state = D3D12_RESOURCE_STATE_COMMON;
+        }
+        return S_OK;
+    }
+
+    // The provider's CopyTexture contract, for native: both textures return
+    // to their initial_state; an empty box copies the whole resource.
+    static void copy_native(ID3D12GraphicsCommandList* list, TextureDesc& destination,
+        TextureDesc& source, D3D12_BOX box, UINT x, UINT y) noexcept {
+        if (list == nullptr || destination.texture == nullptr || source.texture == nullptr) return;
+        std::array<D3D12_RESOURCE_BARRIER, 2> barriers{};
+        UINT count = 0;
+        const auto transition = [&](ID3D12Resource* resource,
+            D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+            if (before == after) return;
+            D3D12_RESOURCE_BARRIER& barrier = barriers[count++];
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = resource;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barrier.Transition.StateBefore = before;
+            barrier.Transition.StateAfter = after;
+        };
+        transition(destination.texture, destination.initial_state, D3D12_RESOURCE_STATE_COPY_DEST);
+        transition(source.texture, source.initial_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        if (count) list->ResourceBarrier(count, barriers.data());
+        D3D12_TEXTURE_COPY_LOCATION to{}, from{};
+        to.pResource = destination.texture;
+        to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        from.pResource = source.texture;
+        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        const bool whole = box.right == 0 && box.bottom == 0;
+        list->CopyTextureRegion(&to, x, y, 0, &from, whole ? nullptr : &box);
+        for (UINT index = 0; index < count; ++index)
+            std::swap(barriers[index].Transition.StateBefore, barriers[index].Transition.StateAfter);
+        if (count) list->ResourceBarrier(count, barriers.data());
+    }
+
 
     HRESULT ensure_float_depth(UINT width, UINT height,
         const D3D12_RESOURCE_DESC& source) noexcept {
@@ -601,14 +679,25 @@ struct LukeAfwSynthesizer::Impl {
             depth_source_format == source.Format && depth_source_width == source.Width &&
             depth_source_height == source.Height) return S_OK;
 
-        const auto create = method<CreateTextureFn>(kCreateTextureSlot);
-        if (create == nullptr) return E_NOINTERFACE;
         TextureDesc created{};
         created.type = Depth;
-        if (!create(renderer, static_cast<int>(width), static_cast<int>(height),
-                DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
-                created, true) ||
-            created.texture == nullptr) return E_FAIL;
+        Microsoft::WRL::ComPtr<ID3D12Resource> native_texture;
+        if (native) {
+            // What the provider's factory made: R32_FLOAT, written by the
+            // conversion below as a UAV and read as an SRV.
+            const HRESULT made = create_native_texture(width, height, DXGI_FORMAT_R32_FLOAT,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, native_texture);
+            if (FAILED(made)) return made;
+            created.texture = native_texture.Get();
+        } else {
+            const auto create = method<CreateTextureFn>(kCreateTextureSlot);
+            if (create == nullptr) return E_NOINTERFACE;
+            if (!create(renderer, static_cast<int>(width), static_cast<int>(height),
+                    DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
+                    created, true) ||
+                created.texture == nullptr) return E_FAIL;
+        }
         created.type = Depth;
         created.initial_state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
 
@@ -734,6 +823,7 @@ struct LukeAfwSynthesizer::Impl {
         if (FAILED(result)) return result;
 
         depth = created;
+        native_depth = std::move(native_texture);
         depth_staging = std::move(staging);
         depth_descriptor_heap = std::move(descriptors);
         depth_root_signature = std::move(root_signature);
@@ -977,8 +1067,9 @@ struct LukeAfwSynthesizer::Impl {
                 static_cast<std::uint64_t>(motion.srv_position), publication);
             return S_OK;
         }
-        const auto setup = method<SetupTextureDescFn>(kSetupTextureDescSlot);
-        if (setup == nullptr) return E_NOINTERFACE;
+        // The provider's descriptors are for the provider; native binds its own.
+        const auto setup = native ? nullptr : method<SetupTextureDescFn>(kSetupTextureDescSlot);
+        if (!native && setup == nullptr) return E_NOINTERFACE;
 
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -1003,12 +1094,12 @@ struct LukeAfwSynthesizer::Impl {
         TextureDesc descriptor{};
         descriptor.texture = resource.Get();
         descriptor.initial_state = D3D12_RESOURCE_STATE_COMMON;
-        setup(renderer, descriptor);
+        if (!native) setup(renderer, descriptor);
         const HRESULT device_status = device->GetDeviceRemovedReason();
         const HRESULT descriptor_status = FAILED(device_status)
             ? device_status
-            : descriptor.srv_position < 0 ||
-                    descriptor.shader_resource_view.ptr == 0
+            : !native && (descriptor.srv_position < 0 ||
+                    descriptor.shader_resource_view.ptr == 0)
                 ? E_FAIL
                 : S_OK;
         report_stage(AfwStage::motion_descriptor_ready, descriptor_status,
@@ -1232,16 +1323,18 @@ HRESULT LukeAfwSynthesizer::initialize(ID3D12Device* device,
     ID3D12CommandQueue* queue, const std::filesystem::path& plugin_path) noexcept {
     try {
         std::scoped_lock lock(mutex_);
-        return initialize_locked(device,queue,plugin_path,true);
+        // Start without the provider: synthesize() loads it at the first
+        // evaluation with AFW selected, so with Full OSR it is never loaded.
+        return initialize_locked(device,queue,plugin_path,true,true);
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
       catch (...) { return E_FAIL; }
 }
 
 HRESULT LukeAfwSynthesizer::create_impl(ID3D12Device* device,
     ID3D12CommandQueue* queue, const std::filesystem::path& plugin_path,
-    bool isolated_provider,std::unique_ptr<Impl>& output) noexcept {
+    bool isolated_provider,bool native,std::unique_ptr<Impl>& output) noexcept {
     try {
-        if (device == nullptr || queue == nullptr || plugin_path.empty()) return E_INVALIDARG;
+        if (device == nullptr || queue == nullptr || (!native && plugin_path.empty())) return E_INVALIDARG;
         auto candidate = std::make_unique<Impl>();
         wchar_t executable[32768]{};
         if (!GetModuleFileNameW(nullptr, executable, 32768)) return HRESULT_FROM_WIN32(GetLastError());
@@ -1252,8 +1345,9 @@ HRESULT LukeAfwSynthesizer::create_impl(ID3D12Device* device,
         candidate->camera_axes = camera_config.axes;
         const auto selected_provider = luke_host_provider(std::filesystem::path(executable).parent_path(), plugin_path);
         candidate->provider_path=selected_provider;
+        candidate->native=native;
         auto load_path=selected_provider;
-        if (isolated_provider) {
+        if (isolated_provider && !native) {
             // beta6 has module-global renderer state. InitDevice/InitFrameWarp
             // on that same loaded module cannot reset every lookup state.
             // A private byte-identical module gets fresh globals; only one new
@@ -1266,17 +1360,19 @@ HRESULT LukeAfwSynthesizer::create_impl(ID3D12Device* device,
             if (!CopyFileW(selected_provider.c_str(),file,FALSE)) return HRESULT_FROM_WIN32(GetLastError());
             load_path=file;
         }
-        candidate->module = LoadLibraryExW(load_path.c_str(), nullptr,
-            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-        if (candidate->module == nullptr) return HRESULT_FROM_WIN32(GetLastError());
-        candidate->init_device = reinterpret_cast<InitDeviceFn>(
-            GetProcAddress(candidate->module, "InitDevice"));
-        candidate->init_frame_warp = reinterpret_cast<InitFrameWarpFn>(
-            GetProcAddress(candidate->module, "InitFrameWarp"));
-        candidate->evaluate = reinterpret_cast<EvaluateFrameWarpFn>(
-            GetProcAddress(candidate->module, "EvaluateFrameWarp"));
-        if (candidate->init_device == nullptr || candidate->init_frame_warp == nullptr ||
-            candidate->evaluate == nullptr) return E_NOINTERFACE;
+        if (!native) {
+            candidate->module = LoadLibraryExW(load_path.c_str(), nullptr,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+            if (candidate->module == nullptr) return HRESULT_FROM_WIN32(GetLastError());
+            candidate->init_device = reinterpret_cast<InitDeviceFn>(
+                GetProcAddress(candidate->module, "InitDevice"));
+            candidate->init_frame_warp = reinterpret_cast<InitFrameWarpFn>(
+                GetProcAddress(candidate->module, "InitFrameWarp"));
+            candidate->evaluate = reinterpret_cast<EvaluateFrameWarpFn>(
+                GetProcAddress(candidate->module, "EvaluateFrameWarp"));
+            if (candidate->init_device == nullptr || candidate->init_frame_warp == nullptr ||
+                candidate->evaluate == nullptr) return E_NOINTERFACE;
+        }
         const D3D12_COMMAND_QUEUE_DESC queue_description = queue->GetDesc();
         HRESULT result = device->CreateCommandAllocator(
             D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -1297,12 +1393,14 @@ HRESULT LukeAfwSynthesizer::create_impl(ID3D12Device* device,
             return HRESULT_FROM_WIN32(GetLastError());
         candidate->device = device;
         candidate->queue = queue;
-        DeviceParams params{};
-        candidate->provider_device=std::make_unique<AfwProviderDevice>(device,candidate->provider_allocations);
-        params.d3d12_device = candidate->provider_device.get();
-        params.d3d12_queue = queue;
-        candidate->renderer = candidate->init_device(params);
-        if (candidate->renderer == nullptr) return E_FAIL;
+        if (!native) {
+            DeviceParams params{};
+            candidate->provider_device=std::make_unique<AfwProviderDevice>(device,candidate->provider_allocations);
+            params.d3d12_device = candidate->provider_device.get();
+            params.d3d12_queue = queue;
+            candidate->renderer = candidate->init_device(params);
+            if (candidate->renderer == nullptr) return E_FAIL;
+        }
         output = std::move(candidate);
         return S_OK;
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
@@ -1310,15 +1408,16 @@ HRESULT LukeAfwSynthesizer::create_impl(ID3D12Device* device,
 }
 
 HRESULT LukeAfwSynthesizer::initialize_locked(ID3D12Device* device,ID3D12CommandQueue* queue,
-    const std::filesystem::path& path,bool isolated) noexcept {
+    const std::filesystem::path& path,bool isolated,bool native) noexcept {
     std::unique_ptr<Impl> candidate;
-    const auto hr=create_impl(device,queue,path,isolated,candidate);
+    const auto hr=create_impl(device,queue,path,isolated,native,candidate);
     if(SUCCEEDED(hr))impl_=std::move(candidate);
     return hr;
 }
 void LukeAfwSynthesizer::queue_standby_locked() noexcept {
     try {
-        if(!impl_||standby_.valid())return;
+        // Native has no provider state to prepare off the render thread.
+        if(!impl_||impl_->native||standby_.valid())return;
         if(retirement_.valid()) {
             if(retirement_.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
             retirement_.get();
@@ -1327,7 +1426,7 @@ void LukeAfwSynthesizer::queue_standby_locked() noexcept {
         standby_=std::async(std::launch::async,[device,queue,path] {
             SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
             std::unique_ptr<Impl> candidate;
-            if(FAILED(create_impl(device.Get(),queue.Get(),path,true,candidate)))return std::unique_ptr<Impl>{};
+            if(FAILED(create_impl(device.Get(),queue.Get(),path,true,false,candidate)))return std::unique_ptr<Impl>{};
             return candidate;
         });
         standby_geometry_=false;
@@ -1336,7 +1435,7 @@ void LukeAfwSynthesizer::queue_standby_locked() noexcept {
 void LukeAfwSynthesizer::prepare_history_reset() noexcept {
     try {
         std::scoped_lock lock(mutex_);
-        if(reset_prepared_||standby_geometry_||!impl_||!impl_->frame_buffers_ready)return;
+        if(reset_prepared_||standby_geometry_||!impl_||impl_->native||!impl_->frame_buffers_ready)return;
         queue_standby_locked();
         if(!standby_.valid()||standby_.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
         auto candidate=standby_.get();if(!candidate)return;
@@ -1363,6 +1462,18 @@ bool LukeAfwSynthesizer::history_reset_ready() noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if(reset_prepared_)return true;
+        if(impl_&&impl_->native) {
+            // Native keeps no provider history: forgetting this context's eye
+            // history is the whole reset, and it is ready at once.
+            impl_->previous_source_publication={};
+            impl_->previous_source_camera={};
+            impl_->last_evaluated_publication=0;
+            impl_->last_evaluated_eye=2;
+            impl_->depth_calibration_reset_pending=true;
+            reset_prepared_=true;
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,1,1230,0,0);
+            return true;
+        }
         if(!standby_geometry_||!standby_.valid()||standby_.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return false;
         // Only one retired provider can exist. Never replace a pending future
         // (whose destructor could join on the game's thread).
@@ -1592,6 +1703,33 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             impl_->paired_unit_identity = paired_key;
             if(!keep_units)impl_->calibrated_units_per_metre = 0;
         }
+        // The provider is loaded only while AFW renders the peer eye. Full OSR
+        // runs native (the provider never loaded, PDAFWPlugin.dll may be
+        // missing); switching between them replaces this context after the
+        // fence above, keeping the camera calibration as a quality change does.
+        const bool want_native = settings.osr == static_cast<int>(OsrReconstruction::full);
+        if (want_native) provider_failure_ = S_OK;
+        else if (FAILED(provider_failure_)) return provider_failure_;
+        if (impl_->native != want_native) {
+            const auto provider=impl_->provider_path;
+            const auto camera_origin=impl_->camera_origin;
+            const auto calibrated_units=impl_->calibrated_units_per_metre;
+            const auto saved_right_axis=impl_->right_axis;
+            const auto unit_epoch=impl_->unit_epoch;const auto unit_stream=impl_->unit_stream;
+            const auto paired_unit_identity=impl_->paired_unit_identity;
+            const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true,want_native);
+            // 1048: a = HRESULT, b = 1 native (provider unloaded) / 0 provider loaded.
+            report_stage(AfwStage::frame_warp_init_begin,result,1048,want_native ? 1 : 0);
+            if (FAILED(result)) {
+                if (!want_native) provider_failure_ = result;
+                return result;
+            }
+            impl_->camera_origin=camera_origin;
+            impl_->calibrated_units_per_metre=calibrated_units;
+            impl_->right_axis=saved_right_axis;
+            impl_->unit_epoch=unit_epoch;impl_->unit_stream=unit_stream;
+            impl_->paired_unit_identity=paired_unit_identity;
+        }
         const auto quality_format=linear_color_format(color_desc.Format);
         if(impl_->checked_quality_format!=quality_format) {
             D3D12_FEATURE_DATA_FORMAT_SUPPORT support{};support.Format=quality_format;
@@ -1600,7 +1738,10 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             impl_->checked_quality_format=quality_format;
         }
         // Formats without typed UAV stores retain their original provider route.
-        const UINT quality_divisor=settings.mode==3 && impl_->quality_can_scale ? (settings.shading_rate==4 ? 2u : settings.shading_rate==8 ? 4u : 1u) : 1u;
+        // Full OSR renders at the eye resolution; the provider's shading rate
+        // does not apply to it.
+        const bool full_osr_requested = settings.osr == static_cast<int>(OsrReconstruction::full);
+        const UINT quality_divisor=settings.mode==3 && impl_->quality_can_scale && !full_osr_requested ? (settings.shading_rate==4 ? 2u : settings.shading_rate==8 ? 4u : 1u) : 1u;
         if ((settings.mode==3 && impl_->active_shading_rate>=0 &&
             settings.shading_rate!=impl_->active_shading_rate) ||
             (impl_->frame_buffers_ready && impl_->quality_divisor!=quality_divisor)) {
@@ -1613,7 +1754,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             const auto saved_right_axis=impl_->right_axis;
             const auto unit_epoch=impl_->unit_epoch;const auto unit_stream=impl_->unit_stream;
             const auto paired_unit_identity=impl_->paired_unit_identity;
-            const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true);
+            const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true,impl_->native);
             report_stage(AfwStage::frame_warp_init_begin,result,1044,settings.shading_rate);
             if (FAILED(result)) return result;
             impl_->camera_origin=camera_origin;
@@ -1686,7 +1827,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             const auto saved_right_axis=impl_->right_axis;
             const auto unit_epoch=impl_->unit_epoch;const auto unit_stream=impl_->unit_stream;
             const auto paired_unit_identity=impl_->paired_unit_identity;
-            const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true);
+            const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true,impl_->native);
             report_stage(AfwStage::frame_warp_init_begin,result,
                 *origin_changed ? 1045 : gta_calibration_changed ? 1203 : provider_geometry_changed ? 1046 : 1047,
                 guide.publication);
@@ -1806,7 +1947,11 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             report_stage(AfwStage::frame_warp_init_begin,
                 static_cast<std::int64_t>(params.eye_format), color_extent,
                 guide.publication);
-            impl_->eye_buffers = impl_->init_frame_warp(params);
+            if (impl_->native) {
+                const HRESULT made = impl_->init_native_eye_buffers(impl_->work_width,
+                    impl_->work_height, params.eye_format);
+                if (FAILED(made)) return made;
+            } else impl_->eye_buffers = impl_->init_frame_warp(params);
             report_stage(AfwStage::frame_warp_init_end, S_OK, source_eye,
                 guide.publication);
             if (impl_->eye_buffers.eye_frame_buffers[0].color.texture == nullptr ||
@@ -1861,8 +2006,14 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         }
         report_stage(AfwStage::producer_waited, S_OK, source_eye,
             guide.publication);
-        const auto copy = impl_->method<CopyTextureFn>(kCopyTextureSlot);
-        if (copy == nullptr) return E_NOINTERFACE;
+        const auto provider_copy = impl_->native ? nullptr : impl_->method<CopyTextureFn>(kCopyTextureSlot);
+        if (!impl_->native && provider_copy == nullptr) return E_NOINTERFACE;
+        const bool native = impl_->native;
+        const auto copy = [native, provider_copy](RendererApi* renderer, ID3D12GraphicsCommandList* list,
+            TextureDesc& destination, TextureDesc& source, D3D12_BOX box, UINT x, UINT y) {
+            if (native) Impl::copy_native(list, destination, source, box, x, y);
+            else provider_copy(renderer, list, destination, source, box, x, y);
+        };
         result = impl_->command_allocator->Reset();
         if (FAILED(result)) {
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage, result, 100, source_eye, guide.publication);
@@ -2128,10 +2279,14 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             native_motion.stereo = native_motion_detail::window_to_guide_transform(
                 as_array(stereo_transform), to_window);
         }
+        // Depth dilation is AFW's silhouette remedy. Full OSR handles
+        // silhouettes itself and its edge rules assume the depth matches the
+        // colour, so its depth is never dilated.
+        const int depth_dilate_mode = full_osr_requested ? 0 : settings.depth_dilate_mode;
         result = impl_->convert_depth(command_list, guide.depth.Get(),
             guide.depth_resource_state,
             guide.depth_x + depth_crop_x, guide.depth_y + depth_crop_y,
-            guide.depth_inverted, settings.depth_dilate_mode, guide,
+            guide.depth_inverted, depth_dilate_mode, guide,
             audit_middle_opposite_transform, native_previous_same_transform,
             motion_crop_x, motion_crop_y,
             middle_motion_window ? middle_motion_window->x : motion_crop_x,
@@ -2207,7 +2362,28 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         // eye reaches, from exactly the depth and matrices the provider gets.
         bool osr_recorded = false;
         OsrConstants osr_constants{};
-        if (settings.osr && settings.mode != 0 && impl_->quality_can_scale &&
+        // Full OSR replaces the provider's evaluation; a preparation failure
+        // (1311) falls back to the provider for this frame.
+        bool full_osr = false;
+        if (full_osr_requested && settings.mode != 0 && input.depth.texture != nullptr) {
+            const auto depth_extent = input.depth.texture->GetDesc();
+            const HRESULT ready = !impl_->quality_can_scale ? DXGI_ERROR_UNSUPPORTED
+                : impl_->osr_full.prepare(impl_->device.Get(),
+                    static_cast<UINT>(depth_extent.Width), depth_extent.Height,
+                    static_cast<UINT>(color_desc.Width), color_desc.Height, quality_format);
+            if (SUCCEEDED(ready)) full_osr = true;
+            else {
+                const auto now = GetTickCount64();
+                auto& last = impl_->input_rejection_report_ticks[62];
+                if (!last || now - last >= 1000) {
+                    last = now;
+                    bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                        ready, 1311, guide.publication, source_eye);
+                }
+            }
+        }
+        if (settings.osr == static_cast<int>(OsrReconstruction::afw_band_fill) &&
+            settings.mode != 0 && impl_->quality_can_scale &&
             input.depth.texture != nullptr) {
             const auto depth_extent = input.depth.texture->GetDesc();
             const Matrix4x4 source_to_destination = multiply(multiply(multiply(
@@ -2294,7 +2470,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 params.ignore_motion_threshold;
             contract.camera_fov_vertical = guide.camera_fov_vertical;
             contract.debug = params.debug;
-            contract.depth_dilate_mode = settings.depth_dilate_mode;
+            contract.depth_dilate_mode = depth_dilate_mode;
             contract.clear_before_warping =
                 params.clear_before_warping;
             contract.is_hudless_color = params.is_hudless_color;
@@ -2437,6 +2613,132 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         report_stage(AfwStage::evaluate_begin, S_OK, source_eye,
             guide.publication);
         impl_->gpu_timing.mark(command_list,1);
+        TextureDesc final_color{};
+        result = S_OK;
+        if (full_osr) {
+            // Full OSR: the layer reconstructs the peer eye from the source
+            // colour, the converted depth, the provider's camera matrices and
+            // the peer eye's own last real frame (src/d3d12/osr_full_warp.hlsl).
+            // The provider is not called; its state stays as it was.
+            const unsigned peer_eye = 1U - source_eye;
+            const auto& history = impl_->osr_full.history(peer_eye);
+            const bool history_usable = osr_full_history_usable(effective_mode,
+                guide.publication, history.publication,
+                impl_->previous_source_publication[peer_eye]);
+            OsrFullWarp::Inputs in{};
+            in.source_depth = input.depth.texture;
+            in.source_depth_state = input.depth.initial_state;
+            in.source_color = source_color;
+            in.source_color_state = D3D12_RESOURCE_STATE_COMMON;
+            in.source_motion = impl_->motion_resource.Get(); // composed same-eye motion, COMMON after compose_motion
+            in.source_motion_state = D3D12_RESOURCE_STATE_COMMON;
+            in.source_eye = source_eye;
+            in.use_history = history_usable;
+            // The history frame's own motion needs that eye's frame before it
+            // for the camera's share: the two publications back it points to.
+            in.use_history_motion = history_usable && history.has_motion &&
+                history.previous_publication != 0 && history.previous_publication + 2 == history.publication;
+            in.history_motion_scale[0] = history.motion_scale[0];
+            in.history_motion_scale[1] = history.motion_scale[1];
+            // Depth texel (i, j) holds the scene at (i, j) + 0.5 + (rounded -
+            // exact origin) + alignment - jitter: the depth window's origin was
+            // rounded to a texel (fraction = exact - rounded), Luke's eye crop
+            // adds the measured alignment, and the DLSS depth was rendered with
+            // this frame's sub-texel jitter (xrfg/osr_full_warp.hpp).
+            in.source_dejitter[0] = -depth_window->fraction_x + kOsrFullDepthAlignX - guide.jitter_x;
+            in.source_dejitter[1] = -depth_window->fraction_y + kOsrFullDepthAlignY - guide.jitter_y;
+            in.history_dejitter[0] = history.dejitter[0];
+            in.history_dejitter[1] = history.dejitter[1];
+            // The history is the destination eye's own frame: its projection.
+            in.locked_depth = osr_full_depth_at(provider_camera.destination_view_to_clip.values,
+                kOsrFullLockedDistanceMetres * impl_->calibrated_units_per_metre);
+            in.debug = settings.debug;
+            const Matrix4x4 forward_stereo = multiply(multiply(multiply(
+                provider_camera.source_clip_to_view, provider_camera.source_view_to_world),
+                provider_camera.destination_world_to_view), provider_camera.destination_view_to_clip);
+            const Matrix4x4 backward_source = multiply(multiply(multiply(
+                provider_camera.destination_clip_to_view, provider_camera.destination_view_to_world),
+                provider_camera.source_world_to_view), provider_camera.source_view_to_clip);
+            std::copy_n(forward_stereo.values, 16, in.forward_stereo);
+            std::copy_n(backward_source.values, 16, in.backward_source);
+            if (history_usable) {
+                const auto as_matrix = [](const std::array<float, 16>& values) noexcept {
+                    Matrix4x4 m; std::copy(values.begin(), values.end(), m.values); return m;
+                };
+                const Matrix4x4 forward_history = multiply(multiply(multiply(
+                    as_matrix(history.camera.clip_to_view), as_matrix(history.camera.view_to_world)),
+                    provider_camera.destination_world_to_view), provider_camera.destination_view_to_clip);
+                const Matrix4x4 backward_history = multiply(multiply(multiply(
+                    provider_camera.destination_clip_to_view, provider_camera.destination_view_to_world),
+                    as_matrix(history.camera.world_to_view)), as_matrix(history.camera.view_to_clip));
+                std::copy_n(forward_history.values, 16, in.forward_history);
+                std::copy_n(backward_history.values, 16, in.backward_history);
+                if (in.use_history_motion) {
+                    const Matrix4x4 forward_history_previous = multiply(multiply(multiply(
+                        as_matrix(history.camera.clip_to_view), as_matrix(history.camera.view_to_world)),
+                        as_matrix(history.camera_previous.world_to_view)), as_matrix(history.camera_previous.view_to_clip));
+                    std::copy_n(forward_history_previous.values, 16, in.forward_history_previous);
+                }
+            }
+            impl_->osr_full.record(impl_->device.Get(), command_list, in);
+            OsrFullHistory kept{};
+            kept.publication = guide.publication; kept.stream = guide.stream; kept.epoch = guide.epoch;
+            // Composed motion value x guide scale = pixels of the guide's motion
+            // grid, which is the depth grid (the windows are checked equal).
+            kept.motion_scale[0] = guide.scale_x; kept.motion_scale[1] = guide.scale_y;
+            kept.dejitter[0] = in.source_dejitter[0]; kept.dejitter[1] = in.source_dejitter[1];
+            std::copy_n(provider_camera.source_view_to_world.values, 16, kept.camera.view_to_world.begin());
+            std::copy_n(provider_camera.source_world_to_view.values, 16, kept.camera.world_to_view.begin());
+            std::copy_n(provider_camera.source_view_to_clip.values, 16, kept.camera.view_to_clip.begin());
+            std::copy_n(provider_camera.source_clip_to_view.values, 16, kept.camera.clip_to_view.begin());
+            impl_->osr_full.record_history_update(command_list, in, kept);
+            final_color.texture = impl_->osr_full.output();
+            final_color.initial_state = D3D12_RESOURCE_STATE_COMMON;
+            // 1310: a = effective mode (bits 8+), history used (bit 0) and
+            // history motion used (bit 1); b = publication, c = the history
+            // frame's publication.
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                (static_cast<std::int64_t>(effective_mode) << 8) | (history_usable ? 1 : 0) | (in.use_history_motion ? 2 : 0),
+                1310, guide.publication, history.publication);
+            // 1312: the de-jitter applied to the source depth this frame:
+            // result = float bits of (window fraction x, y) packed high/low,
+            // b = publication, c = float bits of (jitter x, y) packed high/low.
+            {
+                const auto pack = [](float x, float y) noexcept {
+                    std::uint32_t a{}, b{};
+                    std::memcpy(&a, &x, sizeof(a)); std::memcpy(&b, &y, sizeof(b));
+                    return (static_cast<std::uint64_t>(a) << 32) | b;
+                };
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                    static_cast<std::int64_t>(pack(depth_window->fraction_x, depth_window->fraction_y)),
+                    1312, guide.publication, pack(guide.jitter_x, guide.jitter_y));
+            }
+            if (two_frame_capture_active()) {
+                TwoFrameImageInfo stereo{};
+                stereo.stage = "osr_stereo_depth";
+                stereo.stream = guide.stream;
+                stereo.capture_serial = guide.publication;
+                stereo.eye = static_cast<std::int32_t>(peer_eye);
+                const auto stereo_desc = impl_->osr_full.stereo_depth()->GetDesc();
+                stereo.width = static_cast<std::uint32_t>(stereo_desc.Width);
+                stereo.height = stereo_desc.Height;
+                two_frame_capture_record_ng_x(stereo, impl_->device.Get(), command_list,
+                    impl_->osr_full.stereo_depth(), impl_->osr_full.stereo_depth_state());
+                TwoFrameImageInfo resolved{};
+                resolved.stage = "osr_resolved";
+                resolved.stream = guide.stream;
+                resolved.capture_serial = guide.publication;
+                resolved.eye = static_cast<std::int32_t>(peer_eye);
+                resolved.width = static_cast<std::uint32_t>(color_desc.Width);
+                resolved.height = color_desc.Height;
+                two_frame_capture_record_ng_x(resolved, impl_->device.Get(), command_list,
+                    impl_->osr_full.resolved(), impl_->osr_full.resolved_state());
+            }
+        } else if (impl_->native) {
+            // Native has no provider to fall back to (Full OSR could not
+            // prepare, 1311): this frame keeps the producer's peer eye.
+            result = E_NOINTERFACE;
+        } else {
         {
         AfwProviderCopyScope provider_copy_scope(impl_->renderer);
         impl_->clean_frame_buffers=false;
@@ -2453,17 +2755,10 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
                 S_OK,1005,provider_copy_scope.repaired(),guide.publication);
         }
-        report_stage(AfwStage::evaluate_end, S_OK, source_eye,
-            guide.publication);
-        impl_->gpu_timing.mark(command_list,2);
-        result = S_OK;
         if (params.output_eye_frame_buffer == nullptr ||
             params.output_eye_frame_buffer->color.texture == nullptr) {
             result = E_FAIL;
         } else {
-            TextureDesc destination{};
-            destination.texture = destination_color;
-            destination.initial_state = D3D12_RESOURCE_STATE_COMMON;
             TextureDesc generated = params.output_eye_frame_buffer->color;
             const auto generated_desc = generated.texture->GetDesc();
             const auto& expected_generated=quality_divisor>1 ? input.color.texture->GetDesc() : destination_desc;
@@ -2481,7 +2776,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     two_frame_capture_record_ng_x(returned, impl_->device.Get(),
                         command_list, generated.texture, generated.initial_state);
                 }
-                TextureDesc final_color = generated;
+                final_color = generated;
                 if(quality_divisor>1) {
                     auto* expanded=impl_->color_scale.expanded();
                     impl_->color_scale.record(impl_->device.Get(),command_list,generated.texture,generated.initial_state,
@@ -2515,22 +2810,31 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                         1300, guide.publication,
                         (static_cast<std::uint64_t>(effective_mode) << 8) | (have_history ? 1u : 0u));
                 }
-                copy(impl_->renderer, command_list, destination, final_color,
-                    color_box, 0, 0);
-                report_stage(AfwStage::output_copied, S_OK, source_eye,
-                    guide.publication);
-                if (two_frame_capture_active()) {
-                    TwoFrameImageInfo output{};
-                    output.stage = "afw_generated_eye";
-                    output.stream = guide.stream;
-                    output.capture_serial = guide.publication;
-                    output.eye = static_cast<std::int32_t>(1U - source_eye);
-                    output.width = static_cast<std::uint32_t>(color_desc.Width);
-                    output.height = color_desc.Height;
-                    two_frame_capture_record_ng_x(output, impl_->device.Get(),
-                        command_list, destination_color,
-                        D3D12_RESOURCE_STATE_COMMON);
-                }
+            }
+        }
+        }
+        report_stage(AfwStage::evaluate_end, S_OK, source_eye,
+            guide.publication);
+        impl_->gpu_timing.mark(command_list,2);
+        if (SUCCEEDED(result)) {
+            TextureDesc destination{};
+            destination.texture = destination_color;
+            destination.initial_state = D3D12_RESOURCE_STATE_COMMON;
+            copy(impl_->renderer, command_list, destination, final_color,
+                color_box, 0, 0);
+            report_stage(AfwStage::output_copied, S_OK, source_eye,
+                guide.publication);
+            if (two_frame_capture_active()) {
+                TwoFrameImageInfo output{};
+                output.stage = "afw_generated_eye";
+                output.stream = guide.stream;
+                output.capture_serial = guide.publication;
+                output.eye = static_cast<std::int32_t>(1U - source_eye);
+                output.width = static_cast<std::uint32_t>(color_desc.Width);
+                output.height = color_desc.Height;
+                two_frame_capture_record_ng_x(output, impl_->device.Get(),
+                    command_list, destination_color,
+                    D3D12_RESOURCE_STATE_COMMON);
             }
         }
         if (osr_recorded) impl_->osr.finish(command_list);
@@ -2541,6 +2845,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             guide.publication);
         if (FAILED(close_result) || FAILED(result)) {
             if (osr_recorded) impl_->osr.discard();
+            if (full_osr) impl_->osr_full.discard();
             impl_->depth_staging_state = initial_depth_state;
             impl_->depth_calibration_contracts = initial_calibration_contracts;
             impl_->depth_calibration_reset_pending = initial_calibration_reset;
@@ -2577,6 +2882,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         }
         if (SUCCEEDED(result)) {
             embedded::report_afw_shading_rate(impl_->active_shading_rate);
+            if (full_osr) impl_->osr_full.commit();
             impl_->last_submission_fence = fence_value;
             impl_->last_evaluated_publication = guide.publication;
             impl_->last_evaluated_eye = source_eye;

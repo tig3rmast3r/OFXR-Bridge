@@ -286,6 +286,11 @@ void wording() {
     check(interface_status_text(s).find("AFW + OSR: Active")!=std::string::npos, "OSR band fill is explicit in the status line");
     s.desired.nr_enabled=false;s.runtime.nr_running=false;
     check(interface_state_text(s)=="FSR + AFW + OSR", "OSR label without neural");
+    s.desired.luke_osr=2;
+    check(interface_state_text(s)=="FSR + OSR", "Full OSR replaces AFW in the mode label");
+    check(interface_status_text(s).find("OSR: Active")!=std::string::npos && interface_status_text(s).find("AFW")==std::string::npos, "Full OSR replaces AFW in the status line");
+    s.desired.nr_enabled=true;s.runtime.nr_running=true;
+    check(interface_state_text(s)=="FSR + OSR + Neural", "Full OSR label with neural");
     s.desired.luke_osr=0;s.desired.nr_enabled=true;s.runtime.nr_running=true;
     s.runtime.afw_running=false;s.runtime.nr_running=false;
     check(interface_status_text(s).find("AFW: Waiting | Neural Render: Waiting")!=std::string::npos, "enabled without output is waiting");

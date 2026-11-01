@@ -290,13 +290,17 @@ bool framewarp(Settings& draft, const Snapshot& state) {
     if(state.connected && (state.runtime.pacing_mode==kAfwOnlyPacingMode)!=draft.afw_only)
         ImGui::TextWrapped("AFW Only change saved. Restart the game to apply it.");
     changed |= ImGui::Combo("Reconstruction", &draft.luke_osr,
-        "AFW\0AFW + OSR band fill\0");
-    ImGui::TextWrapped(draft.luke_osr
+        "AFW\0AFW + OSR band fill\0Full OSR\0");
+    ImGui::TextWrapped(draft.luke_osr==2
+        ? "Full OSR (OFXR Stereo Reconstruction): OFXR renders the other eye itself from the same inputs AFW receives: the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame for what the real eye cannot see. PureDark's AFW plugin is not loaded. Applies live."
+        : draft.luke_osr==1
         ? "OSR (OFXR Stereo Reconstruction) band fill: OFXR's own fill of the band beside near objects that neither the other eye nor the previous frame can see, the streaks AFW leaves while strafing. Same inputs as AFW, applies live."
         : "AFW output as is.");
     changed |= ImGui::Checkbox("Advanced parameters", &draft.luke_advanced);
     if (draft.luke_advanced) {
-        if (draft.luke_osr) {
+        if (draft.luke_osr==2)
+            ImGui::TextWrapped("Full OSR uses Framewarp mode (Alternate eye = no previous frame), Debug framewarp (previous-frame pixels green, inpainted pixels magenta) and Depth dilation. The shading rate and Ignore motion are AFW's own.");
+        if (draft.luke_osr==1) {
             changed |= ImGui::SliderInt("Band fill", &draft.luke_osr_fill, 1, 8, "x%d");
             ImGui::TextWrapped("How much of the band is filled at slow strafes. 1 fills only what no viewpoint saw; 2 fills the whole band once the eye clearly leads. Nothing is filled standing still or in the trailing eye.");
             changed |= ImGui::SliderInt("Band cover", &draft.luke_osr_cover, 0, 8, "%d texels");

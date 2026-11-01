@@ -40,7 +40,7 @@ struct AfwSettings {
     float ignore_motion_threshold{2.5F};
     int shading_rate{}; // beta6 Combined: 0=1x1, 1=1x2, ... 8=4x4
     int depth_dilate_mode{}; // 0 off, 1 horizontal 1x3, 2 square 3x3
-    bool osr{}; // OSR (OFXR Stereo Reconstruction) band fill on the provider output, docs/OSR_HOLE_FILL.md
+    int osr{}; // OSR (OFXR Stereo Reconstruction): 0 off, 1 band fill on the provider output (docs/OSR_HOLE_FILL.md), 2 full reconstruction (docs/OSR_FULL_WARP.md)
     int osr_cover{};  // OSR: band cover in depth texels beyond the hole on the background side, 0..8
     int osr_trim{};   // OSR: depth texels of the object's smeared edge replaced too, 0..2
     int osr_fill{2};  // OSR: band fill gain on (1 - t), 1..8; 1 = history model only
