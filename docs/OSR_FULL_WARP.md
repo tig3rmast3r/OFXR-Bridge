@@ -210,7 +210,10 @@ the generated eye.
    twig for instance, or the warp missed it; it is tagged moved and filled
    like a hole. (An earlier rule compared the history depth with the band's
    background edge; against the sky that rejected every frond behind a neon
-   sign and striped the band with mirror fill.)
+   sign and striped the band with mirror fill.) A camera-attached history
+   surface is always legitimate band content: both tests reproject it as
+   world geometry, and while strafing they failed on the weapon's own side
+   faces, so the inpaint mirrored a second copy of the weapon into them.
 4. **Inpaint.** Every pixel that is not a stereo pixel belongs to a band: a
    run of history, moved and hole pixels along the row between two stereo
    pixels. The nearer bounding pixel is the occluder; the band is background

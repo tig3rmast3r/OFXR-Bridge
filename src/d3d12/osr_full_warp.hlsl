@@ -790,7 +790,14 @@ void OsrFullResolve(uint3 id : SV_DispatchThreadID) {
         return;
     }
     if (history && resolve_history(c, depth_pixel, ndc, true, color, word)) {
-        const bool legitimate = hidden_from_source(ndc, asfloat(word & ~3u)) ||
+        // A camera-attached surface (the first-person weapon) keeps its screen
+        // place; both tests below reproject it as world geometry, which it is
+        // not. While strafing they failed on the weapon's own side faces that
+        // only this eye sees, and the inpaint mirrored a second copy of the
+        // weapon into them: a double image in parts of the weapon, orange
+        // (moved) in debug.
+        const bool legitimate = (word & HistoryLockedBit) != 0 ||
+            hidden_from_source(ndc, asfloat(word & ~3u)) ||
             history_ray_unchanged(ndc, asfloat(word & ~3u));
         WarpedOut[id.xy] = legitimate ? color : 0;
         ResolvedOut[id.xy] = (word & ~3u) | (legitimate ? TagHistory : TagMoved);
