@@ -289,9 +289,29 @@ int main(int argc,char** argv) {
             legacy_snapshot.layers[0].views[1].pose.position.x==1,"absent OSR receipt preserves the existing AFW/pass-through metadata");
         std::puts("OSR fresh/held terminal metadata, unchanged source/orientation/FOV/time and legacy PASS");return 0;
     }
+    if(route=="rife-unsupported-ack") {
+        xrfg_fixture::ControlProfile profile;
+        auto desired=xrfg::autonomous::snapshot().desired;
+        xrfg::autonomous::select_generation(desired,4,2);desired.rife_multiplier=3;
+        check(xrfg::autonomous::request(desired),"unsupported legacy RIFE3 UI request");
+        xrfg::autonomous::apply_runtime_settings();
+        auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());state->handle=reinterpret_cast<XrSession>(2);
+        state->graphics_binding=SessionGraphicsBinding::d3d11;
+        state->menu_enabled=true;state->nvidia_options.rife_model=3;state->nvidia_options.rife_multiplier=2;
+        check(apply_embedded_control(state)==E_NOTIMPL,"legacy transport must refuse unsupported multi-output RIFE");
+        const auto receipt=xrfg::embedded::snapshot();
+        check(!receipt.pending && receipt.errors && receipt.last_error==E_NOTIMPL,
+            "unsupported RIFE revision must finish pending with an explicit error");
+        check(state->menu_enabled && state->nvidia_options.rife_multiplier==2,
+            "refused RIFE3 request must preserve the previous enable state and multiplier");
+        std::puts("Unsupported RIFE3: explicit acknowledgement/error, no perpetual Applying settings, previous2X preserved PASS");
+        return 0;
+    }
+    const bool rife_msfs=route.starts_with("rife-msfs");
+    const bool rife_inherited=rife_msfs && route.find("inherited")!=std::string::npos;
     const auto overlap_tag=route.find("-app-overlap");
-    const bool rife_app_overlap=overlap_tag!=std::string::npos;
-    if(rife_app_overlap)route.erase(overlap_tag,std::string("-app-overlap").size());
+    const bool rife_app_overlap=overlap_tag!=std::string::npos || rife_msfs;
+    if(overlap_tag!=std::string::npos)route.erase(overlap_tag,std::string("-app-overlap").size());
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
     const bool adaptive_framework=route.starts_with("adaptive-framework-");
     const bool adaptive_director=route.starts_with("adaptive-director-");
@@ -314,14 +334,14 @@ int main(int argc,char** argv) {
     const unsigned rife_latency_factor=route.find("latency3")!=std::string::npos?3:4;
     const bool rife_report=route=="rife-report";
     const bool rife_replay=route=="rife-replay";
-    const bool rife_switch=route.starts_with("rife-switch") || (rife_luke && route.find("switch")!=std::string::npos);
+    const bool rife_switch=(rife_msfs && route.find("switch")!=std::string::npos) || route.starts_with("rife-switch") || (rife_luke && route.find("switch")!=std::string::npos);
     const bool rife_stress=route.find("stress")!=std::string::npos;
     const bool rife_large=route.find("headset")!=std::string::npos;
     const bool rife_buffer3=route.find("buffer3")!=std::string::npos;
     const unsigned rife_phase_frames=rife_stress?64:12;
     const int rife_pacing=route.ends_with("director")?1:0;
     const bool rife_fast=route.find("fast")!=std::string::npos;
-    const unsigned rife_factor=rife_luke?(rife_switch?2:rife_luke_factor):rife_overlap?rife_overlap_factor:rife_tail?rife_tail_factor:rife_latency?rife_latency_factor:(rife_report||rife_replay)?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
+    const unsigned rife_factor=rife_msfs?2:rife_luke?(rife_switch?2:rife_luke_factor):rife_overlap?rife_overlap_factor:rife_tail?rife_tail_factor:rife_latency?rife_latency_factor:(rife_report||rife_replay)?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
     if(rife_factor)route=rife_luke?(rife_pacing?"hfw-solo-luke-d11-new":"hfw-luke-d11-new"):rife_overlap?"solo-new":"new";
 
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
@@ -361,7 +381,7 @@ int main(int argc,char** argv) {
     if(benchmark_sequence)route=benchmark_dlssg_sequence?"solo-dlssg3":"solo-djules3";
     const bool off_session_probe=route=="off-pacing-session";if(off_session_probe)route="session";
     framework_session_probe=route=="framework-session";if(framework_session_probe)route="session";
-    const bool measured=route.starts_with("metrics-")||rife_latency;if(route.starts_with("metrics-"))route=route.substr(8);
+    const bool measured=route.starts_with("metrics-")||rife_latency||rife_msfs;if(route.starts_with("metrics-"))route=route.substr(8);
     if(route.starts_with("no-origin-"))route=route.substr(10);
     const bool deep=route.starts_with("deep-");if(deep)route=route.substr(5);
     const bool toggling=route.starts_with("toggle-");if(toggling)route=route.substr(7);
@@ -371,7 +391,7 @@ int main(int argc,char** argv) {
     const bool canonical=route.starts_with("canonical-");if(canonical)route=route.substr(10);
     const bool pooled=route.starts_with("pooled-");if(pooled)route=route.substr(7);
     const bool unpooled=route.starts_with("unpooled-");if(unpooled)route=route.substr(9);
-    const bool split_eyes=pooled || unpooled;
+    const bool split_eyes=pooled || unpooled || rife_msfs;
     const bool separate_queue=route.starts_with("separate-");if(separate_queue)route=route.substr(9);
     int a{},b{};if(route.size()>3 && route[route.size()-3]=='-'){a=route[route.size()-2]-'0';b=route.back()-'0';route.resize(route.size()-3);}
     const bool switching=route=="switch";if(switching)route="new";
@@ -1003,7 +1023,7 @@ int main(int argc,char** argv) {
     // SDK limited to one generated frame it would instead test an unrelated
     // prefer_fps scheduling change while repeating the same 2X Fast policy.
     const unsigned benchmark_policy_phases=benchmark_dlssg_sequence && !benchmark_dlssg_transition && state->native_dlss_generated_frames<2?6:7;
-    const unsigned input_count=rife_latency?64:rife_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:8;
+    const unsigned input_count=rife_latency?64:rife_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:rife_msfs?64:8;
     if(benchmark_sequence) {
         std::fprintf(stderr,"BENCH policies=%u real_inputs=%u actual_3x_to_2x_transition=%u explicit_prefer_fps_transition_diagnostic=%u memory_sampling=%s\n",
             benchmark_policy_phases,input_count,unsigned(benchmark_policy_phases==7 &&
@@ -1132,16 +1152,33 @@ int main(int argc,char** argv) {
             }
             released.get();
             check(captured,"RIFE next source Release/capture waited for old batch delivery admission after GPU completion");
-        } else f.write(chain,color);
-        if(split_eyes)f.write(right,color+7);
+        } else if(!rife_msfs)f.write(chain,color);
+        if(split_eyes && !rife_msfs)f.write(right,color+7);
         if(panel_test)f.write(panel_chain,30+n);
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=image_width;g->output_height=g->depth_height=g->motion_height=image_height;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
         if(overlap_wait_ready){prediction=overlap_prediction;overlap_wait_ready=false;}
-        else xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");
-        xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
-        if(measured)if(auto cycle=state->interface_waited_cycle.load())measured_cycles.push_back(std::move(cycle));
+        else xr_ok(rife_msfs?layer_wait_frame(state->handle,nullptr,&prediction):layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");
+        std::future<XrFrameState> next_wait;
+        const auto saved_rife_model=state->nvidia_options.rife_model;
+        if(rife_inherited && n==3)state->nvidia_options.rife_model=-1; // legacy optical owner before the RIFE selection
+        if(rife_msfs && n<input_count) {
+            std::promise<void> entered;auto started=entered.get_future();
+            next_wait=std::async(std::launch::async,[&state,entered=std::move(entered)]() mutable {
+                XrFrameState next{XR_TYPE_FRAME_STATE};entered.set_value();
+                xr_ok(layer_wait_frame(state->handle,nullptr,&next),"MSFS next-thread public Wait");return next;
+            });
+            started.wait();std::this_thread::sleep_for(300us);
+        }
+        xr_ok(rife_msfs?layer_begin_frame(state->handle,nullptr):layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
+        if(measured)if(auto cycle=state->interface_active_cycle.load())measured_cycles.push_back(std::move(cycle));
+        if(rife_msfs) {
+            if(next_wait.valid()){overlap_prediction=next_wait.get();overlap_wait_ready=true;}
+            state->nvidia_options.rife_model=saved_rife_model;
+            if(rife_inherited && n==3)check(state->pipelined_presenter_mode,"inherited optical overlap must exercise the production legacy promotion");
+            f.write(chain,color);f.write(right,color+7);
+        }
         std::array<XrCompositionLayerProjectionView,2> views;
         for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={int(image_width),int(image_height)};}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
@@ -1155,6 +1192,11 @@ int main(int argc,char** argv) {
                 panel_layers[i+1]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);}
             end.layerCount=3;end.layers=panel_layers.data();
         }
+        if(rife_inherited && n==5) {
+            auto desired=xrfg::autonomous::snapshot().desired;desired.rife_multiplier=3;
+            check(xrfg::autonomous::request(desired),"actual GUI RIFE3 request while legacy overlap owner exists");
+        }
+        if(rife_msfs)end.displayTime+=period;
         if(rife_replay) {
             // Exact app timestamp gap of the first failing V739 pair; image
             // captures and real runtime delivery remain independently owned.
@@ -1169,7 +1211,7 @@ int main(int argc,char** argv) {
             ok(state->d3d12_synthesis_queue->Wait(rife_overlap_compute_gate.Get(),1),
                 "hold C compute while the presenter retires B");
         }
-        if(rife_app_overlap && n<input_count) {
+        if(rife_app_overlap && !rife_msfs && n<input_count) {
             xr_ok(layer_wait_frame_impl(state->handle,nullptr,&overlap_prediction),"next application Wait precedes current End");
             overlap_wait_ready=true;
             check(continuous_presenter_active(state) || state->application_frame_has_overlapping_wait,
@@ -1203,7 +1245,12 @@ int main(int argc,char** argv) {
             xr_ok(producer.get(),"shipping End while native End is withheld");
             check(independent,"bridge acceptance returns to game before blocked native End with spare credits");
         } else {
-            const auto submitted=layer_end_frame_impl(state->handle,&end);
+            const auto submitted=rife_msfs?layer_end_frame(state->handle,&end):layer_end_frame_impl(state->handle,&end);
+            if(rife_inherited && n==5) {
+                const auto ack=xrfg::embedded::snapshot();
+                std::fprintf(stderr,"RIFE3_ACK pending=%u errors=%u active_factor=%u legacy=%u\n",ack.pending,ack.errors,rife_frames(*state),unsigned(state->pipelined_presenter_mode));
+                check(!ack.pending && !ack.errors && rife_frames(*state)==3,"RIFE3 must finish Applying settings and activate the requested multiplier");
+            }
             xr_ok(submitted,"shipping OFXR End handoff");
         }
         if(rife_overlap && n==4) {
@@ -1519,6 +1566,15 @@ int main(int argc,char** argv) {
         const auto m=xrfg::autonomous::snapshot().runtime.telemetry;
         std::fprintf(stderr,"Measured scalar check: minimum=%.9f delay=%.9f producer=%.9f cycle=%.9f ms\n",
             m.cycle_estimated_ms,m.ofxr_delay_ms,m.ofxr_time_ms,m.cycle_length_ms);
+        unsigned have_native{},required_count{},readable{},minimum_ok{};
+        for(const auto& c:measured_cycles) {
+            bool required{};xrfg::InterfaceNativeTiming native;const auto have=c->native_timing(required,native);
+            have_native+=have;required_count+=required;float a{},b{},e{};
+            readable+=c->read(have?native.returned_ns:xrfg::interface_clock_ns(),a,b);
+            minimum_ok+=c->read_minimum_cycle(have?native.returned_ns:xrfg::interface_clock_ns(),e);
+        }
+        std::fprintf(stderr,"CYCLE_DIAG total=%zu required=%u native=%u readable=%u minimum=%u active=%p pending=%zu mode=%u\n",measured_cycles.size(),required_count,have_native,readable,minimum_ok,state->interface_active_cycle.load().get(),state->pending_frames.size(),unsigned(state->pipelined_presenter_mode));
+        if(rife_msfs)check(have_native>=32,"steady MSFS timing must keep native receipts beyond the first warm frames");
         check(m.cycle_valid && m.cycle_estimated_valid,"shipping generator publishes XR interval and runtime completion independently of engine origin");
         check(!m.game_time_valid,"abandoned Game timing stays absent without hiding the corrected Excel estimate");
         check(m.cycle_source==xrfg::InterfaceSource::native_frame_cycle_qpc && m.cycle_estimated_source==xrfg::InterfaceSource::native_minimum_cycle_qpc,"all shipping route measurements reach native director endpoint");
@@ -1580,6 +1636,8 @@ int main(int argc,char** argv) {
     }
     if(rife_app_overlap)check(!state->pipelined_presenter_mode,
         "private RIFE must not enter legacy presenter mode when application frames overlap");
+    if(rife_inherited)check(f.real_ends>=1+(input_count-8)*3,
+        "RIFE3 acknowledgement alone is insufficient: native outputs must include the extra intermediates");
     f.transport->stop();
     for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
     xr_ok(layer_destroy_swapchain_impl(chain),"shipping destroy");

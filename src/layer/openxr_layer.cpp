@@ -15861,6 +15861,32 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     const bool previously_enabled = state->menu_enabled;
     if (continuous_presenter_active(state))
         static_cast<void>(wait_for_presenter_idle(state));
+    if(state->private_runtime && state->pipelined_presenter_mode && control.desired.enabled &&
+        control.desired.rife_model>=0 && !state->luke_afw_enabled &&
+        state->graphics_binding==SessionGraphicsBinding::d3d12 && !state->d3d11_bridge && !state->vulkan_bridge) {
+        // An optical route may have promoted before RIFE was selected. Its
+        // legacy overlap owner is not a hardware restriction on private RIFE.
+        // Drain/join it before validating and bootstrapping the native worker.
+        stop_continuous_presenter(state);
+        state->pipelined_presenter_mode=false;
+        state->pipelined_presenter_start_requested=false;
+        state->presenter_start_requested=false;
+        // The old presenter owned the virtual Wait/Begin for this boundary;
+        // the application Begin was deliberately a no-op in that mode. Open
+        // the prime's virtual cycle explicitly before returning to inline
+        // bootstrap. These dispatch calls belong to the private endpoint,
+        // never to SteamVR's independently owned physical frame loop.
+        XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};
+        XrFrameState slot{XR_TYPE_FRAME_STATE};
+        XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+        auto adopted=state->dispatch->wait_frame(state->handle,&wait,&slot);
+        if(XR_SUCCEEDED(adopted))adopted=state->dispatch->begin_frame(state->handle,&begin);
+        if(XR_FAILED(adopted))return E_FAIL;
+        state->last_inline_frame_state=slot;state->last_inline_frame_state_valid=true;
+        state->runtime_frame_waited_unbegun=false;state->application_begin_needs_wait=false;
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::embedded_configuration,
+            829,control.revision,control.desired.rife_multiplier,1);
+    }
     // Retire the buffered consumer before taking capture/GPU locks for an
     // engine reconfiguration. Its completed packets may still need those owners.
     if(state->private_runtime && state->dispatch->steamvr_runtime &&
@@ -15907,7 +15933,17 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     options.rife_model=control.desired.rife_model;
     options.rife_resolution_percent=control.desired.rife_resolution;
     options.rife_multiplier=control.desired.rife_multiplier;
-    if(control.desired.enabled && !state->afw_only && options.rife_model>=0 && options.rife_multiplier>2 && !rife_multiframe_capable(*state))return E_NOTIMPL;
+    if(control.desired.enabled && !state->afw_only && options.rife_model>=0 && options.rife_multiplier>2 && !rife_multiframe_capable(*state)) {
+        // A refused revision must be observable as an error, not an eternal
+        // pending transaction. Preserve the already-working route/enable state.
+        state->menu_enabled=previously_enabled;state->control_revision=control.revision;
+        xrfg::embedded::applied(state->control_id,control.revision,previously_enabled,E_NOTIMPL);
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::embedded_configuration,
+            E_NOTIMPL,control.revision,options.rife_multiplier,
+            (state->private_runtime?1ULL:0ULL)|(state->pipelined_presenter_mode?2ULL:0ULL)|
+            (state->d3d11_bridge?4ULL:0ULL)|(state->vulkan_bridge?8ULL:0ULL)|(state->luke_afw_enabled?16ULL:0ULL));
+        return E_NOTIMPL;
+    }
     options.rife_async=options.rife_model>=0 && async_rife_queue(*state);
     if(hybrid_ready) {
         options.hybrid=true; options.input_scale=xrfg::D3D12NvidiaInputScale::quarter;
@@ -16691,7 +16727,7 @@ XrResult layer_end_frame_impl(
         state->application_frame_has_overlapping_wait;
     const bool application_frame_in_progress =
         state->application_frame_in_progress;
-    const bool pipelined_presenter_mode = state->pipelined_presenter_mode;
+    bool pipelined_presenter_mode = state->pipelined_presenter_mode;
     // Both promotions hand the presenter its first frame at the top of an
     // xrEndFrame, before the inline second cycle runs, so the handoff never
     // overlaps a frame this thread has already submitted.
@@ -16702,19 +16738,19 @@ XrResult layer_end_frame_impl(
     const bool match_latest_by_submission =
         application_frame_in_progress && !consume_in_submission_order;
     if (interface_entered_ns) {
-        const auto interface_frame = latest_pending_application_frame(state,
-            end_info ? end_info->displayTime : 0, consume_in_submission_order, match_latest_by_submission);
-        if (interface_frame && interface_frame->interface_cycle == state->interface_active_cycle.load()) {
-            interface_stamp.cycle = interface_call.cycle = interface_frame->interface_cycle;
-        }
-        state->interface_active_cycle.store(nullptr);
+        // Begin owns the current call-cycle. A game may rewrite displayTime
+        // and overlap its next Wait: the pending prediction queue is then not
+        // an authority for the identity of this already-begun frame.
+        const auto begun_cycle=state->interface_active_cycle.exchange(nullptr);
+        if(application_frame_in_progress)
+            interface_stamp.cycle=interface_call.cycle=begun_cycle;
     }
     state->application_frame_in_progress = false;
     state->application_frame_has_overlapping_wait = false;
     if (!frame_had_overlapping_wait && !pipelined_presenter_mode) {
         state->pipelined_wait_streak = 0;
     }
-    const bool use_continuous_presenter = continuous_presenter_active(state);
+    bool use_continuous_presenter = continuous_presenter_active(state);
     if (use_continuous_presenter &&
         (end_info == nullptr || end_info->type != XR_TYPE_FRAME_END_INFO)) {
         return XR_ERROR_VALIDATION_FAILURE;
@@ -16759,6 +16795,14 @@ XrResult layer_end_frame_impl(
             S_OK, 126,
             startup_request->stream, startup_request->epoch);
     const HRESULT control_result = apply_embedded_control(state, startup_request.has_value(), end_info);
+    if(state->private_runtime && desired_control.desired.rife_model>=0 &&
+        pipelined_presenter_mode && !state->pipelined_presenter_mode) {
+        // Reconfiguration may have retired an inherited legacy owner. Do not
+        // enqueue this boundary through a stale pre-transaction mode snapshot.
+        use_continuous_presenter=continuous_presenter_active(state);
+        pipelined_presenter_mode=state->pipelined_presenter_mode;
+        pipelined_presenter_start_requested=false;
+    }
     // Multi-output RIFE cannot bootstrap through the inline 2X pair: that
     // path deliberately refuses extra destinations. Use the newly applied
     // multiplier and promote after the real prime closes the current XR cycle.
