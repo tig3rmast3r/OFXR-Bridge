@@ -35,8 +35,10 @@ runtime/rife/app/          # persistent worker and model code
 runtime/rife/runtime.json # download provenance
 ```
 
-The DLL searches its parent directories for `runtime/rife/python/python.exe`
-and `runtime/rife/app/worker.py`. Keep test builds under the laboratory tree.
+The tray resolves `runtime/rife` from its original package and passes that
+absolute path through its owned generated runtime INI. The staged AppData DLL
+uses that locator (v734); direct laboratory harnesses can also search their
+parent directories. Keep the tray's test build under the laboratory tree.
 The build ZIP does not duplicate the interpreter, Torch or weights. A system
 Python or installed CUDA toolkit is not required; a compatible NVIDIA driver
 is required. The process uses an isolated Python environment and a restricted

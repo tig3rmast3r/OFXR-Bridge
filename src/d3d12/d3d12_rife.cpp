@@ -1,4 +1,5 @@
 #include "xrfg/d3d12_rife.hpp"
+#include "xrfg/rife_runtime_locator.hpp"
 #include "rife_pack_shader.hpp"
 #include "rife_vertex_shader.hpp"
 #include "rife_unpack_shader.hpp"
@@ -27,13 +28,8 @@ std::filesystem::path runtime_path() {
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
         reinterpret_cast<LPCWSTR>(&runtime_path),&module);
     wchar_t file[32768]{}; if(!GetModuleFileNameW(module,file,32768))throw E_FAIL;
-    auto folder=std::filesystem::path(file).parent_path();
-    for(unsigned i=0;i<12 && !folder.empty();++i,folder=folder.parent_path()){
-        auto candidate=folder/L"runtime"/L"rife";
-        if(std::filesystem::is_regular_file(candidate/L"python"/L"python.exe") &&
-           std::filesystem::is_regular_file(candidate/L"app"/L"worker.py")) return candidate;
-        if(folder==folder.parent_path())break;
-    }
+    const auto runtime=staged_rife_runtime(std::filesystem::path(file).parent_path());
+    if(!runtime.empty())return runtime;
     throw HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
 }
 class Worker {

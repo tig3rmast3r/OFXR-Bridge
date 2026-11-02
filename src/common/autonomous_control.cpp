@@ -80,7 +80,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 78801;
+constexpr std::uint32_t kAbi = 78901;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
