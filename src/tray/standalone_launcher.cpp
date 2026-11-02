@@ -263,6 +263,8 @@ LauncherSettings parse_settings(std::string_view text) {
                         lower_ascii(value) == "true";
                 } else if (key == "overlay_position") {
                     settings.overlay_position = parse_overlay_position(lower_ascii(value));
+                } else if (key == "overlay_enabled") {
+                    settings.overlay_enabled = value == "1" || lower_ascii(value) == "true";
                 } else if (key == "crash_debug") {
                     settings.crash_debug = value == "1" || lower_ascii(value) == "true";
                 } else if (key == "diagnostics") {
@@ -283,6 +285,8 @@ LauncherSettings parse_settings(std::string_view text) {
                     settings.logging_hotkey=lower_ascii(value);
                 } else if(key=="dump_hotkey") {
                     settings.dump_hotkey=lower_ascii(value);
+                } else if(key=="fps_counter_hotkey") {
+                    settings.fps_counter_hotkey=lower_ascii(value);
                 }
             }
         }
@@ -292,6 +296,9 @@ LauncherSettings parse_settings(std::string_view text) {
         offset = newline + 1;
     }
     if (!separation_seen) settings.separate_synthesis = settings.single_swapchain_rings;
+    if(settings.overlay_position==FpsOverlayPosition::off) {
+        settings.overlay_enabled=false;settings.overlay_position=FpsOverlayPosition::elliott_bottom;
+    }
     return settings;
 }
 
@@ -319,18 +326,20 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\ncrash_debug=" + (settings.crash_debug ? "1" : "0") +
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
            "\r\noverlay_position=" + overlay_position_name(settings.overlay_position) +
+           "\r\noverlay_enabled=" + (settings.overlay_enabled ? "1" : "0") +
            "\r\npause_hotkey=" + settings.pause_hotkey +
            "\r\nframegen_hotkey=" + settings.pause_hotkey +
            "\r\ninterface_hotkey=" + settings.interface_hotkey +
            "\r\nnr_hotkey=" + settings.nr_hotkey +
            "\r\nlogging_hotkey=" + settings.logging_hotkey +
            "\r\ndump_hotkey=" + settings.dump_hotkey +
+           "\r\nfps_counter_hotkey=" + settings.fps_counter_hotkey +
            (settings.rife_runtime_dir.empty() ? std::string{} : "\r\nrife_runtime_dir=" + settings.rife_runtime_dir) +
            "\r\n";
 }
 
-std::array<std::string*,5> keybind_settings(LauncherSettings& s) {
-    return {&s.interface_hotkey,&s.nr_hotkey,&s.pause_hotkey,&s.logging_hotkey,&s.dump_hotkey};
+std::array<std::string*,kKeybindCount> keybind_settings(LauncherSettings& s) {
+    return {&s.interface_hotkey,&s.nr_hotkey,&s.pause_hotkey,&s.logging_hotkey,&s.dump_hotkey,&s.fps_counter_hotkey};
 }
 Keybinds runtime_keybinds(const LauncherSettings& settings) {
     auto copy=settings;const auto values=keybind_settings(copy);Keybinds result;
@@ -646,7 +655,7 @@ std::string build_runtime_ini(
            "\r\nmax_file_mb=" + std::to_string(max_file_mb) +
            "\r\nflush_each_event=" + (flush_each_event ? "1" : "0") + "\r\n"
            "timing_capture=0\r\npose_cadence_capture=0\r\ngpu_instrumentation_enabled=0\r\n"
-           "\r\n[overlay]\r\nposition=" + overlay_position_name(settings.overlay_position) + "\r\n";
+           "\r\n[overlay]\r\nposition=" + overlay_position_name(settings.overlay_enabled?settings.overlay_position:FpsOverlayPosition::off) + "\r\n";
 }
 
 std::string build_runtime_ini(
@@ -675,6 +684,7 @@ std::string build_runtime_ini(
     settings.afw_only=desired.afw_only;
     settings.diagnostics = desired.diagnostics;
     settings.overlay_position = static_cast<FpsOverlayPosition>(desired.overlay_position);
+    settings.overlay_enabled = desired.overlay_enabled;
     std::string result = build_runtime_ini(settings, max_file_mb, flush_each_event);
     const auto replace_value = [&](std::string_view key, std::string_view value) {
         const std::string prefix = "\r\n" + std::string(key) + "=";

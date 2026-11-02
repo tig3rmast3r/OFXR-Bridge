@@ -18,15 +18,19 @@
 namespace xrfg::autonomous {
 inline std::atomic_uint64_t applied_runtime_revision{};
 inline std::atomic_bool r19_camera_enabled{};
-inline void poll_diagnostic_logging_key() {
-    static DiagnosticKeyEdge logging,nr;
-    const bool log_pressed=logging.poll(KeybindAction::logging),nr_pressed=nr.poll(KeybindAction::nr);
-    if(!log_pressed && !nr_pressed)return;
+inline void apply_toggle_shortcuts(bool log_pressed,bool nr_pressed,bool counter_pressed) {
+    if(!log_pressed && !nr_pressed && !counter_pressed)return;
     const auto base = snapshot().desired;
     auto edited = base;
     if(log_pressed)edited.diagnostics=!base.diagnostics;
     if(nr_pressed)edited.nr_enabled=!base.nr_enabled;
+    if(counter_pressed)edited.overlay_enabled=!base.overlay_enabled;
     request_changes(base, edited);
+}
+inline void poll_diagnostic_logging_key() {
+    static DiagnosticKeyEdge logging,nr,counter;
+    apply_toggle_shortcuts(logging.poll(KeybindAction::logging),nr.poll(KeybindAction::nr),
+        counter.poll(KeybindAction::fps_counter));
 }
 inline void apply_runtime_settings() {
     static std::mutex mutex;
@@ -58,7 +62,7 @@ inline void apply_runtime_settings() {
     if (!embedded::request_afw(a)) return;
     if (!embedded::set_djules_triple_frame_gen(s.triple_frame_gen)) return;
     if (!embedded::set_djules_prefer_fps(s.prefer_fps || s.triple_frame_gen)) return;
-    if (!embedded::set_overlay_setting(s.overlay_position)) return;
+    if (!embedded::set_overlay_setting(s.overlay_enabled?s.overlay_position:0)) return;
     if (!embedded::set_logging_setting(s.diagnostics)) return;
     neural_rendering::Settings n{};
     n.enabled=s.nr_enabled; n.before_sr=s.nr_before_sr; n.second_pass=s.nr_second_pass;

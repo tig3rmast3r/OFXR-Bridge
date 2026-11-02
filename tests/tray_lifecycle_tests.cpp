@@ -286,7 +286,7 @@ int main(int argc,char** argv) {
     if(argc>1 && std::string_view(argv[1])=="keybind-child") {
         require(xrfg::autonomous::initialize_game_configuration(L"KeybindChild.exe"),"bind child game profile");
         const auto keys=xrfg::autonomous::keybinds();
-        for(unsigned i=0;i<5;++i)if(keys.bindings.keys[i]!=xrfg::KeybindChord{6,VK_F17+i})return 1;
+        for(unsigned i=0;i<xrfg::kKeybindCount;++i)if(keys.bindings.keys[i]!=xrfg::KeybindChord{6,VK_F17+i})return 1;
         return 0;
     }
     Fixture isolated_control;

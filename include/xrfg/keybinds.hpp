@@ -4,13 +4,14 @@
 #include <cstddef>
 
 namespace xrfg {
-enum class KeybindAction : unsigned { open_interface, nr, framegen, logging, dump, count };
+enum class KeybindAction : unsigned { open_interface, nr, framegen, logging, dump, fps_counter, count };
+inline constexpr std::size_t kKeybindCount=static_cast<unsigned>(KeybindAction::count);
 struct KeybindChord {
     unsigned modifiers{},key{}; // RegisterHotKey MOD_* flags and Win32 VK code
     bool operator==(const KeybindChord&) const = default;
 };
 struct Keybinds {
-    std::array<KeybindChord,5> keys{{{0,0x79},{0,0x7a},{0,0x76},{0,0x78},{0,0x77}}};
+    std::array<KeybindChord,kKeybindCount> keys{{{0,0x79},{0,0x7a},{0,0x76},{0,0x78},{0,0x77},{0,0x75}}};
     bool operator==(const Keybinds&) const = default;
     const KeybindChord& operator[](KeybindAction action) const {return keys[static_cast<unsigned>(action)];}
 };

@@ -383,13 +383,26 @@ void actual_widgets() {
     require(snapshot().desired.afw_debug != enabled.desired.afw_debug,
         "real Luke debug checkbox publishes hot setting");
     headset.select_tab("Display");
-    headset.choose("Headset FPS counter", 5, "Elliottate's follow controller", "/Display_");
+    headset.choose("Counter type", 4, "Elliottate's follow controller", "/Display_");
     require(snapshot().desired.overlay_position == 5, "headset controller meter publishes existing display setting");
     tray.select_tab("Display");
-    tray.choose("Headset FPS counter", 6, "Elliottate's stick to bottom", "/Display_");
+    tray.choose("Counter type", 5, "Elliottate's stick to bottom", "/Display_");
     require(snapshot().desired.overlay_position == 6, "tray bottom meter preserves mode 6");
     headset.draw();
     require(headset.widgets.draft.overlay_position == 6, "both surfaces reflect new meter mode");
+    const bool counter_was_enabled=snapshot().desired.overlay_enabled;
+    headset.activate("/Display_", "On-screen FPS counter");headset.draw();headset.draw();
+    require(snapshot().desired.overlay_enabled!=counter_was_enabled && snapshot().desired.overlay_position==6,
+        "counter checkbox toggles visibility without discarding selected type");
+    tray.draw();tray.draw();
+    require(tray.widgets.draft.overlay_enabled==snapshot().desired.overlay_enabled,
+        "desktop reflects headset counter visibility");
+    tray.choose("Counter type", 0, "Upper left", "/Display_");
+    require(snapshot().desired.overlay_position==1 && snapshot().desired.overlay_enabled!=counter_was_enabled,
+        "type selection does not implicitly enable or disable the counter");
+    tray.activate("/Display_", "On-screen FPS counter");tray.draw();tray.draw();
+    require(snapshot().desired.overlay_enabled==counter_was_enabled && snapshot().desired.overlay_position==1,
+        "counter toggle restores the selected type");
     headset.activate("/Display_", "Diagnostic logging");
     headset.draw();
     require(snapshot().desired.diagnostics != enabled.desired.diagnostics,

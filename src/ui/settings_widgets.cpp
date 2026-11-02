@@ -452,8 +452,12 @@ bool neural(SettingsWidgetState& ui, const Snapshot& state) {
 
 bool display(SettingsWidgetState& ui, const Snapshot& state) {
     auto& draft=ui.draft;
-    bool changed = ImGui::Combo("Headset FPS counter", &draft.overlay_position,
-        "Off\0Upper left\0Upper right\0Lower left\0Lower right\0Elliottate's follow controller\0Elliottate's stick to bottom\0");
+    bool changed = ImGui::Checkbox("On-screen FPS counter", &draft.overlay_enabled);
+    int counter_type=draft.overlay_position-1;
+    if(ImGui::Combo("Counter type", &counter_type,
+        "Upper left\0Upper right\0Lower left\0Lower right\0Elliottate's follow controller\0Elliottate's stick to bottom\0")) {
+        draft.overlay_position=counter_type+1;changed=true;
+    }
     changed |= ImGui::Checkbox("Export status.json", &draft.status_json);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keeps FPS and latency readings active when all panels are closed.");
     changed |= ImGui::Checkbox("Diagnostic logging", &draft.diagnostics);

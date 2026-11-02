@@ -4726,7 +4726,8 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_sync_actions(
             (sync_info->countActiveActionSets != 0 && sync_info->activeActionSets == nullptr)) {
             return gesture.sync_actions(session, sync_info);
         }
-        if(xrfg::autonomous::snapshot().desired.overlay_position!=5)return gesture.sync_actions(session,sync_info);
+        const auto display=xrfg::autonomous::snapshot().desired;
+        if(!display.overlay_enabled || display.overlay_position!=5)return gesture.sync_actions(session,sync_info);
         std::vector<XrActiveActionSet> active;
         if(sync_info->countActiveActionSets)active.assign(sync_info->activeActionSets,sync_info->activeActionSets+sync_info->countActiveActionSets);
         active.push_back({gesture.action_set, XR_NULL_PATH});

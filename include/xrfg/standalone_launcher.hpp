@@ -100,12 +100,13 @@ struct LauncherSettings {
     // copy at release, for comparing the two on one build.
     bool capture_at_end_frame{true};
     bool diagnostics{};
+    bool overlay_enabled{true};
     FpsOverlayPosition overlay_position{FpsOverlayPosition::elliott_bottom};
     // Global Configure keybinds preferences, in parse_hotkey's form. Framegen
     // retains the armed tray pause/resume registration; the other actions are
     // read live by the runtime. Empty, "off" or invalid values disable a key.
     std::string pause_hotkey{"f7"}; // retained member/INI alias for old configurations
-    std::string interface_hotkey{"f10"},nr_hotkey{"f11"},logging_hotkey{"f9"},dump_hotkey{"f8"};
+    std::string interface_hotkey{"f10"},nr_hotkey{"f11"},logging_hotkey{"f9"},dump_hotkey{"f8"},fps_counter_hotkey{"f6"};
 };
 
 // status.json (docs/STATUS_JSON.md): the tray's state and the running game as
@@ -154,7 +155,7 @@ using Hotkey = xrfg::KeybindChord;
 // parse_hotkey would refuse: the inverse of parse_hotkey.
 [[nodiscard]] std::optional<std::string> hotkey_setting(Hotkey hotkey);
 inline constexpr char kDefaultPauseHotkey[] = "f7";
-std::array<std::string*,5> keybind_settings(LauncherSettings& settings);
+std::array<std::string*,kKeybindCount> keybind_settings(LauncherSettings& settings);
 Keybinds runtime_keybinds(const LauncherSettings& settings);
 
 [[nodiscard]] std::string backend_ini_value(FlowBackend backend);

@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -33,6 +34,7 @@ void write_position(const std::filesystem::path& ini,const wchar_t* position) {
     check(selection>=0,"known display selection");
     const auto generation_revision=xrfg::embedded::snapshot().revision;
     auto desired=xrfg::autonomous::snapshot().desired;desired.overlay_position=selection;
+    desired.overlay_enabled=selection!=0;
     check(xrfg::autonomous::request(desired),"real live display request accepted");
     xrfg::autonomous::apply_runtime_settings();
     check(xrfg::autonomous::applied_runtime_revision.load()==xrfg::autonomous::snapshot().revision,
@@ -57,6 +59,7 @@ ComPtr<ID3D11Device> device11;
 std::vector<ComPtr<ID3D12Resource>> textures;
 std::vector<ComPtr<ID3D11Texture2D>> textures11;
 unsigned created{}, destroyed{}, space_created{}, space_destroyed{}, acquires{}, waits{}, releases{}, ends{};
+std::unordered_set<XrSwapchain> active_chains;
 unsigned acquired_index{}, last_released{}, width{}, height{};
 bool timeout_next = true, fail_end{}, unsupported{}, d3d11{};
 unsigned clock_conversions{};
@@ -107,10 +110,10 @@ XrResult XRAPI_CALL create_chain(XrSession, const XrSwapchainCreateInfo* info, X
         for (auto& texture : textures) check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE,
             &desc, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&texture))), "D3D12 texture");
     }
-    ++created; *output = handle<XrSwapchain>(5+created-1); return XR_SUCCESS;
+    ++created; *output = handle<XrSwapchain>(5+created-1);active_chains.insert(*output);return XR_SUCCESS;
 }
 XrResult XRAPI_CALL destroy_chain(XrSwapchain chain) {
-    check((reinterpret_cast<std::uintptr_t>(chain)>=5 && reinterpret_cast<std::uintptr_t>(chain)<5+created), "destroyed app swapchain"); ++destroyed; return XR_SUCCESS;
+    check(active_chains.erase(chain)==1, "destroyed app, unknown or already retired swapchain"); ++destroyed; return XR_SUCCESS;
 }
 XrResult XRAPI_CALL enumerate(XrSwapchain, std::uint32_t capacity, std::uint32_t* count, XrSwapchainImageBaseHeader* output) {
     *count = 3;
@@ -141,7 +144,7 @@ XrResult XRAPI_CALL end(XrSession, const XrFrameEndInfo* info) {
         check(info->layerCount == expected_count + 1, "wrong layer count");
         const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[expected_count]);
         check(quad->type == XR_TYPE_COMPOSITION_LAYER_QUAD && (quad->space == overlay_space || quad->space==local_space) &&
-            (quad->subImage.swapchain == overlay_chain || quad->subImage.swapchain==handle<XrSwapchain>(6)) && quad->eyeVisibility == XR_EYE_VISIBILITY_BOTH,
+            active_chains.contains(quad->subImage.swapchain) && quad->eyeVisibility == XR_EYE_VISIBILITY_BOTH,
             "invalid overlay quad");
         check(releases > 0, "unreleased overlay image");
         check(quad->layerFlags == XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
@@ -287,6 +290,18 @@ int main(int argc, char** argv) {
             check(overlay.end_frame(&info,false)==XR_SUCCESS&&observed_count==2,"bottom meter uploaded");
             check(created==1 && width==1024&&height==512&&last_pose.position.y==-.30F&&last_pose.position.z==-1.F,"upstream bottom placement");
             check(pixel_count(0)>1024*100,"meter cropped lower rows transparent on GPU");
+            const auto generation_before_toggle=xrfg::embedded::snapshot().revision;
+            const auto toggle_counter=[&](bool enabled) {
+                xrfg::autonomous::apply_toggle_shortcuts(false,false,true);
+                xrfg::autonomous::apply_runtime_settings();
+                const auto selected=xrfg::autonomous::snapshot().desired;
+                check(selected.overlay_enabled==enabled && selected.overlay_position==6,"F6 action preserves selected bottom meter");
+                check(xrfg::embedded::snapshot().revision==generation_before_toggle,"counter shortcut cannot rebuild generation");
+                std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
+                check(overlay.end_frame(&info,false)==XR_SUCCESS && observed_count==(enabled?2:1),
+                    "counter shortcut hides/restores real OpenXR meter submission");
+            };
+            toggle_counter(false);toggle_counter(true);
             check(!overlay.marker_placement(),"panel is not corner diagnostic marker");
             xrfg::InterfaceFrameStamp meter_stamp{471,xrfg::interface_clock_ns(),0};
             check(overlay.end_frame(&info,false,true,{},0,meter_stamp)==XR_SUCCESS&&clock_conversions>0,

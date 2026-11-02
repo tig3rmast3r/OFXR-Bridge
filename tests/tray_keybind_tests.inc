@@ -31,15 +31,15 @@ void keybind_ui_tests(AppState& app) {
     namespace a=xrfg::autonomous;
     INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_HOTKEY_CLASS};InitCommonControlsEx(&controls);
     app.settings_path=a::global_configuration_path();
-    require(a::publish_keybinds({}),"publish initial five defaults");
+    require(a::publish_keybinds({}),"publish initial six defaults");
     KeybindDialog draft;auto fields=xrfg::standalone::keybind_settings(app.settings);
-    for(unsigned i=0;i<5;++i)draft.settings[i]=*fields[i];
+    for(unsigned i=0;i<xrfg::kKeybindCount;++i)draft.settings[i]=*fields[i];
     const auto defaults=draft.settings;
-    require(defaults==std::array<std::string,5>{"f10","f11","f7","f9","f8"},"five requested defaults");
+    require(defaults==std::array<std::string,xrfg::kKeybindCount>{"f10","f11","f7","f9","f8","f6"},"six requested defaults");
     auto result=run_keybind_dialog(draft,[&](HWND window){
         require(a::keybinds().suspended,"runtime actions suspended during capture");
         save_keybind_preview(window);
-        for(unsigned i=0;i<5;++i){
+        for(unsigned i=0;i<xrfg::kKeybindCount;++i){
             SendMessageW(window,WM_COMMAND,IDC_KEYBIND_CHANGE+i,0);
             const auto box=GetDlgItem(window,IDC_KEYBIND_CAPTURE+i);
             require(IsWindowVisible(box)!=FALSE,"Change starts native capture for this row");
@@ -49,7 +49,7 @@ void keybind_ui_tests(AppState& app) {
             require(draft.capturing==-1,"capture completes after a main key");
         }
         SendMessageW(window,WM_COMMAND,IDC_KEYBIND_CLEAR+4,0);require(draft.settings[4]=="off","Clear disables one binding");
-        SendMessageW(window,WM_COMMAND,IDC_KEYBIND_DEFAULTS,0);require(draft.settings==defaults,"Restore defaults resets all five");
+        SendMessageW(window,WM_COMMAND,IDC_KEYBIND_DEFAULTS,0);require(draft.settings==defaults,"Restore defaults resets all six");
         for(unsigned i=0;i<2;++i){
             SendMessageW(window,WM_COMMAND,IDC_KEYBIND_CHANGE+i,0);
             SendMessageW(GetDlgItem(window,IDC_KEYBIND_CAPTURE+i),WM_KEYDOWN,VK_F17,0);
@@ -57,7 +57,7 @@ void keybind_ui_tests(AppState& app) {
         SendMessageW(window,WM_COMMAND,IDOK,0);
         wchar_t status[512]{};GetDlgItemTextW(window,IDC_KEYBIND_STATUS,status,512);
         require(std::wstring_view(status).find(L"same binding")!=std::wstring_view::npos,"duplicate actions cannot be saved");
-        for(unsigned i=0;i<5;++i){
+        for(unsigned i=0;i<xrfg::kKeybindCount;++i){
             SendMessageW(window,WM_COMMAND,IDC_KEYBIND_CHANGE+i,0);
             const auto box=GetDlgItem(window,IDC_KEYBIND_CAPTURE+i);
             SendMessageW(box,HKM_SETHOTKEY,hotkey_control_value({MOD_CONTROL|MOD_SHIFT,VK_F17+i}),0);
@@ -71,12 +71,12 @@ void keybind_ui_tests(AppState& app) {
         a::ScopedConfigurationSelection offline(a::game_configuration_path(L"Offline.exe"));
         require(apply_keybinds(app,draft.settings),"save global keybinds while an offline game is selected");
         const auto active=a::keybinds();
-        for(unsigned i=0;i<5;++i)require(active.bindings.keys[i]==xrfg::KeybindChord{6,VK_F17+i},"all runtime actions receive the new binding live");
+        for(unsigned i=0;i<xrfg::kKeybindCount;++i)require(active.bindings.keys[i]==xrfg::KeybindChord{6,VK_F17+i},"all runtime actions receive the new binding live");
         require(!std::filesystem::exists(a::game_configuration_path(L"Offline.exe")),"keybinds do not write selected game profile");
     }
     std::ifstream saved(app.settings_path);std::string text((std::istreambuf_iterator<char>(saved)),{});
     const auto restored=xrfg::standalone::parse_settings(text);auto copy=restored;const auto restored_fields=xrfg::standalone::keybind_settings(copy);
-    for(unsigned i=0;i<5;++i)require(*restored_fields[i]==draft.settings[i],"all five bindings survive serialization and restart");
+    for(unsigned i=0;i<xrfg::kKeybindCount;++i)require(*restored_fields[i]==draft.settings[i],"all six bindings survive serialization and restart");
     const auto before=a::keybinds().bindings;
     result=run_keybind_dialog(draft,[&](HWND window){SendMessageW(window,WM_COMMAND,IDC_KEYBIND_DEFAULTS,0);SendMessageW(window,WM_COMMAND,IDCANCEL,0);});
     require(result==IDCANCEL && a::keybinds().bindings==before && !a::keybinds().suspended,"Cancel preserves published bindings and releases lease");
@@ -102,5 +102,5 @@ void keybind_ui_tests(AppState& app) {
     const auto wait=WaitForSingleObject(child.hProcess,10000);DWORD exit=1;GetExitCodeProcess(child.hProcess,&exit);CloseHandle(child.hThread);CloseHandle(child.hProcess);
     require(wait==WAIT_OBJECT_0 && exit==0,"bound game process reads global live keybinds");
     a::publish_keybinds({});
-    std::cout<<"Five native capture rows, default/clear/duplicate/OK/Cancel, persistence, global profile isolation, exact modifiers and independent bound game read PASS\n";
+    std::cout<<"Six native capture rows, default/clear/duplicate/OK/Cancel, persistence, global profile isolation, exact modifiers and independent bound game read PASS\n";
 }

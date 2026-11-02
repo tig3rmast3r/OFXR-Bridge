@@ -4,9 +4,9 @@
 IDI_OFXR_DISARMED ICON "../../OFXR_disarmed.ico"
 IDI_OFXR_ARMED ICON "../../OFXR_armed.ico"
 
-IDD_KEYBINDS DIALOGEX 0, 0, 364, 239
+IDD_KEYBINDS DIALOGEX 0, 0, 364, 264
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "OFXR-BRIDGE 0.3.2 (v842) - Configure keybinds"
+CAPTION "OFXR-BRIDGE 0.3.2 (v843) - Configure keybinds"
 FONT 9, "Segoe UI"
 BEGIN
     LTEXT "Click Change, then press a key or combination.", -1, 12, 12, 340, 14
@@ -35,11 +35,16 @@ BEGIN
     CONTROL "", 1114, "msctls_hotkey32", WS_TABSTOP | WS_BORDER, 126, 136, 108, 18
     PUSHBUTTON "Change", 1124, 243, 136, 60, 18
     PUSHBUTTON "Clear", 1134, 310, 136, 42, 18
-    LTEXT "Dump requires logging. Shortcuts are paused while configuring.", -1, 12, 164, 340, 14
-    LTEXT "", IDC_KEYBIND_STATUS, 12, 181, 340, 25
-    PUSHBUTTON "Restore defaults", IDC_KEYBIND_DEFAULTS, 12, 213, 88, 18
-    DEFPUSHBUTTON "OK", IDOK, 241, 213, 52, 18
-    PUSHBUTTON "Cancel", IDCANCEL, 300, 213, 52, 18
+    LTEXT "Toggle FPS counter", -1, 12, 165, 110, 12
+    LTEXT "", 1105, 129, 165, 104, 12
+    CONTROL "", 1115, "msctls_hotkey32", WS_TABSTOP | WS_BORDER, 126, 161, 108, 18
+    PUSHBUTTON "Change", 1125, 243, 161, 60, 18
+    PUSHBUTTON "Clear", 1135, 310, 161, 42, 18
+    LTEXT "Dump requires logging. Shortcuts are paused while configuring.", -1, 12, 189, 340, 14
+    LTEXT "", IDC_KEYBIND_STATUS, 12, 206, 340, 25
+    PUSHBUTTON "Restore defaults", IDC_KEYBIND_DEFAULTS, 12, 238, 88, 18
+    DEFPUSHBUTTON "OK", IDOK, 241, 238, 52, 18
+    PUSHBUTTON "Cancel", IDCANCEL, 300, 238, 52, 18
 END
 
 IDD_RIFE_INSTALL DIALOGEX 0, 0, 388, 244
@@ -60,8 +65,8 @@ BEGIN
 END
 
 1 VERSIONINFO
-FILEVERSION 0,3,2,842
-PRODUCTVERSION 0,3,2,842
+FILEVERSION 0,3,2,843
+PRODUCTVERSION 0,3,2,843
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -72,10 +77,10 @@ BEGIN
  BEGIN
   BLOCK "040904b0"
   BEGIN
-   VALUE "FileDescription", "OFXR-BRIDGE 0.3.2 (v842)\0"
+   VALUE "FileDescription", "OFXR-BRIDGE 0.3.2 (v843)\0"
    VALUE "ProductName", "OFXR-BRIDGE\0"
-   VALUE "FileVersion", "0.3.2 (v842)\0"
-   VALUE "ProductVersion", "0.3.2 (v842)\0"
+   VALUE "FileVersion", "0.3.2 (v843)\0"
+   VALUE "ProductVersion", "0.3.2 (v843)\0"
    VALUE "OriginalFilename", "OFXRBridgeTray.exe\0"
   END
  END

@@ -90,7 +90,8 @@ struct Settings {
     bool status_json{}; // explicit external telemetry/export request; per profile, default off
     bool benchmark_csv{true}; // automatic suite CSV; independent of the flight log
     bool benchmark_auto_pick{true}; // per-profile, apply a measured winner only on completion
-    int overlay_position{6}; // 0 off, 1 upper-left, 2 upper-right, 3 lower-left, 4 lower-right, 5 Elliott controller, 6 Elliott bottom
+    bool overlay_enabled{true};
+    int overlay_position{6}; // selected type 1..6; legacy 0 migrates to disabled/bottom
     float menu_scale{1.F}; // physical headset interface multiplier, 0.5 to 1.25
     float menu_offset_x{}; // common-FOV centre offset, normalized -1 to 1
     float menu_offset_y{};

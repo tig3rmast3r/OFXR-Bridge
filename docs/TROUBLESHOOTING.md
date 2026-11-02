@@ -33,12 +33,13 @@ with **Auto pick best one** on. If the problem is still there, carry on below.
 ## Step 1: is OFXR running in your game?
 
 OFXR shows an **information overlay** at the bottom of your view by default.
-You can change it under **Display / Headset FPS counter**: a corner counter, an
-overlay that follows the controller, or off.
+Use **Display / On-screen FPS counter** to show or hide it, or press **F6**
+(configurable in the tray's **Configure keybinds...**). **Counter type** selects
+a corner counter, controller overlay or bottom overlay and stays selected while hidden.
 
 | You see | It means | Go to |
 | --- | --- | --- |
-| No overlay or counter at all | OFXR is not loaded in the game | [A](#a-ofxr-is-not-loaded) |
+| No overlay or counter with **On-screen FPS counter** enabled | OFXR may not be loaded in the game | [A](#a-ofxr-is-not-loaded) |
 | Numbers in **red**, or a **red** corner counter | OFXR is loaded but not generating frames | [B](#b-ofxr-is-loaded-but-not-generating), or [C](#c-luke-ross-games) in a Luke Ross game |
 | Numbers in **green**, or a **green** or **blue** corner counter | OFXR is working (blue: Luke Ross reconstruction is producing the frames) | [D](#d-ofxr-works-but-it-does-not-feel-better) |
 | **Paused** in the top right corner | Frame generation is paused | Press the pause key again (**F7** unless you changed it; the tray menu shows it), or tick **Enable frame generation** in Settings |

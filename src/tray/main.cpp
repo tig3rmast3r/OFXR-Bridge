@@ -648,9 +648,9 @@ void close_pause_signal(AppState& state) {
     return std::wstring(name.begin(), name.end());
 }
 
-// The dialog edits a draft; only OK publishes and saves the five bindings.
+// The dialog edits a draft; only OK publishes and saves the six bindings.
 struct KeybindDialog {
-    std::array<std::string,5> settings;
+    std::array<std::string,xrfg::kKeybindCount> settings;
     int capturing{-1};
     bool updating{};
 };
@@ -685,7 +685,7 @@ struct KeybindDialog {
     return hotkey;
 }
 
-constexpr std::array<const wchar_t*,5> kKeybindNames{L"Open interface",L"Toggle NR",L"Toggle framegen",L"Enable logging",L"Dump (debug)"};
+constexpr std::array<const wchar_t*,xrfg::kKeybindCount> kKeybindNames{L"Open interface",L"Toggle NR",L"Toggle framegen",L"Enable logging",L"Dump (debug)",L"Toggle FPS counter"};
 
 void show_keybind_row(HWND dialog,KeybindDialog& state,unsigned row) {
     ShowWindow(GetDlgItem(dialog,IDC_KEYBIND_CAPTURE+row),SW_HIDE);
@@ -709,7 +709,7 @@ INT_PTR CALLBACK keybind_dialog_procedure(HWND dialog,UINT message,WPARAM wparam
     switch(message) {
     case WM_INITDIALOG:
         state=reinterpret_cast<KeybindDialog*>(lparam);SetWindowLongPtrW(dialog,DWLP_USER,lparam);
-        for(unsigned i=0;i<5;++i)show_keybind_row(dialog,*state,i);
+        for(unsigned i=0;i<xrfg::kKeybindCount;++i)show_keybind_row(dialog,*state,i);
         xrfg::autonomous::suspend_keybinds(true);SetTimer(dialog,1,500,nullptr);
         return TRUE;
     case WM_TIMER:
@@ -719,15 +719,15 @@ INT_PTR CALLBACK keybind_dialog_procedure(HWND dialog,UINT message,WPARAM wparam
     case WM_COMMAND: {
         if(!state)return FALSE;
         const auto id=LOWORD(wparam);
-        if(id>=IDC_KEYBIND_CHANGE && id<IDC_KEYBIND_CHANGE+5) {
+        if(id>=IDC_KEYBIND_CHANGE && id<IDC_KEYBIND_CHANGE+xrfg::kKeybindCount) {
             begin_keybind_capture(dialog,*state,id-IDC_KEYBIND_CHANGE);return TRUE;
         }
-        if(id>=IDC_KEYBIND_CLEAR && id<IDC_KEYBIND_CLEAR+5) {
+        if(id>=IDC_KEYBIND_CLEAR && id<IDC_KEYBIND_CLEAR+xrfg::kKeybindCount) {
             if(state->capturing>=0)show_keybind_row(dialog,*state,unsigned(state->capturing));
             state->capturing=-1;const unsigned row=id-IDC_KEYBIND_CLEAR;
             state->settings[row]="off";show_keybind_row(dialog,*state,row);return TRUE;
         }
-        if(id>=IDC_KEYBIND_CAPTURE && id<IDC_KEYBIND_CAPTURE+5 && HIWORD(wparam)==EN_CHANGE) {
+        if(id>=IDC_KEYBIND_CAPTURE && id<IDC_KEYBIND_CAPTURE+xrfg::kKeybindCount && HIWORD(wparam)==EN_CHANGE) {
             const unsigned row=id-IDC_KEYBIND_CAPTURE;
             if(state->updating || state->capturing!=int(row))return TRUE;
             const WORD value=LOWORD(SendDlgItemMessageW(dialog,id,HKM_GETHOTKEY,0,0));
@@ -740,21 +740,21 @@ INT_PTR CALLBACK keybind_dialog_procedure(HWND dialog,UINT message,WPARAM wparam
         }
         if(id==IDC_KEYBIND_DEFAULTS) {
             xrfg::standalone::LauncherSettings defaults;const auto values=xrfg::standalone::keybind_settings(defaults);
-            state->capturing=-1;for(unsigned i=0;i<5;++i){state->settings[i]=*values[i];show_keybind_row(dialog,*state,i);}
+            state->capturing=-1;for(unsigned i=0;i<xrfg::kKeybindCount;++i){state->settings[i]=*values[i];show_keybind_row(dialog,*state,i);}
             SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,L"Defaults restored. Click OK to save.");return TRUE;
         }
         if(id==IDCANCEL){EndDialog(dialog,IDCANCEL);return TRUE;}
         if(id==IDOK) {
-            std::array<xrfg::standalone::Hotkey,5> keys{};
-            for(unsigned i=0;i<5;++i) {
+            std::array<xrfg::standalone::Hotkey,xrfg::kKeybindCount> keys{};
+            for(unsigned i=0;i<xrfg::kKeybindCount;++i) {
                 keys[i]=xrfg::standalone::parse_hotkey(state->settings[i]).value_or(xrfg::standalone::Hotkey{});
                 for(unsigned j=0;j<i;++j)if(keys[i].key && keys[i]==keys[j]) {
                     SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,(std::wstring(kKeybindNames[i])+L" and "+kKeybindNames[j]+L" use the same binding. Change or clear one.").c_str());return TRUE;
                 }
             }
             bool available=true;unsigned failed{};
-            for(unsigned i=0;i<5;++i)if(keys[i].key && !RegisterHotKey(dialog,0x7f01+i,keys[i].modifiers|MOD_NOREPEAT,keys[i].key)){available=false;failed=i;break;}
-            for(unsigned i=0;i<5;++i)UnregisterHotKey(dialog,0x7f01+i);
+            for(unsigned i=0;i<xrfg::kKeybindCount;++i)if(keys[i].key && !RegisterHotKey(dialog,0x7f01+i,keys[i].modifiers|MOD_NOREPEAT,keys[i].key)){available=false;failed=i;break;}
+            for(unsigned i=0;i<xrfg::kKeybindCount;++i)UnregisterHotKey(dialog,0x7f01+i);
             if(!available){SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,(std::wstring(kKeybindNames[failed])+L": another program uses that combination. Choose another one.").c_str());return TRUE;}
             EndDialog(dialog,IDOK);return TRUE;
         }
@@ -763,9 +763,9 @@ INT_PTR CALLBACK keybind_dialog_procedure(HWND dialog,UINT message,WPARAM wparam
     default:return FALSE;
     }
 }
-bool apply_keybinds(AppState& state,const std::array<std::string,5>& bindings) {
+bool apply_keybinds(AppState& state,const std::array<std::string,xrfg::kKeybindCount>& bindings) {
     auto updated=state.settings;const auto fields=xrfg::standalone::keybind_settings(updated);
-    for(unsigned i=0;i<5;++i)*fields[i]=bindings[i];
+    for(unsigned i=0;i<xrfg::kKeybindCount;++i)*fields[i]=bindings[i];
     if(!xrfg::autonomous::publish_keybinds(xrfg::standalone::runtime_keybinds(updated)))return false;
     if(!xrfg::autonomous::write_configuration_sections(state.settings_path,xrfg::standalone::serialize_settings(updated))) {
         xrfg::autonomous::publish_keybinds(xrfg::standalone::runtime_keybinds(state.settings));return false;
@@ -776,7 +776,7 @@ void change_keybinds(AppState& state) {
     unregister_pause_hotkey(state);
     INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_HOTKEY_CLASS};InitCommonControlsEx(&controls);
     KeybindDialog dialog;const auto fields=xrfg::standalone::keybind_settings(state.settings);
-    for(unsigned i=0;i<5;++i)dialog.settings[i]=*fields[i];
+    for(unsigned i=0;i<xrfg::kKeybindCount;++i)dialog.settings[i]=*fields[i];
     const auto answer=DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_KEYBINDS),state.window,keybind_dialog_procedure,reinterpret_cast<LPARAM>(&dialog));
     xrfg::autonomous::suspend_keybinds(false);
     if(answer==IDOK && !apply_keybinds(state,dialog.settings))show_error(state.window,L"Unable to save the keybinds. The previous bindings are still active.");

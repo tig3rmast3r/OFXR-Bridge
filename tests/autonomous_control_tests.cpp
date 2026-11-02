@@ -64,6 +64,16 @@ void codec() {
     }
     require(desired.benchmark_auto_pick,"automatic benchmark choice defaults on");
     require(!desired.status_json,"status export defaults off");
+    auto hidden_counter=desired;hidden_counter.overlay_enabled=false;hidden_counter.overlay_position=5;
+    const auto counter_saved=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(hidden_counter));
+    require(!counter_saved.overlay_enabled && counter_saved.overlay_position==5,"hidden counter retains its selected type across restart");
+    const auto legacy_counter=xrfg::autonomous::parse_settings("[ofxr]\noverlay_position=0\n");
+    require(!legacy_counter.overlay_enabled && legacy_counter.overlay_position==6,"old Off selection migrates to disabled with a reusable type");
+    auto other_counter=desired;other_counter.overlay_position=3;
+    auto visibility_only=desired;visibility_only.overlay_enabled=false;
+    const auto counter_merged=xrfg::autonomous::merge_changes(other_counter,desired,visibility_only);
+    require(!counter_merged.overlay_enabled && counter_merged.overlay_position==3,
+        "visibility toggle preserves a concurrent counter type edit");
     auto exported=desired;exported.status_json=true;
     require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(exported)).status_json,"status exporter setting roundtrips in game profile");
     auto concurrent_export=desired;concurrent_export.nr_enabled=true;

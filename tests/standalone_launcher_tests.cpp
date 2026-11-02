@@ -113,7 +113,7 @@ int main() {
     rife_settings.rife_multiplier=4;rife_settings.scale=5;
     const auto sixth_ini=build_runtime_ini(release_defaults,rife_settings);
     if(!contains(sixth_ini,"nvidia_input_scale=1/6") || !contains(sixth_ini,"rife_multiplier=4"))return 1;
-    for (auto position : {xrfg::FpsOverlayPosition::off, xrfg::FpsOverlayPosition::upper_left,
+    for (auto position : {xrfg::FpsOverlayPosition::upper_left,
         xrfg::FpsOverlayPosition::upper_right, xrfg::FpsOverlayPosition::lower_left, xrfg::FpsOverlayPosition::lower_right}) {
         LauncherSettings option;
         option.overlay_position = position;
@@ -121,6 +121,18 @@ int main() {
             !contains(build_runtime_ini(option), std::string("[overlay]\r\nposition=") +
                 xrfg::overlay_position_name(position))) return 1;
     }
+    LauncherSettings hidden_counter;hidden_counter.overlay_position=xrfg::FpsOverlayPosition::elliott_controller;
+    hidden_counter.overlay_enabled=false;
+    const auto counter_restored=parse_settings(serialize_settings(hidden_counter));
+    if(counter_restored.overlay_enabled || counter_restored.overlay_position!=hidden_counter.overlay_position ||
+        !contains(build_runtime_ini(hidden_counter),"[overlay]\r\nposition=off"))return 1;
+    auto hidden_profile=rife_settings;hidden_profile.overlay_enabled=false;hidden_profile.overlay_position=5;
+    if(!contains(build_runtime_ini(release_defaults,hidden_profile),"[overlay]\r\nposition=off"))return 1;
+    const auto legacy_counter=parse_settings("[tray]\noverlay_position=off\n");
+    if(legacy_counter.overlay_enabled || legacy_counter.overlay_position!=xrfg::FpsOverlayPosition::elliott_bottom)return 1;
+    if(runtime_keybinds(release_defaults)[xrfg::KeybindAction::fps_counter]!=xrfg::KeybindChord{0,0x75})return 1;
+    hidden_counter.fps_counter_hotkey="ctrl+f6";
+    if(parse_settings(serialize_settings(hidden_counter)).fps_counter_hotkey!="ctrl+f6")return 1;
     if (release_defaults.backend != FlowBackend::nvidia ||
         release_defaults.nvidia_preset != NvidiaPerformancePreset::medium ||
         release_defaults.nvidia_input_scale != NvidiaInputScale::half ||
