@@ -34,6 +34,7 @@ enum class NvidiaInputScale {
     three_quarter,
     half,
     quarter,
+    fifth, // RIFE only
 };
 
 struct LauncherSettings {

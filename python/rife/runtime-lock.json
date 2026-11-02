@@ -103,6 +103,18 @@
       "url": "https://files.pythonhosted.org/packages/8e/93/f0904fa7d954ecc4c0db17c8d63d185d442dd59fc6757f1d1f448c59c256/cuda_pathfinder-1.8.4-py3-none-any.whl",
       "sha256": "85a4e708c725d603f576042ef32781a3d1737c51e84c35fe361d2680191af65a",
       "bytes": 62594
+    },
+    {
+      "path": "models/flownet_v4.4.pkl",
+      "url": "https://github.com/HolyWu/vs-rife/releases/download/model/flownet_v4.4.pkl",
+      "sha256": "a051572810b025c35013a35f044a08e6edb516ec1ffa1ac2878a48059f30d5fa",
+      "bytes": 34987345
+    },
+    {
+      "path": "models/flownet_v4.3.pkl",
+      "url": "https://github.com/HolyWu/vs-rife/releases/download/model/flownet_v4.3.pkl",
+      "sha256": "7f4bdd625488b55b6433e270751fa77619b733b03473489a1a495fe4fa50591a",
+      "bytes": 34987345
     }
   ],
   "msvc_crt": {
@@ -160,5 +172,16 @@
       }
     ],
     "source": "Unmodified x64 Microsoft.VC143.CRT redistributable from Visual Studio Build Tools"
+  },
+  "model_variants": {
+    "visible": {
+      "2": "4.6",
+      "3": "4.4",
+      "4": "4.3"
+    },
+    "legacy_worker_only": {
+      "0": "4.25.lite",
+      "1": "4.16.lite"
+    }
   }
 }

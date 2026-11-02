@@ -159,6 +159,7 @@ enum class D3D12OpticalFlowInputScale {
     three_quarter,
     half,
     quarter, // optional quarter flow; also used by Hybrid
+    fifth, // RIFE motion-inference grid, 20% per axis
 };
 
 // The name the NVIDIA options and the tray settings already use.

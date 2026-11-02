@@ -278,7 +278,7 @@ struct D3D12Rife::Impl{
 D3D12Rife::D3D12Rife()=default;D3D12Rife::~D3D12Rife()=default;
 HRESULT D3D12Rife::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,DXGI_FORMAT format,int model,float scale)noexcept{
     try{
-        if(!device||!queue||model<0||model>2||scale<=0||scale>1)return E_INVALIDARG;
+        if(!device||!queue||model<0||model>4||scale<=0||scale>1)return E_INVALIDARG;
         auto p=std::make_unique<Impl>();p->device=device;p->queue=queue;p->format=format;p->model=model;p->scale=scale;
         auto luid=device->GetAdapterLuid();std::memcpy(&p->luid,&luid,sizeof(luid));p->worker=worker_for(p->luid);
         p->proxy=format==DXGI_FORMAT_R16G16B16A16_FLOAT||format==DXGI_FORMAT_R32G32B32A32_FLOAT?1:

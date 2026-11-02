@@ -80,7 +80,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 79001;
+constexpr std::uint32_t kAbi = 79101;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -321,7 +321,7 @@ Settings sanitize(Settings value) noexcept {
     // queue/history policy: benchmark and manual/INI/IPC selection must agree.
     if (value.frame_generation == 2) value.backend = 0;
     value.preset = std::clamp(value.preset, 0, 2);
-    value.scale = std::clamp(value.scale, 0, 3);
+    value.scale = std::clamp(value.scale, 0, value.frame_generation==4?4:3);
     value.separate_synthesis = std::clamp(value.separate_synthesis, 0, 1);
     value.lower_vram = std::clamp(value.lower_vram, 0, 1);
     value.separate_synthesis = value.lower_vram;
@@ -356,7 +356,7 @@ Settings sanitize(Settings value) noexcept {
     // FSR and DLSS-G require engine guides. No optical-flow substitution is
     // silently offered for a guide-only generation backend.
     if (value.frame_generation > 0 && value.frame_generation < 4) value.motion_vectors = 1;
-    value.rife_model=std::clamp(value.rife_model,0,2);
+    value.rife_model=std::clamp(value.rife_model,2,4); // retired Lite choices migrate to 4.6
     if(value.frame_generation==4){value.backend=2;value.motion_vectors=0;value.triple_frame_gen=false;value.backward=false;}
     // Legacy profiles only know the selected route. Keep its explicit values;
     // unseen routes start from their own defaults, never from another menu.
@@ -369,7 +369,7 @@ Settings sanitize(Settings value) noexcept {
     for (std::size_t i = 0; i < value.generation_profiles.size(); ++i) {
         auto& p = value.generation_profiles[i];
         p.motion_vectors = i == 7 ? 0 : i >= 4 ? 1 : std::clamp(p.motion_vectors, 0, 1);
-        p.preset = std::clamp(p.preset, 0, 2); p.scale = std::clamp(p.scale, 0, 3);
+        p.preset = std::clamp(p.preset, 0, 2); p.scale = std::clamp(p.scale, 0, i==7?4:3);
         p.separate_synthesis = std::clamp(p.separate_synthesis, 0, 1);
         p.lower_vram = std::clamp(p.lower_vram, 0, 1);
         p.separate_synthesis = p.lower_vram;

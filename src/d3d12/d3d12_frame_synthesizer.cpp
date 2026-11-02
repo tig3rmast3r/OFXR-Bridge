@@ -123,6 +123,8 @@ struct NvidiaInputScaleRatio {
         return {1U, 2U};
     case D3D12NvidiaInputScale::quarter:
         return {1U, 4U};
+    case D3D12NvidiaInputScale::fifth:
+        return {1U, 5U};
     case D3D12NvidiaInputScale::full:
     default:
         return {1U, 1U};
@@ -2697,9 +2699,9 @@ struct D3D12FrameSynthesizer::Impl {
         if(nvidia_options.rife_model>=0){
             if(generation_mode!=D3D12FrameGenerationMode::ofxr)return E_INVALIDARG;
             rife=std::make_unique<D3D12Rife>();
-            constexpr float scales[]{1.F,.75F,.5F,.25F};
+            constexpr float scales[]{1.F,.75F,.5F,.25F,.20F};
             result=rife->initialize(device.Get(),queue.Get(),view_format,nvidia_options.rife_model,
-                scales[std::clamp(static_cast<int>(nvidia_options.input_scale),0,3)]);
+                scales[std::clamp(static_cast<int>(nvidia_options.input_scale),0,4)]);
             if(FAILED(result))return result;
         }
         if(rife && nvidia_options.rife_async)rife_thread=std::thread([this]{run_rife_work();});

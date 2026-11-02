@@ -5818,7 +5818,7 @@ int main(int argc, char** argv) {
     try {
         if(argc>1 && std::string_view(argv[1])=="rife-headset") {
             D3D12WarpFixture fixture(true);
-            for(int model:{2,1,0})for(auto scale:{xrfg::D3D12NvidiaInputScale::quarter,xrfg::D3D12NvidiaInputScale::half})
+            for(int model:{2,3,4})for(auto scale:{xrfg::D3D12NvidiaInputScale::quarter,xrfg::D3D12NvidiaInputScale::fifth})
                 test_rife_stereo(fixture,model,3700,3400,scale,true);
             fixture.require_no_debug_errors();return 0;
         }
@@ -5827,13 +5827,13 @@ int main(int argc, char** argv) {
         }
         if(argc>1 && std::string_view(argv[1])=="rife-async") {
             D3D12WarpFixture fixture(true);
-            for(int model=0;model<3;++model)test_rife_stereo(fixture,model,256,128,xrfg::D3D12NvidiaInputScale::quarter,false,true);
+            for(int model:{2,3,4})test_rife_stereo(fixture,model,256,128,xrfg::D3D12NvidiaInputScale::fifth,false,true);
             test_rife_pipeline(fixture);
             return 0;
         }
         if(argc>1 && std::string_view(argv[1])=="rife") {
             D3D12WarpFixture fixture(true);
-            for(int model=0;model<3;++model)test_rife_stereo(fixture,model);
+            for(int model:{2,3,4})test_rife_stereo(fixture,model);
             fixture.require_no_debug_errors();return 0;
         }
         if(argc>1 && std::string_view(argv[1])=="memory-lifecycle") {

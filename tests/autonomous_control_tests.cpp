@@ -227,6 +227,16 @@ void route_profiles() {
     require(rife.frame_generation==4 && rife.rife_model==2 && rife.motion_vectors==0 && !rife.triple_frame_gen,"RIFE uses no engine guides and is 2X only");
     auto rife_roundtrip=parse_settings(serialize_settings(rife));
     require(rife_roundtrip.rife_model==2 && rife_roundtrip.frame_generation==4,"RIFE model survives per-game INI roundtrip");
+    auto fifth=parse_settings("[ofxr]\nframe_generation=4\nrife_model=3\nscale=4\n");
+    require(fifth.rife_model==3 && fifth.scale==4,"RIFE 4.4 and 20 percent survive normalization");
+    auto fifth_roundtrip=parse_settings(serialize_settings(fifth));
+    require(fifth_roundtrip.scale==4 && fifth_roundtrip.rife_model==3,"RIFE 20 percent is persisted in its own profile");
+    select_generation(fifth,0,2);
+    require(fifth.scale<=3,"ordinary OFXR never inherits unsupported fifth grid");
+    select_generation(fifth,4,2);
+    require(fifth.scale==4,"RIFE restores its fifth inference grid after route changes");
+    auto retired=parse_settings("[ofxr]\nframe_generation=4\nrife_model=1\n");
+    require(retired.rife_model==2,"retired heavy Lite choice migrates to accepted 4.6");
     auto legacy = parse_settings("[ofxr]\nframe_generation=2\nbackend=3\nmotion_vectors=1\ntriple_frame_gen=1\nlower_vram=1\n");
     require(legacy.triple_frame_gen && legacy.lower_vram, "legacy active DLSS-G preferences retained");
     select_generation(legacy, 0, 3);

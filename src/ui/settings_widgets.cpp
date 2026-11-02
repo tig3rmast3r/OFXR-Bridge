@@ -216,8 +216,9 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
             changed |= ImGui::Checkbox("Bidirectional flow", &draft.backward);
         }
     } else if (draft.frame_generation==4) {
-        changed |= ImGui::Combo("RIFE model", &draft.rife_model,"4.25 Lite\0" "4.16 Lite\0" "4.6\0");
-        changed |= ImGui::Combo("Motion inference resolution", &draft.scale,"100%\0" "75%\0" "50%\0" "25%\0");
+        int model=draft.rife_model-2;
+        if(ImGui::Combo("RIFE model", &model,"4.6\0" "4.4\0" "4.3\0")){draft.rife_model=model+2;changed=true;}
+        changed |= ImGui::Combo("Motion inference resolution", &draft.scale,"100%\0" "75%\0" "50%\0" "25%\0" "20%\0");
         ImGui::TextWrapped("Experimental portable Python/CUDA. One model, sequential eyes. Motion and blending are estimated at the selected resolution; original full-resolution colours are warped at output. Lower inference resolution reduces motion/occlusion precision. Requires the shared RIFE runtime. 2X only.");
     } else if (draft.frame_generation==3) {
         ImGui::TextWrapped("Game motion vectors + FidelityFX optical flow (25% per axis). If game guides are unavailable or rejected, uses FidelityFX optical flow.");

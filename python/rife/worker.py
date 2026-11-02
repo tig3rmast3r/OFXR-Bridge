@@ -16,7 +16,7 @@ from cuda.bindings import driver as cu
 from gpu_memory import GpuMemory
 
 ROOT = Path(sys.executable).resolve().parent.parent
-MODELS = (("4.25.lite", "4_25_lite"), ("4.16.lite", "4_16_lite"), ("4.6", "4_6"))
+MODELS = (("4.25.lite", "4_25_lite"), ("4.16.lite", "4_16_lite"), ("4.6", "4_6"), ("4.4", "4_4"), ("4.3", "4_3"))
 
 
 def cuda(result):

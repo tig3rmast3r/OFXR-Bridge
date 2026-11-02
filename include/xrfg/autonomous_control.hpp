@@ -40,11 +40,11 @@ struct Settings {
     int pacing_mode{1}; // 0 framework, 1 sole director, 2 framework + director
     int backend{2}; // 0 FidelityFX, 1 NVIDIA reference, 2 NVIDIA new, 3 NVIDIA djules
     int motion_vectors{}; // 0 optical flow, 1 native game guides
-    int rife_model{2}; // 0 4.25 Lite, 1 4.16 Lite, 2 4.6 (fastest measured)
+    int rife_model{2}; // 2 4.6, 3 4.4, 4 4.3; retired Lite IDs0/1 map to2
     int frame_generation{}; // 0 OFXR, 1 FSR 3, 2 native DLSS Frame Generation, 3 Hybrid, 4 RIFE
     int hybrid_backend{}; // legacy profile key; Hybrid fallback is always FidelityFX
     int preset{1}; // 0 slow, 1 medium, 2 fast
-    int scale{2}; // 0 full, 1 three-quarter, 2 half, 3 quarter
+    int scale{2}; // 0 full, 1 three-quarter, 2 half, 3 quarter, 4 fifth (RIFE only)
     bool backward{};
     int separate_synthesis{}; // legacy field, follows combined Lower VRAM
     int lower_vram{}; // checkbox: 0 off (default), 1 on

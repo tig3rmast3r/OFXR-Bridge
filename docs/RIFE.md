@@ -1,7 +1,7 @@
-# Experimental RIFE route (v735)
+# Experimental RIFE route (v736)
 
 The Frame generation menu includes RIFE between OFXR and Hybrid. Model choices
-are 4.25 Lite, 4.16 Lite and 4.6. The initial trial selects 4.6 with 25% motion
+are 4.6, 4.4 and 4.3. The initial trial selects 4.6 with 25% motion
 inference when entering its new profile. Existing OFXR defaults are unchanged.
 
 This is a NVIDIA CUDA / PyTorch experiment, not TensorRT and not an AMD backend.
@@ -15,7 +15,7 @@ camera and sampled at the chosen motion-inference resolution. RIFE predicts
 the forward/backward sampling displacements and blending mask at that size.
 The D3D12 output shader applies those fields to the original full-resolution
 colour images, including their alpha. It does **not** enlarge a low-resolution
-RGB generated frame. The real frame is copied unchanged. Lower inference
+RGB generated frame. The real frame is copied unchanged. 20% is also available (per axis); full-resolution output is retained. Lower inference
 resolution still reduces motion/occlusion precision, especially on fine edges.
 
 The RIFE model implementations are derived from
@@ -100,3 +100,35 @@ One cached worker sample serves all generators on that adapter, at most once per
 second while UI/log/benchmark telemetry requests it. Unknown worker usage is N/A,
 not a misleading game-only total. This is committed dedicated usage against the
 DXGI budget, not an end-to-end GPU residency or compositor memory measurement.
+
+
+## Faster model trial
+
+The two newer Lite choices are retired from this build's menu. Persisted IDs2,
+3 and4 mean4.6,4.4 and4.3; default remains4.6 at25%. Old Lite preferences map
+to4.6. The shared worker retains legacy IDs0/1 for earlier sealed builds.
+The two original new weight files and upstream architectures are pinned in
+runtime-lock.json from HolyWu/vs-rife commit3488617283db7c428a83ba4a19382285da698b6a.
+Only the same final flow/mask adapter used by4.6 is applied. Weights are unchanged.
+
+Initial RTX4090 CUDA-event test, two eyes sequentially,3700x3400 native with
+925x850 inference (25%):4.6 median5.66ms,4.4 4.59ms,4.3 4.65ms over120samples
+per model in three rotated rounds. At20% (740x680):4.6 4.28ms,4.4 3.83ms,
+4.3 3.86ms. This measures inference/graph/input-output tensor copies only;
+D3D12 preparation, full-resolution composition, IPC, game load and headset
+presentation are excluded. Not an in-game FPS or visual-quality guarantee.
+New models need in-game quality comparison, especially fine occlusion edges.
+
+Complete native-colour D3D12 transaction at3700x3400 per eye (five warmed samples,
+median including pack/inference/composition/IPC, excluding game/OpenXR):
+
+| Model | 25% | 20% |
+| --- | ---: | ---: |
+| 4.6 | 7.21ms | 6.22ms |
+| 4.4 | 5.92ms | 5.46ms |
+| 4.3 | 6.42ms | 5.63ms |
+
+Background GPU/scheduler variation is present (one4.6/20% sample16.13ms).
+These are small laboratory comparisons, not a guaranteed headset FPS gain.
+All six configurations retain native one-pixel colour detail in the GPU fixture;
+finer motion and occlusion accuracy still depend on model and inference grid.

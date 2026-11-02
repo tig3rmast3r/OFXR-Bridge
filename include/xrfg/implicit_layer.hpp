@@ -87,6 +87,7 @@ enum class ConfiguredNvidiaInputScale {
     three_quarter,
     half,
     quarter,
+    fifth, // RIFE only
 };
 
 struct ConfiguredNvidiaOptions {
