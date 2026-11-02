@@ -248,6 +248,28 @@ void codec_tests() {
     require(!xrfg::compact_luke_origin_layout(512,8,512,8,layout),"insufficient band margin accepted");
     require(!xrfg::compact_luke_origin_layout(512,32,1024,32,layout),"upscaled/crop mismatch accepted");
     {
+        // Black bars move the mark inside the picture, at most a tenth in.
+        // TLOU1 under VDXR: 159 rows top, 80 columns left on a 3456x3773 eye.
+        const xrfg::LukeOriginBars tlou_bars{80,159,350};
+        const auto inset=xrfg::luke_origin_inset_with_bars({32,32},tlou_bars,3456,3773,false);
+        require(inset==std::array<unsigned,2>{88,167},"bars do not move the mark inside the picture");
+        require(xrfg::luke_origin_inset_with_bars({32,32},tlou_bars,3456,3773,true)[1]==358,
+            "a bottom band does not follow the bottom bar");
+        require(xrfg::luke_origin_inset_with_bars({32,32},{0,900,0},3456,3773,false)[1]==377,
+            "a bar past a tenth of the eye moves the mark further in");
+        require(xrfg::luke_origin_inset_with_bars({32,32},{},3456,3773,false)==std::array<unsigned,2>{32,32},
+            "no bars changed the title's inset");
+        xrfg::LukeColorOriginLayout barred;
+        require(xrfg::compact_luke_origin_layout(3456,3776,3456,3773,barred,inset[0],inset[1])&&
+            barred.bands[0].y>=159+8,"mark not below the top bar");
+        const float line[]{0.F,0.F,0.F,.2F,.5F,0.F};
+        unsigned run{};
+        require(xrfg::luke_origin_black_run(line,false,run)&&run==3,"top bar measured wrong");
+        require(xrfg::luke_origin_black_run(line,true,run)&&run==1,"bottom bar measured wrong");
+        const float black[]{0.F,0.F,0.F};
+        require(!xrfg::luke_origin_black_run(black,false,run)&&run==0,"a black line measured as a bar");
+    }
+    {
         // TLOU1 under VDXR: a 1941x2119 eye from a 3920x2112 output (slightly
         // magnified vertically) still gets its protected layout.
         xrfg::LukeColorOriginLayout magnified;

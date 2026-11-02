@@ -17,18 +17,31 @@
 
 namespace xrfg {
 namespace {
+bool origin_from_bottom() noexcept;
+// Black bars measured on the eye images by the reader (left|top|bottom, 16
+// bits each) and the eye extent they were measured on. Writer and reader
+// place the mark from the same values.
+std::atomic<std::uint64_t> g_bars{}, g_bars_extent{};
+LukeOriginBars stored_bars(unsigned width, unsigned height) noexcept {
+    if (g_bars_extent.load(std::memory_order_acquire) != ((static_cast<std::uint64_t>(width) << 32) | height)) return {};
+    const auto bits = g_bars.load(std::memory_order_acquire);
+    return {static_cast<unsigned>(bits >> 32) & 0xffffu, static_cast<unsigned>(bits >> 16) & 0xffffu,
+        static_cast<unsigned>(bits) & 0xffffu};
+}
 // Outlaws' final REAL VR color can translate the corner barcode beyond the
 // eye boundary; its FPS text also covers that corner. Keep its exact token
 // inside the eye, away from that overlay. GTA additionally masks the top of
 // realtime scripted scenes; its bounded scan follows the full-size eye height.
-std::array<unsigned,2> origin_inset(unsigned color_height) noexcept {
+// Black bars around the picture move it inside (luke_origin_inset_with_bars).
+std::array<unsigned,2> origin_inset(unsigned color_width, unsigned color_height) noexcept {
     static const auto title=[] {
         wchar_t path[MAX_PATH]{};
         GetModuleFileNameW(nullptr,path,MAX_PATH);
         const auto* name=wcsrchr(path,L'\\');
         return std::wstring(name?name+1:path);
     }();
-    return luke_origin_inset_for_title(title,color_height);
+    return luke_origin_inset_with_bars(luke_origin_inset_for_title(title,color_height),
+        stored_bars(color_width,color_height),color_width,color_height,origin_from_bottom());
 }
 bool bright_primary_origin() noexcept {
     static const bool selected=[] {
@@ -73,6 +86,12 @@ struct Reader {
     HANDLE event{};
     bool poisoned{};
     std::array<LukeOriginRowWindow, 2> windows{}; // per color slot, under mutex
+    // Black bars: a measurement is adopted once kBarAgreement consecutive ones
+    // agree within kBarTolerance pixels, so a dark scene beside a bar does not
+    // move the mark from frame to frame. Under mutex.
+    LukeOriginBars bar_candidate{};
+    unsigned bar_agree{};
+    std::uint64_t bar_extent{};
     ~Reader() { if (event) CloseHandle(event); }
 };
 // Three sleeping helpers plus the caller: bounded CPU parallelism, no frame
@@ -322,7 +341,7 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             return E_PENDING; // Actual eye viewport is not known during startup.
         }
         LukeColorOriginLayout layout;
-        const auto inset=origin_inset(static_cast<UINT>(color_extent));
+        const auto inset=origin_inset(static_cast<UINT>(color_extent >> 32),static_cast<UINT>(color_extent));
         if (!compact_luke_origin_layout(rect.width, rect.height,
                 static_cast<UINT>(color_extent >> 32), static_cast<UINT>(color_extent), layout,inset[0],inset[1],
                 origin_from_bottom()))
@@ -419,7 +438,7 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
                 report_origin_layout(false,1,0,extent_bits(static_cast<UINT>(original.Width),original.Height));
                 results[i]=E_PENDING; continue;
             }
-            const auto inset=origin_inset(original.Height);
+            const auto inset=origin_inset(static_cast<UINT>(original.Width),original.Height);
             if (!compact_luke_origin_layout(static_cast<UINT>(output_extent>>32),static_cast<UINT>(output_extent),
                     static_cast<UINT>(original.Width),original.Height,plan.layout,inset[0],inset[1],origin_from_bottom())) {
                 report_origin_layout(false,2,output_extent,extent_bits(static_cast<UINT>(original.Width),original.Height));
@@ -449,6 +468,23 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
                 ~(UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT)-1);
             reader->device->GetCopyableFootprints(&roi,0,1,offset,&plan.footprint,nullptr,nullptr,nullptr);
             bytes=plan.footprint.Offset+UINT64(plan.footprint.Footprint.RowPitch)*roi.Height;
+        }
+        // Black bars: the middle column (top and bottom) and middle row (left)
+        // of the first valid eye.
+        int bars_from=-1;
+        for (unsigned i=0;i<count;++i) if (plans[i].valid) { bars_from=static_cast<int>(i); break; }
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT column_footprint{}, row_footprint{};
+        if (bars_from>=0) {
+            const auto& original=plans[bars_from].original;
+            const auto place=[&](UINT64 width, UINT height, D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint) {
+                auto strip=original; strip.Width=width; strip.Height=height; strip.MipLevels=1;
+                const UINT64 offset=(bytes+D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT-1) &
+                    ~(UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT)-1);
+                reader->device->GetCopyableFootprints(&strip,0,1,offset,&footprint,nullptr,nullptr,nullptr);
+                bytes=footprint.Offset+UINT64(footprint.Footprint.RowPitch)*height;
+            };
+            place(1,original.Height,column_footprint);
+            place(original.Width,1,row_footprint);
         }
         if (!reader->readback || reader->bytes!=bytes) {
             D3D12_HEAP_PROPERTIES heap{}; heap.Type=D3D12_HEAP_TYPE_READBACK;
@@ -482,6 +518,15 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             const auto& scan=plan.layout.scan;
             const D3D12_BOX box{scan.x,scan.y,0,scan.x+scan.width,scan.y+scan.height,1};
             reader->list->CopyTextureRegion(&destination,0,0,0,&source,&box);
+            if (static_cast<int>(i)==bars_from) {
+                const UINT width=static_cast<UINT>(plan.original.Width),height=plan.original.Height;
+                destination.PlacedFootprint=column_footprint;
+                const D3D12_BOX column{width/2,0,0,width/2+1,height,1};
+                reader->list->CopyTextureRegion(&destination,0,0,0,&source,&column);
+                destination.PlacedFootprint=row_footprint;
+                const D3D12_BOX row{0,height/2,0,width,height/2+1,1};
+                reader->list->CopyTextureRegion(&destination,0,0,0,&source,&row);
+            }
             if (state!=D3D12_RESOURCE_STATE_COPY_SOURCE) {
                 auto barrier=transition(colors[i],D3D12_RESOURCE_STATE_COPY_SOURCE,state);
                 reader->list->ResourceBarrier(1,&barrier);
@@ -511,6 +556,37 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
         void* mapped{}; const D3D12_RANGE range{0,static_cast<SIZE_T>(bytes)};
         result=reader->readback->Map(0,&range,&mapped);
         if (FAILED(result)) return finish(result);
+        if (bars_from>=0) {
+            const auto& original=plans[bars_from].original;
+            const auto bpp=luke_origin_pixel_bytes(original.Format);
+            const auto* base=static_cast<const std::byte*>(mapped);
+            std::vector<float> column(original.Height),row(static_cast<std::size_t>(original.Width));
+            for (UINT y=0;y<original.Height;++y)
+                column[y]=luke_origin_luma(base+column_footprint.Offset+UINT64(column_footprint.Footprint.RowPitch)*y,original.Format);
+            for (UINT64 x=0;x<original.Width;++x)
+                row[static_cast<std::size_t>(x)]=luke_origin_luma(base+row_footprint.Offset+x*bpp,original.Format);
+            LukeOriginBars measured{};
+            if (luke_origin_black_run(column,false,measured.top) && luke_origin_black_run(column,true,measured.bottom) &&
+                luke_origin_black_run(row,false,measured.left)) {
+                constexpr unsigned kBarAgreement=8, kBarTolerance=2;
+                const auto extent=extent_bits(static_cast<UINT>(original.Width),original.Height);
+                const auto within=[](unsigned a,unsigned b){return (a>b?a-b:b-a)<=kBarTolerance;};
+                auto& candidate=reader->bar_candidate;
+                if (reader->bar_extent==extent && within(candidate.left,measured.left) &&
+                    within(candidate.top,measured.top) && within(candidate.bottom,measured.bottom)) ++reader->bar_agree;
+                else { candidate=measured; reader->bar_agree=1; reader->bar_extent=extent; }
+                if (reader->bar_agree==kBarAgreement) {
+                    const auto clamp16=[](unsigned v){return static_cast<std::uint64_t>(std::min(v,0xffffu));};
+                    const auto bits=(clamp16(candidate.left)<<32)|(clamp16(candidate.top)<<16)|clamp16(candidate.bottom);
+                    if (g_bars.load(std::memory_order_acquire)!=bits || g_bars_extent.load(std::memory_order_acquire)!=extent) {
+                        g_bars.store(bits,std::memory_order_release);
+                        g_bars_extent.store(extent,std::memory_order_release);
+                        // 1250: black bars adopted; b = left<<32 | top<<16 | bottom, c = eye extent.
+                        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,S_OK,1250,bits,extent);
+                    }
+                }
+            }
+        }
         std::array<LukeColorOriginImage,2> image_rows{};
         std::array<LukeColorOriginDecode,2> decoded{};
         std::array<std::uint64_t,2> geometry{};
