@@ -134,6 +134,14 @@ the generated eye.
    parallax drew a dashed line along every top edge (Spider-Man, 14:2x). (A test for
    a near surface within the radius kept a 3-5 px stale edge beside a
    bollard, F8 of 13:32:41.)
+   Parallax only sees the camera move an edge. An object that moves by
+   itself leaves its previous-frame edge where the edge used to be, with no
+   parallax: a running character under a follow camera drew a thin outline
+   of its old leg, boot and arm positions (Spider-Man, F8s of 2026-11-02
+   09:41). So a halo is also not taken when this frame's warp holds no
+   surface nearer than the halo within `kOsrFullHaloRadius` of the pixel:
+   the object has moved away. Each test only adds a reason to drop a halo;
+   the radius test catches object motion, the parallax test camera motion.
    When the previous frame shows a nearer surface than the warp, it is
    projected into the source eye: if the source holds something farther
    there, it would have seen the surface had it existed, so the surface is

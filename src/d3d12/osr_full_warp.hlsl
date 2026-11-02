@@ -521,6 +521,22 @@ float halo_parallax(float4x4 backward, float2 ndc, float at_depth, float near, f
 // without the object motion the history splat applied.
 static float2 g_history_position = 0; // scene position (history texels) of the last resolve_history hit
 
+// Does this frame's warp still hold a surface nearer than z within HaloRadius
+// of destination texel c? The halo parallax test only sees the camera move an
+// edge; an object that moves by itself (a running character's legs under a
+// follow camera) leaves its previous-frame edge pixels where the edge used to
+// be, with no parallax, and they were drawn as a thin outline of its old
+// position (Spider-Man, F8s of 2026-11-02 09:41).
+bool nearer_surface_present(int2 c, float z) {
+    bool present = false;
+    [unroll] for (int dy = -HaloRadius; dy <= HaloRadius; ++dy)
+        [unroll] for (int dx = -HaloRadius; dx <= HaloRadius; ++dx) {
+            const uint v = StereoDepth.Load(int3(clamp(c + int2(dx, dy), int2(0, 0), int2(DepthSize) - 1), 0));
+            present = present || (v != 0 && asfloat(v) > z * EdgeRatio + FarDepth);
+        }
+    return present;
+}
+
 bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, out float4 result, out uint word) {
     word = HistorySplat.Load(int3(c, 0));
     result = 0;
@@ -547,7 +563,8 @@ bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, o
         float history_near = 0.0;
         const float2 toward = halo_direction(HistoryDepth, t, at_depth, history_near);
         if (history_near > at_depth * EdgeRatio + FarDepth &&
-            halo_parallax(BackwardHistory, ndc, at_depth, history_near, toward) > HaloParallax)
+            (halo_parallax(BackwardHistory, ndc, at_depth, history_near, toward) > HaloParallax ||
+             !nearer_surface_present(c, at_depth)))
             found = false;
     }
     return found;
