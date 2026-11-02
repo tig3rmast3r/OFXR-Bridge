@@ -113,11 +113,106 @@ void codec_tests() {
     xrfg::LukeColorOriginLayout layout;
     require(xrfg::luke_origin_inset_for_title(L"gta5_enhanced.EXE")==std::array<unsigned,2>{0,32},"GTA Enhanced case-insensitive protected policy");
     require(xrfg::luke_origin_inset_for_title(L"Outlaws.exe")==std::array<unsigned,2>{256,32},"Outlaws protected policy changed");
+    require(xrfg::luke_origin_inset_for_title(L"TLOU-I.exe")==std::array<unsigned,2>{32,32},"TLOU1 margins missing");
+    {
+        // TLOU1 3920 -> 3907: its left eye showed the band starting 13 pixels
+        // before its edge with no margin. With it, that placement is inside
+        // the scan with room to spare, and the whole band decodes.
+        xrfg::LukeColorOriginLayout tlou;
+        require(xrfg::compact_luke_origin_layout(3920,3280,3907,3280,tlou,32,32),"TLOU1 protected layout");
+        const int observed_shift=28; // eye column 0 = output column 28
+        const int eye_x=int(tlou.bands[0].x)-observed_shift;
+        require(eye_x>=int(tlou.scan.x)+8 && eye_x+256+8<=int(tlou.scan.x+tlou.scan.width),
+            "TLOU1 observed placement outside the reader's scan");
+        std::vector<float> projected(3907,.02F);
+        for(unsigned cell=0;cell<256;++cell)
+            projected[eye_x+cell]=xrfg::luke_origin_white(0x2036u,cell)?1.F:0.F;
+        const auto decoded=xrfg::decode_luke_origin_row(std::span<const float>(projected).subspan(tlou.scan.x,tlou.scan.width));
+        require(decoded.token==0x2036u&&!decoded.ambiguous,"TLOU1 shifted band lost its token");
+    }
+    for(const auto* name:{L"tll.exe",L"TLL-L.exe",L"u4.exe",L"u4-l.exe"})
+        require(xrfg::luke_origin_inset_for_title(name)==std::array<unsigned,2>{256,32},"Uncharted margins missing");
+    {
+        // Uncharted 4080 -> 4079: without an inset the band began at eye
+        // pixel 1 of its 261-pixel scan, 2 pixels left of where it was
+        // written. With the inset that placement has room on both sides.
+        xrfg::LukeColorOriginLayout uncharted;
+        require(xrfg::compact_luke_origin_layout(4080,3424,4079,3424,uncharted,32,32),"Uncharted protected layout");
+        const int eye_x=int(uncharted.bands[0].x)-2;
+        require(eye_x>=int(uncharted.scan.x)+16 && eye_x+256+16<=int(uncharted.scan.x+uncharted.scan.width),
+            "Uncharted observed placement without margin in the reader's scan");
+        std::vector<float> projected(4079,.02F);
+        for(unsigned cell=0;cell<256;++cell)
+            projected[eye_x+cell]=xrfg::luke_origin_white(0x2036u,cell)?1.F:0.F;
+        const auto decoded=xrfg::decode_luke_origin_row(std::span<const float>(projected).subspan(uncharted.scan.x,uncharted.scan.width));
+        require(decoded.token==0x2036u&&!decoded.ambiguous,"Uncharted shifted band lost its token");
+    }
+    {
+        // Uncharted 3488x2928: the band 32 px above the bottom edge, the
+        // reader's scan around it, a 2-pixel shift still inside.
+        require(xrfg::luke_origin_from_bottom_for_title(L"TLL.exe")&&xrfg::luke_origin_from_bottom_for_title(L"u4-l.exe")&&
+            !xrfg::luke_origin_from_bottom_for_title(L"tlou-i.exe"),"bottom placement policy");
+        xrfg::LukeColorOriginLayout bottom;
+        require(xrfg::compact_luke_origin_layout(3488,2928,3488,2928,bottom,32,32,true)&&bottom.band_count==2&&
+            bottom.bands[0].y==2928-8-2-32&&!bottom.bright[0]&&bottom.bands[1].y==bottom.bands[0].y-64&&bottom.bright[1]&&
+            bottom.bands[1].x==bottom.bands[0].x&&bottom.scan.y+bottom.scan.height<=2928&&
+            bottom.scan.y+16<=bottom.bands[1].y&&bottom.bands[0].y+8+16<=bottom.scan.y+bottom.scan.height,
+            "Uncharted bottom layout: dim band and a bright band 64 rows above, both in the scan");
+        // 2800x2352 output shown in a 2800x2350 eye (measured): either crop
+        // keeps both bands inside the eye and inside the scan.
+        require(xrfg::compact_luke_origin_layout(2800,2352,2800,2350,bottom,32,32,true)&&bottom.band_count==2,
+            "Uncharted bottom layout under a 2-row crop");
+        for(const unsigned crop:{0U,2U})for(unsigned band=0;band<2;++band) {
+            const unsigned eye_y=bottom.bands[band].y-crop;
+            require(eye_y+8<=2350&&eye_y>=bottom.scan.y+16&&eye_y+8+16<=bottom.scan.y+bottom.scan.height,
+                "bottom band outside the eye or the scan for a crop");
+        }
+        // Measured at 3600x3024 -> 3600x3022: the band drawn 258 pixels in
+        // appears magnified 1.05 and 43 pixels further left. Still inside the
+        // scan with its sync prefix, and decodable at that pitch.
+        require(xrfg::compact_luke_origin_layout(3600,3024,3600,3022,bottom,256,32,true)&&bottom.scan.x==0&&
+            bottom.bands[0].x==258&&bottom.scan.width>=258+256+8,"Uncharted wide search window");
+        {
+            std::vector<float> eye(bottom.scan.width,.02F);
+            const double origin=258*1.05-43;
+            for(unsigned x=0;x<eye.size();++x) {
+                const double cell=(x-origin)/1.05;
+                if(cell>=0&&cell<256)eye[x]=xrfg::luke_origin_white(0x2036u,unsigned(cell))?1.F:0.F;
+            }
+            const auto decoded=xrfg::decode_luke_origin_row(eye);
+            require(decoded.token==0x2036u&&!decoded.ambiguous,"magnified, shifted bottom band lost its token");
+        }
+        std::array<std::byte,4> bright{};
+        xrfg::luke_origin_pixel(bright.data(),DXGI_FORMAT_R11G11B10_FLOAT,true,true);
+        require(std::fabs(xrfg::luke_origin_luma(bright.data(),DXGI_FORMAT_R11G11B10_FLOAT)-1.F)<1e-4F,"bright stamp is not full white");
+    }
+    for(const float scene:{.02F,.1F,.3F,.6F}) {
+        // Uncharted: a 1/16 band right after brighter scenery, blurred over
+        // a pixel. The scenery-to-band drop and bit0's own merge into one
+        // edge 1.85 px early; the band must still decode, from bit1.
+        std::vector<float> row(325,scene),blurred(325);
+        for(unsigned cell=0;cell<256;++cell)row[34+cell]=xrfg::luke_origin_white(0x10DCu,cell)?.05F:0.F;
+        for(std::size_t x=0;x<row.size();++x)
+            blurred[x]=.25F*row[x?x-1:0]+.5F*row[x]+.25F*row[x+1<row.size()?x+1:x];
+        const auto decoded=xrfg::decode_luke_origin_row(blurred);
+        require(decoded.token==0x10DCu&&!decoded.ambiguous,"dim band beside brighter scenery lost its token");
+    }
     for(const auto* name:{L"GTA5.exe",L"Dead Space.exe",L"KingdomCome.exe",L"HorizonForbiddenWest.exe"})
         require(xrfg::luke_origin_inset_for_title(name)==std::array<unsigned,2>{0,0},"unrelated title got GTA inset");
     require(xrfg::compact_luke_origin_layout(2128,1696,1553,1696,layout,0,32)&&layout.band_count==1&&
-        layout.bands[0].x==577&&layout.bands[0].y==34&&layout.scan.y==16&&layout.scan.height==44,
+        layout.bands[0].x==577&&layout.bands[0].y==34&&layout.scan.y==0&&layout.scan.height==76,
         "GTA measured final-color protected geometry");
+    for(unsigned height:{1696U,2736U,3344U}) {
+        const auto gta=xrfg::luke_origin_inset_for_title(L"GTA5_Enhanced.exe",height);
+        require(gta[1]==height/6,"GTA scripted inset did not follow full-size eye height");
+        require(xrfg::compact_luke_origin_layout(3424,height,2987,height,layout,gta[0],gta[1]),
+            "GTA scripted full-size layout rejected");
+        require(layout.bands[0].y>height/8+16&&layout.scan.height==76&&layout.scan.width==697,
+            "GTA scripted inset must retain its band and the wider 32-row translation window");
+        for(const auto* name:{L"Outlaws.exe",L"GTA5.exe",L"DeadSpace.exe",L"KingdomCome.exe",L"HorizonForbiddenWest.exe"})
+            require(xrfg::luke_origin_inset_for_title(name,height)==xrfg::luke_origin_inset_for_title(name),
+                "scripted inset changed another title");
+    }
     require(xrfg::compact_luke_origin_layout(3344,3344,3063,3344,layout),"Horizon crop layout");
     require(layout.band_count==1 && layout.bands[0].x==283 && layout.bands[0].y==2 && layout.bands[0].width==256 &&
         layout.bands[0].height==8 && layout.scan.width==541 && layout.scan.height==12,"derived corner crop");
@@ -152,6 +247,37 @@ void codec_tests() {
     require(!xrfg::compact_luke_origin_layout(UINT32_MAX,1440,1319,1440,layout),"oversized/overflow layout admitted");
     require(!xrfg::compact_luke_origin_layout(512,8,512,8,layout),"insufficient band margin accepted");
     require(!xrfg::compact_luke_origin_layout(512,32,1024,32,layout),"upscaled/crop mismatch accepted");
+    {
+        // Black bars move the mark inside the picture, at most a tenth in.
+        // TLOU1 under VDXR: 159 rows top, 80 columns left on a 3456x3773 eye.
+        const xrfg::LukeOriginBars tlou_bars{80,159,350};
+        const auto inset=xrfg::luke_origin_inset_with_bars({32,32},tlou_bars,3456,3773,false);
+        require(inset==std::array<unsigned,2>{88,167},"bars do not move the mark inside the picture");
+        require(xrfg::luke_origin_inset_with_bars({32,32},tlou_bars,3456,3773,true)[1]==358,
+            "a bottom band does not follow the bottom bar");
+        require(xrfg::luke_origin_inset_with_bars({32,32},{0,900,0},3456,3773,false)[1]==377,
+            "a bar past a tenth of the eye moves the mark further in");
+        require(xrfg::luke_origin_inset_with_bars({32,32},{},3456,3773,false)==std::array<unsigned,2>{32,32},
+            "no bars changed the title's inset");
+        xrfg::LukeColorOriginLayout barred;
+        require(xrfg::compact_luke_origin_layout(3456,3776,3456,3773,barred,inset[0],inset[1])&&
+            barred.bands[0].y>=159+8,"mark not below the top bar");
+        const float line[]{0.F,0.F,0.F,.2F,.5F,0.F};
+        unsigned run{};
+        require(xrfg::luke_origin_black_run(line,false,run)&&run==3,"top bar measured wrong");
+        require(xrfg::luke_origin_black_run(line,true,run)&&run==1,"bottom bar measured wrong");
+        const float black[]{0.F,0.F,0.F};
+        require(!xrfg::luke_origin_black_run(black,false,run)&&run==0,"a black line measured as a bar");
+    }
+    {
+        // TLOU1 under VDXR: a 1941x2119 eye from a 3920x2112 output (slightly
+        // magnified vertically) still gets its protected layout.
+        xrfg::LukeColorOriginLayout magnified;
+        require(xrfg::compact_luke_origin_layout(3920,2112,1941,2119,magnified,32,32)&&magnified.band_count>0,
+            "slightly magnified eye has no layout");
+        require(!xrfg::compact_luke_origin_layout(3920,2112,1941,2112+2112/20+1,magnified,32,32),
+            "eye more than 5% taller than the output accepted");
+    }
     // V641 Outlaws F8: 3056x3344 -> 3056x3337; final-color translation can
     // clip the corner sync, while REAL VR's FPS block covers its left side.
     // Protect the token, not the decoder: all bits/CRC remain mandatory.
@@ -159,8 +285,8 @@ void codec_tests() {
     require(xrfg::compact_luke_origin_layout(3056,3344,3056,3337,protected_layout,256,32),
         "Outlaws protected origin layout");
     require(protected_layout.band_count==1 && protected_layout.bands[0].x==258 &&
-        protected_layout.bands[0].y==41 && protected_layout.scan.x==240 && protected_layout.scan.y==16 &&
-        protected_layout.scan.width==292 && protected_layout.scan.height==51,"Outlaws bounded protected scan");
+        protected_layout.bands[0].y==41 && protected_layout.scan.x==224 && protected_layout.scan.y==0 &&
+        protected_layout.scan.width==324 && protected_layout.scan.height==83,"Outlaws bounded protected scan");
     for(int shift=-16;shift<=16;++shift) {
         std::vector<float> projected(3056,.15F);
         const int x=static_cast<int>(protected_layout.bands[0].x)+shift;
@@ -233,9 +359,13 @@ void luma_tests() {
         DXGI_FORMAT_R10G10B10A2_UNORM,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT,
         DXGI_FORMAT_R11G11B10_FLOAT,DXGI_FORMAT_R16G16B16A16_UNORM}) {
         std::array<std::byte,16> pixel{};
+        // Float outputs are scene-referred: their white stays under exposure/bloom.
+        const bool scene_referred=format==DXGI_FORMAT_R16G16B16A16_FLOAT||
+            format==DXGI_FORMAT_R32G32B32A32_FLOAT||format==DXGI_FORMAT_R11G11B10_FLOAT;
         for(bool white:{false,true}) {
             xrfg::luke_origin_pixel(pixel.data(),format,white);
-            require(close(xrfg::luke_origin_luma(pixel.data(),format),white?1.F:0.F),"black/white stamp luminance changed");
+            require(close(xrfg::luke_origin_luma(pixel.data(),format),
+                white?(scene_referred?xrfg::kLukeOriginHdrWhite:1.F):0.F),"black/white stamp luminance changed");
         }
     }
     const std::uint32_t packed_hdr=0x3c0U|(0x380U<<11)|(0x1a0U<<22); // 1,.5,.25
@@ -321,7 +451,66 @@ struct Gpu {
         transition(source,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
         transition(destination,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
     }
+    ComPtr<ID3D12Resource> black_rows(ID3D12Resource* destination,unsigned y,unsigned height) {
+        const auto desc=destination->GetDesc();const UINT width=static_cast<UINT>(desc.Width);
+        const UINT pitch=(width*4+255)&~255U;
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width=UINT64(pitch)*height;buffer.Height=buffer.DepthOrArraySize=buffer.MipLevels=buffer.SampleDesc.Count=1;
+        buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> upload;
+        check(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,IID_PPV_ARGS(&upload)),"scripted black-mask upload");
+        void* data{};check(upload->Map(0,nullptr,&data),"scripted mask map");
+        std::memset(data,0,static_cast<std::size_t>(buffer.Width));upload->Unmap(0,nullptr);
+        D3D12_TEXTURE_COPY_LOCATION s{},d{};s.pResource=upload.Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        s.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,width,height,1,pitch};
+        d.pResource=destination;d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        transition(destination,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
+        list->CopyTextureRegion(&d,0,y,0,&s,nullptr);
+        transition(destination,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
+        return upload; // Caller retains until the submitted readback fence completes.
+    }
 };
+void doom_hdr_gpu_test() {
+    require(xrfg::luke_origin_bright_primary_for_title(L"DOOMTheDarkAges.exe")&&
+        xrfg::luke_origin_bright_primary_for_title(L"doomthedarkages.EXE")&&
+        !xrfg::luke_origin_bright_primary_for_title(L"TheGreatCircle.exe")&&
+        !xrfg::luke_origin_bright_primary_for_title(L"GTA5_Enhanced.exe")&&
+        !xrfg::luke_origin_bright_primary_for_title(L"Outlaws.exe"),"DOOM-only HDR contrast scope");
+    Gpu gpu;
+    auto source=gpu.texture(1024,1024,DXGI_FORMAT_R16G16B16A16_FLOAT);
+    auto eye=gpu.texture(1024,744,DXGI_FORMAT_R16G16B16A16_FLOAT);
+    xrfg::configure_luke_color_origin_extent(1024,744);
+    constexpr std::uint32_t expected=0x12345;
+    xrfg::LukeColorOriginRect written{};
+    check(xrfg::mark_luke_color_origin(gpu.list.Get(),source.Get(),expected,D3D12_RESOURCE_STATE_COMMON,
+        gpu.device.Get(),{},DXGI_FORMAT_UNKNOWN,&written),"DOOM HDR stamp");
+    require(written.x==2&&written.y==282&&written.width==256&&written.height==8,
+        "DOOM HDR fix changed marker geometry/copy budget");
+    D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=16384;
+    desc.Height=desc.DepthOrArraySize=desc.MipLevels=desc.SampleDesc.Count=1;desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;check(gpu.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,
+        D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&readback)),"DOOM stamp readback");
+    gpu.transition(source.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=source.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.pResource=readback.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Footprint={DXGI_FORMAT_R16G16B16A16_FLOAT,256,8,1,2048};
+    const D3D12_BOX box{2,282,0,258,290,1};gpu.list->CopyTextureRegion(&dst,0,0,0,&src,&box);
+    gpu.transition(source.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
+    gpu.crop(source.Get(),eye.Get(),0,140,1024,744);gpu.submit();
+    std::uint32_t token{};check(xrfg::read_luke_color_origin(gpu.queue.Get(),eye.Get(),&token,
+        D3D12_RESOURCE_STATE_COMMON,5000),"DOOM cropped marker read");
+    require(token==expected,"DOOM HDR marker changed identity");
+    void* mapped{};D3D12_RANGE range{0,16384};check(readback->Map(0,&range,&mapped),"DOOM HDR map");
+    const auto* half=static_cast<const std::uint16_t*>(mapped);
+    const bool levels=half[0]==0x3c00&&half[1]==0x3c00&&half[2]==0x3c00&&
+        half[8]==0&&half[9]==0&&half[10]==0;
+    const D3D12_RANGE untouched{0,0};readback->Unmap(0,&untouched);
+    require(levels,"DOOM HDR stamp is still dim 1/16 instead of full-white 1.0");
+    std::cout<<"DOOM HDR GPU stamp: full-white1.0/black0, exact256x8/16384bytes, crop280 and CRC identity PASS\n";
+}
 void gpu_tests() {
     Gpu gpu;
     auto source=gpu.texture(1024,64),left=gpu.texture(800,64),right=gpu.texture(800,64);
@@ -369,11 +558,15 @@ void gpu_tests() {
     gpu.submit();
     std::array<std::uint32_t,2> pair_tokens{};
     std::array<HRESULT,2> pair_results{};
+    xrfg::LukeColorOriginReadReceipt pair_receipt;
     const auto read_pair=[&](std::array<ID3D12Resource*,2> colors,DWORD timeout=5000) {
         return xrfg::read_luke_color_origin_pair(gpu.queue.Get(),colors,pair_tokens,pair_results,
-            D3D12_RESOURCE_STATE_COMMON,timeout);
+            D3D12_RESOURCE_STATE_COMMON,timeout,nullptr,&pair_receipt);
     };
     check(read_pair({pair_a.Get(),pair_b.Get()}),"paired transport with different row pitches");
+    require(pair_receipt.submitted&&pair_receipt.fence&&pair_receipt.value&&
+        pair_receipt.fence->GetCompletedValue()>=pair_receipt.value,
+        "completed origin read did not return its exact GPU lease-retirement receipt");
     require(pair_results[0]==S_OK && pair_results[1]==S_OK &&
         pair_tokens[0]==token_a && pair_tokens[1]==token_b,"paired eyes merged tokens/footprints");
     check(read_pair({pair_b.Get(),pair_a.Get()}),"reversed paired transport");
@@ -397,6 +590,9 @@ void gpu_tests() {
         pair_tokens[1]==token_b,"invalid peer suppressed/contaminated valid eye");
     check(gpu.queue->Wait(gate.Get(),2),"gate pair reader");
     const auto pair_stalled=read_pair({pair_b.Get(),pair_b.Get()},5);
+    require(pair_receipt.submitted&&pair_receipt.fence&&pair_receipt.value&&
+        pair_receipt.fence->GetCompletedValue()<pair_receipt.value,
+        "timed-out origin read lost its pending fence or reused its source lease early");
     check(gate->Signal(2),"release pair reader gate");
     require(pair_stalled==HRESULT_FROM_WIN32(WAIT_TIMEOUT) &&
         pair_results[0]==pair_stalled && pair_results[1]==pair_stalled &&
@@ -599,6 +795,92 @@ void cpu_batch_tests() {
  for(auto& t:callers)t=std::thread([&]{for(unsigned n=0;n<5;++n){std::array<xrfg::LukeColorOriginDecode,2> out;xrfg::decode_luke_origin_images(images,out);require(out[0].ambiguous&&out[1].token==101&&!out[1].ambiguous,"concurrent decode batches mixed independent results");}});
  for(auto& t:callers)t.join();
  images[0].row_pitch=3;xrfg::decode_luke_origin_images(images,results);require(!results[0].token&&results[1].token==101,"invalid stride consumed or poisoned peer");
+ // Diagnostic evidence must ignore alpha-only black and remain independent
+ // of CRC admission. Observing content never permits a missing token.
+ std::array<std::vector<std::byte>,2> scene;
+ for(unsigned i=0;i<2;++i){scene[i].resize(pitch*8);for(unsigned p=3;p<scene[i].size();p+=4)scene[i][p]=std::byte{255};
+  images[i]={scene[i].data(),DXGI_FORMAT_B8G8R8A8_UNORM,w,8,pitch};}
+ std::array<bool,2> nonblack{true,true};xrfg::decode_luke_origin_images(images,results,nonblack);
+ require(!nonblack[0]&&!nonblack[1]&&!results[0].token&&!results[1].token,"opaque black source invented color or CRC");
+ scene[0][0]=std::byte{1};xrfg::decode_luke_origin_images(images,results,nonblack);
+ require(nonblack[0]&&!nonblack[1]&&!results[0].token,"content probe admitted markerless scene");
+ for(unsigned x=0;x<256;++x)xrfg::luke_origin_pixel(scene[0].data()+2*pitch+(x+2)*4,images[0].format,xrfg::luke_origin_white(104,x));
+ xrfg::decode_luke_origin_images(images,results,nonblack);
+ require(nonblack[0]&&!nonblack[1]&&results[0].token==104&&!results[0].ambiguous,"content probe changed valid CRC");
+ auto observed=results;xrfg::decode_luke_origin_images(images,results);
+ require(results[0].token==observed[0].token&&results[0].ambiguous==observed[0].ambiguous&&results[1].token==observed[1].token,
+  "diagnostic and ordinary decoder admission differ");
+}
+// Pimax/REAL VR Ghost of Tsushima: 3680x3680 producer, 3680x3089 eye, so a
+// 260x603 scan whose band sits at one fixed crop row. Only rows near the
+// learned band are decoded until a miss, a conflict or a geometry change.
+void windowed_decode_tests() {
+    constexpr unsigned w=260,h=603,pitch=w*4;
+    std::array<std::vector<std::byte>,2> bytes;
+    std::array<xrfg::LukeColorOriginImage,2> images;
+    for(unsigned i=0;i<2;++i) {
+        bytes[i].assign(std::size_t(pitch)*h,std::byte{128});
+        images[i]={bytes[i].data(),DXGI_FORMAT_R8G8B8A8_UNORM,w,h,pitch};
+    }
+    const auto band=[&](unsigned image,unsigned top,std::uint32_t token) {
+        for(unsigned y=top;y<top+xrfg::kLukeOriginHeight;++y)for(unsigned x=0;x<256;++x)
+            xrfg::luke_origin_pixel(bytes[image].data()+std::size_t(y)*pitch+(x+2)*4,images[image].format,
+                xrfg::luke_origin_white(token,x));
+    };
+    const auto clear=[&](unsigned image){std::fill(bytes[image].begin(),bytes[image].end(),std::byte{128});};
+    std::array<std::uint64_t,2> geometry{7,9};
+    std::array<xrfg::LukeOriginRowWindow,2> windows{};
+    std::array<xrfg::LukeColorOriginDecode,2> results{};
+    const auto decode=[&](unsigned count=1){
+        return xrfg::decode_luke_origin_images_windowed(std::span(images.data(),count),
+            std::span(geometry.data(),count),std::span(windows.data(),count),std::span(results.data(),count));
+    };
+    band(0,297,0x51a7e3);
+    require(decode()==0&&results[0].token==0x51a7e3&&!results[0].ambiguous,"first read is a whole scan");
+    require(windows[0].geometry==7&&windows[0].first==297&&windows[0].last==304,"whole scan learned band rows");
+    require(decode()==1&&results[0].token==0x51a7e3&&results[0].first_row==297&&results[0].last_row==304,
+        "learned rows decoded alone, in scan coordinates");
+    // A bright copy of the band 64 rows above it (bottom layouts) carries the
+    // same token. The window learns one band, not both and the gap between.
+    band(0,297-64,0x51a7e3);windows[0]={};
+    require(decode()==0&&results[0].token==0x51a7e3&&windows[0].first==297&&windows[0].last==304,
+        "whole scan learned both bands and the gap instead of one band");
+    require(decode()==1&&results[0].first_row==297&&results[0].last_row==304,"one band decoded alone");
+    clear(0);band(0,297,0x51a7e3);windows[0]={};
+    require(decode()==0&&windows[0].first==297&&windows[0].last==304,"single band relearned");
+    clear(0);band(0,297+xrfg::kLukeOriginWindowMargin,0x51a7e4);
+    require(decode()==1&&results[0].token==0x51a7e4&&windows[0].first==297+xrfg::kLukeOriginWindowMargin,
+        "drift inside the margin followed without a whole scan");
+    clear(0);band(0,100,0x51a7e5);
+    require(decode()==0&&results[0].token==0x51a7e5&&windows[0].first==100,
+        "band outside the window recovered by the whole scan in the same read");
+    clear(0);
+    require(decode()==0&&!results[0].token&&windows[0].geometry==0,"missing token forgets the window");
+    // A conflicting copy outside the window is not seen by narrowed reads
+    // (no periodic whole scan); the next whole scan, here after the learned
+    // band goes missing, rejects the image and forgets the rows.
+    band(0,297,0x51a7e6);
+    require(decode()==0&&results[0].token==0x51a7e6,"relearn after a miss");
+    band(0,10,0x51a7e7);
+    for(unsigned n=0;n<64;++n)
+        require(decode()==1&&results[0].token==0x51a7e6&&!results[0].ambiguous,"narrowed reads scanned whole");
+    clear(0);band(0,10,0x51a7e7);
+    require(decode()==0&&results[0].token==0x51a7e7&&windows[0].first==10,"whole scan after a miss did not relearn");
+    clear(0);band(0,297,0x51a7e6);band(0,150,0x51a7e7);
+    for(unsigned n=0;n<2;++n)require(decode()==0&&results[0].ambiguous&&windows[0].geometry==0,
+        "whole scan lost conflicting-token rejection, or an ambiguous read learned rows");
+    // New geometry discards rows learned for another layout.
+    clear(0);band(0,297,0x51a7e8);
+    require(decode()==0&&windows[0].geometry==7,"relearn");
+    geometry[0]=8;
+    require(decode()==0&&windows[0].geometry==8,"geometry change reused stale rows");
+    // Colors keep independent windows and results.
+    band(1,40,0x51a7e9);
+    require(decode(2)==1&&results[0].token==0x51a7e8&&results[1].token==0x51a7e9&&
+        windows[1].first==40,"second color borrowed the first color's window");
+    require(decode(2)==3&&results[1].token==0x51a7e9,"both colors narrowed independently");
+    images[1].row_pitch=3;
+    require((decode(2)&2)==0&&!results[1].token&&results[0].token==0x51a7e8,"invalid peer stride poisoned narrowed color");
 }
 void outlaws_protected_gpu_test() {
     wchar_t executable[MAX_PATH]{};GetModuleFileNameW(nullptr,executable,MAX_PATH);
@@ -638,20 +920,79 @@ void gta_protected_gpu_test() {
     wchar_t executable[MAX_PATH]{};GetModuleFileNameW(nullptr,executable,MAX_PATH);
     const auto* name=wcsrchr(executable,L'\\');
     require(_wcsicmp(name?name+1:executable,L"GTA5_Enhanced.exe")==0,"GTA GPU test requires shipping process-name routing");
+    // Captured V691 failure class: chromatic channels each retain a valid CRC
+    // while their spatially offset weighted luminance loses the sync/payload.
+    std::vector<std::byte> chromatic(800*4*4,std::byte{102});
+    const auto channel_marker=[&](unsigned channel,unsigned shift,std::uint32_t token) {
+        for(unsigned y=0;y<4;++y)for(unsigned x=0;x<256;++x)
+            chromatic[(y*800+100+shift+x)*4+channel]=std::byte(xrfg::luke_origin_white(token,x)?255:0);
+    };
+    channel_marker(0,0,8118);channel_marker(1,2,8118);channel_marker(2,1,8118);
+    xrfg::LukeColorOriginImage chromatic_image{chromatic.data(),DXGI_FORMAT_R8G8B8A8_UNORM,800,4,3200};
+    xrfg::LukeColorOriginDecode decoded{};
+    xrfg::decode_luke_origin_images(std::span(&chromatic_image,1),std::span(&decoded,1));
+    require(!decoded.token&&!decoded.ambiguous,"chromatic fixture unexpectedly retained a luminance CRC");
+    chromatic_image.rgb_fallback=true;
+    xrfg::decode_luke_origin_images(std::span(&chromatic_image,1),std::span(&decoded,1));
+    require(decoded.token==8118&&!decoded.ambiguous,"RGB recovery did not preserve exact full token/CRC");
+    channel_marker(0,0,8119);
+    xrfg::decode_luke_origin_images(std::span(&chromatic_image,1),std::span(&decoded,1));
+    require(decoded.ambiguous,"different valid channel tokens were silently combined");
+    std::fill(chromatic.begin(),chromatic.end(),std::byte{64});
+    xrfg::decode_luke_origin_images(std::span(&chromatic_image,1),std::span(&decoded,1));
+    require(!decoded.token&&!decoded.ambiguous,"erased RGB invented an identity");
     Gpu gpu;auto source=gpu.texture(2128,1696);
     xrfg::configure_luke_color_origin_extent(1553,1696);
     xrfg::LukeColorOriginRect written{};constexpr std::uint32_t expected=223;
     check(xrfg::mark_luke_color_origin(gpu.list.Get(),source.Get(),expected,D3D12_RESOURCE_STATE_COMMON,gpu.device.Get(),{},DXGI_FORMAT_UNKNOWN,&written),"GTA original writer");
-    require(written.x==577&&written.y==34&&written.width==256&&written.height==8,"GTA actual process did not select vertical inset");
+    require(written.x==577&&written.y==284&&written.width==256&&written.height==8,"GTA actual process did not select scripted-safe inset");
     std::vector<ComPtr<ID3D12Resource>> eyes;
+    std::vector<ComPtr<ID3D12Resource>> masks;
     for(unsigned crop:{0U,288U,575U})for(int shift:{-16,-8,0,8,16}) {
         auto eye=gpu.texture(1553,1696);
         const unsigned sy=shift<0?unsigned(-shift):0,dy=shift>0?unsigned(shift):0;
-        gpu.crop(source.Get(),eye.Get(),crop,sy,1553,1696-std::abs(shift),0,dy);eyes.push_back(std::move(eye));
+        gpu.crop(source.Get(),eye.Get(),crop,sy,1553,1696-std::abs(shift),0,dy);
+        masks.push_back(gpu.black_rows(eye.Get(),0,1696/8));
+        masks.push_back(gpu.black_rows(eye.Get(),1696-1696/8,1696/8));
+        eyes.push_back(std::move(eye));
     }
     gpu.submit();
     for(const auto& eye:eyes){std::uint32_t token{};check(xrfg::read_luke_color_origin(gpu.queue.Get(),eye.Get(),&token,D3D12_RESOURCE_STATE_COMMON,5000),"GTA cropped/shifted actual GPU reader");
         require(token==expected,"GTA crop or reprojection margin lost exact CRC token");}
+    // Exact new captured geometry: gameplay -> scripted mask -> gameplay.
+    // Copies are real D12 commands, while the closed REAL VR transform is not
+    // simulated here. Capture-transform replay is a separate offline receipt.
+    gpu.reset();auto wide=gpu.texture(3424,2736);
+    xrfg::configure_luke_color_origin_extent(2987,2736);
+    check(xrfg::mark_luke_color_origin(gpu.list.Get(),wide.Get(),expected+1,D3D12_RESOURCE_STATE_COMMON,gpu.device.Get(),{},DXGI_FORMAT_UNKNOWN,&written),"GTA large scripted writer");
+    require(written.x==439&&written.y==458,"GTA large source marker misplaced");
+    eyes.clear();masks.clear();
+    for(unsigned crop:{0U,219U,437U})for(bool scripted:{false,true}) {
+        auto eye=gpu.texture(2987,2736);gpu.crop(wide.Get(),eye.Get(),crop,0,2987,2736);
+        if(scripted) {
+            masks.push_back(gpu.black_rows(eye.Get(),0,344));
+            masks.push_back(gpu.black_rows(eye.Get(),2736-344,344));
+        }
+        eyes.push_back(std::move(eye));
+    }
+    gpu.submit();
+    for(const auto& eye:eyes){std::uint32_t token{};check(xrfg::read_luke_color_origin(gpu.queue.Get(),eye.Get(),&token,D3D12_RESOURCE_STATE_COMMON,5000),"GTA scripted/gameplay transition reader");
+        require(token==expected+1,"GTA scripted transition kept an old token or lost its marker");}
+    std::array<std::uint32_t,2> observed_tokens{};std::array<HRESULT,2> observed_results{};std::array<bool,2> observed_color{};
+    check(xrfg::read_luke_color_origin_pair(gpu.queue.Get(),{eyes[0].Get(),eyes[1].Get()},observed_tokens,observed_results,
+        D3D12_RESOURCE_STATE_COMMON,5000,&observed_color),"GTA GPU diagnostic color receipt");
+    require(observed_color[0]&&observed_color[1]&&observed_tokens[0]==expected+1&&observed_tokens[1]==expected+1,
+        "GTA color receipt changed exact tokens");
+    const auto raw_scene=xrfg::luke_original_scene_identity(observed_tokens,{0,1});
+    require(bool(raw_scene)&&raw_scene.output==0,"actual GPU CRC pair could not identify the original real scene");
+    gpu.reset();auto erased=gpu.texture(2987,2736);gpu.crop(wide.Get(),erased.Get(),219,0,2987,2736);
+    masks.push_back(gpu.black_rows(erased.Get(),440,44));gpu.submit();std::uint32_t absent{};
+    require(xrfg::read_luke_color_origin(gpu.queue.Get(),erased.Get(),&absent,D3D12_RESOURCE_STATE_COMMON,5000)==HRESULT_FROM_WIN32(ERROR_NOT_FOUND)&&!absent,
+        "GTA missing marker guessed an earlier publication");
+    check(xrfg::read_luke_color_origin_pair(gpu.queue.Get(),{erased.Get(),erased.Get()},observed_tokens,observed_results,
+        D3D12_RESOURCE_STATE_COMMON,5000,&observed_color),"GTA black GPU diagnostic receipt");
+    require(!observed_color[0]&&!observed_color[1]&&!observed_tokens[0]&&!observed_tokens[1],"GTA black readback not classified exactly");
+    require(!xrfg::luke_original_scene_identity(observed_tokens,{0,1}),"erased GPU markers invented a real scene identity");
     std::cout<<"GTA protected GPU: "<<checks<<" checks PASS\n";
 }
 int captured_decode_benchmark(char** argv) {
@@ -671,8 +1012,9 @@ int captured_decode_benchmark(char** argv) {
  std::sort(serial_ms.begin(),serial_ms.end());std::sort(parallel_ms.begin(),parallel_ms.end());std::cout<<"CAPTURED_DECODE serial_ms="<<serial_ms[7]<<" parallel_ms="<<parallel_ms[7]<<" token0="<<expected[0].token<<" token1="<<expected[1].token<<" ambiguous="<<expected[0].ambiguous<<','<<expected[1].ambiguous<<'\n';return 0;
 }
 int main(int argc,char** argv) {
-    try { if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
+    try { if(argc==2 && std::string_view(argv[1])=="doom-hdr") {doom_hdr_gpu_test();return 0;}
+        if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="gta-protected") {gta_protected_gpu_test();return 0;}
-        if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
+        if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();windowed_decode_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
     catch(const std::exception& e) {std::cerr<<"Compact origin FAIL: "<<e.what()<<"\n";return 1;}
 }

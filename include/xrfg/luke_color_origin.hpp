@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d12.h>
+#include <wrl/client.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -32,7 +33,8 @@ constexpr bool luke_origin_bit(std::uint32_t token, unsigned bit) noexcept {
 constexpr bool luke_origin_white(std::uint32_t token, unsigned x) noexcept {
     return (x % 4 < 2) == luke_origin_bit(token, x / 4);
 }
-struct LukeColorOriginDecode { std::uint32_t token{}; bool ambiguous{}; };
+// Image batches also report the first/last scanned row holding the token.
+struct LukeColorOriginDecode { std::uint32_t token{}; bool ambiguous{}; int first_row{-1}, last_row{-1}; };
 inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) noexcept {
     try {
         if (row.size() < 96 || row.size() > 16384) return {};
@@ -61,27 +63,35 @@ inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) 
             const auto a = static_cast<std::size_t>(x), b = std::min(a + 1, row.size() - 1);
             return row[a] + (row[b] - row[a]) * (x - a);
         };
-        const auto prefix_matches = [&](double origin, double cell) {
-            for (unsigned bit = 0; bit < 16; ++bit) {
+        const auto prefix_bit = [](unsigned bit) { return ((0xd3a5U >> (15 - bit)) & 1) != 0; };
+        // Sampled Manchester test of sync bits [from, to): cheapest first.
+        const auto prefix_matches = [&](double origin, double cell, unsigned from = 0, unsigned to = 16) {
+            for (unsigned bit = from; bit < to; ++bit) {
                 const double difference = sample(origin + (2. * bit - .5) * cell)
                     - sample(origin + (2. * bit + .5) * cell);
                 if (!std::isfinite(difference) || std::abs(difference) < bit_contrast ||
-                    (difference > 0) != (((0xd3a5U >> (15 - bit)) & 1) != 0)) return false;
+                    (difference > 0) != prefix_bit(bit)) return false;
             }
             return true;
         };
-        const auto fit_edges = [&](double& origin, double& cell, unsigned count, bool known_prefix) {
+        // Least-squares refit of origin/cell on the edges nearest the bit
+        // middles, walking the sorted edges forward from `hint` (an index at or
+        // before the first middle) instead of a binary search per bit.
+        const auto fit_edges = [&](double& origin, double& cell, unsigned count, bool known_prefix,
+                double minimum, std::size_t hint) {
             double n{}, sx{}, sy{}, sxx{}, sxy{};
+            const double window = .4 * cell;
+            std::size_t at = hint;
+            while (at > 0 && edges[at - 1].x >= origin - window) --at;
             for (unsigned bit = 0; bit < count; ++bit) {
                 const double target = origin + 2. * bit * cell;
-                double distance = .4 * cell;
+                while (at < edges.size() && edges[at].x < target - window) ++at;
+                double distance = window;
                 const Edge* best{};
-                auto it = std::lower_bound(edges.begin(), edges.end(), target - distance,
-                    [](const Edge& edge, double value) { return edge.x < value; });
-                for (; it != edges.end() && it->x <= target + distance; ++it) {
-                    if (known_prefix && it->falling != (((0xd3a5U >> (15 - bit)) & 1) != 0)) continue;
-                    const double error = std::abs(it->x - target);
-                    if (error < distance) { distance = error; best = &*it; }
+                for (std::size_t k = at; k < edges.size() && edges[k].x <= target + window; ++k) {
+                    if (known_prefix && edges[k].falling != prefix_bit(bit)) continue;
+                    const double error = std::abs(edges[k].x - target);
+                    if (error < distance) { distance = error; best = &edges[k]; }
                 }
                 if (!best) continue;
                 const double x = 2. * bit, y = best->x - origin;
@@ -90,47 +100,74 @@ inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) 
             // One blended midpoint can disappear into the overlay/background
             // gradient. Fit the remaining sync edges; every decoded sync bit
             // and the complete payload CRC are still required below.
-            if (n < (known_prefix ? 15. : 64.)) return false;
+            if (n < minimum) return false;
             const double pitch = (n * sxy - sx * sy) / (n * sxx - sx * sx);
             if (pitch < .7 || pitch > 4.05) return false;
             origin += (sy - pitch * sx) / n; cell = pitch;
             return true;
         };
         LukeColorOriginDecode result{};
-        // Infer continuous pitch from bit0 and either final sync midpoint.
-        // Bit14 rises, bit15 falls. Using only bit15 loses a valid marker when
-        // that one edge is blended into the changing overlay/background.
-        // No rigid scale grid, guessed publication or partial-prefix identity.
+        // The sync prefix 0xd3a5 begins 1,1,0,1 (Manchester 1 = falling middle):
+        // from bit0's middle the edges rise one cell on and fall two cells on;
+        // from bit1's middle they rise two and fall four cells on. Bit1 is
+        // the anchor when a dim band's bit0 edge merged into brighter scenery
+        // beside it (Uncharted, band at the image's left edge). So each
+        // candidate is a pair of falling edges at most four cells apart with
+        // a rising edge midway, screened by sampled sync bits 2..5: linear in
+        // the edges, where pairing every falling edge with every edge up to
+        // 120 px on tried 5,500 pairs a row on a grainy dark corner (11 ms a
+        // frame, Uncharted at night). The pitch from two cells is too rough
+        // for the far sync bits (a 0.3 px edge error is 7% of the span), so
+        // the pitch comes from bit14's rising or bit15's falling edge near
+        // its predicted place, as before. No rigid scale grid, guessed
+        // publication or partial-prefix identity: every sync bit and the CRC
+        // still decide.
         for (std::size_t first = 0; first < edges.size(); ++first) {
             if (!edges[first].falling) continue;
-            for (std::size_t last = first + 1; last < edges.size(); ++last) {
-                const double length = edges[last].x - edges[first].x;
-                if (length > 120.) break;
-                if (length < 21.) continue;
-                const unsigned anchor = edges[last].falling ? 15 : 14;
-                double origin = edges[first].x, cell = length / (2. * anchor);
-                // Necessary full-payload extent, NOT another decode tolerance.
-                // The existing fits move origin <8px and retain >.94 of this
-                // pitch (15/16 prefix edges, then all64 payload edges). Even
-                // the looser 100-cell extent cannot fit here: its last sample
-                // would be outside the row. Keep every remaining fit/CRC check.
-                if (origin + 100. * cell > static_cast<double>(row.size()-1) + 8.) continue;
-                if (!prefix_matches(origin, cell) || !fit_edges(origin, cell, 16, true)) continue;
-                fit_edges(origin, cell, kLukeOriginBits, false);
-                std::uint16_t checksum{}; std::uint32_t token{}; bool valid = true;
-                for (unsigned bit = 0; bit < kLukeOriginBits; ++bit) {
-                    const double difference = sample(origin + (2. * bit - .5) * cell)
-                        - sample(origin + (2. * bit + .5) * cell);
-                    if (!std::isfinite(difference) || std::abs(difference) < bit_contrast) { valid = false; break; }
-                    const unsigned value = difference > 0 ? 1 : 0;
-                    if (bit < 16) {
-                        if (value != ((0xd3a5U >> (15 - bit)) & 1)) { valid = false; break; }
-                    } else if (bit < 48) token = (token << 1) | value;
-                    else checksum = static_cast<std::uint16_t>((checksum << 1) | value);
+            const double x0 = edges[first].x;
+            for (std::size_t second = first + 1; second < edges.size(); ++second) {
+                const double span = edges[second].x - x0;
+                if (span > 4. * 4.05) break;
+                if (!edges[second].falling || span < 2. * .7) continue;
+                // The rising edge midway: bit0's end for bit1's anchor, bit2's
+                // middle for bit1's. Within .4 cell, as the fits below allow.
+                double nearest = span;
+                for (std::size_t k = first + 1; k < second; ++k)
+                    if (!edges[k].falling) nearest = std::min(nearest, std::abs(edges[k].x - x0 - span / 2.));
+                for (unsigned start = 0; start < 2; ++start) {
+                    const double rough = span / (start ? 4. : 2.);
+                    if (rough < .7 || rough > 4.05 || nearest > .4 * rough) continue;
+                    const double rough_origin = x0 - 2. * start * rough;
+                    // Necessary full-payload extent, NOT another decode tolerance.
+                    // The fits move origin <8px and retain >.94 of this pitch.
+                    if (rough_origin + 100. * rough > static_cast<double>(row.size()-1) + 8.) continue;
+                    if (!prefix_matches(rough_origin, rough, 2, 6) || !prefix_matches(rough_origin, rough, 0, 2)) continue;
+                    for (std::size_t last = second + 1; last < edges.size(); ++last) {
+                        const double length = edges[last].x - rough_origin;
+                        if (length > 30. * rough * 1.1 + 1.5) break;
+                        const unsigned anchor = edges[last].falling ? 15 : 14;
+                        const double predicted = 2. * anchor * rough;
+                        if (std::abs(length - predicted) > std::max(.1 * predicted, 1.5)) continue;
+                        double cell = length / (2. * anchor), origin = x0 - 2. * start * cell;
+                        if (cell < .7 || cell > 4.05) continue;
+                        if (!prefix_matches(origin, cell) || !fit_edges(origin, cell, 16, true, 15, first)) continue;
+                        fit_edges(origin, cell, kLukeOriginBits, false, 64, first);
+                        std::uint16_t checksum{}; std::uint32_t token{}; bool valid = true;
+                        for (unsigned bit = 0; bit < kLukeOriginBits; ++bit) {
+                            const double difference = sample(origin + (2. * bit - .5) * cell)
+                                - sample(origin + (2. * bit + .5) * cell);
+                            if (!std::isfinite(difference) || std::abs(difference) < bit_contrast) { valid = false; break; }
+                            const unsigned value = difference > 0 ? 1 : 0;
+                            if (bit < 16) {
+                                if (value != ((0xd3a5U >> (15 - bit)) & 1)) { valid = false; break; }
+                            } else if (bit < 48) token = (token << 1) | value;
+                            else checksum = static_cast<std::uint16_t>((checksum << 1) | value);
+                        }
+                        if (!valid || !token || checksum != luke_origin_crc(token)) continue;
+                        if (result.token && result.token != token) result.ambiguous = true;
+                        result.token = token;
+                    }
                 }
-                if (!valid || !token || checksum != luke_origin_crc(token)) continue;
-                if (result.token && result.token != token) result.ambiguous = true;
-                result.token = token;
             }
         }
         return result;
@@ -153,9 +190,16 @@ inline DXGI_FORMAT luke_origin_upload_format(DXGI_FORMAT resource, DXGI_FORMAT p
         (resource == DXGI_FORMAT_R32G32B32A32_TYPELESS && proven_view == DXGI_FORMAT_R32G32B32A32_FLOAT)) return proven_view;
     return DXGI_FORMAT_UNKNOWN;
 }
-inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white) noexcept {
+// White on a float (scene-referred) output, before the game's exposure,
+// bloom and tone mapping. The Last of Us Part I (R11G11B10) under REAL VR
+// turned a 1.0 marker into a clipped glow reaching 20 pixels around the band
+// in the eye image and never decoded; the decoder needs only a few levels of
+// contrast. Exact in half, 11/10-bit and 32-bit floats.
+inline constexpr float kLukeOriginHdrWhite = 1.f / 16.f;
+// bright: 1.0 on float outputs (see LukeColorOriginLayout::bright).
+inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white, bool bright = false) noexcept {
     if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
-        const auto level = static_cast<std::uint16_t>(white ? 0x3c00 : 0);
+        const auto level = static_cast<std::uint16_t>(white ? (bright ? 0x3c00 : 0x2c00) : 0); // 1 or 2^-4
         const std::uint16_t values[]{level, level, level, 0x3c00};
         std::memcpy(pixel, values, sizeof(values));
     } else if (format == DXGI_FORMAT_R16G16B16A16_UNORM) {
@@ -163,11 +207,12 @@ inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white) 
         const std::uint16_t values[]{level, level, level, 0xffff};
         std::memcpy(pixel, values, sizeof(values));
     } else if (format == DXGI_FORMAT_R11G11B10_FLOAT) {
-        // Unsigned 5-bit exponents, 6/6/5-bit mantissas. Exactly 1.0 RGB.
-        const std::uint32_t value = white ? (0x3c0U | (0x3c0U << 11) | (0x1e0U << 22)) : 0;
+        // Unsigned 5-bit exponents, 6/6/5-bit mantissas. Exactly 2^-4 (or 1) RGB.
+        const std::uint32_t value = !white ? 0 : bright ? (0x3c0U | (0x3c0U << 11) | (0x1e0U << 22))
+            : (0x2c0U | (0x2c0U << 11) | (0x160U << 22));
         std::memcpy(pixel, &value, sizeof(value));
     } else if (format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
-        const float level = white ? 1.f : 0.f, values[]{level, level, level, 1.f};
+        const float level = white ? (bright ? 1.f : kLukeOriginHdrWhite) : 0.f, values[]{level, level, level, 1.f};
         std::memcpy(pixel, values, sizeof(values));
     } else {
         const std::uint32_t value = format == DXGI_FORMAT_R10G10B10A2_UNORM
@@ -235,24 +280,64 @@ struct LukeColorOriginImage {
     const std::byte* pixels{};
     DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
     unsigned width{},height{},row_pitch{};
+    bool rgb_fallback{}; // chromatic postprocessing; full sync/payload/CRC only
 };
+// Optional diagnostic receipt: any finite nonzero RGB luma in this read ROI,
+// not a whole-frame visibility or scene-validity decision. CRC is unchanged.
 void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
-    std::span<LukeColorOriginDecode> results) noexcept;
+    std::span<LukeColorOriginDecode> results, std::span<bool> nonblack = {}) noexcept;
+// A final color is cropped from a taller producer at an offset fixed by the
+// host (Luke's square render to a wider eye: 591 Pimax rows). The scan must
+// cover every possible offset, but once a CRC-valid band is found the same
+// geometry puts it in the same rows. Decode those rows plus the protected
+// translation margin first; any miss, ambiguity or geometry change decodes
+// the whole scan in the same read. A conflicting token outside the window is
+// seen at the next whole scan, not before: a periodic whole scan to look for
+// one cost a 3-6 ms hitch every 32 frames for a case never observed.
+inline constexpr unsigned kLukeOriginWindowMargin = 16;
+struct LukeOriginRowWindow {
+    std::uint64_t geometry{}; // 0: unknown; caller-defined scan identity
+    unsigned first{}, last{}; // inclusive scan rows of the last decoded band
+};
+// Returns one bit per image whose result came from its window alone.
+unsigned decode_luke_origin_images_windowed(std::span<const LukeColorOriginImage> images,
+    std::span<const std::uint64_t> geometry, std::span<LukeOriginRowWindow> windows,
+    std::span<LukeColorOriginDecode> results, std::span<bool> nonblack = {}) noexcept;
 struct LukeColorOriginRect { unsigned x{}, y{}, width{}, height{}; };
 inline constexpr unsigned kLukeOriginHeight = 8;
 inline constexpr unsigned kLukeOriginMargin = 2;
 struct LukeColorOriginLayout {
     std::array<LukeColorOriginRect,8> bands{};
+    // A band stamped at full white instead of kLukeOriginHdrWhite: survives a
+    // heavily vignetted corner, where the dim band's contrast shrinks with it
+    // (Uncharted at night: 8 of 255 at the bottom-left). Its bloom in a bright
+    // corner is why the dim band stays, kLukeOriginBrightGap rows apart.
+    std::array<bool,8> bright{};
     unsigned band_count{};
     LukeColorOriginRect scan;
 };
+inline constexpr unsigned kLukeOriginBrightGap = 64;
 // Cover every possible unscaled horizontal eye crop with complete, disjoint
 // copies of ONE token. A narrow common intersection need not contain a marker.
 // Geometry selects positions, never an eye, frame or alternate metadata source.
+// from_bottom: the band sits inset_y above the bottom edge instead of below
+// the top one (Uncharted's night sky and rain are drawn over the top of the
+// image after DLSS). With a vertical crop of dy rows the eye shows the band
+// up to dy rows higher; the scan covers every such crop.
 inline bool compact_luke_origin_layout(unsigned output_width, unsigned output_height,
     unsigned color_width, unsigned color_height, LukeColorOriginLayout& layout,
-    unsigned inset_x = 0, unsigned inset_y = 0) noexcept {
+    unsigned inset_x = 0, unsigned inset_y = 0, bool from_bottom = false) noexcept {
     layout = {};
+    // An eye image slightly larger than the output shows the output slightly
+    // magnified: The Last of Us Part I under VDXR delivered a 1941x2119 eye
+    // from a 2112-high output at one resolution, which had no layout at all,
+    // so that eye could never be paired. Lay it out as a full-size crop; a
+    // few percent moves the band by a few pixels at most, inside the reader's
+    // translation window. Larger is a mismatch.
+    if (color_height > output_height && color_height - output_height <= output_height / 20)
+        color_height = output_height;
+    if (color_width > output_width && color_width - output_width <= output_width / 20)
+        color_width = output_width;
     if (!color_width || !color_height || output_width>16384 || output_height>8192 ||
         color_width > output_width || color_height > output_height ||
         inset_x>16384 || inset_y>8192 ||
@@ -283,20 +368,42 @@ inline bool compact_luke_origin_layout(unsigned output_width, unsigned output_he
     }
     // Read only the protected band plus bounded final-color translation, not
     // the empty inset/FPS area. Default geometry remains byte-for-byte equal.
-    const unsigned translation_x=std::min(inset_x,16U),translation_y=std::min(inset_y,16U);
+    // 32: The Last of Us Part I's left eye places the band 15 pixels further
+    // left than any crop of its output, losing its first 13 pixels at the edge.
+    // 256 for a bottom band: Uncharted's eye shows its output magnified about
+    // 1.05 and moved left by up to 43 pixels at 3600 wide, cutting a band 32
+    // pixels in; the search window must cover the band's whole possible travel.
+    const unsigned translation_x=std::min(inset_x,from_bottom?256U:32U),translation_y=std::min(inset_y,32U);
     candidate.scan.x=inset_x-translation_x;
     candidate.scan.y=inset_y-translation_y;
     candidate.scan.width=std::min(color_width,candidate.bands[candidate.band_count-1].x+
         kLukeOriginWidth+kLukeOriginMargin+translation_x)-candidate.scan.x;
     candidate.scan.height=dy+kLukeOriginHeight+2*kLukeOriginMargin+inset_y+
         translation_y-candidate.scan.y;
+    if(from_bottom) {
+        // In output rows; eye row = y - crop, crop anywhere in [0, dy]. The
+        // dim band, and a bright copy of each band kLukeOriginBrightGap above.
+        const unsigned y=color_height-kLukeOriginHeight-kLukeOriginMargin-inset_y;
+        if(static_cast<std::uint64_t>(dy)+kLukeOriginMargin+translation_y+kLukeOriginBrightGap>y)return false;
+        if(candidate.band_count*2>candidate.bands.size())return false;
+        const unsigned count=candidate.band_count;
+        for(unsigned band=0;band<count;++band) {
+            candidate.bands[band].y=y;
+            candidate.bands[count+band]=candidate.bands[band];
+            candidate.bands[count+band].y=y-kLukeOriginBrightGap;
+            candidate.bright[count+band]=true;
+        }
+        candidate.band_count=count*2;
+        candidate.scan.y=y-kLukeOriginBrightGap-dy-kLukeOriginMargin-translation_y;
+        candidate.scan.height=std::min(color_height-candidate.scan.y,
+            kLukeOriginBrightGap+dy+kLukeOriginHeight+2*kLukeOriginMargin+2*translation_y);
+    }
     layout=candidate;
     return true;
 }
 // Geometry negotiation is independent of identity. The first consumer knows
 // the actual eye extent before any marker read; SR warmup may precede it.
 void configure_luke_color_origin_extent(unsigned color_width, unsigned color_height) noexcept;
-
 // Two immutable black/white cell uploads per device/format/height. No per-frame
 // upload allocation, CPU rewrite, producer-submission receipt or 64-frame cap.
 HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* color,
@@ -312,9 +419,15 @@ HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
     DWORD timeout_ms = 250) noexcept;
 // Two independently decoded colors in one submission/fence/map. The return
 // value covers shared transport; per-eye results retain missing/ambiguous errors.
+struct LukeColorOriginReadReceipt {
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+    std::uint64_t value{};
+    bool submitted{};
+};
 HRESULT read_luke_color_origin_pair(ID3D12CommandQueue* queue,
     const std::array<ID3D12Resource*, 2>& colors,
     std::array<std::uint32_t, 2>& tokens, std::array<HRESULT, 2>& results,
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON,
-    DWORD timeout_ms = 250) noexcept;
+    DWORD timeout_ms = 250, std::array<bool,2>* nonblack = nullptr,
+    LukeColorOriginReadReceipt* receipt = nullptr) noexcept;
 } // namespace xrfg

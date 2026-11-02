@@ -9,6 +9,7 @@
 #include <windows.h>
 
 namespace xrfg {
+struct TwoFrameImageInfo;
 
 // How the application's image reaches the runtime's for one bridged
 // swapchain. Logged in the swapchain's d3d11_bridge record.
@@ -100,6 +101,12 @@ public:
     // into the runtime's image. What the layer queues after this on the same
     // queue - the history capture - reads the shared texture in order.
     [[nodiscard]] HRESULT release(std::uint32_t index) noexcept;
+
+    // F8 only: snapshot the application-side shared image after release(),
+    // ordered on this bridge's own queue and before the existing mark_read().
+    // This is distinct from the runtime image and from AFW's history mirror.
+    [[nodiscard]] HRESULT diagnostic_capture_application(
+        std::uint32_t index, const TwoFrameImageInfo& info) noexcept;
 
     // Everything the layer will read from image `index` this frame has been
     // queued: signal, so the next before_write of this image waits for it.

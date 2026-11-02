@@ -21,6 +21,11 @@ int main() {
     using namespace xrfg::standalone;
 
     const LauncherSettings release_defaults;
+    if(!contains(build_runtime_ini(release_defaults,xrfg::autonomous::Settings{}),"luke_osr=2\r\n"))return 1;
+    for(int saved:{0,1,2}) {
+        auto controls=xrfg::autonomous::Settings{};controls.luke_osr=saved;
+        if(!contains(build_runtime_ini(release_defaults,controls),saved==0?"luke_osr=0\r\n":"luke_osr=2\r\n"))return 1;
+    }
     if(release_defaults.crash_debug)return 1;
     for(bool enabled:{false,true}) {
         auto choice=release_defaults;choice.crash_debug=enabled;
@@ -522,6 +527,16 @@ int main() {
     }
     std::filesystem::remove(support_source / L"nvngx_dlssnr.dll");
     std::filesystem::remove(support_cache / L"nvngx_dlssnr.dll");
+    // PureDark's AFW provider is optional: Full OSR needs none.
+    const wchar_t* without_provider[]{L"ofxr_amd_fidelityfx_framegeneration_dx12.dll",
+        L"nvngx.dll_dlssnr.dll", L"nvngx.dll_dlssg.dll"};
+    for (const auto* name : without_provider) write_file(support_source / name, "required-helper");
+    if (!stage_runtime_support_files(support_source, support_cache, &support_error) ||
+        std::filesystem::exists(support_cache / L"PDAFWPlugin.dll")) return 1;
+    for (const auto* name : without_provider) {
+        std::filesystem::remove(support_source / name);
+        std::filesystem::remove(support_cache / name);
+    }
     std::filesystem::remove(support_source);
     std::filesystem::remove(support_cache);
     std::filesystem::remove(support_fixture);
@@ -534,6 +549,61 @@ int main() {
             L"\"C:\\Path With Space\\\\\"") {
         std::cerr << "Windows argument quoting failed\n";
         return 1;
+    }
+
+    // status.json: the top-level keys, null without a session, no settings
+    // section, the running session's multiplier over the setting's, escaping,
+    // null for a rate or latency not measured.
+    {
+        StatusInputs idle;
+        idle.armed = true;
+        idle.build = 735;
+        idle.updated = "2026-10-28T09:12:03.512Z";
+        const std::string without = build_status_json(idle);
+        StatusInputs running = idle;
+        running.paused = true;
+        running.settings.triple_frame_gen = false;
+        running.session_present = true;
+        running.session.pid = 23456;
+        running.session.process = "Flight\"Sim\\2024.exe";
+        running.session.runtime = "SteamVR";
+        running.session.multiplier = 3;
+        running.session.generating = true;
+        running.session.app_fps = 29.84f;
+        running.session.output_fps = 89.36f;
+        running.session.display_hz = 90.0f;
+        running.session.latency_ms = 41.26f;
+        running.session.latency_valid = true;
+        const std::string with = build_status_json(running);
+        StatusInputs unmeasured = running;
+        unmeasured.session.rates_valid = unmeasured.session.output_valid = unmeasured.session.latency_valid = false;
+        const std::string without_rates = build_status_json(unmeasured);
+        if (!contains(without, "\"schema\": 1,") || !contains(without, "\"armed\": true,") ||
+            !contains(without, "\"paused\": false,") ||
+            !contains(without, "\"multiplier\": 2,") ||
+            !contains(without, "\"generating\": null,") ||
+            !contains(without, "\"output_fps\": null,") ||
+            !contains(without, "\"latency_ms\": null,") ||
+            !contains(without, "\"build\": 735") ||
+            !contains(without, "\"updated\": \"2026-10-28T09:12:03.512Z\"") ||
+            !contains(with, "\"paused\": true,") || !contains(with, "\"multiplier\": 3,") ||
+            !contains(with, "\"generating\": true,") ||
+            !contains(with, "\"app_fps\": 29.8,") ||
+            !contains(with, "\"output_fps\": 89.4,") ||
+            !contains(with, "\"display_hz\": 90.0,") ||
+            !contains(with, "\"latency_ms\": 41.3,") ||
+            !contains(with, "\"process\": \"Flight\\\"Sim\\\\2024.exe\"") ||
+            !contains(with, "\"pid\": 23456,") ||
+            !contains(without_rates, "\"app_fps\": null,") ||
+            !contains(without_rates, "\"output_fps\": null,") ||
+            !contains(without_rates, "\"latency_ms\": null,") ||
+            !contains(without_rates, "\"display_hz\": 90.0,") ||
+            contains(without, "settings") || contains(with, "settings") ||
+            !contains(without, "\"session\": null\n}\n") ||
+            !contains(with, "\"deep_pipeline\": false\n  }\n}\n")) {
+            std::cerr << "status.json was not as documented\n";
+            return 1;
+        }
     }
 
     std::cout << "OFXR manual persistent launcher support tests passed\n";

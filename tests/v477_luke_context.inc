@@ -1,5 +1,6 @@
 // Real original D12 Execute hook, COM ownership, and production layer bootstrap.
-void luke_standalone_context_test(bool active_alias_history=false, bool no_helper_context=false, bool stale_synthesis=false) {
+void luke_standalone_context_test(bool active_alias_history=false, bool no_helper_context=false,
+    bool stale_synthesis=false,bool resource_lifecycle=false) {
     using Microsoft::WRL::ComPtr;
     ComPtr<ID3D11Device> d11;ComPtr<ID3D11DeviceContext> c11;
     check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,
@@ -12,9 +13,13 @@ void luke_standalone_context_test(bool active_alias_history=false, bool no_helpe
     ComPtr<ID3D12Device> queried;ComPtr<ID3D12CommandQueue> q;
     check(!query_luke_ross_d3d12_context(&queried,&q),"ordinary host rejected");
     auto marker=LoadLibraryW((current_layer_directory()/L"luke-runtime-fixture.dll").c_str());
+    // Model the production session boundary after loading the fixture DLL;
+    // luke_detected() is intentionally a cached read, not a loader poll.
+    xrfg::native_ingress::refresh_luke_detection();
     check(marker && xrfg::native_ingress::luke_detected(),"Luke fixture detected");
     check(!query_luke_ross_d3d12_context(&queried,&q),"queue creation is not original production");
     auto state=session();state->presenter_active=false;state->three_slot_director=false;
+    if(resource_lifecycle){state->dispatch->steamvr_runtime=true;state->vdxr_legacy=false;}
     state->luke_afw_enabled=true;state->graphics_binding_capabilities=no_helper_context?3:7;
     state->d3d11_device=d11;state->d3d11_context=c11;
     if (!no_helper_context) {state->d3d12_device=d12;state->d3d12_queue=private_queue;}
@@ -137,8 +142,79 @@ void luke_standalone_context_test(bool active_alias_history=false, bool no_helpe
     check(query_luke_ross_d3d12_context(&queried,&q)&&q==original_queue&&queried==d12,
         "private execution queue replaced original SR/RR provenance");
     auto execution_queue=state->d3d12_queue;
-    auto initialized=state->luke_afw;initialize_late_luke_context(state);
-    check(state->luke_afw==initialized&&state->d3d12_queue==execution_queue,"no repeat initialization");
+    {
+        auto initialized=state->luke_afw;initialize_late_luke_context(state);
+        check(state->luke_afw==initialized&&state->d3d12_queue==execution_queue,"no repeat initialization");
+    }
+    if(resource_lifecycle) {
+        check(active_alias_history && pending->d3d12_history && state->luke_afw,
+            "provider lifecycle requires actual active color history and initialized AFW");
+        const auto retained_synthesis=state->luke_synthesis_queue;
+        auto* const retained_history=pending->d3d12_history.get();
+        xrfg::D3D12HistoryCaptureTicket capture{};
+        check(SUCCEEDED(pending->d3d12_history->capture(0,&capture)) &&
+            SUCCEEDED(pending->d3d12_history->commit(capture)),"active provider-lifecycle color capture");
+        const auto snapshot=[&]() {
+            xrfg::D3D12HistoryConsumerLease lease{};ComPtr<ID3D12Resource> resource;
+            ComPtr<ID3D12Fence> production;
+            check(SUCCEEDED(pending->d3d12_history->acquire_consumer(capture,&lease,&resource,&production)),
+                "retained color snapshot resolves through original history");
+            pending->d3d12_history->cancel_consumer(lease);
+            check(SUCCEEDED(wait_composition_fence(production.Get(),capture.fence_value,3000)),
+                "provider-lifecycle color writer retires");
+            return resource;
+        };
+        auto retained_snapshot=snapshot();
+        const auto request=[&](bool ofxr,int afw) {
+            auto settings=xrfg::autonomous::snapshot().desired;
+            settings.enabled=ofxr;settings.afw_mode=afw;
+            check(xrfg::autonomous::request(settings),"canonical provider-lifecycle desired settings");
+            xrfg::autonomous::apply_runtime_settings();
+            check(xrfg::embedded::snapshot().desired.enabled==ofxr &&
+                xrfg::embedded::afw_snapshot().desired.mode==afw,"canonical AFW/OFXR publication");
+            check(SUCCEEDED(apply_embedded_control(state)),"apply independent AFW/OFXR resource lifecycle");
+        };
+        const auto native_context_preserved=[&]() {
+            ComPtr<ID3D12Device> owner;ComPtr<ID3D12CommandQueue> producer;
+            return state->d3d12_device==d12 && state->d3d12_queue==execution_queue &&
+                state->luke_synthesis_queue==retained_synthesis && (state->graphics_binding_capabilities&8) &&
+                query_luke_ross_d3d12_context(&owner,&producer) && owner==d12 && producer==original_queue;
+        };
+        std::weak_ptr<xrfg::LukeAfwSynthesizer> first=state->luke_afw;
+        request(true,0);
+        check(!state->luke_afw && first.expired(),"AFW OFF retained its unused provider while OFXR remained ON");
+        check(state->menu_enabled && native_context_preserved() && pending->d3d12_history.get()==retained_history &&
+            snapshot()==retained_snapshot,"AFW OFF disturbed active OFXR owner, queues or color history backing");
+        request(true,3);initialize_late_luke_context(state);
+        check(state->luke_afw && state->luke_afw->initialized() && native_context_preserved(),
+            "AFW re-enable failed to recover retained capability8 using the exact execution queue");
+        check(pending->d3d12_history.get()==retained_history && snapshot()==retained_snapshot,
+            "AFW re-enable replaced active OFXR history backing");
+        auto* const second=state->luke_afw.get();
+        initialize_late_luke_context(state);
+        check(state->luke_afw.get()==second && native_context_preserved(),"active AFW repeated provider initialization");
+        std::weak_ptr<xrfg::LukeAfwSynthesizer> second_lifetime=state->luke_afw;
+        request(false,3);initialize_late_luke_context(state);
+        check(!state->menu_enabled && state->luke_afw.get()==second && !second_lifetime.expired() && native_context_preserved(),
+            "OFXR OFF retired a still-selected AFW provider");
+        request(true,3);initialize_late_luke_context(state);
+        check(state->menu_enabled && state->luke_afw.get()==second && native_context_preserved(),
+            "OFXR re-enable replaced the active AFW provider");
+        retained_snapshot.Reset();
+        request(false,0);
+        check(!state->menu_enabled && !state->luke_afw && second_lifetime.expired() && native_context_preserved(),
+            "both OFF retained an AFW provider or lost original native producer authority");
+        initialize_late_luke_context(state);
+        check(!state->luke_afw,"OFF context polling reallocated an unused AFW provider");
+        request(true,3);initialize_late_luke_context(state);
+        check(state->luke_afw && native_context_preserved(),"AFW ON after both OFF failed or substituted the game queue");
+        auto* const third=state->luke_afw.get();initialize_late_luke_context(state);
+        check(state->luke_afw.get()==third,"second AFW activation repeatedly initialized its provider");
+        std::weak_ptr<xrfg::LukeAfwSynthesizer> final_lifetime=state->luke_afw;
+        request(false,0);
+        check(!state->luke_afw && final_lifetime.expired(),"final AFW resource retirement retained its provider");
+        std::cout<<"Luke provider lifecycle: AFW OFF with OFXR ON frees provider; history/owner/queues retained; capability8 re-enable twice; both OFF cold PASS\n";
+    }
     xrfg::stop_ngx_guide_capture(original_queue.Get());
     queried.Reset();q.Reset();
     check(!query_luke_ross_d3d12_context(&queried,&q),"retired producer does not survive reset");

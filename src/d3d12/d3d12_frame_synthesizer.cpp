@@ -1131,6 +1131,8 @@ struct D3D12FrameSynthesizer::Impl {
     bool fsr_stale_guide_gap{};
     bool ffx_context_created{};
     bool flow_output_consumed{};
+    bool fidelityfx_packed_readable{};
+    bool flat_panel{};
     bool nvidia_gpu_timing_enabled{};
     bool allow_luke_guide_device_alias{};
     ~Impl() {
@@ -2104,7 +2106,8 @@ struct D3D12FrameSynthesizer::Impl {
             if (FAILED(result)) {
                 return result;
             }
-            if (backend == D3D12OpticalFlowBackend::nvidia && generation_mode != D3D12FrameGenerationMode::native_dlss && !flow_resources_deferred) {
+            if (backend == D3D12OpticalFlowBackend::nvidia &&
+                generation_mode == D3D12FrameGenerationMode::ofxr && !flow_resources_deferred) {
                 result = device->CreateCommandAllocator(
                     D3D12_COMMAND_LIST_TYPE_DIRECT,
                     IID_PPV_ARGS(slot.synthesis_allocator.GetAddressOf()));
@@ -2615,7 +2618,10 @@ struct D3D12FrameSynthesizer::Impl {
             return HRESULT_FROM_WIN32(
                 error == ERROR_SUCCESS ? ERROR_NOT_ENOUGH_MEMORY : error);
         }
-        result = flow_resources_deferred || generation_mode == D3D12FrameGenerationMode::native_dlss ? S_OK
+        // FSR owns its optical-flow contexts. Its dispatch returns before the
+        // ordinary OFXR optical backend, just as native DLSS-G does. Selecting
+        // it must not allocate an unused second flow engine per swapchain.
+        result = flow_resources_deferred || generation_mode != D3D12FrameGenerationMode::ofxr ? S_OK
                  : backend == D3D12OpticalFlowBackend::nvidia
                      ? create_nvidia_resources(node_mask)
                      : create_fidelityfx_resources(node_mask);
@@ -3310,7 +3316,7 @@ struct D3D12FrameSynthesizer::Impl {
         // NVIDIA work slots also own a second command list. This route bypasses
         // OFA, but the list was reset with the slot and must still be closed
         // before the slot can be reused on a later frame.
-        if (backend == D3D12OpticalFlowBackend::nvidia) {
+        if (slot.synthesis_command_list) {
             result = slot.synthesis_command_list->Close();
             if (FAILED(result)) return result;
         }
@@ -3385,20 +3391,20 @@ struct D3D12FrameSynthesizer::Impl {
                 parameters.flow_height = guide->output_y;
                 parameters.flow_block_size = guide->output_width;
                 parameters.game_motion_padding = guide->output_height;
-                parameters.game_motion_rect = {
-                    static_cast<float>(guide->motion_x),
-                    static_cast<float>(guide->motion_y),
-                    static_cast<float>(guide->motion_width),
-                    static_cast<float>(guide->motion_height)};
+                // A guide placed by its camera (MSFS 2024's foveated
+                // periphery) maps the fractional part of its vectors under
+                // the image rectangle, so the scale into image pixels is the
+                // camera's.
+                parameters.game_motion_rect = guide_motion_rect(*guide);
                 // DLSS low-resolution vectors are expressed in render-space pixel
                 // units after applying MV_Scale. Synthesis and pose reprojection
                 // operate in the final output rectangle's pixel space, so convert
                 // both vector components into that same coordinate system.
                 parameters.game_motion_scale = {
                     guide->scale_x * static_cast<float>(guide->output_width) /
-                        static_cast<float>(guide->motion_width),
+                        parameters.game_motion_rect[2],
                     guide->scale_y * static_cast<float>(guide->output_height) /
-                        static_cast<float>(guide->motion_height)};
+                        parameters.game_motion_rect[3]};
                 parameters.game_motion_jitter_delta = guide->jittered
                     ? std::array<float, 2>{
                           guide->jitter_x - guide->previous_jitter_x,
@@ -3973,7 +3979,7 @@ struct D3D12FrameSynthesizer::Impl {
                 context_fence);
         }
 
-        if (backend == D3D12OpticalFlowBackend::nvidia) {
+        if (slot.synthesis_command_list) {
             const HRESULT close_result = slot.synthesis_command_list->Close();
             if (FAILED(close_result)) return close_result;
         }
@@ -4235,7 +4241,8 @@ struct D3D12FrameSynthesizer::Impl {
         WorkSlot& slot,
         const RollingSource& source,
         ID3D12Resource* destination) noexcept {
-        if (backend == D3D12OpticalFlowBackend::nvidia || native_dlss) {
+        if (backend == D3D12OpticalFlowBackend::nvidia ||
+            generation_mode != D3D12FrameGenerationMode::ofxr) {
             const std::array<D3D12_RESOURCE_BARRIER, 2> before_copy{
                 transition_barrier(
                     source.resource.Get(),
@@ -4284,6 +4291,12 @@ struct D3D12FrameSynthesizer::Impl {
             static_cast<UINT>(before_copy.size()),
             before_copy.data());
 
+        if(fidelityfx_packed_readable) {
+            const auto to_write=transition_barrier(packed_color.Get(),
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            slot.command_list->ResourceBarrier(1,&to_write);
+        }
+        fidelityfx_packed_readable=true;
         ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
         slot.command_list->SetDescriptorHeaps(1, heaps);
         slot.command_list->SetComputeRootSignature(root_signature.Get());
@@ -4615,6 +4628,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         synthesis->SetDescriptorHeaps(1, heaps);
         synthesis->SetGraphicsRootSignature(root_signature.Get());
+        if(flat_panel)parameters.synthesis_flags|=128U;
         synthesis->SetPipelineState(
             nvidia_options.bidirectional
                 ? nvidia_bidirectional_graphics_pipeline.Get()
@@ -5094,6 +5108,7 @@ struct D3D12FrameSynthesizer::Impl {
                 gpu_start,
                 kSrvDescriptorCount,
                 descriptor_increment));
+        if(flat_panel)parameters.synthesis_flags|=128U;
         slot.command_list->SetPipelineState(guides ? hybrid_graphics_pipeline.Get() : graphics_pipeline.Get());
         // The guides' motion is read by the hybrid composition.
         const auto motion_barriers = [&](bool to_read) {
@@ -5147,14 +5162,12 @@ struct D3D12FrameSynthesizer::Impl {
                         offset_gpu_handle(gpu_start, descriptor_base, descriptor_increment));
                     parameters.use_game_motion = guide->output_x | (guide->output_y << 16U);
                     parameters.game_motion_padding = guide->output_width | (guide->output_height << 16U);
-                    parameters.game_motion_rect = {
-                        static_cast<float>(guide->motion_x), static_cast<float>(guide->motion_y),
-                        static_cast<float>(guide->motion_width), static_cast<float>(guide->motion_height)};
+                    parameters.game_motion_rect = guide_motion_rect(*guide);
                     parameters.game_motion_scale = {
                         guide->scale_x * static_cast<float>(guide->output_width) /
-                            static_cast<float>(guide->motion_width),
+                            parameters.game_motion_rect[2],
                         guide->scale_y * static_cast<float>(guide->output_height) /
-                            static_cast<float>(guide->motion_height)};
+                            parameters.game_motion_rect[3]};
                     parameters.game_motion_jitter_delta = guide->jittered
                         ? std::array<float, 2>{guide->jitter_x - guide->previous_jitter_x,
                                                guide->jitter_y - guide->previous_jitter_y}
@@ -6618,6 +6631,9 @@ HRESULT D3D12FrameSynthesizer::initialize(
             return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
         }
         auto candidate = std::make_unique<Impl>();
+        // initialize records/allocates but never submits this engine's work.
+        // Failure cleanup must not drain unrelated commands on its queue.
+        candidate->copy_resources_retired=true;
         const HRESULT result = candidate->initialize(
             device,
             queue,
@@ -6634,6 +6650,7 @@ HRESULT D3D12FrameSynthesizer::initialize(
         if (FAILED(result)) {
             return result;
         }
+        candidate->copy_resources_retired=false;
         impl_ = std::move(candidate);
         return S_OK;
     } catch (const std::bad_alloc&) {
@@ -6649,21 +6666,75 @@ HRESULT D3D12FrameSynthesizer::reconfigure(D3D12OpticalFlowBackend backend,
     try {
         std::scoped_lock lock(mutex_);
         if (!impl_) return E_UNEXPECTED;
-        const HRESULT idle = impl_->wait_for_idle();
-        if (FAILED(idle)) return idle; // never free pending GPU work
-        std::vector<ID3D12Resource*> current, synthetic;
-        for (const auto& d : impl_->current_destinations) current.push_back(d.resource.Get());
-        for (const auto& d : impl_->synthetic_destinations) synthetic.push_back(d.resource.Get());
-        auto candidate = std::make_unique<Impl>();
-        const HRESULT result = candidate->initialize(impl_->device.Get(), impl_->queue.Get(),
-            impl_->history, current, synthetic, impl_->view_format, impl_->release_state,
-            backend, options, impl_->requested_gpu_timing, generation_mode,
-            impl_->allow_luke_guide_device_alias, impl_->flow_resources_deferred);
-        if (FAILED(result)) return result;
-        impl_ = std::move(candidate);
-        return S_OK;
+        return replace_resources_locked(backend,options,generation_mode,
+            impl_->flow_resources_deferred,false);
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
       catch (...) { return E_FAIL; }
+}
+
+HRESULT D3D12FrameSynthesizer::suspend_flow_resources() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if(!impl_)return E_UNEXPECTED;
+        if(impl_->generation_mode!=D3D12FrameGenerationMode::ofxr)return S_FALSE;
+        if(impl_->flow_resources_deferred)return S_OK;
+        return replace_resources_locked(impl_->backend,impl_->nvidia_options,
+            impl_->generation_mode,true,true);
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+      catch (...) { return E_FAIL; }
+}
+
+HRESULT D3D12FrameSynthesizer::replace_resources_locked(D3D12OpticalFlowBackend backend,
+    D3D12NvidiaOpticalFlowOptions options,D3D12FrameGenerationMode generation_mode,
+    bool defer_flow,bool preserve_completed_tickets) {
+        if (!impl_) return E_UNEXPECTED;
+        const HRESULT idle = impl_->wait_for_idle();
+        if (FAILED(idle)) return idle; // never free pending GPU work
+        // Preserve transport ownership, not the old method's working set. In
+        // particular FFX/NVIDIA contexts can each be large at headset sizes;
+        // constructing the replacement while retaining the drained provider
+        // doubles the transient VRAM cost and can make an otherwise valid
+        // switch fail. No submitted GPU work survives the idle proof above.
+        auto device=impl_->device;
+        auto queue=impl_->queue;
+        auto history=impl_->history;
+        const auto view_format=impl_->view_format;
+        const auto release_state=impl_->release_state;
+        const auto timing=impl_->requested_gpu_timing;
+        const auto allow_alias=impl_->allow_luke_guide_device_alias;
+        const auto completed_fence=preserve_completed_tickets?impl_->fence:ComPtr<ID3D12Fence>{};
+        const auto next_fence=impl_->next_fence_value;
+        const auto submitted_fence=impl_->last_submitted_fence_value;
+        const auto synthetic_fence=impl_->last_synthetic_fence_value;
+        std::vector<ComPtr<ID3D12Resource>> retained;
+        std::vector<ID3D12Resource*> current, synthetic;
+        retained.reserve(impl_->current_destinations.size()+impl_->synthetic_destinations.size());
+        for (const auto& d : impl_->current_destinations) {
+            retained.push_back(d.resource);current.push_back(d.resource.Get());
+        }
+        for (const auto& d : impl_->synthetic_destinations) {
+            retained.push_back(d.resource);synthetic.push_back(d.resource.Get());
+        }
+        auto candidate = std::make_unique<Impl>();
+        candidate->copy_resources_retired=true;
+        impl_->copy_resources_retired=true;
+        impl_.reset();
+        const HRESULT result = candidate->initialize(device.Get(),queue.Get(),
+            std::move(history),current,synthetic,view_format,release_state,
+            backend,options,timing,generation_mode,allow_alias,defer_flow);
+        // A failed replacement remains explicitly uninitialized. The layer
+        // reports the error and presents real frames; never retain a different
+        // method's resources or advertise that old method as the new one.
+        if (FAILED(result)) return result;
+        if(preserve_completed_tickets) {
+            candidate->fence=completed_fence;
+            candidate->next_fence_value=next_fence;
+            candidate->last_submitted_fence_value=submitted_fence;
+            candidate->last_synthetic_fence_value=synthetic_fence;
+        }
+        candidate->copy_resources_retired=false;
+        impl_ = std::move(candidate);
+        return S_OK;
 }
 
 // Luke source transport only calls submit_copy; allocating another flow
@@ -6810,6 +6881,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
         // A deferred copy engine has no temporal anchor: only a real prime
         // may upgrade it. Invalid pair calls must not allocate a flow engine.
         if(impl_->flow_resources_deferred){if(ticket)*ticket={};return E_INVALIDARG;}
+        impl_->flat_panel=flat_panel_.load(std::memory_order_relaxed);
         return impl_->submit_pair(
             current,
             current_source_views,
@@ -6828,6 +6900,10 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
         }
         return E_FAIL;
     }
+}
+
+void D3D12FrameSynthesizer::set_flat_panel(bool enabled) noexcept {
+    flat_panel_.store(enabled,std::memory_order_relaxed);
 }
 
 HRESULT D3D12FrameSynthesizer::flush_current_copy(

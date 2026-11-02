@@ -3,9 +3,10 @@
 #include <cstdint>
 
 namespace xrfg::native_ingress {
-// Rendering and capture paths read only the last completed discovery result.
-// They never enumerate modules or query exports.
+// Most processes read the last cached discovery result. The two selected
+// Luke Vulkan games use the original V666 dynamic recognition path.
 bool luke_detected() noexcept;
+bool legacy_luke_vulkan_detection() noexcept;
 
 // Startup/session boundary: force a fresh result. The existing hook-monitor
 // thread passes false and scans only after a DLL load/unload invalidates it.

@@ -313,7 +313,7 @@ std::string elliott_benchmark_text(const autonomous::Snapshot& state,std::uint64
     if(!state.connected || !b.game_pid || b.game_pid!=state.runtime.process_id)return {};
     if(b.phase==autonomous::BenchmarkPhase::complete) {
         if(state.desired.afw_only && state.runtime.pacing_mode!=autonomous::kAfwOnlyPacingMode)
-            return "Tests complete | restart game: AFW Only";
+            return "Tests complete | restart game: Frame Reconstruction only";
         return "Tests complete";
     }
     if(!autonomous::benchmark_active(b) || !b.count || b.index>=b.count)return {};

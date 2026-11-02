@@ -9,6 +9,17 @@
 
 namespace xrfg {
 
+// Process-lifetime diagnostics for OFXR's own native FG handles, never the
+// game's SR/RR features. No reset, resource ownership or NGX shutdown follows.
+// Read at a quiescent/drained boundary when reconciling multiple fields.
+struct D3D12NativeDlssGLifetime {
+    std::uint64_t create_attempts{},create_successes{},create_failures{};
+    // Every nonnull create result counts, including failure-returned handles.
+    std::uint64_t created{},failed_create_handles{};
+    std::uint64_t release_attempts{},released{},release_failures{},live{};
+};
+[[nodiscard]] D3D12NativeDlssGLifetime native_dlssg_lifetime_snapshot() noexcept;
+
 // Native NGX integration. The caller drains the queue before destroying this
 // object and owns the frame/guide leases until its completion fence passes.
 class D3D12NativeDlssG final {

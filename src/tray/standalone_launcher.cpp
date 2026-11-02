@@ -1,10 +1,13 @@
 #include "xrfg/standalone_launcher.hpp"
+#include "xrfg/osr_full_warp.hpp"
 
 #include <windows.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <stdexcept>
 
@@ -299,6 +302,62 @@ std::string serialize_settings(const LauncherSettings& settings) {
 }
 
 namespace {
+
+[[nodiscard]] std::string json_string(std::string_view value) {
+    return "\"" + escape_json(value) + "\"";
+}
+
+[[nodiscard]] std::string json_rate(float value) {
+    char text[32]{};
+    std::snprintf(text, sizeof(text), "%.1f",
+        std::isfinite(value) ? static_cast<double>(value) : 0.0);
+    return text;
+}
+
+[[nodiscard]] const char* json_bool(bool value) { return value ? "true" : "false"; }
+
+}  // namespace
+
+// The 0.2 format (schema 1) plus latency_ms. Fields may be added within a
+// schema; none changes meaning or disappears without a new number.
+std::string build_status_json(const StatusInputs& inputs) {
+    const std::uint32_t configured = inputs.settings.triple_frame_gen ? 3U : 2U;
+    const bool session = inputs.session_present;
+    const StatusSession& running = inputs.session;
+    std::string json = "{\n";
+    json += "  \"schema\": 1,\n";
+    json += std::string("  \"armed\": ") + json_bool(inputs.armed) + ",\n";
+    json += std::string("  \"paused\": ") + json_bool(inputs.paused) + ",\n";
+    json += "  \"multiplier\": " +
+        std::to_string(session ? running.multiplier : configured) + ",\n";
+    json += std::string("  \"generating\": ") +
+        (session ? json_bool(running.generating) : "null") + ",\n";
+    json += "  \"app_fps\": " +
+        (session && running.rates_valid ? json_rate(running.app_fps) : "null") + ",\n";
+    json += "  \"output_fps\": " +
+        (session && running.output_valid ? json_rate(running.output_fps) : "null") + ",\n";
+    json += "  \"display_hz\": " +
+        (session && running.display_hz > 0.0f ? json_rate(running.display_hz) : "null") +
+        ",\n";
+    json += "  \"latency_ms\": " +
+        (session && running.latency_valid ? json_rate(running.latency_ms) : "null") + ",\n";
+    json += "  \"updated\": " + json_string(inputs.updated) + ",\n";
+    json += "  \"ofxr\": { \"build\": " + std::to_string(inputs.build) + " },\n";
+    if (session) {
+        json += "  \"session\": {\n";
+        json += "    \"process\": " + json_string(running.process) + ",\n";
+        json += "    \"pid\": " + std::to_string(running.pid) + ",\n";
+        json += "    \"runtime\": " + json_string(running.runtime) + ",\n";
+        json += std::string("    \"deep_pipeline\": ") + json_bool(running.deep_pipeline) + "\n";
+        json += "  }\n";
+    } else {
+        json += "  \"session\": null\n";
+    }
+    json += "}\n";
+    return json;
+}
+
+namespace {
 struct HotkeyToken {
     std::string_view name;
     std::string_view display;
@@ -472,7 +531,7 @@ std::string build_vulkan_layer_manifest(
            "    \"api_version\": \"1.3.296\",\n"
            "    \"implementation_version\": \"" +
            std::to_string(implementation_version) + "\",\n"
-           "    \"description\": \"OFXR-BRIDGE 0.3.1 (v" +
+           "    \"description\": \"OFXR-BRIDGE 0.3.2 (v" +
            std::to_string(implementation_version) +
            "): serialises Vulkan queue submissions while the bridge is armed\",\n"
            "    \"functions\": {\n"
@@ -500,7 +559,7 @@ std::string build_implicit_layer_manifest(
            "    \"api_version\": \"1.0\",\n"
            "    \"implementation_version\": \"" +
            std::to_string(implementation_version) + "\",\n"
-           "    \"description\": \"OFXR-BRIDGE 0.3.1 (v" +
+           "    \"description\": \"OFXR-BRIDGE 0.3.2 (v" +
            std::to_string(implementation_version) +
            ") manual persistent implicit layer\",\n"
            "    \"disable_environment\": \"XRFG_DISABLE_OFXR_BRIDGE\"\n"
@@ -594,7 +653,11 @@ std::string build_runtime_ini(
         "\r\nluke_afw_clear_before_warping=" + (desired.afw_clear_before_warping ? "1" : "0") +
         "\r\nluke_afw_ignore_motion_threshold=" + std::to_string(desired.afw_ignore_motion_threshold) +
         "\r\nluke_afw_depth_dilate_mode=" + std::to_string(desired.afw_depth_dilate_mode) + "\r\n" +
-        "luke_afw_shading_rate=" + std::to_string(desired.afw_shading_rate) + "\r\n";
+        "luke_afw_shading_rate=" + std::to_string(desired.afw_shading_rate) + "\r\n" +
+        "luke_osr=" + std::to_string(normalize_osr_reconstruction(desired.luke_osr)) + "\r\n" +
+        "luke_osr_cover=" + std::to_string(desired.luke_osr_cover) + "\r\n" +
+        "luke_osr_trim=" + std::to_string(desired.luke_osr_trim) + "\r\n" +
+        "luke_osr_fill=" + std::to_string(desired.luke_osr_fill) + "\r\n";
     return result;
 }
 
@@ -645,7 +708,6 @@ bool stage_runtime_support_files(
     try {
         const wchar_t* required[]{
             L"ofxr_amd_fidelityfx_framegeneration_dx12.dll",
-            L"PDAFWPlugin.dll",
             L"nvngx.dll_dlssnr.dll", L"nvngx.dll_dlssg.dll"};
         // Validate the complete package before staging any support file.
         for (const auto* name : required) {
@@ -660,6 +722,14 @@ bool stage_runtime_support_files(
                 if (error) *error = L"Could not prepare standalone runtime helper:\r\n" + (destination_directory / name).wstring();
                 return false;
             }
+        }
+        // PureDark's AFW provider is optional: Full OSR renders the Luke Ross
+        // peer eye without it; only the AFW reconstructions load it.
+        const auto provider = source_directory / L"PDAFWPlugin.dll";
+        if (std::filesystem::is_regular_file(provider) &&
+            !install_runtime_layer_dll(provider, destination_directory / provider.filename())) {
+            if (error) *error = L"Could not prepare standalone runtime helper:\r\n" + (destination_directory / provider.filename()).wstring();
+            return false;
         }
         const auto vendor = source_directory / L"nvngx_dlssnr.dll";
         if (std::filesystem::is_regular_file(vendor) &&

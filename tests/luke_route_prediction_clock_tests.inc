@@ -2,6 +2,7 @@ void luke_route_prediction_clock_test() {
     constexpr XrDuration physical = 11'111'111;
     auto s = session();s->luke_afw_enabled = true;s->menu_enabled = true;
     s->dispatch->steamvr_runtime = true;s->presenter_display_period = physical;
+    s->vdxr_legacy=false; // session creation resolves the physical runtime into its transport policy
     const auto initial_waits = waits.load();
     {std::scoped_lock lock(g_state_mutex);g_sessions[s->handle]=s;}
     struct Registration {XrSession handle;~Registration(){std::scoped_lock lock(g_state_mutex);g_sessions.erase(handle);}} registration{s->handle};
@@ -51,9 +52,9 @@ void luke_route_prediction_clock_test() {
     check(!adopt_luke_display_period(*s,std::nullopt) &&
         !adopt_luke_display_period(*s,std::chrono::nanoseconds(0)) &&
         !adopt_luke_display_period(*s,std::chrono::milliseconds(60)),"invalid HMD measurement adopted");
-    s->dispatch->steamvr_runtime=false;
+    s->dispatch->steamvr_runtime=false;s->vdxr_legacy=true;
     check(!adopt_luke_display_period(*s,std::chrono::milliseconds(8)),"VDXR acquired Luke SteamVR clock adoption");
-    s->dispatch->steamvr_runtime=true;s->luke_afw_enabled=false;
+    s->dispatch->steamvr_runtime=true;s->vdxr_legacy=false;s->luke_afw_enabled=false;
     check(!adopt_luke_display_period(*s,std::chrono::milliseconds(8)),"ordinary D11 acquired Luke clock adoption");
     s->luke_afw_enabled=true;s->graphics_binding=SessionGraphicsBinding::d3d12;
     check(!adopt_luke_display_period(*s,std::chrono::milliseconds(8)),"native or Vulkan bridge acquired D11 Luke clock adoption");

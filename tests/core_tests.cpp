@@ -11,11 +11,13 @@
 #include "xrfg/luke_camera_origin.hpp"
 #include "xrfg/luke_ingress_devices.hpp"
 #include "xrfg/luke_afw_startup.hpp"
+#include "xrfg/native_ingress/RealVrDlssCamera.h"
 
 #include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -76,28 +78,37 @@ int main() {
         const Key epoch{1000001, 8};
         startup.observe_fresh(epoch, 200);
         startup.observe_fresh(epoch, 201);
-        expect(!startup.pending(), "new history epoch requires its own stable fresh streak");
+        expect(!startup.pending(), "scene cut cannot rearm a completed producer startup");
         startup.observe_fresh(epoch, 205);
         startup.observe_fresh(epoch, 206);
-        expect(!startup.pending(), "publication gaps discard the earlier candidate");
         startup.observe_fresh(epoch, 207);
-        expect(startup.pending() == epoch, "three frames after a gap arm the new epoch");
+        expect(!startup.pending(), "fresh post-cut history must not drain or reset the route again");
+        // Retry/gap behaviour still applies to a genuinely new producer.
+        const Key retry_stream{1500001, 8};
+        startup.observe_fresh(retry_stream, 205);
+        startup.observe_fresh(retry_stream, 206);
+        expect(!startup.pending(), "new producer requires its own fresh streak");
+        startup.observe_fresh(retry_stream, 209);
+        startup.observe_fresh(retry_stream, 210);
+        expect(!startup.pending(), "publication gaps discard the earlier candidate");
+        startup.observe_fresh(retry_stream, 211);
+        expect(startup.pending() == retry_stream, "three frames after a gap arm the new producer");
         startup.observe_failure();
         expect(!startup.pending(), "missing/admission failure disarms a pending candidate");
-        startup.observe_fresh(epoch, 208);
-        startup.observe_fresh(epoch, 209);
+        startup.observe_fresh(retry_stream, 212);
+        startup.observe_fresh(retry_stream, 213);
         expect(!startup.pending(), "failure recovery starts a new three-fresh streak");
-        startup.observe_fresh(epoch, 210);
-        startup.complete(epoch, false);
+        startup.observe_fresh(retry_stream, 214);
+        startup.complete(retry_stream, false);
         expect(!startup.pending(), "failed reconfiguration cannot immediately retry");
-        startup.observe_fresh(epoch, 211);
-        startup.observe_fresh(epoch, 212);
+        startup.observe_fresh(retry_stream, 215);
+        startup.observe_fresh(retry_stream, 216);
         expect(!startup.pending(), "failed force requires three new fresh frames before retry");
-        startup.observe_fresh(epoch, 213);
-        expect(startup.pending() == epoch, "first failure permits one bounded retry");
-        startup.complete(epoch, false);
-        for (std::uint64_t publication = 214; publication < 300; ++publication)
-            startup.observe_fresh(epoch, publication);
+        startup.observe_fresh(retry_stream, 217);
+        expect(startup.pending() == retry_stream, "first failure permits one bounded retry");
+        startup.complete(retry_stream, false);
+        for (std::uint64_t publication = 218; publication < 300; ++publication)
+            startup.observe_fresh(retry_stream, publication);
         expect(!startup.pending(), "two failed attempts cannot cause a per-frame retry loop");
 
         const Key new_stream{2000001, 8};
@@ -109,7 +120,7 @@ int main() {
         expect(startup.pending() == new_stream, "new producer stream has independent startup state");
         startup.complete(new_stream, true);
 
-        const Key overflow{2000001, 9};
+        const Key overflow{2500001, 9};
         startup.observe_fresh(overflow, std::numeric_limits<std::uint64_t>::max() - 1);
         startup.observe_fresh(overflow, std::numeric_limits<std::uint64_t>::max());
         startup.observe_fresh(overflow, 1);
@@ -155,9 +166,9 @@ int main() {
         expect(!ordinary_drain.pending(), "ordinary successful hot On-to-Off drain satisfies startup without a force");
         ordinary_drain.observe_fresh(epoch, 510);
         ordinary_drain.observe_fresh(epoch, 511);
-        expect(!ordinary_drain.pending(), "ordinary drain does not satisfy a future history epoch");
+        expect(!ordinary_drain.pending(), "ordinary drain remains satisfied across a scene cut");
         ordinary_drain.observe_fresh(epoch, 512);
-        expect(ordinary_drain.pending() == epoch, "future epoch still needs its independent startup rendezvous");
+        expect(!ordinary_drain.pending(), "three post-cut frames cannot reset the metrics via startup");
     }
     {
         xrfg::LukeCameraOrigin origin;
@@ -437,9 +448,26 @@ int main() {
         xrfg::luke_same_eye_native_motion_title(L"Dead Space.exe") &&
         xrfg::luke_same_eye_native_motion_title(L"DEAD SPACE.EXE") &&
         !xrfg::luke_same_eye_native_motion_title(L"DeadSpace.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"Cyberpunk2077.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"CYBERPUNK2077.EXE") &&
+        !xrfg::luke_same_eye_native_motion_title(L"Cyberpunk2077Launcher.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"afop.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"AFOP.EXE") &&
         !xrfg::luke_same_eye_native_motion_title(L"Outlaws.exe") &&
         !xrfg::luke_same_eye_native_motion_title(L"Spider-Man2.exe"),
         "measured same-eye interval includes Remastered without guessing other games");
+    {
+        int game{}, injector{};
+        using xrfg::LukeMotionSource;
+        expect(xrfg::luke_motion_source(&game, &injector) == LukeMotionSource::replaced &&
+            xrfg::luke_motion_source(&game, &game) == LukeMotionSource::original &&
+            xrfg::luke_motion_source(nullptr, &game) == LukeMotionSource::unobserved &&
+            xrfg::luke_motion_source(&game, nullptr) == LukeMotionSource::unobserved &&
+            xrfg::luke_motion_span(LukeMotionSource::replaced) == 2 &&
+            xrfg::luke_motion_span(LukeMotionSource::original) == 1 &&
+            xrfg::luke_motion_span(LukeMotionSource::unobserved) == 1,
+            "unlisted REAL VR motion is N-2 only when the typed call's vectors were replaced");
+    }
     // Spider-Man Remastered PID28936: the native view uses down for Y,
     // compensated by a negative projection focal term. Physical XR up still
     // samples the upper raster half; rejecting the sign prevents all AFW.
@@ -548,6 +576,112 @@ int main() {
         near(game_baseline, 6.406F), "centimetre-scale producer camera uses its measured units");
     expect(!xrfg::luke_game_eye_baseline(0.06406F, 1.0F, 0, game_baseline),
         "missing calibration never falls back to metres");
+    {
+        // REAL VR's DLSS-fix constants: a camera 3 m up, turned 90 degrees
+        // (forward = world +x, right = world -z), with 100 degrees horizontal
+        // and 70 vertical of field, near 0.25, far 4000, and the shader's uv
+        // mapping. Its decode must give that pose and a projection whose
+        // z/w is the game's depth and whose x/y come from uv.
+        namespace rv = xrfg::native_ingress::real_vr_dlss_camera;
+        std::array<unsigned char, rv::buffer_bytes> bytes{};
+        const auto put = [&](std::size_t offset, float v) { std::memcpy(bytes.data() + offset, &v, 4); };
+        const auto put_u = [&](std::size_t offset, std::uint32_t v) { std::memcpy(bytes.data() + offset, &v, 4); };
+        // transf0 rows: world = M * (x, y, z, 1); columns right, up, forward, position.
+        const float rows[16]{0, 0, 1, 10,   0, 1, 0, 3,   -1, 0, 0, -5,   0, 0, 0, 1};
+        for (unsigned i = 0; i < 16; ++i) put(i * 4, rows[i]);
+        const float tan_h = std::tan(50.F * 3.14159265F / 180), tan_v = std::tan(35.F * 3.14159265F / 180);
+        const float near_plane = .25F, far_plane = 4000.F;
+        // x/z = u * sx + ox over [-tan_h, tan_h]; y/z = v * sy + oy, v down, y up.
+        put(304, 2 * tan_h); put(320, -tan_h);
+        put(308, -2 * tan_v); put(324, tan_v);
+        // z = near / (depth * sz + oz): reversed-Z style, depth 1 at near, 0 at far.
+        const float sz = 1 - near_plane / far_plane, oz = near_plane / far_plane;
+        put(312, sz); put(328, oz); put(316, near_plane); put(332, far_plane);
+        put_u(256, 1920); put_u(260, 1080); put(264, 1920); put(268, 1080); put(272, 1 / 1920.F); put(276, 1 / 1080.F);
+        put(288, 1920); put(292, 1080);
+        expect(rv::looks_like(bytes.data(), bytes.size(), 1920, 1080) &&
+            !rv::looks_like(bytes.data(), bytes.size(), 1280, 720), "REAL VR constants recognised by their field size");
+        const auto camera = rv::decode(bytes.data(), bytes.size());
+        const auto near3 = [](const std::array<float, 3>& a, float x, float y, float z) {
+            return std::fabs(a[0] - x) < 1e-5F && std::fabs(a[1] - y) < 1e-5F && std::fabs(a[2] - z) < 1e-5F;
+        };
+        // The rotation is read transposed (see decode): rows of transf0 are the axes.
+        expect(camera.valid && near3(camera.position, 10, 3, -5) && near3(camera.right, 0, 0, 1) &&
+            near3(camera.up, 0, 1, 0) && near3(camera.forward, -1, 0, 0) && camera.near_z == near_plane && camera.far_z == far_plane,
+            "REAL VR constants did not give the camera's pose");
+        expect(std::fabs(camera.fov_vertical - 70.F * 3.14159265F / 180) < 1e-4F, "REAL VR constants did not give the field");
+        // A view point at uv (0.3, 0.8), 12 m deep: through the projection its
+        // x/w, y/w are that uv's NDC and its z/w the shader's depth value.
+        const float z = 12.F, x = (.3F * 2 * tan_h - tan_h) * z, y = (.8F * -2 * tan_v + tan_v) * z;
+        const auto& p = camera.view_to_clip;
+        const float cx = x * p[0] + y * p[4] + z * p[8] + p[12], cy = x * p[1] + y * p[5] + z * p[9] + p[13];
+        const float cz = x * p[2] + y * p[6] + z * p[10] + p[14], cw = x * p[3] + y * p[7] + z * p[11] + p[15];
+        const float depth = (near_plane / z - oz) / sz;
+        expect(std::fabs(cw - z) < 1e-4F && std::fabs(cx / cw - (.3F * 2 - 1)) < 1e-4F &&
+            std::fabs(cy / cw - (1 - .8F * 2)) < 1e-4F && std::fabs(cz / cw - depth) < 1e-5F,
+            "REAL VR projection does not reproduce the shader's uv and depth");
+        // x mapped the other way (S.x < 0): the same screen, right negated.
+        put(304, -2 * tan_h); put(320, tan_h);
+        const auto mirrored = rv::decode(bytes.data(), bytes.size());
+        expect(mirrored.valid && near3(mirrored.right, 0, 0, -1) && mirrored.view_to_clip[0] > 0 &&
+            std::fabs(mirrored.view_to_clip[0] - p[0]) < 1e-5F && std::fabs(mirrored.view_to_clip[8] - p[8]) < 1e-5F,
+            "a left-pointing view x was not normalised");
+        // transf0 is the step from the frame REAL VR stepped from, whose own
+        // transf0 is this frame's transf_2. Left eye, then the right eye 63 mm
+        // to its right, then the left eye again after a 90 degree turn to the
+        // right about the head: the chained world puts each camera where those
+        // steps say.
+        const auto step = [](std::array<double, 16> rows, std::array<double, 16> from, bool flip_x) {
+            rv::Camera c{}; c.valid = true; c.transform = rows; c.previous_transform = from; c.flip_x = flip_x; return c;
+        };
+        const std::array<double, 16> identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        const std::array<double, 16> to_right{1, 0, 0, .063, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        const std::array<double, 16> to_left{1, 0, 0, -.063, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        // Right-eye view to left-eye view after turning: x' = z, z' = -x, 63 mm back left.
+        const std::array<double, 16> turned{0, 0, 1, -.063, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 0, 1};
+        const std::array<double, 16> unknown{1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        rv::Chain chain; rv::Camera world{};
+        expect(chain.advance(step(identity, unknown, false), world) == rv::Chain::kRestarted &&
+            near3(world.position, 0, 0, 0), "a chain starts its world at its first camera");
+        const auto first_world = chain.world();
+        expect(chain.advance(step(to_right, identity, false), world) == 1 && near3(world.position, .063F, 0, 0) &&
+            near3(world.right, 1, 0, 0), "the next eye did not land 63 mm to the right");
+        expect(chain.advance(step(turned, to_right, false), world) == 1 && near3(world.position, 0, 0, 0) &&
+            near3(world.right, 0, 0, -1) && near3(world.forward, 1, 0, 0), "a turn did not rotate the chained camera");
+        // REAL VR steps from the first frame again (its transf_2 is the first
+        // frame's transf0), not from the turned one just before.
+        expect(chain.advance(step(to_left, identity, false), world) == 3 && near3(world.position, -.063F, 0, 0) &&
+            near3(world.right, 1, 0, 0), "a step from an earlier frame did not start from that frame");
+        // A frame stepping from one never captured: its transf_2 is the step
+        // into that frame from the last one held (5 units right here), then
+        // its own step. Same world, no restart.
+        expect(chain.advance(step(to_right, unknown, true), world) == rv::Chain::kBridged &&
+            chain.world() == first_world && near3(world.position, 5, 0, 0) && near3(world.right, -1, 0, 0),
+            "a frame after an uncaptured one was not bridged from the last frame, or x was not normalised");
+    }
+    {
+        // The Last of Us Part I F8 (projection x mirrored): right eye's
+        // publication 202 against the left eye's 201, 5.7 cm along +right.
+        const std::array<float, 3> right_eye{-246.112595F, -18.5818462F, -11.1235952F};
+        const std::array<float, 3> left_eye{-246.087296F, -18.5860825F, -11.0724058F};
+        const std::array<float, 3> right_axis{-0.442002326F, 0.0729873255F, -0.894039571F};
+        expect(xrfg::luke_measured_right_axis(1, right_eye, left_eye, right_axis, .057F) == 1.F &&
+            xrfg::luke_measured_right_axis(0, left_eye, right_eye, right_axis, .057F) == 1.F,
+            "TLOU1 camera_right points to the right eye");
+        expect(xrfg::luke_measured_right_axis(0, right_eye, left_eye, right_axis, .057F) == -1.F,
+            "a mirrored camera_right is measured as such");
+        expect(xrfg::luke_measured_right_axis(1, right_eye, left_eye, right_axis, .2F) == 0 &&
+            xrfg::luke_measured_right_axis(1, right_eye, right_eye, right_axis, .057F) == 0 &&
+            xrfg::luke_measured_right_axis(2, right_eye, left_eye, right_axis, .057F) == 0,
+            "a separation that is not one eye baseline decides nothing");
+        xrfg::LukeRightAxisSign sign;
+        expect(sign.observe(1) == 0 && sign.observe(0) == 0 && sign.observe(1) == 0 &&
+            sign.observe(1) == 1, "direction adopted only after three agreeing frames");
+        for (int i = 0; i < 12; ++i) expect(sign.observe(-1) == 1, "swapped-eye frames flipped an adopted direction");
+        xrfg::LukeRightAxisSign interrupted;
+        expect(interrupted.observe(1) == 0 && interrupted.observe(-1) == 0 && interrupted.observe(1) == 0 &&
+            interrupted.observe(1) == 0 && interrupted.observe(1) == 1, "a disagreeing frame did not restart the count");
+    }
     for (float units : {1.0F, 100.0F}) {
         for (float world_scale : {0.5F, 1.0F, 2.0F}) {
             const float baseline = 0.064F * units / world_scale;
@@ -583,6 +717,15 @@ int main() {
     for(unsigned i=1;i<=12;++i)
         expect(unstable_units.observe(1,i,i%2 ? 6.0F : 7.0F)==0,
             "inconsistent acceleration/camera separation is not silently accepted");
+    xrfg::LukeSceneCameraUnitCalibration scene_units;
+    for(unsigned i=1;i<=8;++i)expect(scene_units.observe(1,i,.11857F)==0,"GTA startup requires a complete native calibration window");
+    expect(near(scene_units.observe(1,9,.11857F),.11857F),"GTA scripted-rig calibration established");
+    for(unsigned i=10;i<=17;++i)expect(near(scene_units.observe(1,i,.06195F),.11857F),"one or mixed-window rig sample cannot rescale AFW");
+    expect(near(scene_units.observe(1,18,.06195F),.06195F),"consistent gameplay rig replaces stale scripted separation");
+    expect(near(scene_units.observe(2,19,0),.06195F),"GTA temporal reset preserves proven unit conversion while cameras re-prime");
+    expect(near(scene_units.observe(2,19,.2F),.06195F),"duplicate scene publication adds no calibration confidence");
+    expect(scene_units.observe(2,18,.2F)==0,"out-of-order scene camera rejected");
+    for(unsigned i=20;i<40;++i)expect(near(scene_units.observe(2,i,i%2?.04F:.09F),.06195F),"unstable post-cut cameras cannot poison recovered units");
     constexpr float physical_ipd = 0.06412F;
     const std::array<float, 3> xr_left{-physical_ipd * 0.5F, 0.0F, 0.0F};
     const std::array<float, 3> xr_right{physical_ipd * 0.5F, 0.0F, 0.0F};

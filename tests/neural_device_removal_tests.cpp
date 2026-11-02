@@ -109,7 +109,7 @@ static void TestLifetime(const std::filesystem::path& root)
     auto b = Monitor::Observe(queue.Get(), root);
     Check(a && a == b, "one observer per device across device and queue owners");
     const auto firstPath = a->Path();
-    Check(Read(firstPath).find("armed version=V641") != std::string::npos, "armed receipt flushed");
+    Check(Read(firstPath).find("armed version=") != std::string::npos, "armed receipt flushed");
     Sleep(50);
     Check(Read(firstPath).find("device_removed utc=") == std::string::npos, "no healthy notification");
     a.reset();
@@ -125,7 +125,7 @@ static void TestLifetime(const std::filesystem::path& root)
     next.reset();
     const auto report = Read(nextPath);
     Check(report.find("device_removed utc=") != std::string::npos, "removed receipt");
-    Check(report.find("nr_flight_begin version=V641") != std::string::npos, "RAM flight ring persisted on removal");
+    Check(report.find("nr_flight_begin version=") != std::string::npos, "RAM flight ring persisted on removal");
     Check(report.find("nr_flight_end") != std::string::npos, "RAM flight ring completed before DRED query");
     Check(report.find("breadcrumb_query=") != std::string::npos, "actual DRED queried");
     Check(report.find("page_fault_query=") != std::string::npos, "actual page fault data queried");

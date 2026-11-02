@@ -27,11 +27,26 @@ template<class T>ComPtr<T> native(T* input) {
     if(d3d_native::get_borrowed(input,&borrowed))borrowed->QueryInterface(IID_PPV_ARGS(&output));
     return output;
 }
+// BindFlags<<32 | DXGI format, for the capture log.
+std::uint64_t describe(ID3D11Resource* resource) {
+    ComPtr<ID3D11Texture2D> texture;D3D11_TEXTURE2D_DESC desc{};
+    if(!resource||FAILED(resource->QueryInterface(IID_PPV_ARGS(texture.GetAddressOf()))))return 0;
+    texture->GetDesc(&desc);return (std::uint64_t{desc.BindFlags}<<32)|desc.Format;
+}
+std::uint64_t pack(std::uint32_t high,std::uint32_t low){return (std::uint64_t{high}<<32)|low;}
+// Width<<32 | height.
+std::uint64_t extent(ID3D11Resource* resource) {
+    ComPtr<ID3D11Texture2D> texture;D3D11_TEXTURE2D_DESC desc{};
+    if(!resource||FAILED(resource->QueryInterface(IID_PPV_ARGS(texture.GetAddressOf()))))return 0;
+    texture->GetDesc(&desc);return pack(desc.Width,desc.Height);
+}
+std::uint32_t bits(float value){std::uint32_t result{};std::memcpy(&result,&value,sizeof(result));return result;}
 // Scalar queries preserve the exact immutable native evaluation table. Only
 // transport-owned GPU objects are substituted; callers' maps are never edited.
+// Depth is withheld when this evaluation's depth did not cross over.
 struct Parameters final:NVSDK_NGX_Parameter {
-    const NVSDK_NGX_Parameter* base{};D3D11GuideTransport* transport{};
-    Parameters(const NVSDK_NGX_Parameter* p,D3D11GuideTransport* t):base(p),transport(t){}
+    const NVSDK_NGX_Parameter* base{};D3D11GuideTransport* transport{};bool depth{true};
+    Parameters(const NVSDK_NGX_Parameter* p,D3D11GuideTransport* t,bool has_depth):base(p),transport(t),depth(has_depth){}
 #define SCALAR(T) void Set(const char*,T)override{} NVSDK_NGX_Result Get(const char* n,T* v)const override{return base->Get(n,v);}
     SCALAR(unsigned long long) SCALAR(float) SCALAR(double) SCALAR(unsigned int) SCALAR(int)
 #undef SCALAR
@@ -41,7 +56,7 @@ struct Parameters final:NVSDK_NGX_Parameter {
         if(!strcmp(n,NVSDK_NGX_Parameter_Color))return transport->resource(D3D11GuideTransport::color);
         if(!strcmp(n,NVSDK_NGX_Parameter_Output))return transport->resource(D3D11GuideTransport::output);
         if(!strcmp(n,NVSDK_NGX_Parameter_MotionVectors))return transport->resource(D3D11GuideTransport::motion);
-        if(!strcmp(n,NVSDK_NGX_Parameter_Depth))return transport->resource(D3D11GuideTransport::depth);
+        if(!strcmp(n,NVSDK_NGX_Parameter_Depth))return depth?transport->resource(D3D11GuideTransport::depth):nullptr;
         return nullptr;
     }
     NVSDK_NGX_Result Get(const char* n,ID3D12Resource** v)const override {
@@ -55,6 +70,8 @@ struct Parameters final:NVSDK_NGX_Parameter {
 struct Feature {
     std::uint32_t identity{};NVSDK_NGX_Feature type{};int flags{};UINT width{},height{},out_width{},out_height{};bool flags_known{true};
     std::uint64_t owner{};
+    // Last outcome and stream shape written to the capture log: one line per change.
+    std::uint64_t noted{};std::array<std::uint64_t,5> described{};
     std::unique_ptr<D3D11GuideTransport> transport;
     std::mutex mutex;
 };
@@ -108,6 +125,8 @@ template<unsigned Slot>NVSDK_NGX_Result create(ID3D11DeviceContext* context,NVSD
         f->flags_known=NVSDK_NGX_SUCCEED(p->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,&f->flags));
         f->width=get<UINT>(p,NVSDK_NGX_Parameter_Width);f->height=get<UINT>(p,NVSDK_NGX_Parameter_Height);
         f->out_width=get<UINT>(p,NVSDK_NGX_Parameter_OutWidth);f->out_height=get<UINT>(p,NVSDK_NGX_Parameter_OutHeight);
+        capture_log("d3d11_feature_create",pack(Slot,static_cast<std::uint32_t>(type)),static_cast<std::uint32_t>(f->flags),
+            pack(f->width,f->height),pack(f->out_width,f->out_height));
         std::scoped_lock lock(registry().mutex);registry().features[*output]=f;
     }return result;
 }
@@ -123,6 +142,8 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
             recovered->out_width=get<UINT>(p,NVSDK_NGX_Parameter_OutWidth);recovered->out_height=get<UINT>(p,NVSDK_NGX_Parameter_OutHeight);
             if(flags&&recovered->width&&recovered->height&&recovered->out_width&&recovered->out_height) {
                 recovered->identity=allocate_handle_key();registry().features.emplace(handle,recovered);
+                capture_log("d3d11_feature_recovered",pack(Slot,static_cast<std::uint32_t>(recovered->type)),static_cast<std::uint32_t>(recovered->flags),
+                    pack(recovered->width,recovered->height),pack(recovered->out_width,recovered->out_height));
             }
         }
         auto it=registry().features.find(handle);
@@ -140,28 +161,39 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     if(luke_detected()&&!f->flags_known)return raw();
     auto ctx=native(context);if(!f||!ctx||ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return raw();
     std::scoped_lock lock(f->mutex);
+    // The evaluation's outcome, logged when it changes: code, HRESULT, detail.
+    const auto note=[&](std::uint32_t code,HRESULT hr,std::uint64_t detail=0) {
+        const auto key=pack(code,static_cast<std::uint32_t>(hr));if(f->noted==key)return;f->noted=key;
+        capture_log("d3d11_evaluate",code,static_cast<std::uint32_t>(hr),detail,reinterpret_cast<std::uintptr_t>(handle));
+    };
     ComPtr<ID3D11Device> game_device;ctx->GetDevice(&game_device);
     ComPtr<ID3D12Device> device;ComPtr<ID3D12CommandQueue> queue;std::uint64_t generation{};
-    if(FAILED(acquire_d3d11_guide_owner(game_device.Get(),&device,&queue,&generation)))return raw();
+    if(const auto hr=acquire_d3d11_guide_owner(game_device.Get(),&device,&queue,&generation);FAILED(hr)){note(1,hr);return raw();}
     observe_copies(ctx.Get());configure_queue(queue.Get());
     if(f->owner!=generation){f->transport.reset();f->owner=generation;}
     if(!f->transport){f->transport=std::make_unique<D3D11GuideTransport>();
-        if(FAILED(f->transport->initialize(ctx.Get(),device.Get(),queue.Get()))){f->transport.reset();return raw();}}
+        if(const auto hr=f->transport->initialize(ctx.Get(),device.Get(),queue.Get());FAILED(hr)){f->transport.reset();note(2,hr);return raw();}}
     auto& t=*f->transport;
     auto color=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Color));
     auto output=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Output));
     auto motion=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_MotionVectors));
     auto depth_texture=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Depth));
-    if(!output||!motion||!depth_texture)return raw();
-    if(FAILED(t.begin()))return raw();
+    // Depth is optional (0.2 V505): vectors alone drive Hybrid, as in Ready
+    // or Not on 0.2. Luke Ross titles keep requiring it.
+    if(!output||!motion||(!depth_texture&&luke_detected())) {
+        note(3,S_OK,(output?1U:0U)|(motion?2U:0U)|(depth_texture?4U:0U));return raw();
+    }
+    if(const auto hr=t.begin();FAILED(hr)){note(4,hr);return raw();}
     const auto fail=[&]{(void)t.submit();return raw();};
-    if(FAILED(t.copy(D3D11GuideTransport::motion,motion.Get()))||
-       FAILED(t.copy(D3D11GuideTransport::depth,depth_texture.Get()))||
-       (color&&FAILED(t.copy(D3D11GuideTransport::color,color.Get()))))return fail();
-    Parameters shadow(p,&t);
+    if(const auto hr=t.copy(D3D11GuideTransport::motion,motion.Get());FAILED(hr)){note(5,hr,describe(motion.Get()));return fail();}
+    const HRESULT depth_result=depth_texture?t.copy(D3D11GuideTransport::depth,depth_texture.Get()):E_POINTER;
+    if(FAILED(depth_result)&&luke_detected()){note(6,depth_result,describe(depth_texture.Get()));return fail();}
+    if(color)if(const auto hr=t.copy(D3D11GuideTransport::color,color.Get());FAILED(hr)){note(7,hr,describe(color.Get()));return fail();}
+    Parameters shadow(p,&t,SUCCEEDED(depth_result));
     DlssMotionVectorPublication g{};g.stream=reinterpret_cast<std::uintptr_t>(handle);
     g.producer_queue=queue.Get();g.verified_producer_device=device.Get();
-    g.motion_vectors=t.resource(D3D11GuideTransport::motion);g.depth=t.resource(D3D11GuideTransport::depth);
+    g.motion_vectors=t.resource(D3D11GuideTransport::motion);
+    g.depth=SUCCEEDED(depth_result)?t.resource(D3D11GuideTransport::depth):nullptr;
     g.output_width=f->out_width;g.output_height=f->out_height;
     const bool low=(f->flags&NVSDK_NGX_DLSS_Feature_Flags_MVLowRes)!=0;
     const auto render_width=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width,f->width);
@@ -176,7 +208,16 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     g.reset=get<int>(p,NVSDK_NGX_Parameter_Reset)!=0;g.jittered=(f->flags&NVSDK_NGX_DLSS_Feature_Flags_MVJittered)!=0;
     g.depth_inverted=(f->flags&NVSDK_NGX_DLSS_Feature_Flags_DepthInverted)!=0;
     g.frame_time_delta_ms=get<float>(p,NVSDK_NGX_Parameter_FrameTimeDeltaInMsec,16.6667F);
-    const bool exact=apply_camera(g,nullptr);if(luke_detected()&&!exact)return fail();
+    const bool exact=apply_camera(g,nullptr);if(luke_detected()&&!exact){note(8,S_OK);return fail();}
+    // The stream's shape (V520's lines), once per change of size or rectangle.
+    if(const std::array<std::uint64_t,5> shape{pack(g.output_width,g.output_height),pack(g.motion_width,g.motion_height),
+            pack(g.output_x,g.output_y),pack(g.motion_x,g.motion_y),pack(g.depth_x,g.depth_y)};f->described!=shape) {
+        f->described=shape;
+        capture_log("d3d11_stream",static_cast<std::uint32_t>(f->flags),shape[0],shape[1],pack(bits(g.scale_x),bits(g.scale_y)));
+        capture_log("d3d11_stream_rects",shape[2],shape[3],shape[4],pack(g.depth_width,g.depth_height));
+        capture_log("d3d11_stream_textures",extent(motion.Get()),extent(depth_texture.Get()),extent(output.Get()),
+            describe(motion.Get()));
+    }
     nr_guides(t,true);
     if(color)neural_rendering::before_sr(f->identity,t.list(),&shadow,queue.Get());
     nr_guides(t,false);
@@ -189,6 +230,9 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     g.resource_state=g.depth_resource_state=g.output_resource_state=D3D12_RESOURCE_STATE_COMMON;
     g.direct_output_receipt=!g.protect_snapshot_lifetime;
     const auto frame=publish_dlss_motion_vectors(g);
+    // 9 refused; 10 published with depth (detail: depth's flags and format,
+    // unpacked if packed); 11 published without (hr: why the depth failed).
+    note(!frame?9:g.depth?10:11,depth_result,describe(depth_texture.Get()));
     nr_guides(t,true);
     barrier(t,D3D11GuideTransport::output,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     neural_rendering::after_sr(f->identity,t.list(),&shadow,queue.Get());

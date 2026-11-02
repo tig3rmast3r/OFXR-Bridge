@@ -3,7 +3,20 @@
 #include <cstdint>
 #include <optional>
 #include "xrfg/luke_render_identity.hpp"
+#include "xrfg/scene_presentation_rate.hpp"
 namespace xrfg {
+// Meter identity for the unmodified application stereo pair. A valid color
+// token proves the pixels' origin even while AFW waits for camera history.
+// This is never a guide-admission or synthetic-output identity.
+inline SceneIdentity luke_original_scene_identity(
+    const std::array<std::uint32_t,2>& tokens,
+    const std::array<std::uint32_t,2>& logical_eyes) noexcept {
+    if (!tokens[0] || !tokens[1] || logical_eyes[0]>1 || logical_eyes[1]>1 ||
+        logical_eyes[0]==logical_eyes[1]) return {};
+    const auto left=logical_eyes[0]==0?tokens[0]:tokens[1];
+    const auto right=logical_eyes[0]==0?tokens[1]:tokens[0];
+    return {0x4c554b4500000001ULL,(std::uint64_t(left)<<32)|right,0};
+}
 // HFW's render counter can stay unchanged across a fresh capture of the other
 // eye. AFW resolves the actual color-carried CRC token downstream; do not discard
 // that capture using the coarser cross-eye counter. Raw OFXR keeps its old filter.

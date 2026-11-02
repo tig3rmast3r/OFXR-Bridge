@@ -138,7 +138,7 @@ void test_native_dlss_nvidia_prime(D3D12WarpFixture& fixture) {
 
 void test_native_dlss_packed_stereo(D3D12WarpFixture& fixture, bool cropped,
                                     DXGI_FORMAT format = kFormat, bool recover_core = false,
-                                    StereoPattern* observed = nullptr) {
+                                    StereoPattern* observed = nullptr, bool resized_eye = false) {
     constexpr UINT width = 256, height = 128, margin = 16;
     const auto previous = translated_motion_pattern(width, height, {0, 0});
     const auto current = translated_motion_pattern(width, height, {8, -8});
@@ -220,10 +220,47 @@ void test_native_dlss_packed_stereo(D3D12WarpFixture& fixture, bool cropped,
             eye * width + (cropped ? 3U : 0U), cropped ? 1U : 0U,
             cropped ? width - 6 : width, cropped ? height - 2 : height};
     }
+    if (resized_eye) for (UINT eye=0; eye<kEyeCount; ++eye) {
+        for(auto* set:{&a_guides,&b_guides}) {
+            auto g=std::make_shared<xrfg::DlssMotionVectorFrame>(*set->eyes[eye]);
+            g->output_x=0;g->output_width=width-4;g->output_height=height-2;
+            g->camera_data_valid=g->camera_matrices_valid=true;
+            const auto& f=views[eye].fov;
+            const float left=std::tan(f.angle_left),right=std::tan(f.angle_right);
+            const float up=std::tan(f.angle_up),down=std::tan(f.angle_down);
+            g->camera_view_to_clip={};
+            g->camera_view_to_clip[0]=2.F/(right-left);
+            g->camera_view_to_clip[5]=2.F/(up-down);
+            g->camera_view_to_clip[8]=-(right+left)/(right-left);
+            g->camera_view_to_clip[9]=-(up+down)/(up-down);
+            g->camera_view_to_clip[10]=1.F;g->camera_view_to_clip[11]=1.F;
+            g->camera_view_to_clip[14]=-.1F;
+            set->eyes[eye]=std::move(g);
+        }
+    }
     xrfg::D3D12NativeDlssG native;
     require_hresult(native.initialize(fixture.device(), fixture.queue(), packed[0]->GetDesc(),
                                       format), "packed native initialization");
     const std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{output.Get()}}};
+    if (resized_eye) {
+        // Unknown or narrower cameras must STILL fail bounds admission. The
+        // fix may map a proven view; it must not waive the guard or mutate the
+        // immutable publication shared with other generators.
+        for(bool narrow:{false,true}) {
+            auto bad_a=a_guides,bad_b=b_guides;
+            for(auto* set:{&bad_a,&bad_b}) for(auto& frame:set->eyes)if(frame) {
+                auto bad=std::make_shared<xrfg::DlssMotionVectorFrame>(*frame);
+                bad->camera_matrices_valid=narrow;
+                bad->camera_view_to_clip[0]*=2.F;frame=std::move(bad);
+            }
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                require(native.record(list,0,packed[0].Get(),packed[1].Get(),views,views,
+                    &bad_a,&bad_b,outputs,D3D12_RESOURCE_STATE_RENDER_TARGET)==S_FALSE &&
+                    native.last_skip()==xrfg::D3D12NativeDlssG::Skip::guides,
+                    "resized-eye mapping admitted an unknown/narrow native camera");
+            });
+        }
+    }
     if (recover_core) {
         // The real old provider advertises FG and creates a feature, but
         // rejects evaluation. Both refused pairs must remain non-generated.
@@ -251,6 +288,10 @@ void test_native_dlss_packed_stereo(D3D12WarpFixture& fixture, bool cropped,
         "an unsubmitted native decision must not turn the counter green");
     native.submitted(fixture.completion_fence(), fixture.last_submitted_value());
     require(receipt->generated(), "actual packed interpolation must have an enabled GPU decision");
+    if(resized_eye)for(UINT eye=0;eye<kEyeCount;++eye)
+        require(a_guides.eyes[eye]->output_width==width-4 && b_guides.eyes[eye]->output_x==0 &&
+            !a_guides.eyes[eye]->placed && !b_guides.eyes[eye]->placed,
+            "native placement modified the original shared guide publication");
     auto unpacked = create_native_test_texture(fixture, width, height,
                                           D3D12_RESOURCE_STATE_RENDER_TARGET, kEyeCount, format);
     fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {

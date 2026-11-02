@@ -94,7 +94,7 @@ void fsr_release_identity_test() {
         check(XR_SUCCEEDED(layer_release_swapchain_image_impl(chain->handle,&info)), "actual FSR release");
         check(chain->last_released_capture.has_value(), "FSR color captured at release");
     };
-    const auto refresh=[&] {refresh_release_bound_projection_guides(*s,mappings);};
+    const auto refresh=[&] {refresh_release_bound_projection_guides(*s,ProjectionSnapshot{},mappings);};
     const auto verify=[&] {
         for(unsigned eye=0;eye<2;++eye) {
             auto g=chains[eye]->last_released_motion_vectors;
@@ -119,7 +119,17 @@ void fsr_release_identity_test() {
         check(SUCCEEDED(apply_embedded_control(s)), "real generator switch application");
     }
     check(chains[0]->fsr_eye_identity.stream==left_identity.stream, "route switches retain verified stream identity");
-    s->menu_enabled = true; // Route switch was intentionally made with generation paused.
+    // The route switch deliberately paused the real canonical controls. Resume
+    // through that same API: changing only the private session bool would leave
+    // the owned-guide capture gate correctly disabled by the global OFF state.
+    auto resumed=xrfg::embedded::snapshot().desired;
+    resumed.enabled=true;resumed.frame_generation=1;resumed.hybrid=false;resumed.motion_vectors=1;
+    check(xrfg_fixture::request_control(resumed),"resume actual canonical FSR controls");
+    check(SUCCEEDED(apply_embedded_control(s)),"apply actual FSR resume after paused route switch");
+    // Owned temporal snapshots were retired while OFF. The first exact
+    // right/left releases establish the resumed epoch before both-before-release
+    // ordering can use the learned identities again.
+    publish(1);release(1);publish(0);release(0);refresh();verify();
     publish(1);publish(0);release(0);release(1);refresh();verify();
     publish(1);publish(0,true);release(0);release(1);refresh();
     check(!chains[0]->last_released_motion_vectors, "reset epoch cannot reuse learned eye identity");

@@ -8,6 +8,9 @@
 #include <array>
 #include <memory>
 
+struct ID3D11DeviceContext;
+struct ID3D11Texture2D;
+
 namespace xrfg {
 
 // A single F8 press captures two completed AFW xrEndFrame
@@ -15,11 +18,16 @@ namespace xrfg {
 std::uint32_t two_frame_capture_begin_end_frame() noexcept;
 void two_frame_capture_finish_end_frame(std::uint32_t frame) noexcept;
 void two_frame_capture_mark_afw_evaluation() noexcept;
+// Starts the bounded recorder immediately, only with F9 diagnostic logging.
+// Caller handles episode recovery/cooldown; never injects a keyboard event.
+[[nodiscard]] bool two_frame_capture_request_origin_loss() noexcept;
 [[nodiscard]] bool two_frame_capture_active() noexcept;
 // Full-resolution F8 session only; the rolling F9 ring has its own witnesses.
 [[nodiscard]] bool two_frame_capture_images_active() noexcept;
 // Full F8 only, one native pair per stream and at most two streams.
 [[nodiscard]] bool two_frame_capture_claim_dlssg_pair(std::uint64_t stream) noexcept;
+// At most one original image per application swapchain in a full F8 session.
+[[nodiscard]] bool two_frame_capture_claim_application(std::uint64_t swapchain) noexcept;
 void two_frame_capture_timeline(
     const char* stream,
     std::int64_t code,
@@ -46,6 +54,13 @@ struct TwoFrameImageInfo {
 };
 
 struct TwoFrameGuideContract {
+    // Current / exact previous-opposite / exact previous-same producer receipt.
+    // Diagnostic metadata only; original cameras, guides and XR poses unchanged.
+    std::array<std::uint64_t,3> gta_tracking_render{};
+    std::array<int,3> gta_tracking_mode{};
+    std::array<float,3> gta_tracking_yaw{};
+    std::array<bool,3> gta_tracking_valid{};
+    std::array<std::array<float,28>,3> gta_tracking_poses{};
     std::uint32_t native_camera_token{}, color_origin_token{};
     std::uint64_t native_production_sequence{};
     bool interleaved_history{};
@@ -140,6 +155,13 @@ void two_frame_capture_record_ng_x(
     const TwoFrameImageInfo& info, ID3D12Device* device,
     ID3D12CommandQueue* queue, ID3D12Resource* source,
     D3D12_RESOURCE_STATES source_state) noexcept;
+
+// F8 only, on the existing D11 owner/release thread. Copies the exact native
+// application image to staging; the writer receives CPU bytes and never calls
+// the single-threaded D11 context. D12 is used only to describe row footprints.
+[[nodiscard]] HRESULT two_frame_capture_record_d3d11(
+    const TwoFrameImageInfo& info, ID3D12Device* footprint_device,
+    ID3D11DeviceContext* context, ID3D11Texture2D* source) noexcept;
 
 // Called after the native ExecuteCommandLists hook, never before it.
 void two_frame_capture_submission(

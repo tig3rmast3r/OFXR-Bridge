@@ -2,7 +2,7 @@
 // Shared COM-alias fixture; forwards real hardware/WARP allocation and backing data.
 // Real WARP operations are forwarded; only the reported COM device identity
 // differs. Same adapter is intentionally NOT proof of snapshot ownership.
-class ReportedDeviceAlias final : public ID3D12Device {
+class ReportedDeviceAlias : public ID3D12Device {
 public:
     explicit ReportedDeviceAlias(ID3D12Device* native, bool exposes_native = false,
         bool exposes_public_video=false,ID3D12Device* video_owner=nullptr)

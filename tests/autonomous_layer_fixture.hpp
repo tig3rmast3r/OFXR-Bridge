@@ -15,13 +15,17 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     s.enabled=desired.enabled; s.backend=desired.backend; s.preset=desired.preset;
     s.scale=desired.scale; s.backward=desired.backward; s.lower_vram=desired.lower_vram;
     s.separate_synthesis=desired.separate_synthesis;
-    s.motion_vectors=desired.motion_vectors; s.frame_generation=desired.frame_generation;
+    const int canonical_generation=desired.hybrid && desired.frame_generation==0
+        ?3:desired.frame_generation;
+    s.motion_vectors=desired.motion_vectors; s.frame_generation=canonical_generation;
     s.native_scale=static_cast<int>(desired.native_scale);
     const auto pipeline=xrfg::embedded::djules_pipeline_snapshot();
     s.prefer_fps=pipeline.prefer_fps; s.triple_frame_gen=pipeline.triple_frame_gen;
     if (!xrfg::autonomous::request(s)) return false;
     xrfg::autonomous::apply_runtime_settings();
     auto effective=desired;
+    effective.hybrid=canonical_generation==3;
+    effective.frame_generation=canonical_generation==3?0:canonical_generation;
     if (effective.frame_generation == 2) effective.backend = 0;
     effective.motion_vectors=xrfg::autonomous::snapshot().desired.motion_vectors;
     const auto actual=xrfg::embedded::snapshot().desired;

@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <future>
 
 namespace xrfg {
 
@@ -27,6 +28,10 @@ public:
     LukeAfwSynthesizer(const LukeAfwSynthesizer&) = delete;
     LukeAfwSynthesizer& operator=(const LukeAfwSynthesizer&) = delete;
 
+    // plugin_path is PureDark's AFW provider. It is loaded only while AFW
+    // renders the peer eye, from the first evaluation with AFW selected: with
+    // Full OSR the layer renders it alone and the provider is never loaded,
+    // so it may be missing.
     [[nodiscard]] HRESULT initialize(
         ID3D12Device* device,
         ID3D12CommandQueue* queue,
@@ -40,16 +45,31 @@ public:
         const D3D12ReprojectionView& destination_view,
         std::uint32_t source_eye,
         float xr_eye_baseline,
-        const embedded::AfwSettings& settings) noexcept;
+        const embedded::AfwSettings& settings,
+        bool native_peer_camera=false,
+        std::optional<Vec3>* reconstructed_position=nullptr) noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
+    // Prepare a fresh isolated provider while published XR pixels stay intact.
+    // Calls only poll ready futures; the render thread never joins pending work.
+    void prepare_history_reset() noexcept;
+    [[nodiscard]] bool history_reset_ready() noexcept;
 
 private:
     struct Impl;
     HRESULT initialize_locked(ID3D12Device* device, ID3D12CommandQueue* queue,
-        const std::filesystem::path& plugin_path, bool isolated_provider) noexcept;
+        const std::filesystem::path& plugin_path, bool isolated_provider, bool native) noexcept;
     mutable std::mutex mutex_;
     std::unique_ptr<Impl> impl_;
+    std::future<std::unique_ptr<Impl>> standby_;
+    std::future<void> retirement_;
+    bool standby_geometry_{},reset_prepared_{};
+    // A provider that failed to load is not retried every frame; selecting
+    // Full OSR again clears it.
+    HRESULT provider_failure_{S_OK};
+    void queue_standby_locked() noexcept;
+    static HRESULT create_impl(ID3D12Device*,ID3D12CommandQueue*,
+        const std::filesystem::path&,bool,bool,std::unique_ptr<Impl>&) noexcept;
 };
 
 }  // namespace xrfg

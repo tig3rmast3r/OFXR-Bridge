@@ -51,6 +51,11 @@ struct Settings {
     float afw_ignore_motion_threshold{2.5F};
     int afw_depth_dilate_mode{};
     int afw_shading_rate{}; // beta6 Combined; 0 full resolution, 4=2x2, 8=4x4
+    int luke_osr{2};       // 2 OSR (default), 0 AFW (legacy); retired value 1 migrates to OSR
+    int luke_osr_cover{};  // OSR: band cover in depth texels beyond the hole, 0..8
+    int luke_osr_trim{};   // OSR: object-edge texels replaced too, 0..2
+    int luke_osr_fill{2};  // OSR: band fill gain, 1..8
+    bool luke_advanced{};  // Luke Ross tab: show the provider and OSR parameters
     bool nr_enabled{};
     bool nr_before_sr{true};
     float nr_intensity{1.F};
@@ -72,6 +77,7 @@ struct Settings {
     bool nr_compare_swap{};
     bool r19_camera{}; // opt-in own camera for every FG route; live pair snapshot
     bool diagnostics{};
+    bool status_json{}; // explicit external telemetry/export request; per profile, default off
     bool benchmark_csv{true}; // automatic suite CSV; independent of the flight log
     bool benchmark_auto_pick{true}; // per-profile, apply a measured winner only on completion
     int overlay_position{6}; // 0 off, 1 upper-left, 2 upper-right, 3 lower-left, 4 lower-right, 5 Elliott controller, 6 Elliott bottom
@@ -146,6 +152,7 @@ struct RuntimeStatus {
     std::uint32_t buffer_capacity{}; // active admission capacity; zero for native Legacy/AFW-only
     std::uint32_t eye_long_side{}; // minimum per-eye longest side of the submitted stereo scene
     bool shared_queue{}; // actual capture/OFXR queue fallback, not the requested pacing
+    bool afw_flat_scene{};
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
     return !r.vdxr_legacy;
@@ -198,7 +205,7 @@ enum class OverlaySwapchain : unsigned { fps=1, meter=2, menu=4 };
 void report_overlay_limit(OverlaySwapchain surface, bool refused) noexcept;
 std::string_view overlay_limit_text(std::uint32_t mask) noexcept;
 // Visibility leases are independent of settings revisions and persistence.
-enum class InterfaceSurface : unsigned { desktop, headset, meter };
+enum class InterfaceSurface : unsigned { desktop, headset, meter, status_export };
 void set_interface_visible(InterfaceSurface surface, bool visible) noexcept;
 bool interface_telemetry_requested() noexcept;
 void report_interface_telemetry(InterfaceTelemetry value) noexcept;

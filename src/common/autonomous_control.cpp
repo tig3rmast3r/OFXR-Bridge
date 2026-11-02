@@ -1,6 +1,7 @@
 #include "xrfg/autonomous_control.hpp"
 #include "xrfg/benchmark_suite.hpp"
 #include "xrfg/presented_output_rate.hpp"
+#include "xrfg/osr_full_warp.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -78,7 +79,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 68101;
+constexpr std::uint32_t kAbi = 77301;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -89,7 +90,7 @@ struct Shared {
     std::uint32_t bytes{};
     Snapshot snapshot{};
     wchar_t configuration_file[32768]{};
-    alignas(8) std::uint64_t visible_until_ms[3]{};
+    alignas(8) std::uint64_t visible_until_ms[4]{};
     alignas(8) std::uint64_t benchmark_metrics_until_ms{};
     Settings benchmark_saved{};
     alignas(8) std::uint64_t benchmark_memory_request{};
@@ -327,6 +328,10 @@ Settings sanitize(Settings value) noexcept {
     value.afw_ignore_motion_threshold = bounded(value.afw_ignore_motion_threshold, 0.F, 16.F, 2.5F);
     value.afw_depth_dilate_mode = std::clamp(value.afw_depth_dilate_mode, 0, 2);
     value.afw_shading_rate = std::clamp(value.afw_shading_rate, 0, 8);
+    value.luke_osr = normalize_osr_reconstruction(value.luke_osr);
+    value.luke_osr_cover = std::clamp(value.luke_osr_cover, 0, 8);
+    value.luke_osr_trim = std::clamp(value.luke_osr_trim, 0, 2);
+    value.luke_osr_fill = std::clamp(value.luke_osr_fill, 1, 8);
     value.nr_intensity = bounded(value.nr_intensity, 0.F, 2.F, 1.F);
     value.nr_preset = std::clamp(value.nr_preset, 0, 3);
     value.nr_style = std::clamp(value.nr_style, 0, 2);
@@ -423,6 +428,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(r19_camera)
         READ_FIELD(afw_mode) READ_FIELD(afw_debug) READ_FIELD(afw_clear_before_warping)
         READ_FIELD(afw_ignore_motion_threshold) READ_FIELD(afw_depth_dilate_mode) READ_FIELD(afw_shading_rate)
+        READ_FIELD(luke_osr) READ_FIELD(luke_osr_cover) READ_FIELD(luke_osr_trim) READ_FIELD(luke_osr_fill) READ_FIELD(luke_advanced)
         READ_FIELD(nr_enabled) READ_FIELD(nr_before_sr) READ_FIELD(nr_intensity)
         READ_FIELD(nr_preset) READ_FIELD(nr_style) READ_FIELD(nr_local_structure)
         READ_FIELD(nr_local_tone) READ_FIELD(nr_skin_structure) READ_FIELD(nr_auto_mask)
@@ -430,7 +436,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(nr_max_ratio) READ_FIELD(nr_working_scale) READ_FIELD(nr_white_point_scale)
         READ_FIELD(nr_debug_view) READ_FIELD(nr_compare) READ_FIELD(nr_compare_split)
         READ_FIELD(nr_compare_zoom) READ_FIELD(nr_compare_swap)
-        READ_FIELD(diagnostics) READ_FIELD(benchmark_csv) READ_FIELD(benchmark_auto_pick) READ_FIELD(overlay_position)
+        READ_FIELD(diagnostics) READ_FIELD(status_json) READ_FIELD(benchmark_csv) READ_FIELD(benchmark_auto_pick) READ_FIELD(overlay_position)
         READ_FIELD(menu_scale) READ_FIELD(menu_offset_x) READ_FIELD(menu_offset_y)
         READ_FIELD(luke_shared_swapchains)
 #undef READ_FIELD
@@ -460,6 +466,7 @@ std::string serialize_settings(const Settings& settings) {
     WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(r19_camera)
     WRITE_FIELD(afw_mode) WRITE_FIELD(afw_debug) WRITE_FIELD(afw_clear_before_warping)
     WRITE_FIELD(afw_ignore_motion_threshold) WRITE_FIELD(afw_depth_dilate_mode) WRITE_FIELD(afw_shading_rate)
+    WRITE_FIELD(luke_osr) WRITE_FIELD(luke_osr_cover) WRITE_FIELD(luke_osr_trim) WRITE_FIELD(luke_osr_fill) WRITE_FIELD(luke_advanced)
     WRITE_FIELD(nr_enabled) WRITE_FIELD(nr_before_sr) WRITE_FIELD(nr_intensity)
     WRITE_FIELD(nr_preset) WRITE_FIELD(nr_style) WRITE_FIELD(nr_local_structure)
     WRITE_FIELD(nr_local_tone) WRITE_FIELD(nr_skin_structure) WRITE_FIELD(nr_auto_mask)
@@ -467,7 +474,7 @@ std::string serialize_settings(const Settings& settings) {
     WRITE_FIELD(nr_max_ratio) WRITE_FIELD(nr_working_scale) WRITE_FIELD(nr_white_point_scale)
     WRITE_FIELD(nr_debug_view) WRITE_FIELD(nr_compare) WRITE_FIELD(nr_compare_split)
     WRITE_FIELD(nr_compare_zoom) WRITE_FIELD(nr_compare_swap)
-    WRITE_FIELD(diagnostics) WRITE_FIELD(benchmark_csv) WRITE_FIELD(benchmark_auto_pick) WRITE_FIELD(overlay_position)
+    WRITE_FIELD(diagnostics) WRITE_FIELD(status_json) WRITE_FIELD(benchmark_csv) WRITE_FIELD(benchmark_auto_pick) WRITE_FIELD(overlay_position)
     WRITE_FIELD(menu_scale) WRITE_FIELD(menu_offset_x) WRITE_FIELD(menu_offset_y)
     WRITE_FIELD(luke_shared_swapchains)
 #undef WRITE_FIELD
@@ -645,6 +652,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
     MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
     MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
+    MERGE_FIELD(luke_osr) MERGE_FIELD(luke_osr_cover) MERGE_FIELD(luke_osr_trim) MERGE_FIELD(luke_osr_fill) MERGE_FIELD(luke_advanced)
     MERGE_FIELD(nr_enabled) MERGE_FIELD(nr_before_sr) MERGE_FIELD(nr_intensity)
     MERGE_FIELD(nr_preset) MERGE_FIELD(nr_style) MERGE_FIELD(nr_local_structure)
     MERGE_FIELD(nr_local_tone) MERGE_FIELD(nr_skin_structure) MERGE_FIELD(nr_auto_mask)
@@ -652,7 +660,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
     MERGE_FIELD(nr_max_ratio) MERGE_FIELD(nr_working_scale) MERGE_FIELD(nr_white_point_scale)
     MERGE_FIELD(nr_debug_view) MERGE_FIELD(nr_compare) MERGE_FIELD(nr_compare_split)
     MERGE_FIELD(nr_compare_zoom) MERGE_FIELD(nr_compare_swap)
-    MERGE_FIELD(diagnostics) MERGE_FIELD(benchmark_csv) MERGE_FIELD(benchmark_auto_pick) MERGE_FIELD(overlay_position)
+    MERGE_FIELD(diagnostics) MERGE_FIELD(status_json) MERGE_FIELD(benchmark_csv) MERGE_FIELD(benchmark_auto_pick) MERGE_FIELD(overlay_position)
     MERGE_FIELD(menu_scale) MERGE_FIELD(menu_offset_x) MERGE_FIELD(menu_offset_y)
     MERGE_FIELD(luke_shared_swapchains)
 #undef MERGE_FIELD
@@ -890,7 +898,7 @@ void suite_complete(Shared& shared,const SuiteRecorder& rec,std::uint64_t now) {
     const auto latency=std::minmax_element(result.samples.latency.begin(),result.samples.latency.end());
     std::snprintf(b.message,sizeof(b.message),"Complete. Selected %s: %.1f FPS (%.1f-%.1f), %.1f ms (%.1f-%.1f).%s",
         label.c_str(),score.fps,*fps.first,*fps.second,score.latency,*latency.first,*latency.second,
-        restart_afw_only ? " Restart the game to activate AFW Only." : "");
+        restart_afw_only ? " Restart the game to activate Frame Reconstruction only." : "");
 }
 } // namespace
 
@@ -906,7 +914,7 @@ bool start_benchmark(bool full,bool luke) noexcept {
         }
         if(s.runtime.pacing_mode==kAfwOnlyPacingMode) {
             b={};b.phase=BenchmarkPhase::error;
-            std::snprintf(b.message,sizeof(b.message),"AFW only is active. Disable it in the Luke Ross tab and restart the game for the OFXR matrix.");return false;
+            std::snprintf(b.message,sizeof(b.message),"Frame Reconstruction only is active. Disable it in the Luke Ross tab and restart the game for the OFXR matrix.");return false;
         }
         if(luke && !s.runtime.luke_detected) {
             b={};b.phase=BenchmarkPhase::error;
@@ -1110,7 +1118,7 @@ void report_overlay_limit(OverlaySwapchain surface, bool refused) noexcept {
 void set_interface_visible(InterfaceSurface surface, bool visible) noexcept {
     try {
         auto& c = channel(); if (!c.data) return;
-        const auto index = static_cast<unsigned>(surface); if (index > 2) return;
+        const auto index = static_cast<unsigned>(surface); if (index > 3) return;
         std::atomic_ref<std::uint64_t>(c.data->visible_until_ms[index]).store(
             visible ? GetTickCount64() + 1000 : 0, std::memory_order_release);
     } catch (...) {}
@@ -1143,7 +1151,11 @@ std::string_view interface_vectors_text(const Snapshot& s, std::uint64_t now) no
 std::string_view interface_state_text(const Snapshot& s) noexcept {
     if (!s.connected) return "Waiting";
     const auto& r = s.runtime;
-    if(interface_afw_only_active(s,GetTickCount64()))return s.desired.nr_enabled && r.nr_running ? "AFW + Neural" : "AFW";
+    if(interface_afw_only_active(s,GetTickCount64())) {
+        const bool nr=s.desired.nr_enabled && r.nr_running;
+        if(normalize_osr_reconstruction(s.desired.luke_osr)==2) return nr ? "OSR + Neural" : "OSR";
+        return nr ? "AFW + Neural" : "AFW";
+    }
     if (r.generation_state == GenerationState::paused) return "Paused";
     if (r.pending || r.applied_revision != s.revision) return "Applying settings";
     const bool active = r.telemetry.updated_ms && GetTickCount64() - r.telemetry.updated_ms < 2000 && r.telemetry.generating;
@@ -1155,17 +1167,20 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
         const bool afw=fresh && r.afw_running && s.desired.afw_mode!=0;
         const bool nr=fresh && r.nr_running && s.desired.nr_enabled;
         // Static views retain noexcept/zero allocation on both UI surfaces.
-        static constexpr std::string_view names[7][4]={
-            {"FidelityFX","FidelityFX + AFW","FidelityFX + Neural","FidelityFX + AFW + Neural"},
-            {"OFXR 0.2.1","OFXR 0.2.1 + AFW","OFXR 0.2.1 + Neural","OFXR 0.2.1 + AFW + Neural"},
-            {"OFXR 0.3.0","OFXR 0.3.0 + AFW","OFXR 0.3.0 + Neural","OFXR 0.3.0 + AFW + Neural"},
-            {"OFXR 0.2.13","OFXR 0.2.13 + AFW","OFXR 0.2.13 + Neural","OFXR 0.2.13 + AFW + Neural"},
-            {"Hybrid","Hybrid + AFW","Hybrid + Neural","Hybrid + AFW + Neural"},
-            {"FSR","FSR + AFW","FSR + Neural","FSR + AFW + Neural"},
-            {"DLSS-G","DLSS-G + AFW","DLSS-G + Neural","DLSS-G + AFW + Neural"}};
+        // Columns: base, + AFW, + Neural, + AFW + Neural, + OSR, + OSR + Neural.
+        static constexpr std::string_view names[7][6]={
+            {"FidelityFX","FidelityFX + AFW","FidelityFX + Neural","FidelityFX + AFW + Neural","FidelityFX + OSR","FidelityFX + OSR + Neural"},
+            {"OFXR 0.2.1","OFXR 0.2.1 + AFW","OFXR 0.2.1 + Neural","OFXR 0.2.1 + AFW + Neural","OFXR 0.2.1 + OSR","OFXR 0.2.1 + OSR + Neural"},
+            {"OFXR 0.3.0","OFXR 0.3.0 + AFW","OFXR 0.3.0 + Neural","OFXR 0.3.0 + AFW + Neural","OFXR 0.3.0 + OSR","OFXR 0.3.0 + OSR + Neural"},
+            {"OFXR 0.2.13","OFXR 0.2.13 + AFW","OFXR 0.2.13 + Neural","OFXR 0.2.13 + AFW + Neural","OFXR 0.2.13 + OSR","OFXR 0.2.13 + OSR + Neural"},
+            {"Hybrid","Hybrid + AFW","Hybrid + Neural","Hybrid + AFW + Neural","Hybrid + OSR","Hybrid + OSR + Neural"},
+            {"FSR","FSR + AFW","FSR + Neural","FSR + AFW + Neural","FSR + OSR","FSR + OSR + Neural"},
+            {"DLSS-G","DLSS-G + AFW","DLSS-G + Neural","DLSS-G + AFW + Neural","DLSS-G + OSR","DLSS-G + OSR + Neural"}};
         const int route=r.generation_mode==1 ? 5 : r.generation_mode==2 ? 6 :
             r.generation_mode==3 ? 4 : std::clamp(s.desired.backend,0,3);
-        return names[route][(afw?1:0)+(nr?2:0)];
+        // OSR replaces AFW as the eye renderer.
+        const int osr=afw ? normalize_osr_reconstruction(s.desired.luke_osr) : 0;
+        return names[route][osr==2 ? (nr?5:4) : (afw?1:0)+(nr?2:0)];
     }
     return r.ready ? "Real frames only" : "Waiting";
 }
@@ -1237,8 +1252,10 @@ std::string interface_status_text(const Snapshot& s) {
     const bool runtime_fresh=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
     const auto generator=r.generation_mode==1 ? "FSR" : r.generation_mode==2 ? "DLSS-G" : "OFXR";
     add(std::string(generator)+(s.desired.enabled ? (generating ? ": Active" : ": Waiting") : ": Off"));
-    add(!r.luke_detected ? "AFW: N/A" : s.desired.afw_mode==0 ? "AFW: Off" :
-        runtime_fresh && r.afw_running ? "AFW: Active" : "AFW: Waiting");
+    const char* afw_label=normalize_osr_reconstruction(s.desired.luke_osr)==2 ? "OSR" : "AFW";
+    add(!r.luke_detected ? std::string(afw_label)+": N/A" : s.desired.afw_mode==0 ? std::string(afw_label)+": Off" :
+        runtime_fresh && r.afw_flat_scene ? std::string(afw_label)+": 2D scene (no stereo source)" :
+        runtime_fresh && r.afw_running ? std::string(afw_label)+": Active" : std::string(afw_label)+": Waiting");
     add(!s.desired.nr_enabled ? "Neural Render: Off" : runtime_fresh && r.nr_running ? "Neural Render: Active" : "Neural Render: Waiting");
     return result;
 }

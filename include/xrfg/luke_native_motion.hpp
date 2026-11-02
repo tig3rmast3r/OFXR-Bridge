@@ -152,6 +152,31 @@ inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
     const bool native_view_rows=axes==LukeProducerCameraAxes::native_view_rows;
     if(!native_motion_detail::transform(current,middle,out.opposite,up_sign,native_view_rows) ||
         !native_motion_detail::transform(current,older,out.same,up_sign,native_view_rows))return false;
+    if(guide.compose_native_object_history) {
+        failure=10;
+        const auto& peer=*guide.previous_opposite_guide;
+        if(guide.raw_motion_native_span!=1 || !peer.compose_native_object_history ||
+            !peer.motion_vectors || !peer.depth || !peer.motion_retention || !peer.depth_retention ||
+            peer.motion_x!=guide.motion_x || peer.motion_y!=guide.motion_y ||
+            peer.depth_x!=guide.motion_x || peer.depth_y!=guide.motion_y ||
+            peer.depth_width!=guide.motion_width || peer.depth_height!=guide.motion_height ||
+            peer.scale_x!=guide.scale_x || peer.scale_y!=guide.scale_y)
+            return false;
+        Microsoft::WRL::ComPtr<IUnknown> owner,motion_owner,depth_owner;
+        if(!peer.motion_snapshot_device || !peer.depth_snapshot_device ||
+            FAILED(guide.motion_snapshot_device.As(&owner)) ||
+            FAILED(peer.motion_snapshot_device.As(&motion_owner)) ||
+            FAILED(peer.depth_snapshot_device.As(&depth_owner)) ||
+            owner.Get()!=motion_owner.Get() || owner.Get()!=depth_owner.Get())return false;
+        const auto mv=peer.motion_vectors->GetDesc(), dz=peer.depth->GetDesc();
+        if(mv.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D || dz.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+            mv.DepthOrArraySize!=1 || dz.DepthOrArraySize!=1 || mv.SampleDesc.Count!=1 || dz.SampleDesc.Count!=1 ||
+            std::uint64_t(peer.motion_x)+peer.motion_width>mv.Width || std::uint64_t(peer.motion_y)+peer.motion_height>mv.Height ||
+            std::uint64_t(peer.depth_x)+peer.depth_width>dz.Width || std::uint64_t(peer.depth_y)+peer.depth_height>dz.Height ||
+            (mv.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) || (dz.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE))return false;
+        if(!native_motion_detail::transform(middle,older,out.stereo,up_sign,native_view_rows))return false;
+        out.padding[1]=1.F;
+    }
     failure=0;return true;
 }
 }

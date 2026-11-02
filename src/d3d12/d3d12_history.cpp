@@ -117,6 +117,7 @@ struct D3D12SwapchainHistory::Impl {
     HANDLE busy_event{};
     HANDLE busy_timer{};
     std::array<HistorySlot, D3D12SwapchainHistory::kSlotCount> slots;
+    D3D12_RESOURCE_DESC history_description{};
     D3D12_RESOURCE_STATES release_state{};
     std::uint64_t next_serial{1};
     std::uint64_t next_fence_value{1};
@@ -255,39 +256,12 @@ struct D3D12SwapchainHistory::Impl {
         queue = input_queue;
         release_state = input_release_state;
 
-        const D3D12_COMMAND_QUEUE_DESC queue_description = queue->GetDesc();
-        D3D12_HEAP_PROPERTIES heap_properties{};
-        heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
-        heap_properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-        heap_properties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-        heap_properties.CreationNodeMask =
-            queue_description.NodeMask == 0 ? 1U : queue_description.NodeMask;
-        heap_properties.VisibleNodeMask = heap_properties.CreationNodeMask;
-
-        D3D12_RESOURCE_DESC history_description = source_description;
+        history_description = source_description;
         history_description.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
             history_description.Flags & ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
-        for (HistorySlot& slot : slots) {
-            HRESULT result = device->CreateCommittedResource(
-                &heap_properties,
-                D3D12_HEAP_FLAG_NONE,
-                &history_description,
-                D3D12_RESOURCE_STATE_COMMON,
-                nullptr,
-                IID_PPV_ARGS(slot.resource.GetAddressOf()));
-            if (FAILED(result)) {
-                if (failure_stage != nullptr) {
-                    *failure_stage =
-                        D3D12HistoryInitializationStage::create_slot_resource;
-                }
-                return result;
-            }
-            result = create_closed_command_list(
-                queue_description.NodeMask, slot, failure_stage);
-            if (FAILED(result)) {
-                return result;
-            }
-        }
+        // Enumeration validates the source contract; it is not permission to
+        // reserve three full-resolution generation snapshots while FG is off.
+        // Each slot gets backing and commands only on its first real capture.
 
         HRESULT result = device->CreateFence(
             0,
@@ -310,6 +284,22 @@ struct D3D12SwapchainHistory::Impl {
         }
 
         capture_enabled = true;
+        return S_OK;
+    }
+
+    [[nodiscard]] HRESULT ensure_slot_resources(HistorySlot& slot) noexcept {
+        if (slot.resource) return S_OK;
+        HistorySlot created;
+        const auto node_mask = queue->GetDesc().NodeMask;
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        heap.CreationNodeMask = heap.VisibleNodeMask = node_mask ? node_mask : 1U;
+        auto result = device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,
+            &history_description,D3D12_RESOURCE_STATE_COMMON,nullptr,
+            IID_PPV_ARGS(created.resource.GetAddressOf()));
+        if (SUCCEEDED(result)) result = create_closed_command_list(node_mask,created,nullptr);
+        if (FAILED(result)) return result;
+        slot = std::move(created);
         return S_OK;
     }
 
@@ -512,6 +502,9 @@ struct D3D12SwapchainHistory::Impl {
         if (FAILED(result)) {
             return result;
         }
+
+        result = ensure_slot_resources(slot);
+        if (FAILED(result)) return result;
 
         slot.valid = false;
         slot.ticket = {};
@@ -744,6 +737,16 @@ struct D3D12SwapchainHistory::Impl {
         next_slot = 0;
         return S_OK;
     }
+
+    [[nodiscard]] HRESULT release_snapshots() noexcept {
+        const auto result = invalidate();
+        if (FAILED(result)) return result;
+        for (auto& slot : slots) {
+            slot.ram_gpu.harvest();
+            slot = {};
+        }
+        return S_OK;
+    }
 };
 
 D3D12SwapchainHistory::D3D12SwapchainHistory() noexcept = default;
@@ -918,6 +921,15 @@ HRESULT D3D12SwapchainHistory::invalidate() noexcept {
     try {
         std::scoped_lock lock(mutex_);
         return impl_ == nullptr ? S_OK : impl_->invalidate();
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+HRESULT D3D12SwapchainHistory::release_snapshots() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ == nullptr ? S_OK : impl_->release_snapshots();
     } catch (...) {
         return E_FAIL;
     }

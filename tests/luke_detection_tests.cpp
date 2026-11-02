@@ -28,6 +28,18 @@ int wmain(int argc, wchar_t** argv) {
     using namespace xrfg::native_ingress;
     try {
         require(argc >= 3, "custom and conventional fixture paths required");
+        if (argc > 3 && std::wstring_view(argv[3]) == L"--legacy-vulkan") {
+            require(legacy_luke_vulkan_detection(),"selected executable uses V666 recognition");
+            start_luke_detection_notifications();refresh_luke_detection(false);
+            require(!luke_detection_notifications_ready_for_test()&&!luke_detected(),"legacy starts negative without notifications");
+            {Module custom(argv[1]);require(luke_detected(),"legacy detects late custom marker without refresh");}
+            require(!luke_detected(),"legacy notices custom unload without refresh");
+            {Module conventional(argv[2]);require(luke_detected(),"legacy detects conventional marker without refresh");}
+            require(!luke_detected(),"legacy notices conventional unload without refresh");
+            require(luke_detection_scan_count_for_test()==0,"selected route does not invoke cached discovery or refcount lookup");
+            std::cout<<"V666 Vulkan recognition: negative, late custom/conventional load and unload without cache refresh PASS\n";
+            return 0;
+        }
         if (argc > 3 && std::wstring_view(argv[3]) == L"--preloaded") {
             Module preloaded(argv[1]);
             refresh_luke_detection();

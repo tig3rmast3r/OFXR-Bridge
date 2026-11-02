@@ -274,6 +274,9 @@ int main() {
         check(hooked<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers")(device,&allocation,&plain)==VK_SUCCESS,
             "unsplit original command allocation");
         begin_hook(plain,&begun);const auto plain_first=recording_receipt(plain);
+        const auto cutoff_before=guide_submission_cutoff();
+        check(!guide_submission_precedes(*plain_first,queue,cutoff_before),"recording alone is not producer submission proof");
+        check(bool(guide_recording_receipt(plain)),"one-time observed primary admits a guide recording");
         hooked<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(plain);
         VkSubmitInfo plain_info{VK_STRUCTURE_TYPE_SUBMIT_INFO};plain_info.commandBufferCount=1;plain_info.pCommandBuffers=&plain;
         const auto old_callbacks=submitted_callbacks;
@@ -281,7 +284,18 @@ int main() {
             plain_first&&plain_first->disposition==RecordingDisposition::submitted&&submitted.size()==1&&
             submitted.front().commands==std::vector<VkCommandBuffer>{plain}&&submitted_callbacks==old_callbacks,
             "unsplit successful Submit1 records disposition without injecting a segment or callback");
+        const auto cutoff_after=guide_submission_cutoff();
+        check(guide_submission_precedes(*plain_first,queue,cutoff_after)&&
+            !guide_submission_precedes(*plain_first,queue,cutoff_before)&&
+            !guide_submission_precedes(*plain_first,reinterpret_cast<VkQueue>(uintptr_t(9876)),cutoff_after),
+            "publication requires exact successful queue before the bridge signal cutoff");
+        check(!plain_first->disposed,"successful submit does not release command-buffer resource references");
+        check(!guide_recording_reusable(plain_first,3,3),"pending executable original cannot reuse a slot even after D3D12 retirement");
         hooked<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(plain,0);
+        check(plain_first->disposed,"exact reset proves recording resource references disposed");
+        check(!guide_recording_reusable(plain_first,3,2)&&guide_recording_reusable(plain_first,3,3),
+            "disposed recording still requires the exact consumer fence before slot reuse");
+        check(!guide_recording_reusable(plain_first,3,~uint64_t{0}),"device removal cannot masquerade as consumer retirement");
         check(plain_first->disposition==RecordingDisposition::submitted&&!recording_receipt(plain),
             "disposed accepted unsplit recording cannot become abandoned or reappear");
         begin_hook(plain,&begun);const auto plain_second=recording_receipt(plain);
@@ -292,11 +306,13 @@ int main() {
         check(hooked<PFN_vkQueueSubmit2>("vkQueueSubmit2")(queue,1,&plain_info2,app_fence)==VK_ERROR_DEVICE_LOST&&
             plain_second&&plain_second->disposition==RecordingDisposition::recording,
             "failed unsplit Submit2 leaves original recording unsubmitted");
+        check(!guide_submission_precedes(*plain_second,queue,guide_submission_cutoff()),"failed submit2 cannot publish guides");
         driver_submit_result=VK_SUCCESS;
         check(hooked<PFN_vkQueueSubmit2>("vkQueueSubmit2")(queue,1,&plain_info2,app_fence)==VK_SUCCESS&&
             plain_second->disposition==RecordingDisposition::submitted&&submitted.size()==1&&
             submitted.front().commands==std::vector<VkCommandBuffer>{plain}&&submitted_callbacks==old_callbacks,
             "successful unsplit Submit2 retry marks the same receipt without altering driver packet");
+        check(guide_submission_precedes(*plain_second,queue,guide_submission_cutoff()),"Submit2 publishes its own queue proof");
         begin_hook(plain,&begun);const auto plain_third=recording_receipt(plain);
         check(plain_second->disposition==RecordingDisposition::submitted&&plain_third&&
             plain_third!=plain_second&&plain_third->epoch>plain_second->epoch,

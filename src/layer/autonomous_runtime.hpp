@@ -47,6 +47,7 @@ inline void apply_runtime_settings() {
     a.clear_before_warping=s.afw_clear_before_warping;
     a.ignore_motion_threshold=s.afw_ignore_motion_threshold;
     a.depth_dilate_mode=s.afw_depth_dilate_mode; a.shading_rate=s.afw_shading_rate;
+    a.osr=s.luke_osr; a.osr_cover=s.luke_osr_cover; a.osr_trim=s.luke_osr_trim; a.osr_fill=s.luke_osr_fill;
     if (!embedded::request_afw(a)) return;
     if (!embedded::set_djules_triple_frame_gen(s.triple_frame_gen)) return;
     if (!embedded::set_djules_prefer_fps(s.prefer_fps || s.triple_frame_gen)) return;
@@ -97,7 +98,8 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.pending=control.pending; out.errors=control.errors;
     out.afw_projection_frames=afw.projection_frames; out.afw_ready_frames=afw.ready_frames;
     const auto now=GetTickCount64();
-    out.afw_running=afw.desired.mode!=0 && afw.last_success_ms &&
+    out.afw_flat_scene=afw.flat_scene;
+    out.afw_running=!afw.flat_scene && afw.desired.mode!=0 && afw.last_success_ms &&
         now>=afw.last_success_ms && now-afw.last_success_ms<2000;
     out.nr_running=nr.running;
     out.logging_active=bridge_flight_logger().enabled();
@@ -166,7 +168,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     if(afw_only) {
         generation=GenerationState::paused;out.generation_mode=0;out.motion_source=0;out.provider_error=0;
         char detail[sizeof(out.message)]{};std::copy(std::begin(out.message),std::end(out.message),std::begin(detail));
-        snprintf(out.message,sizeof(out.message),"AFW only: direct OpenXR; OFXR disabled.%s%.130s",detail[0]?" ":"",detail);
+        snprintf(out.message,sizeof(out.message),"Frame Reconstruction only: direct OpenXR, no frame generation.%s%.120s",detail[0]?" ":"",detail);
     }
     out.generation_state=generation;
     report_runtime(out);

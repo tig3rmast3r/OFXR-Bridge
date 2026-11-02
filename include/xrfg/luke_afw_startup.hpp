@@ -28,8 +28,13 @@ public:
             return;
         }
         if (!key_ || *key_ != key) {
+            // A temporal epoch change is a scene/history reset, not another
+            // device/route startup. Re-running the drained configuration here
+            // reset the metrics and stalled every cut after three fresh frames.
+            // A genuinely different producer still qualifies independently.
+            const bool completed_stream = key_ && key_->stream == key.stream && completed_;
             key_ = key;
-            completed_ = false;
+            completed_ = completed_stream;
             attempts_ = 0;
             observe_failure();
         }

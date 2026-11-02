@@ -1,6 +1,8 @@
 #include "xrfg/private_openxr_runtime.hpp"
 #include "xrfg/interface_metrics.hpp"
 #include "xrfg/private_delivery_queue.hpp"
+#include "xrfg/d3d11_d3d12_interop.hpp"
+#include "xrfg/owned_d11_output.hpp"
 #include <wrl/client.h>
 #include <dxgi1_4.h>
 #include <array>
@@ -71,6 +73,7 @@ struct Fixture {
     std::unordered_map<std::uint64_t,unsigned> window_renewals;
     std::vector<std::int64_t> native_windows;
     unsigned expected_views{1};
+    unsigned native_image_count{2};
     std::function<XrResult(XrSwapchain,unsigned)> release_callback;
     std::function<void()> after_head_ready;
     std::function<void(std::uint64_t)> preparation_callback;
@@ -81,6 +84,7 @@ struct Fixture {
     std::vector<std::array<XrSwapchain,2>> stereo_handles;
     std::size_t native_chain_limit{1000};
     std::vector<float> positions;
+    std::vector<std::array<float,2>> panel_positions;
     std::vector<std::int64_t> handoffs,submit_receipts;
     std::vector<bool> director_policies;
     std::int64_t simulated_submit_ns{};
@@ -151,7 +155,7 @@ struct Fixture {
         ok(device12->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list)),"test list");
         record(list.Get());ok(list->Close(),"test close");ID3D12CommandList* lists[]={list.Get()};target->ExecuteCommandLists(1,lists);gpu_wait(target);
     }
-    unsigned read_pixel(Chain& chain) {
+    unsigned read_pixel(Chain& chain,unsigned x=0,unsigned y=0,unsigned slice=0) {
         unsigned color{};
         if(native12) {
             auto source=chain.d12[chain.released];D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=256;desc.Height=1;desc.DepthOrArraySize=desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -159,14 +163,14 @@ struct Fixture {
             ok(device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&readback)),"readback");
             commands([&](ID3D12GraphicsCommandList* list){
                 D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;b.Transition={source.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,chain.state,D3D12_RESOURCE_STATE_COPY_SOURCE};list->ResourceBarrier(1,&b);
-                D3D12_TEXTURE_COPY_LOCATION from{};from.pResource=source.Get();from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                D3D12_TEXTURE_COPY_LOCATION to{};to.pResource=readback.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,1,1,1,256};D3D12_BOX box{0,0,0,1,1,1};list->CopyTextureRegion(&to,0,0,0,&from,&box);
+                D3D12_TEXTURE_COPY_LOCATION from{};from.pResource=source.Get();from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;from.SubresourceIndex=slice;
+                D3D12_TEXTURE_COPY_LOCATION to{};to.pResource=readback.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,1,1,1,256};D3D12_BOX box{x,y,0,x+1,y+1,1};list->CopyTextureRegion(&to,0,0,0,&from,&box);
                 std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(1,&b);
             },delivery_queue.Get());
             void* data{};ok(readback->Map(0,nullptr,&data),"map readback");color=*static_cast<unsigned char*>(data);readback->Unmap(0,nullptr);
         } else {
             auto source=chain.d11[chain.released];D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);desc.BindFlags=desc.MiscFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> readback;
-            ok(device11->CreateTexture2D(&desc,nullptr,&readback),"D11 readback");context->CopyResource(readback.Get(),source.Get());D3D11_MAPPED_SUBRESOURCE mapped{};ok(context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped),"D11 map");color=*static_cast<unsigned char*>(mapped.pData);context->Unmap(readback.Get(),0);
+            ok(device11->CreateTexture2D(&desc,nullptr,&readback),"D11 readback");context->CopyResource(readback.Get(),source.Get());D3D11_MAPPED_SUBRESOURCE mapped{};ok(context->Map(readback.Get(),slice,D3D11_MAP_READ,0,&mapped),"D11 map");color=*(static_cast<unsigned char*>(mapped.pData)+y*mapped.RowPitch+x*4);context->Unmap(readback.Get(),slice);
         }
         return color;
     }
@@ -214,10 +218,12 @@ struct Fixture {
             check(p->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION && p->viewCount==f.expected_views,"owned projection metadata");
             auto& chain=f.chains.at(p->views[0].subImage.swapchain);position=p->views[0].pose.position.x;
             std::scoped_lock lock(f.gpu);
-            color=f.read_pixel(chain);
-            if(p->viewCount==2 && p->views[0].subImage.swapchain!=p->views[1].subImage.swapchain) {
-                check(p->views[0].subImage.imageArrayIndex==0 && p->views[1].subImage.imageArrayIndex==0,"separate eyes retain array domain");
-                f.right_pixels.push_back(f.read_pixel(f.chains.at(p->views[1].subImage.swapchain)));
+            const auto& left=p->views[0].subImage;
+            color=f.read_pixel(chain,left.imageRect.offset.x,left.imageRect.offset.y,left.imageArrayIndex);
+            if(p->viewCount==2) {
+                const auto& right=p->views[1].subImage;
+                if(left.swapchain!=right.swapchain)check(left.imageArrayIndex==0 && right.imageArrayIndex==0,"separate eyes retain array domain");
+                f.right_pixels.push_back(f.read_pixel(f.chains.at(right.swapchain),right.imageRect.offset.x,right.imageRect.offset.y,right.imageArrayIndex));
                 f.stereo_handles.push_back({p->views[0].subImage.swapchain,p->views[1].subImage.swapchain});
             }
             if(info->layerCount>1) {
@@ -226,6 +232,12 @@ struct Fixture {
                 overlay_color=f.read_pixel(f.chains.at(quad->subImage.swapchain));has_overlay=true;
             }
         }
+        std::array<float,2> panels{};unsigned panel_count{};
+        for(unsigned i=0;i<info->layerCount;++i)if(info->layers[i]&&info->layers[i]->type==XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            if(panel_count<2)panels[panel_count]=reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[i])->pose.position.x;
+            ++panel_count;
+        }
+        if(panel_count==2){std::scoped_lock lock(f.mutex);f.panel_positions.push_back(panels);}
         {std::scoped_lock lock(f.mutex);f.pixels.push_back(color);if(has_overlay)f.overlay_pixels.push_back(overlay_color);f.positions.push_back(position);f.handoffs.push_back(start);f.director_policies.push_back(f.transport?f.transport->director_enabled():true);f.targets.push_back(info->displayTime);++f.real_ends;}
         f.changed.notify_all();return f.fail_end?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;
     }
@@ -234,7 +246,7 @@ struct Fixture {
         *output=reinterpret_cast<XrSwapchain>(f.next_handle++);auto& chain=f.chains[*output];
         chain.static_image=(info->createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT)!=0;
         chain.state=f.create_state?f.create_state():f.real_common?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_RENDER_TARGET;
-        for(unsigned i=0;i<2;++i)if(f.native12) {
+        for(unsigned i=0;i<f.native_image_count;++i)if(f.native12) {
             D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;desc.Width=info->width;desc.Height=info->height;desc.DepthOrArraySize=static_cast<UINT16>(info->arraySize);desc.MipLevels=1;desc.Format=static_cast<DXGI_FORMAT>(info->format);desc.SampleDesc.Count=1;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
             D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;ComPtr<ID3D12Resource> texture;
             ok(f.device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,chain.state,nullptr,IID_PPV_ARGS(&texture)),"fake runtime real D12 image");chain.d12.push_back(std::move(texture));
@@ -245,10 +257,10 @@ struct Fixture {
     }
     static XrResult XRAPI_CALL destroy(XrSwapchain handle){current->chains.erase(handle);return XR_SUCCESS;}
     static XrResult XRAPI_CALL enumerate(XrSwapchain handle,std::uint32_t capacity,std::uint32_t* count,XrSwapchainImageBaseHeader* images) {
-        auto& f=*current;auto& chain=f.chains.at(handle);*count=2;if(!capacity)return XR_SUCCESS;if(capacity<2)return XR_ERROR_SIZE_INSUFFICIENT;
-        for(unsigned i=0;i<2;++i)if(f.native12)reinterpret_cast<XrSwapchainImageD3D12KHR*>(images)[i].texture=chain.d12[i].Get();else reinterpret_cast<XrSwapchainImageD3D11KHR*>(images)[i].texture=chain.d11[i].Get();return XR_SUCCESS;
+        auto& f=*current;auto& chain=f.chains.at(handle);*count=static_cast<unsigned>(f.native12?chain.d12.size():chain.d11.size());if(!capacity)return XR_SUCCESS;if(capacity<*count)return XR_ERROR_SIZE_INSUFFICIENT;
+        for(unsigned i=0;i<*count;++i)if(f.native12)reinterpret_cast<XrSwapchainImageD3D12KHR*>(images)[i].texture=chain.d12[i].Get();else reinterpret_cast<XrSwapchainImageD3D11KHR*>(images)[i].texture=chain.d11[i].Get();return XR_SUCCESS;
     }
-    static XrResult XRAPI_CALL acquire(XrSwapchain h,const XrSwapchainImageAcquireInfo*,std::uint32_t* index){auto& f=*current;auto& c=f.chains.at(h);check(!c.owned,"physical image ownership");check(!c.static_image || !c.acquisitions,"static physical image can be acquired only once");++c.acquisitions;c.acquired=f.reuse_current_real_image?c.released:(c.released+1)%2;c.owned=true;c.waited=false;*index=c.acquired;++f.real_acquires;return XR_SUCCESS;}
+    static XrResult XRAPI_CALL acquire(XrSwapchain h,const XrSwapchainImageAcquireInfo*,std::uint32_t* index){auto& f=*current;auto& c=f.chains.at(h);check(!c.owned,"physical image ownership");check(!c.static_image || !c.acquisitions,"static physical image can be acquired only once");++c.acquisitions;c.acquired=f.reuse_current_real_image?c.released:(c.released+1)%static_cast<unsigned>(f.native12?c.d12.size():c.d11.size());c.owned=true;c.waited=false;*index=c.acquired;++f.real_acquires;return XR_SUCCESS;}
     static XrResult XRAPI_CALL wait_image(XrSwapchain h,const XrSwapchainImageWaitInfo*){auto& f=*current;auto& c=f.chains.at(h);check(c.owned,"physical wait after acquire");if(const auto delay=f.slow_image_wait_ms.load()){LARGE_INTEGER due{};due.QuadPart=-delay*10'000LL;check(f.preparation_timer && SetWaitableTimer(f.preparation_timer,&due,0,nullptr,nullptr,FALSE),"precise preparation delay");check(WaitForSingleObject(f.preparation_timer,1000)==WAIT_OBJECT_0,"preparation delay completed");}c.waited=true;if(f.image_wait_callback)f.image_wait_callback(h,c.acquired);return XR_SUCCESS;}
     static XrResult XRAPI_CALL release(XrSwapchain h,const XrSwapchainImageReleaseInfo*){auto& c=current->chains.at(h);check(c.owned && c.waited,"physical release after wait");c.released=c.acquired;c.owned=false;return XR_SUCCESS;}
     static XrResult XRAPI_CALL to_qpc(XrInstance,XrTime t,LARGE_INTEGER* q){LARGE_INTEGER f{};QueryPerformanceFrequency(&f);const auto n=t-epoch;q->QuadPart=n/1'000'000'000LL*f.QuadPart+n%1'000'000'000LL*f.QuadPart/1'000'000'000LL;return XR_SUCCESS;}
@@ -680,8 +692,9 @@ void late_physical_clock() {
     for(unsigned n=3;n<f.handoffs.size();++n){check((f.handoffs[n]-f.physical_origin+1'000'000)%period<300'000,"late physical clock must anchor to display phase");check(f.handoffs[n]-f.handoffs[n-1]>=period-100'000,"first anchored slot cannot burst after fallback");}
     std::puts("Late physical-clock availability transitions from fallback without a burst or lost image PASS");
 }
-void stale_native_clock(bool d12) {
+void stale_native_clock(bool d12,bool directed=true) {
     Fixture f(d12,true,{},true);f.unblock();f.throttled=false;
+    if(!directed)xr_ok(f.transport->set_director_enabled(false),"Framework expired-cycle test");
     auto chain=f.make_chain();std::vector<unsigned> expected;
     for(unsigned n=0;n<6;++n) {
         if(n==2 || n==4) {
@@ -910,6 +923,8 @@ void pooled_publication(bool reuse=false,bool d12=true) {
     xr_ok(f.transport->destroy_swapchain(rebuilt),"rebuilt pool cleanup");check(f.chains.empty(),"no native sink leak");
     std::puts("Pooled native publication: eight private rings/two real sinks, exact stereo FIFO pixels, backpressure, stable cadence, destruction and rebuild PASS");
 }
+#include "private_vram_pool_tests.inc"
+#include "owned_d11_output_tests.inc"
 void queue_priority_policy() {
     D3D12_COMMAND_QUEUE_DESC original{};original.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;original.NodeMask=1;
     std::vector<int> attempts;
@@ -930,4 +945,4 @@ void queue_priority_policy() {
     std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
 }
-int main(int argc,char** argv){std::setvbuf(stdout,nullptr,_IONBF,0);if(argc>1){if(std::string_view(argv[1])=="bypass"){fixture_gpu_completion_proof();live_framework_bypass(true);live_framework_bypass(false);bypass_policy_drain();}else if(std::string_view(argv[1])=="metrics"){native_delivery_receipts(true);native_delivery_receipts(false);}else if(std::string_view(argv[1])=="pool"){pooled_publication();pooled_publication(true);pooled_publication(false,false);pooled_publication(true,false);}else if(std::string_view(argv[1])=="luke"){luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);}else if(std::string_view(argv[1])=="advance"){native_end_advance(true);native_end_advance(false);}else if(std::string_view(argv[1])=="source"){copied_source_reuse(true);copied_source_reuse(false);}else if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);quiet_native_clock(true);quiet_native_clock(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);adaptive_source_refill(true,2);adaptive_source_refill(false,2);quiet_native_clock(true);quiet_native_clock(false);copied_source_reuse(true);copied_source_reuse(false);native_end_advance(true);native_end_advance(false);luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);return 0;}
+int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="bypass-expired"){stale_native_clock(true,false);stale_native_clock(false,false);return 0;}std::setvbuf(stdout,nullptr,_IONBF,0);if(argc>1){if(std::string_view(argv[1])=="vram-hdr"){vram_hdr_publication_tests();return 0;}if(std::string_view(argv[1])=="owned-d11"){owned_d11_output_tests();return 0;}if(std::string_view(argv[1])=="vram"){vram_publication_tests();return 0;}if(std::string_view(argv[1])=="bypass"){fixture_gpu_completion_proof();live_framework_bypass(true);live_framework_bypass(false);bypass_policy_drain();}else if(std::string_view(argv[1])=="metrics"){native_delivery_receipts(true);native_delivery_receipts(false);}else if(std::string_view(argv[1])=="pool"){pooled_publication();pooled_publication(true);pooled_publication(false,false);pooled_publication(true,false);}else if(std::string_view(argv[1])=="luke"){luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);}else if(std::string_view(argv[1])=="advance"){native_end_advance(true);native_end_advance(false);}else if(std::string_view(argv[1])=="source"){copied_source_reuse(true);copied_source_reuse(false);}else if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);quiet_native_clock(true);quiet_native_clock(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);adaptive_source_refill(true,2);adaptive_source_refill(false,2);quiet_native_clock(true);quiet_native_clock(false);copied_source_reuse(true);copied_source_reuse(false);native_end_advance(true);native_end_advance(false);luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);return 0;}

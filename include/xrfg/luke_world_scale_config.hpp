@@ -10,7 +10,10 @@ struct LukeGameCameraConfig {
     float world_scale{};
     LukeProducerCameraAxes axes{LukeProducerCameraAxes::view};
 };
-// The unique WorldScale-bearing section identifies the active Luke title.
+// The WorldScale-bearing section identifies the active Luke title. One REAL
+// VR install can serve several titles (Uncharted: Legacy of Thieves keeps
+// U4ATE and UTLL in one ini): their sections stand for the running title
+// only while they agree on the whole camera contract.
 // DOOM supplies right/down/forward rows; its entire input camera basis needs
 // conversion to view right/up/back. KCD's native packet decoder exposes
 // physical forward (-inverse-view Z), as in accepted OptiScaler V33011.
@@ -34,13 +37,12 @@ inline LukeGameCameraConfig luke_game_camera_config_from_ini(
         const DWORD count = GetPrivateProfileStringW(section, L"WorldScale", L"",
             value, 64, ini.c_str());
         if (!count) continue;
-        if (found || count >= 63) return {};
+        if (count >= 63) return {};
         wchar_t* end{};
         const float scale = std::wcstof(value, &end);
         if (end == value || *end != L'\0' || !std::isfinite(scale) ||
             scale < 0.2F || scale > 5.0F) return {};
-        result.world_scale = scale;
-        result.axes = _wcsicmp(section, L"DOOMTDA") == 0
+        const auto axes = _wcsicmp(section, L"DOOMTDA") == 0
             ? LukeProducerCameraAxes::right_down_forward
             : ((_wcsicmp(section, L"HFW") == 0 || _wcsicmp(section, L"KCD2") == 0 ||
                 _wcsicmp(section, L"DS2023") == 0)
@@ -48,6 +50,9 @@ inline LukeGameCameraConfig luke_game_camera_config_from_ini(
                 : ((_wcsicmp(section, L"INDY") == 0 || _wcsicmp(section, L"GTAVE") == 0)
                     ? LukeProducerCameraAxes::native_view_rows
                     : LukeProducerCameraAxes::view));
+        if (found && (result.world_scale != scale || result.axes != axes)) return {};
+        result.world_scale = scale;
+        result.axes = axes;
         found = true;
     }
     return result;

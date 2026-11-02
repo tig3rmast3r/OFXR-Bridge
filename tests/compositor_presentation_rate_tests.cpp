@@ -2,6 +2,7 @@
 #include "xrfg/compositor_presentation_rate.hpp"
 #include "xrfg/scene_presentation_rate.hpp"
 #include "xrfg/accepted_scene_rate.hpp"
+#include "xrfg/luke_afw_source.hpp"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -71,6 +72,15 @@ int main() {
             if(!r||r->output!=47)throw std::runtime_error("AFW-only held sources inflate total");
             raw.accepted(2'100'000'000,{});
             if(raw.rate(2'200'000'000))throw std::runtime_error("unknown identity invents new content");
+            // Recover from a fully known suffix, without counting the gap.
+            for(unsigned i=1;i<=5;++i)raw.accepted(2'100'000'000+i*20'000'000LL,{2,1000+i,0});
+            if(raw.rate(2'150'000'000))throw std::runtime_error("short recovered interval bypassed minimum sample time");
+            r=raw.rate(2'200'000'000);
+            if(!r||r->output!=50||r->real!=50||r->generated!=0)
+                throw std::runtime_error("known suffix mixed pre-gap samples or invented generated frames");
+            raw.accepted(2'300'000'000,{});
+            raw.accepted(2'250'000'000,{2,9999,0});
+            if(raw.rate(2'700'000'000))throw std::runtime_error("late old confirmation concealed ongoing unknown source");
             // Explicitly separate accepted deliveries from display proof.
             xrfg::InterfaceTelemetry t;t.rates_valid=true;t.output_fps=50;
             t.output_source=xrfg::InterfaceSource::accepted_scene_submissions;
@@ -79,6 +89,28 @@ int main() {
             t.output_source=xrfg::InterfaceSource::runtime_accepted_delivery;
             if(!xrfg::output_rate_valid(t)||xrfg::presented_output_valid(t))
                 throw std::runtime_error("VDXR native Ends misrepresented as physical scanout");
+        }
+        {
+            const auto original=xrfg::luke_original_scene_identity({17,18},{0,1});
+            if(!original||original.output||original!=xrfg::luke_original_scene_identity({18,17},{1,0})||
+                original==xrfg::luke_original_scene_identity({17,19},{0,1}))
+                throw std::runtime_error("original stereo CRC identity changed with mapping order or lost an eye");
+            if(xrfg::luke_original_scene_identity({0,18},{0,1})||
+                xrfg::luke_original_scene_identity({17,0},{0,1})||
+                xrfg::luke_original_scene_identity({17,18},{0,0})||
+                xrfg::luke_original_scene_identity({17,18},{0,2}))
+                throw std::runtime_error("unknown CRC or invalid eye mapping became measured content");
+            xrfg::AcceptedSceneRate mixed;
+            for(unsigned i=0;i<=180;++i) {
+                const auto production=i*50/90;
+                const auto scene=production%5==0
+                    ? xrfg::luke_original_scene_identity({1001+production*2,1002+production*2},{0,1})
+                    : xrfg::SceneIdentity{42,production+1,0};
+                mixed.accepted(std::int64_t(i)*1'000'000'000/90,scene);
+            }
+            const auto rate=mixed.rate(2'000'000'000);
+            if(!rate||rate->output!=50||rate->real!=50||rate->generated!=0)
+                throw std::runtime_error("AFW fallback lost known originals or counted held XR calls");
         }
         struct Delivery {
             std::optional<float> rate{45};unsigned calls{};

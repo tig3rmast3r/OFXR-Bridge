@@ -1,5 +1,6 @@
 #include "xrfg/openxr_fps_overlay.hpp"
 #include "xrfg/autonomous_control.hpp"
+#include "xrfg/luke_afw_source.hpp"
 #include <openxr/openxr_platform.h>
 #include <windows.h>
 #include <dxgi1_6.h>
@@ -451,6 +452,22 @@ int main(int argc, char** argv) {
             for(int n=0;n<12;++n)check(overlay.end_frame(&info,false,false,{},0,stamp)==XR_SUCCESS,"Luke held repeat");
             check(overlay.metrics().delivered_fps<=totals.delivered_fps+.01F,"held repeats cannot inflate total");
             check(overlay.metrics().generated_fps>0,"existing real/generated counter preserved");
+            // Scene-cut fallback has exact original CRCs but no synthesized
+            // peer yet. It is measured as real content, not another AFW output.
+            overlay.reset_metrics();
+            stamp={601,xrfg::interface_clock_ns(),0};
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"unknown cut frame accepted");
+            check(!overlay.metrics().delivered_valid,"unknown cut frame invented a total");
+            const auto original=xrfg::luke_original_scene_identity({1001,1002},{0,1});
+            stamp.scene_owner=original.owner;stamp.scene_serial=original.serial;
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"known original fallback accepted");
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            stamp.scene_serial=xrfg::luke_original_scene_identity({1003,1002},{0,1}).serial;
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"next original fallback accepted");
+            overlay.application_frame(&info);measured=snapshot().runtime.telemetry;
+            check(measured.output_source==xrfg::InterfaceSource::accepted_scene_submissions &&
+                measured.output_fps>0 && measured.output_fps<20 && measured.generated_fps==0,
+                "cut recovery stayed N/A for one second or invented generated/refresh-rate FPS");
             overlay.reset_metrics();
             check(!overlay.metrics().sample_valid,"Luke reset clears counts");
             overlay.set_luke_scene_measurement(false);

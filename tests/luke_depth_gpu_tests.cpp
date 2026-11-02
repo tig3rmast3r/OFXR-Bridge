@@ -379,17 +379,17 @@ int main() { try {
         return (v&0x8000)?-result:result;
     };
 #include "luke_native_motion_gpu.inc"
-    std::array<D3D12_DESCRIPTOR_RANGE,3> motion_ranges{};
-    std::array<D3D12_ROOT_PARAMETER,4> motion_params{};
-    for(UINT i=0;i<3;++i) {
-        motion_ranges[i].RangeType=i==2?D3D12_DESCRIPTOR_RANGE_TYPE_UAV:D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        motion_ranges[i].NumDescriptors=1;motion_ranges[i].BaseShaderRegister=i==1?1:0;
+    std::array<D3D12_DESCRIPTOR_RANGE,2> motion_ranges{};
+    std::array<D3D12_ROOT_PARAMETER,3> motion_params{};
+    for(UINT i=0;i<2;++i) {
+        motion_ranges[i].RangeType=i?D3D12_DESCRIPTOR_RANGE_TYPE_UAV:D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        motion_ranges[i].NumDescriptors=i?1:4;
         motion_params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         motion_params[i].DescriptorTable={1,&motion_ranges[i]};
     }
-    motion_params[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    motion_params[3].Constants.Num32BitValues=60;
-    D3D12_ROOT_SIGNATURE_DESC motion_rd{};motion_rd.NumParameters=4;motion_rd.pParameters=motion_params.data();
+    motion_params[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    motion_params[2].Constants.Num32BitValues=60;
+    D3D12_ROOT_SIGNATURE_DESC motion_rd{};motion_rd.NumParameters=3;motion_rd.pParameters=motion_params.data();
     ComPtr<ID3DBlob> motion_blob;check(D3D12SerializeRootSignature(&motion_rd,D3D_ROOT_SIGNATURE_VERSION_1,&motion_blob,&errors));
     ComPtr<ID3D12RootSignature> motion_root;check(device->CreateRootSignature(0,motion_blob->GetBufferPointer(),motion_blob->GetBufferSize(),IID_PPV_ARGS(&motion_root)));
     D3D12_COMPUTE_PIPELINE_STATE_DESC motion_pd{};motion_pd.pRootSignature=motion_root.Get();
@@ -437,17 +437,19 @@ int main() { try {
           to.pResource=target;to.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;list->CopyTextureRegion(&to,0,0,0,&from,nullptr);
           auto b=barrier(target,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);list->ResourceBarrier(1,&b);
         }
-        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=3;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=5;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         ComPtr<ID3D12DescriptorHeap> views;check(device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&views)));
         const UINT stride=device->GetDescriptorHandleIncrementSize(hd.Type);auto cpu=views->GetCPUDescriptorHandleForHeapStart();
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=xrfg::luke_motion_srv_format(format);srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
         srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.Texture2D.MipLevels=1;
         device->CreateShaderResourceView(input.Get(),&srv,cpu);cpu.ptr+=stride;srv.Format=DXGI_FORMAT_R32_FLOAT;
         device->CreateShaderResourceView(motion_depth.Get(),&srv,cpu);cpu.ptr+=stride;
+        srv.Format=format;device->CreateShaderResourceView(input.Get(),&srv,cpu);cpu.ptr+=stride;
+        srv.Format=DXGI_FORMAT_R32_FLOAT;device->CreateShaderResourceView(motion_depth.Get(),&srv,cpu);cpu.ptr+=stride;
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};uav.Format=xrfg::kLukeAfwMotionFormat;uav.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
         device->CreateUnorderedAccessView(composed.Get(),nullptr,&uav,cpu);
         ID3D12DescriptorHeap* heaps[]{views.Get()};list->SetDescriptorHeaps(1,heaps);list->SetComputeRootSignature(motion_root.Get());list->SetPipelineState(motion_pipeline.Get());
-        auto gpu=views->GetGPUDescriptorHandleForHeapStart();for(UINT i=0;i<3;++i){list->SetComputeRootDescriptorTable(i,gpu);gpu.ptr+=stride;}
+        auto gpu=views->GetGPUDescriptorHandleForHeapStart();list->SetComputeRootDescriptorTable(0,gpu);gpu.ptr+=4*stride;list->SetComputeRootDescriptorTable(1,gpu);
         xrfg::LukeNativeMotionConstants constants{};
         constants.source_base={2,1};constants.crop={1,0};
         constants.extent={6,4};constants.scale={1,1};
@@ -458,7 +460,7 @@ int main() { try {
         constants.same=xrfg::native_motion_detail::window_to_guide_transform(previous,to_window);
         auto stereo=identity;stereo[8]=stereo_step;
         constants.stereo=xrfg::native_motion_detail::window_to_guide_transform(stereo,to_window);
-        list->SetComputeRoot32BitConstants(3,60,&constants,0);list->Dispatch(1,1,1);
+        list->SetComputeRoot32BitConstants(2,60,&constants,0);list->Dispatch(1,1,1);
         auto b=barrier(composed.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);list->ResourceBarrier(1,&b);
         list->CopyResource(afw_motion.Get(),composed.Get());b=barrier(afw_motion.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COPY_SOURCE);list->ResourceBarrier(1,&b);
         const auto desc=afw_motion->GetDesc();D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};UINT64 bytes{};device->GetCopyableFootprints(&desc,0,1,0,&fp,nullptr,nullptr,&bytes);

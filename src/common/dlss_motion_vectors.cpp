@@ -39,10 +39,33 @@ struct SnapshotSlot {
     D3D12_RESOURCE_DESC description{};
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
     std::shared_ptr<DlssSnapshotRetention> retention;
+    // Recording a copy is not submission. The original Execute callback
+    // replaces this list with a fence receipt before reuse or retirement.
+    ComPtr<ID3D12GraphicsCommandList> producer_command_list;
+    IUnknown* producer_identity{}; // canonical weak identity, pinned by producer_command_list
+    ComPtr<ID3D12Fence> producer_fence;
+    std::uint64_t producer_fence_value{};
+    bool producer_canceled{};
+    bool writer_unknown{}; // actual Execute observed, but no trustworthy completion receipt
+    bool submission_started{}; // pre-Execute quarantine awaiting its first post-Execute receipt
 };
 
+bool retain_luke_reset_origins() noexcept {
+    // GTA can reset one native eye before XR consumes its preceding color.
+    // Preserve only exact protected keys, with their original epochs; this
+    // does not authorize joining a new camera across that reset boundary.
+    static const bool gta=[] {
+        wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
+        const auto* name=wcsrchr(path,L'\\');
+        return !_wcsicmp(name?name+1:path,L"GTA5_Enhanced.exe");
+    }();
+    return gta;
+}
+
 struct StreamState {
+    bool retain_reset_origins{retain_luke_reset_origins()};
     LukeCameraUnitCalibration camera_units;
+    LukeSceneCameraUnitCalibration scene_camera_units;
     std::uint64_t epoch{1};
     std::uint64_t serial{};
     std::uint64_t first_publication{};
@@ -62,6 +85,7 @@ struct StreamState {
     std::size_t next_depth_snapshot{};
     ComPtr<ID3D12Fence> submission_fence;
     ComPtr<ID3D12Device> submission_fence_device;
+    ComPtr<IUnknown> submission_fence_queue;
     std::uint64_t next_submission_fence_value{1};
 };
 
@@ -70,8 +94,8 @@ struct Registry {
     std::unordered_map<std::uint64_t, StreamState> streams;
     // A retired stream must disappear from resolution immediately, but its
     // snapshot resources can still be referenced by command lists that have
-    // only been recorded. Keep those allocations alive until the layer's
-    // existing GPU-idle retirement boundary.
+    // only been recorded. Actual Execute/fence receipts or successful Reset
+    // cancellation, plus consumer retirement, authorize their destruction.
     std::vector<StreamState> retired_streams;
     DlssMotionVectorStatistics statistics;
     // Tracking toggles and stream resets cannot reuse a color-carried key.
@@ -86,6 +110,45 @@ Registry& registry() {
 }
 
 std::atomic_bool g_tracking_enabled{false};
+std::atomic_bool g_retirement_pending{false};
+std::atomic_uint64_t g_cancelable_snapshots{};
+std::atomic_bool g_submission_ever_started{};
+
+bool writer_complete(const SnapshotSlot& slot) noexcept {
+    if(!slot.resource)return true;
+    if(slot.writer_unknown)return false;
+    if(slot.producer_canceled)return true;
+    if(slot.producer_command_list || !slot.producer_fence || !slot.producer_fence_value)return false;
+    const auto completed=slot.producer_fence->GetCompletedValue();
+    return completed!=UINT64_MAX && completed>=slot.producer_fence_value;
+}
+
+void clear_frame_history(StreamState& stream) noexcept {
+    stream.previous.reset();stream.previous2.reset();stream.latest.reset();
+    stream.luke_origin_history.clear();
+}
+
+// Every retained allocation has its own actual writer proof. Consumer frame
+// pins and AFW's GPU-read receipts independently prevent early destruction.
+void collect_retired(Registry& registry) noexcept {
+    for(auto& stream:registry.retired_streams) {
+        clear_frame_history(stream);
+        const auto trim=[](auto& slots) {
+            for(auto& slot:slots)if(slot.resource && writer_complete(slot) &&
+                (!slot.retention || (slot.retention.use_count()==1 && slot.retention->reusable())))
+                slot=SnapshotSlot{};
+        };
+        trim(stream.output_snapshots);trim(stream.snapshots);trim(stream.depth_snapshots);
+    }
+    std::erase_if(registry.retired_streams,[](const auto& stream) {
+        const auto empty=[](const auto& slots) {
+            return std::none_of(slots.begin(),slots.end(),[](const auto& slot){return bool(slot.resource);});
+        };
+        return empty(stream.output_snapshots) && empty(stream.snapshots) && empty(stream.depth_snapshots);
+    });
+    g_retirement_pending.store(!registry.retired_streams.empty() ||
+        (!g_tracking_enabled.load(std::memory_order_acquire) && !registry.streams.empty()),std::memory_order_release);
+}
 
 ComPtr<IUnknown> identity(IUnknown* object) noexcept {
     ComPtr<IUnknown> value;
@@ -99,6 +162,15 @@ bool same_identity(IUnknown* left, IUnknown* right) noexcept {
     const auto a = identity(left);
     const auto b = identity(right);
     return a && b && a.Get() == b.Get();
+}
+
+std::vector<ComPtr<IUnknown>> command_identities(std::uint32_t count,ID3D12CommandList* const* lists) {
+    std::vector<ComPtr<IUnknown>> values;values.reserve(count);
+    for(std::uint32_t index=0;index<count;++index)values.push_back(identity(lists[index]));
+    return values;
+}
+bool contains_identity(const std::vector<ComPtr<IUnknown>>& values,IUnknown* value) noexcept {
+    return value && std::any_of(values.begin(),values.end(),[&](const auto& candidate){return candidate.Get()==value;});
 }
 
 bool same_device(IUnknown* left, IUnknown* right) noexcept {
@@ -120,7 +192,8 @@ std::shared_ptr<const DlssMotionVectorFrame> protected_publication(
     for (const auto& [id, stream] : state.streams)
         for (const auto& frame : stream.luke_origin_history)
             if (frame->publication == publication) {
-                if (found || frame->stream != id || frame->epoch != stream.epoch) return {};
+                if (found || frame->stream != id ||
+                    (!stream.retain_reset_origins && frame->epoch != stream.epoch)) return {};
                 found = frame;
             }
     return found;
@@ -223,6 +296,8 @@ HRESULT snapshot_resource(
         producer_queue == nullptr || snapshot == nullptr) return E_POINTER;
     snapshot->Reset();
     if (allocation_receipt) allocation_receipt->Reset();
+    const auto list_identity=identity(producer_command_list);
+    if(!list_identity)return E_NOINTERFACE;
 
     ComPtr<ID3D12Device> source_device;
     ComPtr<ID3D12Device> command_device;
@@ -262,14 +337,16 @@ HRESULT snapshot_resource(
         !(description.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) {
         description.Format = dlss_motion_snapshot_format(description.Format, true);
     }
-    // Ordinary producers keep four slots. Luke may use eight but NEVER
-    // overwrite a CPU-pinned or GPU-in-flight guide. No producer wait/flush.
+    // Ordinary producers keep four slots; direct receipts and Luke use their
+    // explicit bounds. Never overwrite a pending producer, CPU pin or GPU read.
+    // No producer wait/flush is introduced at recording time.
     const std::size_t capacity = retention ? std::min(retained_capacity,SnapshotCount) : 4;
     std::size_t selected = capacity;
     for (std::size_t offset = 0; offset < capacity; ++offset) {
         const auto index = (next_snapshot + offset) % capacity;
         const auto& use = snapshots[index].retention;
-        if (!use || (use.use_count() == 1 && use->reusable())) { selected = index; break; }
+        if (writer_complete(snapshots[index]) &&
+            (!use || (use.use_count() == 1 && use->reusable()))) { selected = index; break; }
     }
     if (selected == capacity) {
         return HRESULT_FROM_WIN32(ERROR_BUSY);
@@ -333,6 +410,11 @@ HRESULT snapshot_resource(
     *snapshot = slot.resource;
     if (allocation_receipt) *allocation_receipt = slot.allocation_device;
     slot.retention = std::move(lifetime);
+    slot.producer_command_list=producer_command_list;
+    slot.producer_identity=list_identity.Get();
+    slot.producer_fence.Reset();slot.producer_fence_value=0;
+    slot.producer_canceled=false;slot.writer_unknown=false;slot.submission_started=false;
+    g_cancelable_snapshots.fetch_add(1,std::memory_order_release);
     if (retention) *retention = slot.retention;
     next_snapshot = (selected + 1) % capacity;
     return S_OK;
@@ -459,6 +541,9 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         if (!g_tracking_enabled.load(std::memory_order_acquire)) return {};
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
+        // Disable can win after the fast check but before this lock. No late
+        // publisher may repopulate a registry whose retirement already ended.
+        if(!g_tracking_enabled.load(std::memory_order_acquire))return {};
         if (!valid(publication)) {
             ++state.statistics.invalid_publications;
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
@@ -486,7 +571,9 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
             stream.previous.reset();
             stream.previous2.reset();
             stream.latest.reset();
-            stream.luke_origin_history.clear();
+            // These immutable records can still be named by a color already
+            // in flight. The same bounded ring/reader ownership prevents reuse.
+            if (!stream.retain_reset_origins) stream.luke_origin_history.clear();
         }
         ComPtr<ID3D12Resource> output_snapshot;
         if (publication.snapshot_output) {
@@ -590,6 +677,9 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->camera_frame_token_valid = publication.camera_frame_token_valid;
         frame->native_production_sequence = publication.native_production_sequence;
         frame->raw_motion_native_span = publication.raw_motion_native_span;
+        frame->compose_native_object_history = publication.compose_native_object_history;
+        frame->gta_headlock=publication.gta_headlock;
+        frame->camera_pending = publication.camera_pending && !publication.camera_data_valid;
         frame->depth_x = publication.depth_x;
         frame->depth_y = publication.depth_y;
         frame->source_depth_x = publication.depth_x;
@@ -622,7 +712,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         const auto interleaved_older = may_interleave
             ? protected_publication(state, frame->publication - 2) : nullptr;
         const bool interleaved = interleaved_frames(*frame, interleaved_middle, interleaved_older);
-        if (publication.protect_snapshot_lifetime) {
+        if (publication.protect_snapshot_lifetime && !frame->camera_pending) {
             // Calibrate exactly once in immutable production order. Consumer
             // queries may lag, repeat or skip; none may select newer cameras
             // to calibrate an older color-carried identity.
@@ -643,8 +733,9 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
                 std::uint64_t(middle->color_origin_token) + 1 == frame->color_origin_token);
             const float sample = consecutive
                 ? luke_camera_separation(camera_sample(older), camera_sample(middle), camera_sample(frame)) : 0;
-            frame->calibrated_game_eye_baseline = stream.camera_units.observe(
-                frame->epoch, frame->publication, sample);
+            frame->calibrated_game_eye_baseline = stream.retain_reset_origins
+                ? stream.scene_camera_units.observe(frame->epoch,frame->publication,sample)
+                : stream.camera_units.observe(frame->epoch,frame->publication,sample);
         }
         if (stream.previous && stream.previous->epoch == frame->epoch &&
             stream.previous->serial + 2 == frame->serial &&
@@ -727,10 +818,11 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
         if (!enabled) {
-            // Do not release the private resources here. The desired setting is
-            // visible to DLSS before the OpenXR layer reaches xrEndFrame and its
-            // GPU-idle fence, so snapshots may still be referenced by submitted
-            // synthesis work. The layer retires them explicitly after that fence.
+            // The layer's drained consumer boundary requests retirement. The
+            // per-slot writer receipt will still protect copies recorded on an
+            // application list that has not actually executed yet.
+            g_retirement_pending.store(!state.streams.empty() || !state.retired_streams.empty(),
+                std::memory_order_release);
             state.statistics.status = DlssMotionVectorStatus::disabled;
             return;
         }
@@ -751,19 +843,24 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept {
         }
         state.statistics = {};
         state.statistics.status = DlssMotionVectorStatus::waiting_for_dlss;
+        collect_retired(state);
     } catch (...) {
     }
 }
 
 void retire_disabled_dlss_motion_vector_resources() noexcept {
+    if(!g_retirement_pending.load(std::memory_order_acquire))return;
     try {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
-        if (g_tracking_enabled.load(std::memory_order_acquire)) return;
-        state.streams.clear();
-        state.retired_streams.clear();
-        state.statistics = {};
-        state.statistics.status = DlssMotionVectorStatus::disabled;
+        if (!g_tracking_enabled.load(std::memory_order_acquire)) {
+            state.retired_streams.reserve(state.retired_streams.size()+state.streams.size());
+            for(auto& [unused,stream]:state.streams)state.retired_streams.push_back(std::move(stream));
+            state.streams.clear();
+            state.statistics = {};
+            state.statistics.status = DlssMotionVectorStatus::disabled;
+        }
+        collect_retired(state);
     } catch (...) {
     }
 }
@@ -772,9 +869,12 @@ void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept {
     try {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
+        state.retired_streams.reserve(state.retired_streams.size()+1);
         auto retired = state.streams.extract(stream);
         if (!retired.empty()) {
             state.retired_streams.push_back(std::move(retired.mapped()));
+            g_retirement_pending.store(true,std::memory_order_release);
+            collect_retired(state);
         }
     } catch (...) {
     }
@@ -800,27 +900,233 @@ void invalidate_dlss_motion_vector_stream_history(std::uint64_t stream_id) noexc
     }
 }
 
+bool attach_dlss_motion_vector_camera(std::uint64_t stream_id, std::uint64_t publication,
+    const DlssCameraAttachment& camera) noexcept {
+    try {
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        const auto it = state.streams.find(stream_id);
+        if (it == state.streams.end()) return false;
+        auto& stream = it->second;
+        std::shared_ptr<const DlssMotionVectorFrame> found;
+        for (const auto& candidate : {stream.latest, stream.previous, stream.previous2})
+            if (candidate && candidate->publication == publication) { found = candidate; break; }
+        if (!found) for (const auto& candidate : stream.luke_origin_history)
+            if (candidate->publication == publication) { found = candidate; break; }
+        if (!found || !found->camera_pending || found->camera_data_valid) return false;
+        for (const auto* values : {&camera.view_to_clip, &camera.clip_to_view})
+            for (float v : *values) if (!std::isfinite(v)) return false;
+        for (const auto* values : {&camera.position, &camera.right, &camera.up, &camera.forward})
+            for (float v : *values) if (!std::isfinite(v)) return false;
+        // The frames were made here and handed out as const; this one is still
+        // incomplete by its own contract (camera_pending).
+        auto& frame = const_cast<DlssMotionVectorFrame&>(*found);
+        frame.camera_position = camera.position;
+        frame.camera_right = camera.right;
+        frame.camera_up = camera.up;
+        frame.camera_forward = camera.forward;
+        frame.camera_view_to_clip = camera.view_to_clip;
+        frame.camera_clip_to_view = camera.clip_to_view;
+        frame.camera_near = camera.near_z;
+        frame.camera_far = camera.far_z;
+        frame.camera_fov_vertical = camera.fov_vertical;
+        frame.camera_data_valid = frame.camera_matrices_valid = true;
+        // The camera belongs to this exact frame: its publication is its token,
+        // consecutive like a producer's frame index, as interleaved history
+        // and AFW's native-motion contract require.
+        frame.camera_frame_token = static_cast<decltype(frame.camera_frame_token)>(frame.publication);
+        frame.camera_frame_token_valid = true;
+        frame.camera_world = camera.world;
+        frame.camera_pending = false;
+        // A later frame has already taken its N-2 scalar camera from this one
+        // without it; that copy stays invalid, so that frame will not join.
+        const bool late = stream.latest && stream.latest.get() != found.get();
+        if (!late) {
+            // As publish decides for a camera that arrives with its frame: under
+            // alternate-eye rendering the other eye's frame lies between this
+            // one and its same-eye predecessor, and calibration spans the three.
+            const bool may_interleave = !frame.native_production_sequence && frame.publication >= 3 &&
+                stream.previous && stream.previous->publication + 1 != frame.publication;
+            const auto interleaved_middle = may_interleave ? protected_publication(state, frame.publication - 1) : nullptr;
+            const auto interleaved_older = may_interleave ? protected_publication(state, frame.publication - 2) : nullptr;
+            const bool interleaved = interleaved_frames(frame, interleaved_middle, interleaved_older);
+            const auto middle = interleaved ? interleaved_middle : stream.previous;
+            const auto older = interleaved ? interleaved_older : stream.previous2;
+            const auto camera_sample = [](const auto& value) {
+                return LukeUnitCamera{value->camera_position, value->camera_right,
+                    value->frame_time_delta_ms, value->camera_data_valid && !value->reset};
+            };
+            const bool consecutive = interleaved || (older && middle &&
+                older->stream == frame.stream && middle->stream == frame.stream &&
+                older->epoch == frame.epoch && middle->epoch == frame.epoch &&
+                older->serial + 1 == middle->serial && middle->serial + 1 == frame.serial &&
+                older->publication + 1 == middle->publication &&
+                middle->publication + 1 == frame.publication &&
+                older->color_origin_token != 0 &&
+                std::uint64_t(older->color_origin_token) + 1 == middle->color_origin_token &&
+                std::uint64_t(middle->color_origin_token) + 1 == frame.color_origin_token);
+            const float sample = consecutive && older && middle
+                ? luke_camera_separation(camera_sample(older), camera_sample(middle), camera_sample(&frame)) : 0;
+            frame.calibrated_game_eye_baseline = stream.camera_units.observe(frame.epoch, frame.publication, sample);
+            if (stream.previous && stream.previous->epoch == frame.epoch &&
+                stream.previous->serial + 2 == frame.serial && stream.previous->publication + 2 == frame.publication)
+                frame.previous_same_native_camera = dlss_native_camera_history(*stream.previous);
+            if (interleaved && older) frame.previous_same_native_camera = dlss_native_camera_history(*older);
+        }
+        report_luke_ingress_contract(frame);
+        return !late;
+    } catch (...) { return false; }
+}
+
+void begin_dlss_motion_vector_submission(std::uint32_t count,ID3D12CommandList* const* lists) noexcept {
+    if(!count || !lists || !g_cancelable_snapshots.load(std::memory_order_acquire))return;
+    try {
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        bool marked=false;
+        const auto visit=[&](const auto& operation) {
+            const auto stream=[&](StreamState& value) {
+                for(auto& slot:value.output_snapshots)operation(slot);
+                for(auto& slot:value.snapshots)operation(slot);
+                for(auto& slot:value.depth_snapshots)operation(slot);
+            };
+            for(auto& [unused,value]:state.streams)stream(value);
+            for(auto& value:state.retired_streams)stream(value);
+        };
+        // No temporary vectors/allocations may fail before the original Execute.
+        // Each supplied identity is queried once and compared to cached slot IDs.
+        for(std::uint32_t index=0;index<count;++index) {
+            const auto canonical=identity(lists[index]);
+            if(!canonical) {
+                // An unidentified input might own any pending copy. Keep every
+                // such resource unknown, never cancelable or receipt-admissible.
+                visit([&](SnapshotSlot& slot) {
+                    if(slot.resource && slot.producer_command_list) {
+                        if(!slot.writer_unknown) {
+                            slot.writer_unknown=true;g_cancelable_snapshots.fetch_sub(1,std::memory_order_release);
+                        }
+                        slot.submission_started=false;
+                    }
+                });
+                return;
+            }
+            visit([&](SnapshotSlot& slot) {
+                if(slot.resource && !slot.writer_unknown && slot.producer_command_list && slot.producer_identity==canonical.Get()) {
+                    slot.writer_unknown=true;slot.submission_started=true;
+                    g_cancelable_snapshots.fetch_sub(1,std::memory_order_release);
+                    marked=true;
+                }
+            });
+        }
+        if(marked)g_submission_ever_started.store(true,std::memory_order_release);
+    }catch(...){}
+}
+
+void abandon_dlss_motion_vector_submission(std::uint32_t count,ID3D12CommandList* const* lists) noexcept {
+    // Do not even lazily construct the registry before the first actual marker.
+    if(!count || !lists || !g_submission_ever_started.load(std::memory_order_acquire))return;
+    try {
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        const auto visit=[&](const auto& operation) {
+            const auto stream=[&](StreamState& value) {
+                for(auto& slot:value.output_snapshots)operation(slot);
+                for(auto& slot:value.snapshots)operation(slot);
+                for(auto& slot:value.depth_snapshots)operation(slot);
+            };
+            for(auto& [unused,value]:state.streams)stream(value);
+            for(auto& value:state.retired_streams)stream(value);
+        };
+        for(std::uint32_t index=0;index<count;++index) {
+            const auto canonical=identity(lists[index]);
+            visit([&](SnapshotSlot& slot) {
+                if(slot.writer_unknown && slot.submission_started && slot.producer_command_list &&
+                    (!canonical || slot.producer_identity==canonical.Get()))slot.submission_started=false;
+            });
+            if(!canonical)return; // unidentified failure conservatively seals every started attempt
+        }
+    }catch(...){}
+}
+
+void report_dlss_motion_vector_reset(ID3D12GraphicsCommandList* list) noexcept {
+    if(!list || !g_cancelable_snapshots.load(std::memory_order_acquire))return;
+    try {
+        const auto reset_identity=identity(list);if(!reset_identity)return;
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        const auto contains=[&](const auto& slots) {
+            return std::any_of(slots.begin(),slots.end(),[&](const auto& slot) {
+                return slot.resource && !slot.writer_unknown && slot.producer_command_list &&
+                    slot.producer_identity==reset_identity.Get();
+            });
+        };
+        const auto affected=[&](const StreamState& stream) {
+            return contains(stream.output_snapshots) || contains(stream.snapshots) || contains(stream.depth_snapshots);
+        };
+        const auto cancel=[&](StreamState& stream) {
+            const auto slots=[&](auto& values) {
+                for(auto& slot:values)if(slot.resource && !slot.writer_unknown && slot.producer_command_list &&
+                    slot.producer_identity==reset_identity.Get()) {
+                    slot.producer_identity=nullptr;slot.producer_command_list.Reset();slot.producer_fence.Reset();slot.producer_fence_value=0;
+                    slot.producer_canceled=true;g_cancelable_snapshots.fetch_sub(1,std::memory_order_release);
+                }
+            };
+            slots(stream.output_snapshots);slots(stream.snapshots);slots(stream.depth_snapshots);
+        };
+        const auto affected_count=std::count_if(state.streams.begin(),state.streams.end(),
+            [&](const auto& entry){return affected(entry.second);});
+        if(!affected_count && std::none_of(state.retired_streams.begin(),state.retired_streams.end(),affected))return;
+        state.retired_streams.reserve(state.retired_streams.size()+affected_count);
+        for(auto& [unused,stream]:state.streams)if(affected(stream)) {
+            const auto next_epoch=stream.epoch+1;
+            cancel(stream);
+            state.retired_streams.push_back(std::move(stream));
+            stream=StreamState{};stream.epoch=next_epoch;
+        }
+        for(auto& stream:state.retired_streams)cancel(stream);
+        collect_retired(state);
+    }catch(...){}
+}
+
 void report_dlss_motion_vector_submission(
     ID3D12CommandQueue* queue,
     std::uint32_t command_list_count,
-    ID3D12CommandList* const* command_lists) noexcept {
+    ID3D12CommandList* const* command_lists,bool began_before_execute) noexcept {
+    if(!command_list_count || !command_lists)return;
+    // Legacy/manual reporters have already executed their lists. Mark them
+    // without allocation before any receipt bookkeeping can throw. Native
+    // reporters consume ONLY the exact pre-call markers, never copies recorded
+    // reentrantly on a reset list before the outer Execute returns.
+    if(!began_before_execute)begin_dlss_motion_vector_submission(command_list_count,command_lists);
+    if(!queue){abandon_dlss_motion_vector_submission(command_list_count,command_lists);return;}
     try {
-        if (queue == nullptr || command_list_count == 0 || command_lists == nullptr)
-            return;
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
-        const auto was_submitted = [&](const auto& frame) {
-            if (!frame || !frame->producer_command_list) return false;
-            for (std::uint32_t index = 0; index < command_list_count; ++index) {
-                if (same_identity(
-                        frame->producer_command_list.Get(), command_lists[index]))
-                    return true;
-            }
-            return false;
+        std::vector<ComPtr<IUnknown>> identities;
+        bool identities_ready=false;
+        const auto list_submitted = [&](IUnknown* canonical) {
+            if(!canonical)return false;
+            if(!identities_ready){identities=command_identities(command_list_count,command_lists);identities_ready=true;}
+            return contains_identity(identities,canonical);
         };
-
-        for (auto& [unused_stream_id, stream] : state.streams) {
-            static_cast<void>(unused_stream_id);
+        const auto process_stream = [&](StreamState& stream) {
+            std::vector<SnapshotSlot*> submitted_slots;
+            const auto inspect_slots=[&](auto& slots) {
+                for(auto& slot:slots)if(slot.resource && slot.writer_unknown && slot.submission_started &&
+                    slot.producer_command_list && list_submitted(slot.producer_identity))
+                    submitted_slots.push_back(&slot);
+            };
+            inspect_slots(stream.output_snapshots);inspect_slots(stream.snapshots);inspect_slots(stream.depth_snapshots);
+            for(auto* slot:submitted_slots) {
+                // Any error after this point leaves a completed-attempt
+                // quarantine. A later Reset or unrelated receipt cannot clear it.
+                slot->submission_started=false;
+            }
+            const auto was_submitted = [&](const auto& frame) {
+                if(!frame || !frame->producer_command_list || !list_submitted(identity(frame->producer_command_list.Get()).Get()))return false;
+                const auto owns=[&](ID3D12Resource* resource) {
+                    return std::any_of(submitted_slots.begin(),submitted_slots.end(),
+                        [&](const auto* slot){return slot->resource.Get()==resource;});
+                };
+                return owns(frame->motion_vectors.Get()) && (!frame->depth || owns(frame->depth.Get()));
+            };
             const bool latest_submitted = was_submitted(stream.latest);
             const bool previous_submitted = was_submitted(stream.previous);
             const bool previous2_submitted = was_submitted(stream.previous2);
@@ -828,13 +1134,18 @@ void report_dlss_motion_vector_submission(
                 stream.luke_origin_history.begin(), stream.luke_origin_history.end(),
                 was_submitted);
             if (!latest_submitted && !previous_submitted &&
-                !previous2_submitted && !origin_submitted) continue;
+                !previous2_submitted && !origin_submitted && submitted_slots.empty()) return;
 
             // The callback follows actual ExecuteCommandLists. Take the
             // allocation receipt from those submitted lists' snapshots;
             // queue.GetDevice may report a Streamline device proxy.
             ComPtr<ID3D12Device> submission_device;
             bool incompatible_devices = false;
+            for(const auto* slot:submitted_slots) {
+                if(!slot->allocation_device || (submission_device &&
+                    !same_identity(submission_device.Get(),slot->allocation_device.Get())))incompatible_devices=true;
+                else submission_device=slot->allocation_device;
+            }
             const auto inspect_owner = [&](const auto& frame, bool submitted) {
                 if (!submitted) return;
                 if (!frame->motion_snapshot_device ||
@@ -855,20 +1166,23 @@ void report_dlss_motion_vector_submission(
             if (!submission_device || incompatible_devices) {
                 ++state.statistics.invalid_rejections;
                 state.statistics.status = DlssMotionVectorStatus::invalid_input;
-                continue;
+                return;
             }
+            const auto queue_identity=identity(queue);
             if (!stream.submission_fence || !same_identity(
-                    stream.submission_fence_device.Get(), submission_device.Get())) {
+                    stream.submission_fence_device.Get(), submission_device.Get()) ||
+                stream.submission_fence_queue.Get()!=queue_identity.Get()) {
                 ComPtr<ID3D12Fence> fence;
                 if (FAILED(submission_device->CreateFence(
                         0, D3D12_FENCE_FLAG_NONE,
                         IID_PPV_ARGS(fence.GetAddressOf())))) {
                     ++state.statistics.invalid_rejections;
                     state.statistics.status = DlssMotionVectorStatus::invalid_input;
-                    continue;
+                    return;
                 }
                 stream.submission_fence = std::move(fence);
                 stream.submission_fence_device = submission_device;
+                stream.submission_fence_queue = queue_identity;
                 stream.next_submission_fence_value = 1;
             }
 
@@ -877,7 +1191,15 @@ void report_dlss_motion_vector_submission(
             if (FAILED(queue->Signal(stream.submission_fence.Get(), fence_value))) {
                 ++state.statistics.invalid_rejections;
                 state.statistics.status = DlssMotionVectorStatus::invalid_input;
-                continue;
+                return;
+            }
+
+            for(auto* slot:submitted_slots) {
+                slot->producer_fence=stream.submission_fence;
+                slot->producer_fence_value=fence_value;
+                slot->producer_identity=nullptr;
+                slot->producer_command_list.Reset();
+                slot->writer_unknown=false;
             }
 
             std::unordered_map<std::uint64_t,
@@ -903,8 +1225,14 @@ void report_dlss_motion_vector_submission(
             stamp_submission(stream.previous2, previous2_submitted);
             for (auto& origin : stream.luke_origin_history)
                 stamp_submission(origin, was_submitted(origin));
-        }
+        };
+        for(auto& [unused_stream_id,stream]:state.streams)process_stream(stream);
+        for(auto& stream:state.retired_streams)process_stream(stream);
+        if(g_retirement_pending.load(std::memory_order_acquire))collect_retired(state);
     } catch (...) {
+        // The registry lock has unwound. This path allocates nothing and seals
+        // pre-call markers even if receipt vectors/frame clones ran out of RAM.
+        abandon_dlss_motion_vector_submission(command_list_count,command_lists);
         report_dlss_motion_vector_status(DlssMotionVectorStatus::invalid_input);
     }
 }
@@ -924,6 +1252,400 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_dlss_guide_publication(
             FAILED(consumer->Wait(frame->producer_fence.Get(),frame->producer_fence_value))) return {};
         return frame;
     } catch (...) { return {}; }
+}
+
+// The tangents of a view's image edges from its projection: x's left edge
+// at NDC -1, its right at +1, the top row at y +1, the bottom at -1. Either
+// vector convention: off-centre terms sit in the third row for row vectors
+// (D3D, w = z * m[2][3]) and in the third column for column vectors (w =
+// m[3][2] * z); w's sign is the handedness. A view direction with tangent t
+// and depth d > 0 has z = sign(w) d, so NDC = (t m00 + sign(w) offset) /
+// |w|, and t = (NDC |w| - sign(w) offset) / m00.
+DlssViewGeometry dlss_view_geometry(const DlssMotionVectorFrame& frame) noexcept {
+    if (!frame.camera_matrices_valid) return {};
+    const auto m = [&](std::size_t row, std::size_t column) {
+        return frame.camera_view_to_clip[row * 4U + column];
+    };
+    for (const float value : frame.camera_view_to_clip)
+        if (!std::isfinite(value)) return {};
+    constexpr float kZero = 1e-6F;
+    if (std::fabs(m(3, 3)) > kZero || std::fabs(m(0, 0)) < kZero || std::fabs(m(1, 1)) < kZero)
+        return {};
+    const bool row_offsets = std::fabs(m(2, 0)) > kZero || std::fabs(m(2, 1)) > kZero;
+    const bool column_offsets = std::fabs(m(0, 2)) > kZero || std::fabs(m(1, 2)) > kZero;
+    float w = 0.0F, offset_x = 0.0F, offset_y = 0.0F;
+    if (row_offsets && !column_offsets) {
+        w = m(2, 3); offset_x = m(2, 0); offset_y = m(2, 1);
+    } else if (column_offsets && !row_offsets) {
+        w = m(3, 2); offset_x = m(0, 2); offset_y = m(1, 2);
+    } else if (!row_offsets && !column_offsets) {
+        // Symmetric: only |w| matters, the term of magnitude one.
+        w = std::fabs(std::fabs(m(2, 3)) - 1.0F) < 1e-4F ? m(2, 3)
+            : std::fabs(std::fabs(m(3, 2)) - 1.0F) < 1e-4F ? m(3, 2) : 0.0F;
+    }
+    if (std::fabs(w) < kZero) return {};
+    const float sign = w > 0.0F ? 1.0F : -1.0F;
+    const float magnitude = std::fabs(w);
+    DlssViewGeometry view;
+    view.known = true;
+    view.tan_left = (-magnitude - sign * offset_x) / m(0, 0);
+    view.tan_right = (magnitude - sign * offset_x) / m(0, 0);
+    view.tan_up = (magnitude - sign * offset_y) / m(1, 1);
+    view.tan_down = (-magnitude - sign * offset_y) / m(1, 1);
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        view.position[axis] = std::isfinite(frame.camera_position[axis]) ? frame.camera_position[axis] : 0.0F;
+        view.right[axis] = std::isfinite(frame.camera_right[axis]) ? frame.camera_right[axis] : 0.0F;
+    }
+    return view;
+}
+
+namespace {
+
+// How far a guide's camera may fall short of an eye's field and still be
+// taken to cover it: a hundredth of the field each side.
+constexpr double kViewCoverTolerance = 0.01;
+// A stream with a camera is recent while its newest evaluation is within
+// this many publications of the newest of all: MSFS 2024's foveated
+// rendering publishes four a frame, and a stream the game stopped
+// evaluating (a menu's, the desktop mirror's) keeps its last frame.
+constexpr std::uint64_t kMaximumViewPublicationGap = 8;
+
+[[nodiscard]] double view_fit_error(const DlssViewGeometry& g, const DlssEyeView& eye) noexcept {
+    return std::fabs(static_cast<double>(g.tan_left) - eye.tan_left) +
+        std::fabs(static_cast<double>(g.tan_right) - eye.tan_right) +
+        std::fabs(static_cast<double>(g.tan_up) - eye.tan_up) +
+        std::fabs(static_cast<double>(g.tan_down) - eye.tan_down);
+}
+
+// Along the two cameras' mean right vector: the smaller is the left eye.
+[[nodiscard]] double camera_side(const DlssViewGeometry& g, const std::array<float, 3>& right) noexcept {
+    return static_cast<double>(g.position[0]) * right[0] +
+        static_cast<double>(g.position[1]) * right[1] +
+        static_cast<double>(g.position[2]) * right[2];
+}
+
+}  // namespace
+
+std::shared_ptr<const DlssMotionVectorFrame> place_guide_in_view(
+    const DlssMotionVectorFrame& frame,
+    const DlssEyeView& view) noexcept {
+    try {
+        const DlssViewGeometry g = dlss_view_geometry(frame);
+        const double eye_width = static_cast<double>(view.tan_right) - view.tan_left;
+        const double eye_height = static_cast<double>(view.tan_up) - view.tan_down;
+        if (!g.known || view.x < 0 || view.y < 0 || view.width == 0 || view.height == 0 ||
+            !(eye_width > 0.0) || !(eye_height > 0.0) || frame.motion_width == 0 ||
+            frame.motion_height == 0) {
+            return {};
+        }
+        // The guide's edges in the image's pixels.
+        const double x0 = view.x, y0 = view.y;
+        const double x1 = x0 + view.width, y1 = y0 + view.height;
+        const double left = x0 + (g.tan_left - view.tan_left) / eye_width * view.width;
+        const double right = x0 + (g.tan_right - view.tan_left) / eye_width * view.width;
+        const double top = y0 + (view.tan_up - g.tan_up) / eye_height * view.height;
+        const double bottom = y0 + (view.tan_up - g.tan_down) / eye_height * view.height;
+        const double slack_x = kViewCoverTolerance * view.width;
+        const double slack_y = kViewCoverTolerance * view.height;
+        // Written so that a NaN refuses.
+        if (!(right - left > 1.0) || !(bottom - top > 1.0) || !(left <= x0 + slack_x) ||
+            !(right >= x1 - slack_x) || !(top <= y0 + slack_y) || !(bottom >= y1 - slack_y)) {
+            return {};
+        }
+        // The vectors under the view: texel = origin + (pixel - edge) x
+        // texels per pixel, kept inside the vectors where the camera falls
+        // short within the tolerance.
+        const double per_x = frame.motion_width / (right - left);
+        const double per_y = frame.motion_height / (bottom - top);
+        const double motion_left = frame.motion_x, motion_top = frame.motion_y;
+        const double motion_right = motion_left + frame.motion_width;
+        const double motion_bottom = motion_top + frame.motion_height;
+        const double mx0 = std::clamp(motion_left + (x0 - left) * per_x, motion_left, motion_right);
+        const double mx1 = std::clamp(motion_left + (x1 - left) * per_x, motion_left, motion_right);
+        const double my0 = std::clamp(motion_top + (y0 - top) * per_y, motion_top, motion_bottom);
+        const double my1 = std::clamp(motion_top + (y1 - top) * per_y, motion_top, motion_bottom);
+        if (!(mx1 - mx0 > 0.5) || !(my1 - my0 > 0.5)) return {};
+        auto placed = std::make_shared<DlssMotionVectorFrame>(frame);
+        placed->output_x = static_cast<std::uint32_t>(view.x);
+        placed->output_y = static_cast<std::uint32_t>(view.y);
+        placed->output_width = view.width;
+        placed->output_height = view.height;
+        placed->placed = true;
+        placed->placed_motion_rect = {static_cast<float>(mx0), static_cast<float>(my0),
+            static_cast<float>(mx1 - mx0), static_cast<float>(my1 - my0)};
+        return placed;
+    } catch (...) {
+        return {};
+    }
+}
+
+std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount>
+resolve_view_placed_dlss_guides(
+    ID3D12CommandQueue* consumer_queue,
+    const std::array<DlssEyeView, kDlssMotionVectorEyeCount>& eyes,
+    const std::array<std::uint64_t, kDlssMotionVectorEyeCount>& released_at) noexcept {
+    std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount> none{};
+    try {
+        if (!g_tracking_enabled.load(std::memory_order_acquire) || consumer_queue == nullptr) {
+            return none;
+        }
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        ++state.statistics.resolve_calls;
+        std::vector<Candidate> candidates;
+        std::vector<DlssViewGeometry> cameras;
+        std::uint64_t newest = 0;
+        for (const auto& [unused_stream_id, stream] : state.streams) {
+            static_cast<void>(unused_stream_id);
+            if (!stream.latest) continue;
+            const auto camera = dlss_view_geometry(*stream.latest);
+            if (!camera.known) continue;
+            if (!same_identity(stream.latest->producer_queue.Get(), consumer_queue) &&
+                !(stream.latest->producer_fence && stream.latest->producer_fence_value != 0 &&
+                  same_device(stream.latest->producer_fence.Get(), consumer_queue))) continue;
+            candidates.push_back({stream.first_publication, stream.latest, stream.previous, stream.previous2});
+            cameras.push_back(camera);
+            newest = std::max(newest, stream.latest->publication);
+        }
+        for (std::size_t index = candidates.size(); index-- > 0;) {
+            if (newest - candidates[index].frame->publication > kMaximumViewPublicationGap) {
+                candidates.erase(candidates.begin() + static_cast<std::ptrdiff_t>(index));
+                cameras.erase(cameras.begin() + static_cast<std::ptrdiff_t>(index));
+            }
+        }
+        if (candidates.empty()) return none;
+
+        // The streams whose camera covers each eye, and how well each fits.
+        constexpr double kNoFit = 1e30;
+        std::vector<std::array<double, kDlssMotionVectorEyeCount>> fit(
+            candidates.size(), {kNoFit, kNoFit});
+        for (std::size_t index = 0; index < candidates.size(); ++index) {
+            for (std::uint32_t eye = 0; eye < kDlssMotionVectorEyeCount; ++eye) {
+                if (place_guide_in_view(*candidates[index].frame, eyes[eye]))
+                    fit[index][eye] = view_fit_error(cameras[index], eyes[eye]);
+            }
+        }
+        // The pair of streams, one an eye, that fits best.
+        std::size_t best_left = 0, best_right = 0;
+        double best = kNoFit;
+        for (std::size_t left = 0; left < candidates.size(); ++left) {
+            for (std::size_t right = 0; right < candidates.size(); ++right) {
+                if (left == right || fit[left][0] >= kNoFit || fit[right][1] >= kNoFit) continue;
+                const double cost = fit[left][0] + fit[right][1];
+                if (cost < best) {
+                    best = cost;
+                    best_left = left;
+                    best_right = right;
+                }
+            }
+        }
+        if (best >= kNoFit) {
+            state.statistics.status = DlssMotionVectorStatus::output_not_direct;
+            return none;
+        }
+        // Two cameras that fit both eyes alike (a symmetric field): the
+        // camera further left is the left eye.
+        if (fit[best_right][0] < kNoFit && fit[best_left][1] < kNoFit &&
+            std::fabs((fit[best_right][0] + fit[best_left][1]) - best) < 1e-4) {
+            const auto& a = cameras[best_left];
+            const auto& b = cameras[best_right];
+            const std::array<float, 3> right{
+                a.right[0] + b.right[0], a.right[1] + b.right[1], a.right[2] + b.right[2]};
+            const double side_a = camera_side(a, right), side_b = camera_side(b, right);
+            if (!(std::fabs(side_a - side_b) > 1e-6)) {
+                ++state.statistics.resolve_stale_pairs;
+                state.statistics.status = DlssMotionVectorStatus::temporal_mismatch;
+                return none;
+            }
+            if (side_a > side_b) std::swap(best_left, best_right);
+        }
+
+        // Each eye's evaluation: its stream's newest by the eye's release.
+        std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount> result{};
+        const std::array<std::size_t, kDlssMotionVectorEyeCount> chosen_streams{best_left, best_right};
+        for (std::uint32_t eye = 0; eye < kDlssMotionVectorEyeCount; ++eye) {
+            const Candidate& candidate = candidates[chosen_streams[eye]];
+            std::shared_ptr<const DlssMotionVectorFrame> chosen = candidate.frame;
+            if (released_at[eye] != 0 && chosen->publication > released_at[eye]) {
+                chosen = candidate.previous && candidate.previous->epoch == candidate.frame->epoch &&
+                        candidate.previous->publication <= released_at[eye]
+                    ? candidate.previous : nullptr;
+            }
+            auto placed = chosen ? place_guide_in_view(*chosen, eyes[eye]) : nullptr;
+            if (!placed) {
+                ++state.statistics.resolve_stale_pairs;
+                state.statistics.status = DlssMotionVectorStatus::temporal_mismatch;
+                return none;
+            }
+            // In OFXR-BRIDGE a CPU publication is not a cross-queue receipt.
+            if (!same_identity(chosen->producer_queue.Get(), consumer_queue) &&
+                !(chosen->producer_fence && chosen->producer_fence_value != 0 &&
+                  same_device(chosen->producer_fence.Get(), consumer_queue) &&
+                  SUCCEEDED(consumer_queue->Wait(chosen->producer_fence.Get(),
+                      chosen->producer_fence_value)))) {
+                ++state.statistics.resolve_queue_mismatches;
+                state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                return none;
+            }
+            auto set = std::make_shared<DlssMotionVectorSet>();
+            set->eye_count = 1;
+            set->eyes[0] = std::move(placed);
+            result[eye] = std::move(set);
+        }
+        state.statistics.matched += kDlssMotionVectorEyeCount;
+        return result;
+    } catch (...) {
+        return none;
+    }
+}
+
+namespace {
+
+// An output this many times smaller than the eye's view at most, and of its
+// aspect to within this fraction, is that view enlarged (0.2's V537).
+constexpr double kStretchLimit = 3.0;
+constexpr double kStretchAspect = 0.01;
+
+[[nodiscard]] bool enlarges_view(const DlssMotionVectorFrame& frame, const DlssEyeView& view) noexcept {
+    if (view.width == 0 || view.height == 0 || frame.output_x != 0 || frame.output_y != 0 ||
+        frame.output_width == 0 || frame.output_height == 0 || frame.motion_width == 0 ||
+        frame.motion_height == 0)
+        return false;
+    if (frame.output_width >= view.width && frame.output_height >= view.height) return false;
+    const double scale_x = static_cast<double>(view.width) / frame.output_width;
+    const double scale_y = static_cast<double>(view.height) / frame.output_height;
+    return scale_x >= 1.0 && scale_y >= 1.0 && scale_x <= kStretchLimit &&
+        scale_y <= kStretchLimit && std::fabs(scale_x / scale_y - 1.0) <= kStretchAspect;
+}
+
+}  // namespace
+
+std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount>
+resolve_enlarged_dlss_guides(
+    ID3D12CommandQueue* consumer_queue,
+    const std::array<DlssEyeView, kDlssMotionVectorEyeCount>& eyes,
+    std::uint64_t released_at) noexcept {
+    std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount> none{};
+    try {
+        if (!g_tracking_enabled.load(std::memory_order_acquire) || consumer_queue == nullptr) {
+            return none;
+        }
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        ++state.statistics.resolve_calls;
+        const auto newest = state.next_publication - 1;
+        // Each stream's evaluation by the release, if it enlarges both views
+        // and is recent: a stream the game stopped evaluating keeps its last.
+        std::vector<std::shared_ptr<const DlssMotionVectorFrame>> chosen;
+        for (const auto& [unused_stream_id, stream] : state.streams) {
+            static_cast<void>(unused_stream_id);
+            const auto& latest = stream.latest;
+            if (!latest || newest - latest->publication > kMaximumViewPublicationGap) continue;
+            if (!same_identity(latest->producer_queue.Get(), consumer_queue) &&
+                !(latest->producer_fence && latest->producer_fence_value != 0 &&
+                  same_device(latest->producer_fence.Get(), consumer_queue))) continue;
+            if (!enlarges_view(*latest, eyes[0]) || !enlarges_view(*latest, eyes[1])) continue;
+            auto frame = latest;
+            if (released_at != 0 && frame->publication > released_at) {
+                frame = stream.previous && stream.previous->epoch == latest->epoch &&
+                        stream.previous->publication <= released_at
+                    ? stream.previous : nullptr;
+            }
+            if (frame) chosen.push_back(std::move(frame));
+        }
+        // One a view: anything else is not this layout, and a third is a
+        // guess.
+        if (chosen.size() != kDlssMotionVectorEyeCount) {
+            state.statistics.status = DlssMotionVectorStatus::output_not_direct;
+            return none;
+        }
+        // Both eyes evaluate before the one image's release, so the release
+        // cannot order them: where the inputs sit, else the evaluation order
+        // (the game renders the left eye first).
+        std::sort(chosen.begin(), chosen.end(), [](const auto& a, const auto& b) {
+            const auto ao = input_offset(*a), bo = input_offset(*b);
+            return ao != bo ? ao < bo : a->publication < b->publication;
+        });
+        std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount> result{};
+        for (std::uint32_t eye = 0; eye < kDlssMotionVectorEyeCount; ++eye) {
+            const auto& frame = chosen[eye];
+            // In OFXR-BRIDGE a CPU publication is not a cross-queue receipt.
+            if (!same_identity(frame->producer_queue.Get(), consumer_queue) &&
+                !(frame->producer_fence && frame->producer_fence_value != 0 &&
+                  same_device(frame->producer_fence.Get(), consumer_queue) &&
+                  SUCCEEDED(consumer_queue->Wait(frame->producer_fence.Get(),
+                      frame->producer_fence_value)))) {
+                ++state.statistics.resolve_queue_mismatches;
+                state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                return none;
+            }
+            const auto& view = eyes[eye];
+            auto placed = std::make_shared<DlssMotionVectorFrame>(*frame);
+            placed->output_x = static_cast<std::uint32_t>(std::max(view.x, 0));
+            placed->output_y = static_cast<std::uint32_t>(std::max(view.y, 0));
+            placed->output_width = view.width;
+            placed->output_height = view.height;
+            placed->placed = true;
+            placed->placed_motion_rect = {static_cast<float>(frame->motion_x),
+                static_cast<float>(frame->motion_y), static_cast<float>(frame->motion_width),
+                static_cast<float>(frame->motion_height)};
+            auto set = std::make_shared<DlssMotionVectorSet>();
+            set->eye_count = 1;
+            set->eyes[0] = std::move(placed);
+            result[eye] = std::move(set);
+        }
+        state.statistics.matched += kDlssMotionVectorEyeCount;
+        return result;
+    } catch (...) {
+        return none;
+    }
+}
+
+void report_dlss_guide_census(ID3D12CommandQueue* consumer_queue,
+    std::uint32_t image_width, std::uint32_t image_height, std::uint64_t detail) noexcept {
+    try {
+        auto& logger = bridge_flight_logger();
+        if (!logger.enabled() && !logger.ram_enabled()) return;
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        const auto newest = state.next_publication - 1;
+        // 756: a the live streams << 32 | the resolver's last status, b the
+        // image (width << 32 | height), c the caller's detail.
+        std::uint32_t live = 0;
+        for (const auto& entry : state.streams)
+            if (entry.second.latest) ++live;
+        logger.event(BridgeFlightOperation::presenter_transition, 756,
+            (static_cast<std::uint64_t>(live) << 32) | static_cast<std::uint32_t>(state.statistics.status),
+            (static_cast<std::uint64_t>(image_width) << 32) | image_height, detail);
+        // 757 per stream: a the stream's low 32 bits << 32 | its motion
+        // inputs' x (16 bits) << 16 | flags (1 the consumer queue or a fence
+        // on its device, 2 a camera, 4 depth, 8 the newest is a reset);
+        // b output width, height, motion width, height (16 bits each); c
+        // the newest publication's distance behind the newest of all << 32 |
+        // the stream's epoch.
+        unsigned reported = 0;
+        for (const auto& [stream_id, stream] : state.streams) {
+            const auto& frame = stream.latest;
+            if (!frame) continue;
+            if (++reported > 8) break;
+            const bool queue = same_identity(frame->producer_queue.Get(), consumer_queue) ||
+                (frame->producer_fence && frame->producer_fence_value != 0 &&
+                 same_device(frame->producer_fence.Get(), consumer_queue));
+            const std::uint64_t flags = (queue ? 1U : 0U) |
+                (dlss_view_geometry(*frame).known ? 2U : 0U) | (frame->depth ? 4U : 0U) |
+                (frame->reset ? 8U : 0U);
+            const auto bits16 = [](std::uint32_t value) {
+                return static_cast<std::uint64_t>(std::min<std::uint32_t>(value, 0xFFFFU));
+            };
+            logger.event(BridgeFlightOperation::presenter_transition, 757,
+                ((stream_id & 0xFFFFFFFFULL) << 32) | (bits16(frame->source_motion_x) << 16) | flags,
+                (bits16(frame->output_width) << 48) | (bits16(frame->output_height) << 32) |
+                    (bits16(frame->motion_width) << 16) | bits16(frame->motion_height),
+                ((newest >= frame->publication ? newest - frame->publication : 0) << 32) |
+                    (frame->epoch & 0xFFFFFFFFULL));
+        }
+    } catch (...) {
+    }
 }
 
 std::uint64_t dlss_motion_vector_publications() noexcept {
@@ -1013,12 +1735,22 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         // exactly one horizontal half of the XR image. This excludes desktop
         // DLSS streams and leaves ordinary mono/Sync Sequential resources on
         // the existing array-size-one path.
+        //
+        // Only recent streams: one the game stopped evaluating keeps its
+        // last frame, and a pair of those is the same stale guides every
+        // frame. Cheeky Foveated DLSS switched from foveated rendering back
+        // to its eye-sized streams and back again: the eye-sized pair was
+        // still taken, a frame from before the switch, and DLSS-G refused
+        // it as discontinuous (record 1, detail 5) for good.
         bool packed_stereo = false;
         if (eye_count == 1) {
+            const auto newest_publication = state.next_publication - 1;
             std::vector<Candidate> horizontal_eye_candidates;
             horizontal_eye_candidates.reserve(candidates.size());
             for (const auto& candidate : candidates) {
-                if (candidate.frame->output_width != 0 &&
+                if (newest_publication - candidate.frame->publication <=
+                        kMaximumViewPublicationGap &&
+                    candidate.frame->output_width != 0 &&
                     candidate.frame->output_height != 0 &&
                     description.Width ==
                         static_cast<std::uint64_t>(
@@ -1099,8 +1831,11 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 return std::shared_ptr<const DlssMotionVectorFrame>{};
             };
             auto chosen = newest_by(released_at);
-            const auto other = other_released_at ? newest_by(other_released_at) : nullptr;
-            bool shared_stream = candidates.size() == 1;
+            // One evaluation for both eyes: each eye's own release bounds it,
+            // and its serials chain frame to frame as published.
+            const auto other = other_released_at && !identity.both_eyes
+                ? newest_by(other_released_at) : nullptr;
+            bool shared_stream = candidates.size() == 1 && !identity.both_eyes;
             if (chosen && other && chosen == other) {
                 if (candidates.size() >= 2) {
                     // Both evaluated before either release. Exactly two
@@ -1158,6 +1893,26 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 return {};
             }
             auto frame = std::make_shared<DlssMotionVectorFrame>(*chosen);
+            if (identity.both_eyes) {
+                // Each eye reads its own half, so the two eyes' guides never
+                // cover the same vectors (classify_fsr_stereo_guides).
+                const std::uint32_t view_width = frame->output_width / 2U;
+                if (frame->output_x != 0 || frame->output_width != description.Width ||
+                    frame->output_width % 2U != 0 || identity.view_half > 1 ||
+                    frame->motion_width < 2 || (frame->depth && frame->depth_width < 2))
+                    return stale();
+                const auto half = static_cast<std::uint32_t>(eye);
+                frame->output_x = identity.view_half * view_width;
+                frame->output_width = view_width;
+                const std::uint32_t motion_half = frame->motion_width / 2U;
+                frame->motion_x += half * motion_half;
+                frame->motion_width = motion_half;
+                if (frame->depth) {
+                    const std::uint32_t depth_half = frame->depth_width / 2U;
+                    frame->depth_x += half * depth_half;
+                    frame->depth_width = depth_half;
+                }
+            }
             if (shared_stream) {
                 frame->previous_serial = frame->serial > 2 ? frame->serial - 2 : 0;
                 // Strict FSR retains its existing guides and queue waits.
@@ -1612,12 +2367,12 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
         if (interleaved) previous = interleaved_middle;
         if (!interleaved && (current->stream != owner_stream || current->stream != previous->stream ||
             current->epoch != previous->epoch ||
-            current->epoch != stream.epoch ||
+            (!stream.retain_reset_origins && current->epoch != stream.epoch) ||
             previous->serial + 1 != current->serial ||
             previous->publication + 1 != current->publication)) {
             ++state.statistics.resolve_stale_pairs;
             const unsigned reason=current->stream!=owner_stream||current->stream!=previous->stream?5:
-                current->epoch!=previous->epoch||current->epoch!=stream.epoch?6:
+                current->epoch!=previous->epoch||(!stream.retain_reset_origins&&current->epoch!=stream.epoch)?6:
                 previous->serial+1!=current->serial?7:8;
             report_luke_token_refusal(reason,color_origin_token,state,owner,owner_stream,current.get(),previous.get(),
                 consumer_queue,canonical_consumer_device);
@@ -1693,6 +2448,32 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
     }
 }
 
+bool luke_native_stream_reset(std::uint64_t stream,std::uint64_t accepted_epoch,
+    ID3D12Device* device) noexcept {
+    try {
+        if(!g_tracking_enabled.load(std::memory_order_acquire)||!stream||!accepted_epoch||!device)return false;
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        const auto found=state.streams.find(stream);
+        if(found==state.streams.end())return false;
+        const auto& s=found->second;
+        return s.latest&&s.latest->camera_frame_token_valid&&s.latest->epoch>accepted_epoch&&
+            same_identity(s.latest->motion_snapshot_device.Get(),device);
+    }catch(...){return false;}
+}
+std::optional<LukeNativeOriginMetadata> luke_native_origin_metadata(
+    std::uint32_t token,ID3D12Device* device) noexcept {
+    try {
+        if(!g_tracking_enabled.load(std::memory_order_acquire)||!token||!device)return {};
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        std::optional<LukeNativeOriginMetadata> result;
+        for(const auto& [id,s]:state.streams)
+            for(const auto& f:s.luke_origin_history)if(f->color_origin_token==token) {
+                if(result||!f->camera_frame_token_valid||!same_identity(f->motion_snapshot_device.Get(),device))return {};
+                result=LukeNativeOriginMetadata{id,f->epoch,f->publication,f->serial};
+            }
+        return result;
+    }catch(...){return {};}
+}
 void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept {
     try {
         auto& state = registry();

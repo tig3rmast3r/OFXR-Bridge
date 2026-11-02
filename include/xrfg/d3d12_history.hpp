@@ -101,6 +101,12 @@ public:
 
     [[nodiscard]] HRESULT invalidate() noexcept;
 
+    // Drop generation-owned snapshots after their exact producer/consumer
+    // fences retire. Source metadata stays initialized, so the next capture
+    // allocates its slot lazily. Active CPU leases refuse release unchanged.
+    // Ticket/lease/fence serials never restart across this memory boundary.
+    [[nodiscard]] HRESULT release_snapshots() noexcept;
+
     [[nodiscard]] bool initialized() const noexcept;
     // Diagnostic observation only; a pending CPU observation is legal when
     // the GPU consumer enqueues a producer-fence wait.

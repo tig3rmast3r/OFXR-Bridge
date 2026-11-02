@@ -1,4 +1,5 @@
 #include "xrfg/luke_detection.hpp"
+#include "xrfg/luke_vulkan_scope.hpp"
 
 #include <windows.h>
 #include <algorithm>
@@ -24,6 +25,23 @@ void CALLBACK module_changed(ULONG reason, const void*, void*) noexcept {
     // Do not call another module, allocate, inspect exports or take a mutex.
     if (reason == 1 || reason == 2)
         module_epoch.fetch_add(1, std::memory_order_release);
+}
+
+bool legacy_v666_luke_detected() noexcept {
+    // basename lookup alone misses RealVR loaded by an absolute custom path.
+    const auto marked=[](HMODULE module){return module&&GetProcAddress(module,"RealVRVersion");};
+    if(marked(GetModuleHandleW(L"dxgi.dll"))||marked(GetModuleHandleW(L"RealVR64.dll")))return true;
+    HMODULE modules[1024]{};DWORD bytes{};
+    using Enum=BOOL(WINAPI*)(HANDLE,HMODULE*,DWORD,LPDWORD);
+    const auto kernel=GetModuleHandleW(L"kernel32.dll");
+    const auto enumerate=reinterpret_cast<Enum>(GetProcAddress(kernel,"K32EnumProcessModules"));
+    if(!enumerate||!enumerate(GetCurrentProcess(),modules,sizeof(modules),&bytes))return false;
+    for(unsigned i=0;i<std::min<DWORD>(bytes/sizeof(HMODULE),1024);++i) {
+        wchar_t path[32768]{};if(!GetModuleFileNameW(modules[i],path,32768))continue;
+        auto* filename=wcsrchr(path,L'\\');filename=filename?filename+1:path;
+        if(marked(modules[i]))return true;
+    }
+    return false;
 }
 
 bool marked_module(HMODULE module) noexcept {
@@ -57,11 +75,17 @@ std::optional<bool> discover_loaded_modules() noexcept {
 }
 }
 
+bool legacy_luke_vulkan_detection() noexcept {
+    static const bool selected=native_vulkan::luke_vulkan_process();
+    return selected;
+}
 bool luke_detected() noexcept {
+    if(legacy_luke_vulkan_detection())return legacy_v666_luke_detected();
     return detected.load(std::memory_order_acquire);
 }
 
 void refresh_luke_detection(bool force) noexcept {
+    if(legacy_luke_vulkan_detection())return;
     const auto pending = module_epoch.load(std::memory_order_acquire);
     if (!force && scanned_epoch.load(std::memory_order_acquire) == pending) return;
     try {
@@ -77,6 +101,7 @@ void refresh_luke_detection(bool force) noexcept {
 }
 
 void start_luke_detection_notifications() noexcept {
+    if(legacy_luke_vulkan_detection())return;
     try {
         std::call_once(notification_once, [] {
             using Callback = void(CALLBACK*)(ULONG, const void*, void*);

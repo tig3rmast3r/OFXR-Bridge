@@ -60,4 +60,30 @@ public:
     }
     unsigned samples() const noexcept { return count_; }
 };
+// GTA can change camera rigs at a scripted transition without changing the
+// producer feature. Keep the established conversion through a temporal reset,
+// but replace it only after another complete, consistent native-camera window.
+// No latest-frame lookup: each immutable publication owns the returned value.
+class LukeSceneCameraUnitCalibration {
+    std::array<float,9> samples_{};
+    unsigned count_{},next_{};
+    std::uint64_t epoch_{},publication_{};
+    float baseline_{};
+public:
+    float observe(std::uint64_t epoch,std::uint64_t publication,float sample) noexcept {
+        if(publication==publication_)return baseline_;
+        if(publication<publication_)return 0;
+        publication_=publication;
+        if(epoch!=epoch_){samples_={};count_=next_=0;epoch_=epoch;}
+        if(!std::isfinite(sample)||sample<=0){count_=next_=0;return baseline_;}
+        samples_[next_]=sample;next_=(next_+1)%samples_.size();
+        count_=std::min<unsigned>(count_+1,samples_.size());
+        if(count_==samples_.size()) {
+            auto sorted=samples_;std::sort(sorted.begin(),sorted.end());const float median=sorted[4];
+            if(sorted.back()-sorted.front()<=median*.03F &&
+                (baseline_<=0||std::abs(median-baseline_)>baseline_*.03F))baseline_=median;
+        }
+        return baseline_;
+    }
+};
 } // namespace xrfg

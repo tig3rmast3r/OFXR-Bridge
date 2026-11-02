@@ -3,6 +3,7 @@
 #include "xrfg/two_frame_capture.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -426,6 +427,39 @@ struct DirectProvider {
     }
 };
 DirectProvider direct_provider;
+struct LifetimeCounters {
+    std::atomic<std::uint64_t> create_attempts{},create_successes{},create_failures{};
+    std::atomic<std::uint64_t> created{},failed_create_handles{};
+    std::atomic<std::uint64_t> release_attempts{},released{},release_failures{},live{};
+};
+LifetimeCounters lifetime;
+void observe_created(NVSDK_NGX_Result result,NVSDK_NGX_Handle* handle,bool direct) noexcept {
+    lifetime.create_attempts.fetch_add(1,std::memory_order_relaxed);
+    if(NVSDK_NGX_SUCCEED(result))lifetime.create_successes.fetch_add(1,std::memory_order_relaxed);
+    else lifetime.create_failures.fetch_add(1,std::memory_order_relaxed);
+    if(handle) {
+        lifetime.created.fetch_add(1,std::memory_order_relaxed);
+        lifetime.live.fetch_add(1,std::memory_order_relaxed);
+        if(NVSDK_NGX_FAILED(result))lifetime.failed_create_handles.fetch_add(1,std::memory_order_relaxed);
+    }
+    auto& logger=bridge_flight_logger();
+    if(logger.enabled() || logger.ram_enabled())
+        logger.event(BridgeFlightOperation::native_dlssg_provider,static_cast<unsigned>(result),
+            9,reinterpret_cast<std::uintptr_t>(handle),direct?1:0);
+}
+void release_owned_feature(NVSDK_NGX_Handle* handle,bool direct) noexcept {
+    if(!handle)return;
+    lifetime.release_attempts.fetch_add(1,std::memory_order_relaxed);
+    const auto result=direct?direct_provider.release(handle):NVSDK_NGX_D3D12_ReleaseFeature(handle);
+    if(NVSDK_NGX_SUCCEED(result)) {
+        lifetime.released.fetch_add(1,std::memory_order_relaxed);
+        lifetime.live.fetch_sub(1,std::memory_order_relaxed);
+    } else lifetime.release_failures.fetch_add(1,std::memory_order_relaxed);
+    auto& logger=bridge_flight_logger();
+    if(logger.enabled() || logger.ram_enabled())
+        logger.event(BridgeFlightOperation::native_dlssg_provider,static_cast<unsigned>(result),
+            10,reinterpret_cast<std::uintptr_t>(handle),direct?1:0);
+}
 struct DirectDevice { ComPtr<ID3D12Device> device; UINT frames{}; };
 std::mutex direct_mutex;
 std::vector<DirectDevice> direct_devices;
@@ -691,10 +725,7 @@ struct D3D12NativeDlssG::Impl {
                                                IID_PPV_ARGS(&out));
     }
     void release_feature(Feature &f) noexcept {
-        if (f.handle) {
-            if (f.direct) direct_provider.release(f.handle);
-            else NVSDK_NGX_D3D12_ReleaseFeature(f.handle);
-        }
+        release_owned_feature(f.handle,f.direct);
         if (f.params) {
             NVSDK_NGX_D3D12_DestroyParameters(f.params);
         }
@@ -763,6 +794,7 @@ struct D3D12NativeDlssG::Impl {
         create.NativeBackbufferFormat = color_format;
         result = f.direct ? direct_provider.create(list, f.params, &create, &f.handle)
                           : NGX_D3D12_CREATE_DLSSG(list, 1, 1, &f.handle, f.params, &create);
+        observe_created(result,f.handle,f.direct);
         bridge_flight_logger().event(BridgeFlightOperation::native_dlssg_provider,
             static_cast<unsigned>(result),4,width,height);
         if (NVSDK_NGX_FAILED(result)) {
@@ -943,21 +975,24 @@ struct D3D12NativeDlssG::Impl {
         const float ux = float(r.offset_x - g.output_x) / g.output_width,
                     uy = float(r.offset_y - g.output_y) / g.output_height;
         const float uw = float(r.width) / g.output_width, uh = float(r.height) / g.output_height;
-        p.motion_rect[0] = g.motion_x + ux * g.motion_width;
-        p.motion_rect[1] = g.motion_y + uy * g.motion_height;
-        p.motion_rect[2] = uw * g.motion_width;
-        p.motion_rect[3] = uh * g.motion_height;
-        p.depth_rect[0] = g.depth_x + ux * g.depth_width;
-        p.depth_rect[1] = g.depth_y + uy * g.depth_height;
-        p.depth_rect[2] = uw * g.depth_width;
-        p.depth_rect[3] = uh * g.depth_height;
-        p.motion_scale[0] = g.scale_x * float(g.output_width) / g.motion_width;
-        p.motion_scale[1] = g.scale_y * float(g.output_height) / g.motion_height;
+        // A guide placed by its camera (MSFS 2024's foveated periphery) maps
+        // the fractional part of its vectors and depth under the view.
+        const auto mr = guide_motion_rect(g), dr = guide_depth_rect(g);
+        p.motion_rect[0] = mr[0] + ux * mr[2];
+        p.motion_rect[1] = mr[1] + uy * mr[3];
+        p.motion_rect[2] = uw * mr[2];
+        p.motion_rect[3] = uh * mr[3];
+        p.depth_rect[0] = dr[0] + ux * dr[2];
+        p.depth_rect[1] = dr[1] + uy * dr[3];
+        p.depth_rect[2] = uw * dr[2];
+        p.depth_rect[3] = uh * dr[3];
+        p.motion_scale[0] = g.scale_x * float(g.output_width) / mr[2];
+        p.motion_scale[1] = g.scale_y * float(g.output_height) / mr[3];
         if (g.jittered) {
             p.jitter_delta[0] =
-                (g.jitter_x - g.previous_jitter_x) * float(g.output_width) / g.motion_width;
+                (g.jitter_x - g.previous_jitter_x) * float(g.output_width) / mr[2];
             p.jitter_delta[1] =
-                (g.jitter_y - g.previous_jitter_y) * float(g.output_height) / g.motion_height;
+                (g.jitter_y - g.previous_jitter_y) * float(g.output_height) / mr[3];
         }
         return p;
     }
@@ -1115,6 +1150,23 @@ struct D3D12NativeDlssG::Impl {
 #else
 struct D3D12NativeDlssG::Impl {};
 #endif
+
+D3D12NativeDlssGLifetime native_dlssg_lifetime_snapshot() noexcept {
+#ifdef XRFG_NATIVE_DLSSG
+    return {
+        lifetime.create_attempts.load(std::memory_order_relaxed),
+        lifetime.create_successes.load(std::memory_order_relaxed),
+        lifetime.create_failures.load(std::memory_order_relaxed),
+        lifetime.created.load(std::memory_order_relaxed),
+        lifetime.failed_create_handles.load(std::memory_order_relaxed),
+        lifetime.release_attempts.load(std::memory_order_relaxed),
+        lifetime.released.load(std::memory_order_relaxed),
+        lifetime.release_failures.load(std::memory_order_relaxed),
+        lifetime.live.load(std::memory_order_relaxed)};
+#else
+    return {};
+#endif
+}
 
 D3D12NativeDlssG::D3D12NativeDlssG() = default;
 D3D12NativeDlssG::~D3D12NativeDlssG() = default;
@@ -1319,6 +1371,30 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             bg->eye_count > 2) {
             return skip(Skip::guides, 2);
         }
+        // Native SR can render a complete eye at a different pixel extent
+        // from the mod's final XR image. Keep the retained native texels and
+        // prove their placement from the camera, rather than treating XR pixel
+        // coordinates as coordinates in the SR output (Witcher3VR). No guessed
+        // scaling, producer mutation or relaxed bounds check is used.
+        DlssMotionVectorSet placed_a=*ag,placed_b=*bg;
+        const auto place_camera_guides=[&](DlssMotionVectorSet& set,std::span<const D3D12ReprojectionView> views) {
+            for(UINT i=0;i<views.size();++i) {
+                const UINT index=p.source.DepthOrArraySize==1 && set.eye_count==views.size()
+                    ? i:slice(views[i],i,UINT(views.size()),p.source.DepthOrArraySize);
+                if(index>=set.eye_count||!set.eyes[index])continue;
+                const auto& g=*set.eyes[index];
+                const auto r=rect(views[i],UINT(p.source.Width),p.source.Height);
+                const bool covered=r.offset_x>=g.output_x && r.offset_y>=g.output_y &&
+                    std::uint64_t(r.offset_x)+r.width<=std::uint64_t(g.output_x)+g.output_width &&
+                    std::uint64_t(r.offset_y)+r.height<=std::uint64_t(g.output_y)+g.output_height;
+                if(covered)continue;
+                const auto& f=views[i].fov;
+                const DlssEyeView eye{std::tan(f.angle_left),std::tan(f.angle_right),
+                    std::tan(f.angle_up),std::tan(f.angle_down),int(r.offset_x),int(r.offset_y),r.width,r.height};
+                if(auto aligned=place_guide_in_view(g,eye))set.eyes[index]=std::move(aligned);
+            }
+        };
+        place_camera_guides(placed_a,av);place_camera_guides(placed_b,bv);ag=&placed_a;bg=&placed_b;
         // Validate the entire stereo pair before writing a command. No partial
         // eye, guessed depth, or cross-stream history is handed to NGX.
         const auto guide_index = [&](UINT i) {

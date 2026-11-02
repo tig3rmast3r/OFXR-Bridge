@@ -1,4 +1,5 @@
 #pragma once
+#include "xrfg/luke_gta_headlock.hpp"
 
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -89,7 +90,27 @@ struct DlssMotionVectorPublication {
     // DLSS consumes float XY; only our existing owned motion copy is typed.
     // Generic/external publishers keep the original resource format.
     bool dlss_float_motion{};
+    // Original one-step GTA inputs need both immutable object-motion intervals.
+    bool compose_native_object_history{};
+    std::optional<LukeGtaHeadlock> gta_headlock;
+    // The camera arrives at submission (attach_dlss_motion_vector_camera):
+    // REAL VR fills its DLSS-fix constants when the list executes, after the
+    // evaluation that publishes this guide. Calibration waits for it.
+    bool camera_pending{};
 };
+
+// A camera attached to a published frame at its submission.
+struct DlssCameraAttachment {
+    std::array<float, 3> position{}, right{}, up{}, forward{};
+    std::array<float, 16> view_to_clip{}, clip_to_view{};
+    float near_z{}, far_z{}, fov_vertical{};
+    std::uint64_t world{}; // see DlssMotionVectorFrame::camera_world
+};
+// Fills the camera of the frame `publication` of `stream`, published with
+// camera_pending, and runs what its publication deferred. False when the
+// frame is gone, already has a camera, or a later frame already read it.
+bool attach_dlss_motion_vector_camera(std::uint64_t stream, std::uint64_t publication,
+    const DlssCameraAttachment& camera) noexcept;
 
 // Scalar native camera history: no retained older GPU resources or SL metadata.
 struct DlssNativeCameraHistory {
@@ -180,6 +201,8 @@ struct DlssMotionVectorFrame {
     // Resolver-proven chronological A/B/A cameras; original stream/epoch/
     // serial identities remain intact, never rewritten as a virtual feature.
     bool luke_interleaved_history{};
+    bool compose_native_object_history{};
+    std::optional<LukeGtaHeadlock> gta_headlock;
     // Calibrated same-time eye separation in the producer camera units.
     float calibrated_game_eye_baseline{};
     std::shared_ptr<DlssSnapshotRetention> motion_retention;
@@ -187,6 +210,12 @@ struct DlssMotionVectorFrame {
     std::uint32_t camera_frame_token{};
     bool camera_frame_token_valid{};
     std::uint64_t native_production_sequence{};
+    bool camera_pending{}; // see DlssMotionVectorPublication::camera_pending
+    // Nonzero: the camera source places every frame in this one world,
+    // whichever NGX handle produced it (REAL VR's chained DLSS-fix steps;
+    // Uncharted switches between one handle and one per eye every second
+    // or so). AFW keys its origin and calibration on it instead.
+    std::uint64_t camera_world{};
     // Where the game's motion and depth rectangles started before the
     // snapshot cropped them: what tells eyes sharing one target apart.
     std::uint32_t source_motion_x{};
@@ -195,6 +224,62 @@ struct DlssMotionVectorFrame {
     // to resolved frames, never to stored producer frames or recursively.
     std::shared_ptr<const DlssMotionVectorFrame> bridge;
     std::uint32_t raw_motion_native_span{1};
+    // A guide placed into an eye's view by its camera (place_guide_in_view):
+    // the output rectangle is then the eye's image rectangle, and
+    // placed_motion_rect (x, y, width, height in vector texels, not whole)
+    // the part of the vectors that lands on it. MSFS 2024's foveated
+    // periphery spreads a few hundred render columns over a whole eye.
+    bool placed{};
+    std::array<float, 4> placed_motion_rect{};
+};
+
+// The vector and depth rectangles a consumer maps the guide's output onto:
+// the placed part for a guide placed by its camera, the whole otherwise.
+// Depth covers the same field as the vectors, at its own resolution.
+[[nodiscard]] inline std::array<float, 4> guide_motion_rect(const DlssMotionVectorFrame& f) noexcept {
+    if (f.placed) return f.placed_motion_rect;
+    return {static_cast<float>(f.motion_x), static_cast<float>(f.motion_y),
+        static_cast<float>(f.motion_width), static_cast<float>(f.motion_height)};
+}
+[[nodiscard]] inline std::array<float, 4> guide_depth_rect(const DlssMotionVectorFrame& f) noexcept {
+    if (!f.placed || !f.motion_width || !f.motion_height)
+        return {static_cast<float>(f.depth_x), static_cast<float>(f.depth_y),
+            static_cast<float>(f.depth_width), static_cast<float>(f.depth_height)};
+    const float sx = static_cast<float>(f.depth_width) / static_cast<float>(f.motion_width);
+    const float sy = static_cast<float>(f.depth_height) / static_cast<float>(f.motion_height);
+    const auto& m = f.placed_motion_rect;
+    return {static_cast<float>(f.depth_x) + (m[0] - static_cast<float>(f.motion_x)) * sx,
+        static_cast<float>(f.depth_y) + (m[1] - static_cast<float>(f.motion_y)) * sy,
+        m[2] * sx, m[3] * sy};
+}
+
+// The field a DLSS evaluation rendered, from its camera's projection
+// (Streamline's cameraViewToClip): the tangents of its image's edges - left
+// and right where x runs from the image's left edge to its right, up and
+// down at its top and bottom row - and where the camera sits. Not known
+// without valid camera matrices or for a projection it cannot read.
+struct DlssViewGeometry {
+    bool known{};
+    float tan_left{};
+    float tan_right{};
+    float tan_up{};
+    float tan_down{};
+    std::array<float, 3> position{};
+    std::array<float, 3> right{};
+};
+[[nodiscard]] DlssViewGeometry dlss_view_geometry(const DlssMotionVectorFrame& frame) noexcept;
+
+// An eye's view in its XR image: the tangents of its field (XrFovf) and its
+// image rectangle.
+struct DlssEyeView {
+    float tan_left{};
+    float tan_right{};
+    float tan_up{};
+    float tan_down{};
+    std::int32_t x{};
+    std::int32_t y{};
+    std::uint32_t width{};
+    std::uint32_t height{};
 };
 
 inline DlssNativeCameraHistory dlss_native_camera_history(const DlssMotionVectorFrame& f) noexcept {
@@ -253,22 +338,53 @@ struct DlssMotionVectorStatistics {
 std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
     const DlssMotionVectorPublication& publication) noexcept;
 void configure_dlss_motion_vector_tracking(bool enabled) noexcept;
-// Call only after all queue work that may reference published snapshots has
-// completed. A live disable intentionally retains them until this safe point.
+// Request after the layer has drained its consumers on disable. Nonblocking:
+// exact unsubmitted/in-flight producer copies and retained GPU readers remain
+// protected. Repeat at a bounded cadence until the final writer receipts finish.
+// Also collects already retired streams after a rapid re-enable. An empty
+// retirement queue uses an atomic fast path and takes no registry lock.
 void retire_disabled_dlss_motion_vector_resources() noexcept;
 void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept;
 // Failed native SR invalidates temporal joins immediately while preserving the
 // owned slot allocations and in-flight GPU snapshot lifetimes.
 void invalidate_dlss_motion_vector_stream_history(std::uint64_t stream) noexcept;
+// Mark an exact original Execute attempt BEFORE forwarding it. No GPU receipt
+// or guide admission is granted here; it only prevents a reentrant successful
+// Reset inside a proxy Execute from canceling potentially submitted copies.
+// Uses an atomic-only fast path when there are no cancelable recordings.
+void begin_dlss_motion_vector_submission(std::uint32_t,ID3D12CommandList* const*) noexcept;
+// Original Execute threw before its post-call receipt. Keep resources in an
+// unknown-writer quarantine; a later reuse of the same COM list is not proof
+// that the abandoned attempt completed.
+void abandon_dlss_motion_vector_submission(std::uint32_t,ID3D12CommandList* const*) noexcept;
+// Native hooks pass began_before_execute=true to consume only their exact
+// pre-call markers. Legacy post-only callers are marked without allocation
+// here before receipt bookkeeping; they do not admit already quarantined slots.
 void report_dlss_motion_vector_submission(
     ID3D12CommandQueue* queue,
     std::uint32_t command_list_count,
-    ID3D12CommandList* const* command_lists) noexcept;
+    ID3D12CommandList* const* command_lists,
+    bool began_before_execute=false) noexcept;
+// Call only AFTER the original GraphicsCommandList::Reset succeeds. Cancels
+// copies recorded on that exact list which have never actually executed.
+// Submitted GPU work and unknown completion receipts remain quarantined.
+// Invalidates canceled active guide history; the next publication primes a
+// fresh epoch. With no cancelable copies, this is an atomic-only fast path.
+void report_dlss_motion_vector_reset(ID3D12GraphicsCommandList*) noexcept;
 // Strict FSR joins never infer semantic eye identity from discovery order.
 // A learned stream/epoch is scalar metadata, not a retained GPU snapshot.
 struct DlssReleasedEyeIdentity {
     bool strict{};
     std::uint64_t stream{}, epoch{};
+    // The eye's view is one horizontal half of its image, so an evaluation the
+    // image's size covers both eyes (No Man's Sky: one side-by-side DLSS pass,
+    // each eye in the matching half of a swapchain of its own). Both eyes take
+    // the same evaluation, never the alternating pair of one shared stream,
+    // each its own half of it: vectors and depth from the eye's half of the
+    // evaluation, the output placed on the view, view_half (0 left, 1 right)
+    // of the image.
+    bool both_eyes{};
+    std::uint32_t view_half{};
 };
 std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
     ID3D12Resource* output,
@@ -281,6 +397,43 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
 // Nonzero release watermarks select exact released snapshots. Strict ordinary
 // D3D12 FSR joins are opt-in; existing OFXR/DLSS-G and AFW contracts are preserved.
 std::uint64_t dlss_motion_vector_publications() noexcept;
+// A guide placed into an eye's view by its camera: a copy whose output
+// rectangle is the view's rectangle and whose placed_motion_rect is the part
+// of its vectors (and depth) that lands there. Null unless the guide's
+// camera covers the view, to within a hundredth of its field.
+std::shared_ptr<const DlssMotionVectorFrame> place_guide_in_view(
+    const DlssMotionVectorFrame& frame,
+    const DlssEyeView& view) noexcept;
+// Both eyes' guides from evaluations whose cameras are known, for a game
+// whose DLSS outputs are views of their own rather than its eye images -
+// MSFS 2024's foveated rendering, four a frame: per eye a periphery over the
+// whole field at a fraction of its pixels, and an inset. Each eye takes the
+// recent stream whose camera covers its field and fits it best (the
+// cameras' positions decide between two that fit alike), placed scaled; the
+// evaluation is the stream's newest by the eye's release watermark. Both
+// eyes or neither, from two streams. Ported from 0.2's V515.
+std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount>
+resolve_view_placed_dlss_guides(
+    ID3D12CommandQueue* consumer_queue,
+    const std::array<DlssEyeView, kDlssMotionVectorEyeCount>& eyes,
+    const std::array<std::uint64_t, kDlssMotionVectorEyeCount>& released_at) noexcept;
+// Both eyes' guides from two recent streams whose outputs are each eye's
+// view enlarged: smaller than the view, of its shape to within 1%, at most
+// three times smaller (0.2's V537). Cheeky Foveated DLSS's foveated
+// rendering evaluates per eye a periphery over the whole field at a fraction
+// of the eye's pixels and an inset, with no camera to place them by. The
+// periphery is placed over the whole view; the eye that evaluated first is
+// the left, unless the inputs sit apart. Both eyes or neither.
+std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount>
+resolve_enlarged_dlss_guides(
+    ID3D12CommandQueue* consumer_queue,
+    const std::array<DlssEyeView, kDlssMotionVectorEyeCount>& eyes,
+    std::uint64_t released_at) noexcept;
+// Diagnostics only: the live DLSS streams as a released image's guide
+// resolution saw them, for an eye image that got none. presenter_transition
+// 756, then 757 per stream (at most eight). Changes nothing.
+void report_dlss_guide_census(ID3D12CommandQueue* consumer_queue,
+    std::uint32_t image_width, std::uint32_t image_height, std::uint64_t detail) noexcept;
 // Resolves by logical projection-view count when the OpenXR swapchain is
 // D3D11 and therefore has no D3D12 image from which to derive array size.
 std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
@@ -300,6 +453,15 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
     std::uint32_t color_origin_token,
     ID3D12CommandQueue* consumer_queue,
     ID3D12Device* canonical_consumer_device) noexcept;
+// Control-only reset preflight. These metadata queries do NOT return a guide,
+// attach old history or authorize AFW generation. Tokens must still be decoded.
+struct LukeNativeOriginMetadata {
+    std::uint64_t stream{},epoch{},publication{},serial{};
+};
+bool luke_native_stream_reset(std::uint64_t stream,std::uint64_t accepted_epoch,
+    ID3D12Device* device) noexcept;
+std::optional<LukeNativeOriginMetadata> luke_native_origin_metadata(
+    std::uint32_t token,ID3D12Device* device) noexcept;
 void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept;
 void report_dlss_motion_vector_use() noexcept;
 DlssMotionVectorStatistics dlss_motion_vector_statistics() noexcept;

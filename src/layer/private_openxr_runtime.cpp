@@ -1,6 +1,7 @@
 #include "xrfg/private_openxr_runtime.hpp"
 #include "xrfg/private_output_distributor.hpp"
 #include "xrfg/interface_metrics.hpp"
+#include "xrfg/owned_d11_output.hpp"
 
 #include <algorithm>
 #include <array>
@@ -55,8 +56,9 @@ struct PrivateOpenXrRuntime::Impl {
     };
     struct Chain {
         XrSwapchain handle{};
-        // Only generated UEVR separate-eye outputs opt into this publication
-        // owner. Application handles and every other transport retain 1:1 XR.
+        // Internally generated outputs may share this publication owner only
+        // within one original source and identical resource/state contract.
+        // Application handles retain their separate native XR ownership.
         std::shared_ptr<Chain> publication;
         XrSwapchain publication_source{};
         unsigned publication_owners{};
@@ -667,10 +669,38 @@ struct PrivateOpenXrRuntime::Impl {
                         if(slots.valid())options.trace(20,packet->sequence,deadline,static_cast<std::int64_t>(slots.slot()));
                         options.trace(24,packet->sequence,prediction_qpc(prediction).value_or(0),renewed);
                     }
-                } else if(diagnostic) {
-                    options.trace(7,packet->sequence,wait_enter,0);
-                    options.trace(6,packet->sequence,wait_leave,0);
-                    options.trace(28,packet->sequence,begun_at,0); // no director pacing
+                } else {
+                    // Framework bypass still needs a live native XR cycle.
+                    // GPU preparation may outlive the Wait already in flight.
+                    // Renew only that expired Begin; retain the same FIFO image
+                    // and never introduce the director's pacing/delay here.
+                    unsigned renewed{};
+                    while(!stopping && prediction.shouldRender) {
+                        const auto at=prediction_qpc(prediction);
+                        if(!at || *at>clock_ns()+PrivateOutputSchedule::preparation_lead)break;
+                        if(diagnostic)options.trace(23,packet->sequence,*at,clock_ns());
+                        if(renewed && renewed%8==0 && !sleep_until(clock_ns()+physical,1'250'000))break;
+                        if(!post_wait(0,false)){result=XR_ERROR_CALL_ORDER_INVALID;break;}
+                        auto fresh=take_wait();
+                        if(!fresh){result=XR_ERROR_SESSION_NOT_RUNNING;break;}
+                        result=fresh->result;if(XR_FAILED(result))break;
+                        prediction=fresh->prediction;waited=true;
+                        wait_enter=fresh->entered;wait_leave=fresh->returned;
+                        XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+                        result=options.real.begin(options.real.session,&begin);
+                        if(XR_FAILED(result))break;
+                        waited=false;begun=true;begun_at=clock_ns();++renewed;
+                    }
+                    if(stopping || XR_FAILED(result)) {
+                        if(!stopping)fail(result);
+                        retire(packet);fifo->retire();break;
+                    }
+                    if(diagnostic) {
+                        options.trace(7,packet->sequence,wait_enter,0);
+                        options.trace(6,packet->sequence,wait_leave,0);
+                        options.trace(28,packet->sequence,begun_at,0); // no director pacing
+                        options.trace(24,packet->sequence,prediction_qpc(prediction).value_or(0),renewed);
+                    }
                 }
                 // Wait for the next cycle may overlap this frame's handoff.
                 // Begin/End remain exclusively serialized on this consumer;
@@ -927,12 +957,14 @@ XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::s
     reservation.accepted=true;{std::scoped_lock lock(s.mutex);s.begun=0;++s.accepted_packets;}s.changed.notify_all();
     s.trace(1,packet->sequence);return XR_SUCCESS;
 }
-XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count,XrSwapchain publication_source) {
+XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count,XrSwapchain publication_source,ID3D12Device* d11_output_owner) {
     if(!info || !output || info->type!=XR_TYPE_SWAPCHAIN_CREATE_INFO || image_count<1 || image_count>3)return XR_ERROR_VALIDATION_FAILURE;
     const bool pooled=publication_source!=XR_NULL_HANDLE;
-    // Internal pooling accepts only plain color outputs. Unknown extension
-    // structures, static/depth/array/cube chains retain the existing path.
-    if(pooled && (info->next || info->createFlags || info->arraySize!=1 || info->faceCount!=1 ||
+    // A packed stereo image or texture array is still one source domain: its
+    // full resource and owned view rectangles/slices travel together. Pooling
+    // never joins different sources, and compatibility includes the array size.
+    // Unknown extensions, static/protected/depth/cube chains stay independent.
+    if(pooled && (info->next || info->createFlags || !info->arraySize || info->faceCount!=1 ||
         !(info->usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) ||
         (info->usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)))return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::unique_lock lock(s.mutex);
@@ -977,7 +1009,15 @@ XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* inf
         }
     } else {
         D3D11_TEXTURE2D_DESC desc{};endpoint.real11.front()->GetDesc(&desc);
-        for(auto& image:chain->images){made=s.device11->CreateTexture2D(&desc,nullptr,&image.d11);if(FAILED(made))break;}
+        const bool share_owned_output=d11_output_owner && !info->next && !info->createFlags &&
+            info->faceCount==1 && info->arraySize && info->mipCount==1 && info->sampleCount==1 &&
+            (info->usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
+            !(info->usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+        for(auto& image:chain->images) {
+            made=share_owned_output?owned_d11_output::create(s.device11.Get(),d11_output_owner,desc,&image.d11):E_NOINTERFACE;
+            if(FAILED(made))made=s.device11->CreateTexture2D(&desc,nullptr,&image.d11);
+            if(FAILED(made))break;
+        }
     }
     if(FAILED(made))return abandon(XR_ERROR_RUNTIME_FAILURE);
     if(pooled) {

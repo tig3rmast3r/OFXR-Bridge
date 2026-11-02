@@ -65,7 +65,12 @@ XrResult XRAPI_CALL outlaws_end(XrSession,const XrFrameEndInfo*) {
 void outlaws_startup_test(const wchar_t* marker_path,const wchar_t* provider_path) {
     using Microsoft::WRL::ComPtr;
     const auto marker=LoadLibraryW(marker_path);
-    check(marker&&xrfg::native_ingress::luke_detected(),"startup actual Luke marker");
+    check(marker&&GetProcAddress(marker,"RealVRVersion"),"startup actual Luke marker module");
+    // This fixture constructs SessionState directly. Model the real session
+    // discovery boundary after loading the actual marker; luke_detected() is
+    // deliberately a cached read and must not become a per-call module scan.
+    xrfg::native_ingress::refresh_luke_detection();
+    check(xrfg::native_ingress::luke_detected(),"startup actual Luke marker");
     test_luke_bootstrap_provider=provider_path;
     ComPtr<ID3D11Device> d11;ComPtr<ID3D11DeviceContext> c11;
     check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,

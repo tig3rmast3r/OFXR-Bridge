@@ -1,5 +1,6 @@
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/implicit_layer.hpp"
+#include "xrfg/osr_full_warp.hpp"
 #include <windows.h>
 #include <map>
 #include <mutex>
@@ -93,7 +94,15 @@ struct AfwControl {
             L"experimental", L"luke_afw_shading_rate", 0, ini().c_str())), 0, 8);
         settings.depth_dilate_mode = std::clamp(static_cast<int>(
             GetPrivateProfileIntW(L"experimental", L"luke_afw_depth_dilate_mode",
-                1, ini().c_str())), 0, 2);
+                0, ini().c_str())), 0, 2);
+        settings.osr = normalize_osr_reconstruction(static_cast<int>(GetPrivateProfileIntW(
+            L"experimental", L"luke_osr", 2, ini().c_str())));
+        settings.osr_cover = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+            L"experimental", L"luke_osr_cover", 0, ini().c_str())), 0, 8);
+        settings.osr_trim = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+            L"experimental", L"luke_osr_trim", 0, ini().c_str())), 0, 2);
+        settings.osr_fill = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+            L"experimental", L"luke_osr_fill", 2, ini().c_str())), 1, 8);
     }
 };
 AfwControl& afw_control() { static AfwControl state; return state; }
@@ -161,11 +170,16 @@ AfwSnapshot afw_snapshot() {
 
 bool request_afw(AfwSettings settings) {
     if (settings.mode < 0 || settings.mode > 3 ||
+        settings.osr < 0 || settings.osr > 2 ||
+        settings.osr_cover < 0 || settings.osr_cover > 8 ||
+        settings.osr_trim < 0 || settings.osr_trim > 2 ||
+        settings.osr_fill < 1 || settings.osr_fill > 8 ||
         settings.shading_rate < 0 || settings.shading_rate > 8 ||
         settings.depth_dilate_mode < 0 || settings.depth_dilate_mode > 2 ||
         !std::isfinite(settings.ignore_motion_threshold) ||
         settings.ignore_motion_threshold < 0.0F ||
         settings.ignore_motion_threshold > 64.0F) return false;
+    settings.osr = normalize_osr_reconstruction(settings.osr);
     auto& c = afw_control();
     std::scoped_lock lock(c.mutex);
     const auto old = c.snapshot.desired;
@@ -193,6 +207,22 @@ bool request_afw(AfwSettings settings) {
     if (old.shading_rate != settings.shading_rate) {
         wchar_t value[16]{}; swprintf_s(value,L"%d",settings.shading_rate);
         ok &= write(L"experimental",L"luke_afw_shading_rate",value);
+    }
+    if (old.osr != settings.osr) {
+        const wchar_t* modes[]{L"0", L"1", L"2"};
+        ok &= write(L"experimental", L"luke_osr", modes[settings.osr]);
+    }
+    if (old.osr_cover != settings.osr_cover) {
+        wchar_t value[16]{}; swprintf_s(value, L"%d", settings.osr_cover);
+        ok &= write(L"experimental", L"luke_osr_cover", value);
+    }
+    if (old.osr_trim != settings.osr_trim) {
+        wchar_t value[16]{}; swprintf_s(value, L"%d", settings.osr_trim);
+        ok &= write(L"experimental", L"luke_osr_trim", value);
+    }
+    if (old.osr_fill != settings.osr_fill) {
+        wchar_t value[16]{}; swprintf_s(value, L"%d", settings.osr_fill);
+        ok &= write(L"experimental", L"luke_osr_fill", value);
     }
     if (!(old == settings)) {
         c.snapshot.desired = settings;
@@ -226,6 +256,8 @@ void report_afw_prepare(std::int64_t reason) {
     auto& c = afw_control();
     std::scoped_lock lock(c.mutex);
     ++c.snapshot.projection_frames;
+    c.snapshot.flat_scene=reason==29;
+    if(reason==29)return; // application scene is a 2D quad, not failed AFW
     if (reason == 0) ++c.snapshot.ready_frames;
     else if (reason == 5) ++c.snapshot.missing_capture_frames;
     else if (reason == 18) ++c.snapshot.busy_frames;

@@ -125,7 +125,11 @@ public:
         std::uint32_t image_count=3,
         // Internal generated outputs only: compatible rings of one source eye
         // share a native sink; the producer handle/images remain independent.
-        XrSwapchain publication_source=XR_NULL_HANDLE);
+        XrSwapchain publication_source=XR_NULL_HANDLE,
+        // Internal generated D11 outputs only. A confirmed owner can supply
+        // one shared backing for D11 publication and D12 synthesis; the native
+        // XR sink and every other output still retain independent allocations.
+        ID3D12Device* d11_output_owner=nullptr);
     XrResult destroy_swapchain(XrSwapchain);
     XrResult enumerate_images(XrSwapchain,std::uint32_t,std::uint32_t*,XrSwapchainImageBaseHeader*);
     XrResult acquire_image(XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t*);

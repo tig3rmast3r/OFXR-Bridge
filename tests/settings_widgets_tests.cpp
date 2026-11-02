@@ -241,8 +241,17 @@ void release_controls() {
         desktop.rendered_text.find("Output CSV")==std::string::npos &&
         desktop.rendered_text.find("Open ofxr-bridge.ini")==std::string::npos,"basic Display removes experimental and redundant controls");
     desktop.select_tab("Luke Ross");desktop.draw(true);
-    require(desktop.rendered_text.find("AFW Only (restart game)")!=std::string::npos && desktop.rendered_text.find("Clear before framewarp")==std::string::npos,"basic Luke UI exposes per-game AFW Only without Clear");
-    desktop.activate("/Framewarp_","AFW Only (restart game)");desktop.draw();
+    require(snapshot().desired.luke_osr==2 && desktop.rendered_text.find("OSR (OFXR Stereo Reconstruction)")!=std::string::npos,
+        "reset selects OSR in the actual desktop Reconstruction combo");
+    desktop.choose("Reconstruction",1,"AFW (legacy)","/Framewarp_");
+    require(snapshot().desired.luke_osr==0,"second reconstruction choice selects legacy AFW");
+    desktop.choose("Reconstruction",0,"OSR","/Framewarp_");
+    require(snapshot().desired.luke_osr==2,"first reconstruction choice selects OSR");
+    desktop.draw(true);
+    require(desktop.rendered_text.find("AFW + OSR")==std::string::npos &&
+        desktop.rendered_text.find("Band fill")==std::string::npos,"retired band-fill controls are absent");
+    require(desktop.rendered_text.find("Frame Reconstruction only (AFW or OSR, restart game)")!=std::string::npos && desktop.rendered_text.find("Clear before framewarp")==std::string::npos,"basic Luke UI exposes per-game Frame Reconstruction only without Clear");
+    desktop.activate("/Framewarp_","Frame Reconstruction only (AFW or OSR, restart game)");desktop.draw();
     require(snapshot().desired.afw_only,"actual AFW Only control persists settings");
     auto advanced=snapshot().desired;advanced.advanced_mode=true;advanced.afw_only=false;require(request(advanced),"enable advanced UI by configuration");
     desktop.select_tab("Frame generation");desktop.draw(true);
@@ -287,6 +296,10 @@ void actual_widgets() {
     require(tray.widgets.draft.nr_enabled == snapshot().desired.nr_enabled,
         "tray reflects hot headset checkbox edit");
     headset.select_tab("Luke Ross");
+    // The provider controls sit behind the persisted Advanced parameters checkbox.
+    headset.activate("/Framewarp_", "Advanced parameters");
+    headset.draw();
+    require(snapshot().desired.luke_advanced, "Luke advanced checkbox publishes hot setting");
     headset.activate("/Framewarp_", "Debug framewarp");
     headset.draw();
     require(snapshot().desired.afw_debug != enabled.desired.afw_debug,
@@ -363,7 +376,7 @@ void actual_widgets() {
     require(tray.rendered_text.find("Swapchain budget fix")==std::string::npos &&
         headset.rendered_text.find("Swapchain budget fix")==std::string::npos,
         "INI-only startup sharing is absent from desktop and headset UI");
-    auto quality_settings=snapshot().desired;quality_settings.afw_mode=3;
+    auto quality_settings=snapshot().desired;quality_settings.afw_mode=3;quality_settings.luke_osr=0;
     require(request(quality_settings),"select Combined for live quality control");
     tray.draw();tray.draw();status.afw_shading_rate=0;report_runtime(status);
     tray.choose("AFW shading rate",1,"2x2 (half per axis)","/Framewarp_");
@@ -374,6 +387,27 @@ void actual_widgets() {
     status.afw_shading_rate=4;report_runtime(status);tray.draw(true);
     require(tray.rendered_text.find("Quality change pending")==std::string::npos,
         "successful active quality update clears pending explanation");
+    tray.choose("Reconstruction",0,"OSR","/Framewarp_");
+    require(snapshot().desired.luke_osr==2,"desktop selects OSR from legacy AFW");
+    headset.draw();headset.draw();
+    headset.choose("Reconstruction",1,"AFW (legacy)","/Framewarp_");
+    require(snapshot().desired.luke_osr==0,"headset selects the second legacy AFW entry");
+    headset.choose("Reconstruction",0,"OSR","/Framewarp_");
+    require(snapshot().desired.luke_osr==2,"headset selects the first OSR entry");
+    tray.draw();tray.draw(true);
+    require(tray.rendered_text.find("AFW shading rate")==std::string::npos &&
+        tray.rendered_text.find("Ignore motion")==std::string::npos &&
+        tray.rendered_text.find("Depth dilation")==std::string::npos &&
+        tray.rendered_text.find("Framewarp mode")!=std::string::npos,
+        "Full OSR advanced parameters show only what it uses, Off included");
+    tray.choose("Framewarp mode",1,"Other eye only (for debug)","/Framewarp_");
+    require(snapshot().desired.afw_mode==1,"Full OSR Other eye only is the alternate-eye mode");
+    tray.choose("Framewarp mode",2,"On","/Framewarp_");
+    require(snapshot().desired.afw_mode==3,"Full OSR On is Combined");
+    tray.choose("Framewarp mode",0,"Off","/Framewarp_");
+    require(snapshot().desired.afw_mode==0,"Full OSR keeps Off");
+    auto osr_settings=snapshot().desired;osr_settings.afw_mode=3;
+    osr_settings.luke_osr=0;require(request(osr_settings),"back to AFW");tray.draw();tray.draw(true);
     const auto content_height=[&](Context& view) {
         for(auto* window:view.context->Windows)
             if(window->Active && std::strstr(window->Name,"/Framewarp_"))return window->ContentSize.y;

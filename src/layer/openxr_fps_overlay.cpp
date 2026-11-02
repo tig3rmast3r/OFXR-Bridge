@@ -851,6 +851,10 @@ struct OpenXrFpsOverlay::Impl {
                 // Without OFXR the old real counter counts held AFW pairs/XR
                 // calls. Use actual source/AFW production identities instead.
                 if(!fps.active) {out.game_fps=scene->real;out.generated_fps=scene->generated;}
+            } else if(bridge_flight_logger().enabled()) {
+                const auto times=accepted_scenes.diagnostic_times();
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,fps.sample_valid,1241,times[1],times[2]);
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,0,1242,times[0],now);
             }
         }
         out.generating = fps.generated_fps > 0;
@@ -1052,6 +1056,7 @@ void OpenXrFpsOverlay::set_display_period(std::int64_t period_ns) noexcept {
 }
 
 void OpenXrFpsOverlay::reset_metrics() noexcept {
+    if(bridge_flight_logger().enabled())bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,0,1239,0,0);
     std::scoped_lock lock(impl_->mutex);
     impl_->counter.reset();
     impl_->accepted_scenes={};
@@ -1175,8 +1180,11 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
         impl_->native_content_counter=impl_->unique_content_only || !native_results.empty();
         const auto metrics=classify_native_frame_content(native_results,native_output,synthetic,new_content);
         SceneIdentity scene{stamp.scene_owner,stamp.scene_serial,metrics.synthetic?native_output+1:0};
-        if(impl_->luke_scene_measurement && metrics.new_content)
+        if(impl_->luke_scene_measurement && metrics.new_content) {
+            if(!scene&&bridge_flight_logger().enabled())bridge_flight_logger().event(
+                BridgeFlightOperation::luke_afw_stage,scene.owner?1:0,1240,info->displayTime,scene.serial);
             impl_->accepted_scenes.accepted(now,scene);
+        }
         impl_->counter.submitted(now,metrics.synthetic,metrics.new_content);
         if(measure && stamp.cycle && metrics.synthetic)
             stamp.cycle->synthetic_accepted(accepted_clock,impl_->estimate_period(),submit_clock);

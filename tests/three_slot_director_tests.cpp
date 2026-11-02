@@ -12,6 +12,7 @@ namespace xrfg {int run_dead_space_ngx_capture_test(const wchar_t*,const wchar_t
 namespace xrfg {int run_gta_enhanced_ngx_capture_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_dead_space_ingress_diagnostics_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_ghost_ngx_capture_test(const wchar_t*,const wchar_t*,bool);}
+namespace xrfg {int run_unlisted_motion_capture_test(const wchar_t*,const wchar_t*,bool);}
 namespace xrfg {int run_horizon_ngx_capture_test(const wchar_t*,const wchar_t*,bool);}
 namespace xrfg {int run_actual_ngx_capture_test(const wchar_t*,const wchar_t*); int run_crimson_ngx_capture_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_kcd_logical_capture_test(const wchar_t*,const wchar_t*);}
@@ -194,6 +195,24 @@ std::shared_ptr<SessionState> session() {
     return state;
 }
 
+// The real content EndFrame entry resolves the exact session by handle. Pure
+// policy fixtures need no registration, but a live test consumer does.
+struct RegisteredFixtureSession {
+    std::shared_ptr<SessionState> current,previous;
+    explicit RegisteredFixtureSession(std::shared_ptr<SessionState> value):current(std::move(value)) {
+        std::scoped_lock lock(g_state_mutex);
+        if(const auto found=g_sessions.find(current->handle);found!=g_sessions.end())previous=found->second;
+        g_sessions[current->handle]=current;
+    }
+    ~RegisteredFixtureSession() {
+        std::scoped_lock lock(g_state_mutex);
+        const auto found=g_sessions.find(current->handle);
+        if(found!=g_sessions.end() && found->second==current) {
+            if(previous)found->second=std::move(previous);else g_sessions.erase(found);
+        }
+    }
+};
+
 void pipelined_route_handoff_test(bool steamvr = false, bool budget_demotion = false) {
     auto state = session();
     state->presenter_active = false;
@@ -351,11 +370,14 @@ void unified_route_policy_test() {
         reference->frame_generation_mode = xrfg::D3D12FrameGenerationMode::ofxr;
         reference->nvidia_new_route = false;
         reference->dispatch->steamvr_runtime = true;
+        reference->vdxr_legacy = false;
         check(steamvr_reference_capture_overlap(*reference), "native SteamVR Reference transport not selected");
         reference->dispatch->steamvr_runtime = false;
         reference->dispatch->virtual_desktop_runtime = true;
+        reference->vdxr_legacy = true;
         check(!steamvr_reference_capture_overlap(*reference), "Reference overlap leaked into Virtual Desktop");
         reference->dispatch->steamvr_runtime = true;
+        reference->vdxr_legacy = false;
         reference->nvidia_new_route = true;
         check(!steamvr_reference_capture_overlap(*reference), "Reference overlap changed New/Djules");
         reference->nvidia_new_route = false;
@@ -376,6 +398,7 @@ void unified_route_policy_test() {
     auto live = std::make_shared<SessionState>(std::make_shared<Dispatch>());
     live->graphics_binding = SessionGraphicsBinding::d3d12;
     live->dispatch->steamvr_runtime = true;
+    live->vdxr_legacy = false;
     live->dispatch->inline_unless_pipelined = true;
     live->three_slot_director = true;
     live->djules_pipeline_switchable = true;
@@ -820,6 +843,43 @@ void inline_afw_publication_gpu_test(const std::shared_ptr<SessionState>& state,
     if(pixel_serial==2){probe.reset();probe_history.reset();}
 }
 
+void origin_history_preflight_gpu_test(const std::shared_ptr<SessionState>& state) {
+    using Microsoft::WRL::ComPtr;
+    std::array<ComPtr<ID3D12Resource>,2> colors;
+    std::array<LukeOriginHistoryProbe,2> inputs;
+    ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> list;
+    check(SUCCEEDED(state->d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator))),"probe allocator");
+    check(SUCCEEDED(state->d3d12_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list))),"probe list");
+    xrfg::configure_luke_color_origin_extent(512,128);
+    for(unsigned i=0;i<2;++i) {
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=512;d.Height=128;
+        d.DepthOrArraySize=d.MipLevels=d.SampleDesc.Count=1;d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+        check(SUCCEEDED(state->d3d12_device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,
+            D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&colors[i]))),"probe color");
+        check(SUCCEEDED(xrfg::mark_luke_color_origin(list.Get(),colors[i].Get(),111+i,D3D12_RESOURCE_STATE_COMMON)),"probe actual marker");
+    }
+    check(SUCCEEDED(list->Close()),"probe close");ID3D12CommandList* lists[]{list.Get()};state->d3d12_queue->ExecuteCommandLists(1,lists);
+    for(unsigned i=0;i<2;++i) {
+        inputs[i].history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+        ID3D12Resource* sources[]{colors[i].Get()};
+        check(SUCCEEDED(inputs[i].history->initialize(state->d3d12_device.Get(),state->d3d12_queue.Get(),sources,D3D12_RESOURCE_STATE_COMMON)),"probe history init");
+        check(SUCCEEDED(inputs[i].history->capture(0,&inputs[i].capture))&&SUCCEEDED(inputs[i].history->commit(inputs[i].capture)),"probe frozen capture");
+    }
+    std::array<std::uint32_t,2> tokens{};std::array<HRESULT,2> results{};bool poisoned{};
+    check(SUCCEEDED(read_luke_capture_origins(state->d3d12_queue.Get(),inputs,tokens,results,poisoned))&&
+        !poisoned&&tokens[0]==111&&tokens[1]==112,"preflight did not read exact leased source tokens");
+    for(unsigned i=0;i<2;++i) {
+        xrfg::D3D12HistoryConsumerLease lease;ComPtr<ID3D12Resource> image;ComPtr<ID3D12Fence> fence;
+        check(SUCCEEDED(inputs[i].history->acquire_consumer(inputs[i].capture,&lease,image.GetAddressOf(),fence.GetAddressOf())),
+            "completed CRC probe left a lease busy before ordinary AFW source copy");
+        inputs[i].history->cancel_consumer(lease);
+        check(SUCCEEDED(inputs[i].history->wait_for_idle()),"probe retirement");
+    }
+    xrfg::configure_luke_color_origin_extent(256,128);
+    std::cout<<"Native reset preflight: exact two source CRCs, producer waits and reusable retired history leases PASS\n";
+}
+
 void held_afw_pair_gpu_test(const std::shared_ptr<SessionState>& state,
     const XrFrameEndInfo& end, const ProjectionSnapshot& snapshot,
     const std::vector<ProjectionResourceMapping>& mappings, unsigned pixel_serial) {
@@ -838,6 +898,7 @@ void held_afw_pair_gpu_test(const std::shared_ptr<SessionState>& state,
     state->graphics_binding_capabilities = 8;
     state->luke_afw = std::make_shared<xrfg::LukeAfwSynthesizer>();
     state->luke_afw_last_pair = pair;
+    if(pixel_serial==1)origin_history_preflight_gpu_test(state);
     std::vector<ProjectionResourceDestination> identities;
     for (const auto& mapping : mappings)
         identities.push_back({mapping.application_swapchain, mapping.application_swapchain});
@@ -1818,22 +1879,51 @@ void embedded_eligibility_test() {
             auto s = std::make_shared<SessionState>(std::make_shared<Dispatch>());
             s->handle = reinterpret_cast<XrSession>(0x213);
             s->graphics_binding = binding;
+            s->dispatch->create_swapchain=+[](XrSession,const XrSwapchainCreateInfo*,XrSwapchain* output)->XrResult {
+                if(output)*output=XR_NULL_HANDLE;
+                return XR_ERROR_VALIDATION_FAILURE;
+            };
+            s->dispatch->destroy_swapchain=+[](XrSwapchain)->XrResult{return XR_SUCCESS;};
+            s->dispatch->enumerate_swapchain_images=+[](XrSwapchain,std::uint32_t,std::uint32_t* count,XrSwapchainImageBaseHeader*)->XrResult {
+                if(count)*count=0;
+                return XR_ERROR_VALIDATION_FAILURE;
+            };
+            check(SUCCEEDED(apply_embedded_control(s)),"establish actual initial control tuple before testing admission");
             s->control_revision = 0;
             s->generation_budget_exhausted = mode == 2;
-            const XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            info.width=info.height=16;info.arraySize=info.faceCount=info.sampleCount=info.mipCount=1;
+            info.format=DXGI_FORMAT_R8G8B8A8_UNORM;info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
             auto chain = std::make_shared<SwapchainState>(s, info);
             chain->handle = reinterpret_cast<XrSwapchain>(0x213);
             chain->session = s;
             chain->generation_eligible_pending = mode != 0;
             chain->generation_declined = mode == 1;
             { std::scoped_lock lock(g_state_mutex); g_swapchains[chain->handle] = chain; }
-            apply_embedded_control(s);
+            struct Remove {
+                XrSwapchain handle;
+                ~Remove(){std::scoped_lock lock(g_state_mutex);g_swapchains.erase(handle);}
+            } cleanup{chain->handle};
+            check(SUCCEEDED(apply_embedded_control(s)),"apply equivalent control revision before projection admission");
+            check(chain->generation_declined == (mode == 1) && !chain->frame_generation,
+                "control revision spent an unsubmitted source's generation budget");
+            ProjectionResourceMapping mapping{};mapping.application_swapchain=chain->handle;
+            check(ensure_projection_frame_generation(s,std::span<const ProjectionResourceMapping>(&mapping,1)),
+                "incompatible graphics binding incorrectly exhausted the session swapchain budget");
             // Eligible attempt fails without a graphics binding: refusal must
             // latch. Ineligible/budget-exhausted chains must remain untouched.
             check(chain->generation_declined == (mode == 1 || mode == 3),
                 "control eligibility/refusal gate");
+            if(mode==3) {
+                check(chain->generation_refusal==(binding==SessionGraphicsBinding::d3d11
+                    ?SwapchainEligibilityReason::invalid_d3d11_image:SwapchainEligibilityReason::missing_dispatch_or_history),
+                    "explicit projection admission returned an unrelated refusal reason");
+                const auto detail=binding==SessionGraphicsBinding::d3d11
+                    ?static_cast<std::uint64_t>(static_cast<std::int64_t>(XR_ERROR_VALIDATION_FAILURE)):0ULL;
+                check(chain->generation_refusal_detail==detail,"explicit projection admission lost the exact runtime/binding failure");
+            }
+            check(s->generation_budget_exhausted==(mode==2),"local graphics refusal changed the session budget gate");
             check(!chain->frame_generation, "unexpected control allocation");
-            { std::scoped_lock lock(g_state_mutex); g_swapchains.erase(chain->handle); }
         }
     }
 }
@@ -2097,6 +2187,7 @@ void refused_frame_recovery_test() {
             auto s = session();
             s->three_slot_director = director;
             s->nvidia_new_route = director;
+            RegisteredFixtureSession registration(s);
             try {
                 auto rejected_frame = frame(61);
                 if (!director) s->presenter_last_frame = frame(60)->frame;
@@ -2134,6 +2225,7 @@ void refused_frame_recovery_test() {
     // Exercise an owned director slot as well as borrowed submissions. The
     // refused A must be consumed so that B can drain; no slot/failure is stuck.
     auto s = session();
+    RegisteredFixtureSession registration(s);
     try {
         auto rejected = frame(71);
         s->three_slots.push_real(rejected);
@@ -2182,6 +2274,7 @@ void refused_frame_recovery_test() {
 #include "d3d12_reported_device_alias.hpp"
 #include "luke_stale_queue_fixture.hpp"
 #include "v477_luke_context.inc"
+#include "native_reset_lifetime_test.inc"
 #include "../src/layer/outlaws_startup_test.inc"
 
 #include "luke_fresh_pacing_fixture.inc"
@@ -2231,7 +2324,58 @@ void luke_queue_policy_test() {
     }
     std::cout<<"Queue policy: SteamVR/VDXR, legacy/comparison, AFW-only, per-eye fallback lifetime PASS\n";
 }
+void gta_flat_scene_test() {
+    auto session=std::make_shared<SessionState>(std::make_shared<Dispatch>());
+    session->luke_afw_enabled=true;
+    session->luke_afw=std::make_shared<xrfg::LukeAfwSynthesizer>();
+    session->graphics_binding_capabilities=8;
+    XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    create.width=1024;create.height=128;create.arraySize=create.sampleCount=1;
+    auto chain=std::make_shared<SwapchainState>(session,create);
+    auto other=std::make_shared<SwapchainState>(session,create);
+    const auto handle=reinterpret_cast<XrSwapchain>(std::uintptr_t(0x69201));
+    const auto other_handle=reinterpret_cast<XrSwapchain>(std::uintptr_t(0x69202));
+    {std::scoped_lock lock(g_state_mutex);g_swapchains[handle]=chain;g_swapchains[other_handle]=other;}
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.eyeVisibility=XR_EYE_VISIBILITY_BOTH;quad.subImage.swapchain=handle;
+    quad.subImage.imageRect.extent={1024,128};
+    XrCompositionLayerQuad second=quad;second.subImage.swapchain=other_handle;
+    const XrCompositionLayerBaseHeader* layers[]{reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&second)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.layerCount=1;end.layers=layers;
+    std::vector<PostAfwFrameInput> completed;
+    const auto prepare=[&] {return prepare_luke_afw_frame(session,{}, {},std::nullopt,1,false,completed,&end);};
+    const auto flat=prepare();
+    check(flat.kind==PreparedGenerationKind::none&&flat.reason==GenerationPrepareReason::luke_flat_scene,
+        "full application flat quad must bypass AFW on absent stereo");
+    check(!flat.original_scene&&completed.empty(),"flat quad must not invent stereo FPS identity");
+    quad.eyeVisibility=XR_EYE_VISIBILITY_LEFT;
+    check(prepare().reason==GenerationPrepareReason::missing_generation,"single-eye overlay is not a flat scene");
+    quad.eyeVisibility=XR_EYE_VISIBILITY_BOTH;quad.subImage.imageRect.extent.width=1023;
+    check(prepare().reason==GenerationPrepareReason::missing_generation,"partial overlay is not a full scene");
+    quad.subImage.imageRect.extent.width=1024;
+    const auto before=xrfg::embedded::afw_snapshot();
+    xrfg::embedded::report_afw_prepare(static_cast<std::int64_t>(prepare().reason));
+    const auto suspended=xrfg::embedded::afw_snapshot();
+    check(suspended.flat_scene&&suspended.failed_frames==before.failed_frames,"flat scene is a suspension, not failed AFW");
+    end.layerCount=0;
+    check(prepare().reason==GenerationPrepareReason::missing_generation,"removed quad must not remain latched");
+    xrfg::embedded::report_afw_prepare(0);
+    const auto resumed=xrfg::embedded::afw_snapshot();
+    check(!resumed.flat_scene&&resumed.ready_frames==suspended.ready_frames+1,"valid stereo resumes ordinary status");
+    {std::scoped_lock lock(g_state_mutex);g_swapchains.erase(handle);g_swapchains.erase(other_handle);}
+    std::cout<<"GTA flat scene: full application BOTH-eye quad despite erased CRC, no staging read or fake FPS; normal status resumes PASS\n";
+}
+#include "quarantine_history_recovery_test.inc"
 int main(int argc, char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="quarantine-history-recovery") {
+        try {quarantine_history_recovery_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+    if(argc>1 && std::string_view(argv[1])=="gta-flat-scene") {
+        try {xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="luke-queue-policy") {
         try {luke_queue_policy_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
@@ -2254,6 +2398,10 @@ int main(int argc, char** argv) {
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
     xrfg_fixture::ControlProfile autonomous_profile;
+    if(argc>1 && std::string_view(argv[1])=="native-reset-lifetime") {
+        try {native_reset_lifetime_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
     if(argc>3 && std::string_view(argv[1])=="outlaws-startup") {
         const std::string marker=argv[2],provider=argv[3];
         const std::wstring wide_marker(marker.begin(),marker.end());
@@ -2289,12 +2437,20 @@ int main(int argc, char** argv) {
         try {luke_standalone_context_test(true);return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
+    if(argc>1 && std::string_view(argv[1])=="luke-afw-resource-lifecycle") {
+        try {luke_standalone_context_test(true,false,false,true);return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="v474-vd") {
         try {djules_v474_vd_restore_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
     if(argc>1 && std::string_view(argv[1])=="v474-policy") {
         try {djules_v474_policy_lifecycle_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
+    if(argc>1 && std::string_view(argv[1])=="vulkan-deferred-release") {
+        try {vulkan_deferred_release_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
     if(argc>1 && std::string_view(argv[1])=="v474-bridge") {
@@ -2372,6 +2528,14 @@ int main(int argc, char** argv) {
         return std::string_view(argv[1])=="crimson-ngx-actual-capture" ?
             xrfg::run_crimson_ngx_capture_test(wide_realvr.c_str(),wide_streamline.c_str()) :
             xrfg::run_actual_ngx_capture_test(wide_realvr.c_str(),wide_streamline.c_str());
+    }
+    if(argc>3 && (std::string_view(argv[1])=="unlisted-motion-swap-capture" ||
+        std::string_view(argv[1])=="unlisted-motion-original-capture")) {
+        const std::string realvr=argv[2],streamline=argv[3];
+        const std::wstring wide_realvr(realvr.begin(),realvr.end());
+        const std::wstring wide_streamline(streamline.begin(),streamline.end());
+        return xrfg::run_unlisted_motion_capture_test(wide_realvr.c_str(),wide_streamline.c_str(),
+            std::string_view(argv[1])=="unlisted-motion-swap-capture");
     }
     if(argc>3 && std::string_view(argv[1])=="kcd-ngx-logical-capture") {
         const std::string realvr=argv[2],streamline=argv[3];
@@ -2520,9 +2684,11 @@ int main(int argc, char** argv) {
             }
             gpu_pipeline(mode == "composition" || mode == "transition" || mode == "capture", mode == "transition", mode == "capture"); return 0;
         }
+        std::cerr<<"Director fixture: explicit eligibility\n"<<std::flush;
         embedded_eligibility_test();
         // Apply both menu revisions to the real session implementation. The
         // GPU backend stays NVIDIA: only presenter ownership is switched.
+        std::cerr<<"Director fixture: control route revisions\n"<<std::flush;
         {
             auto selected = session();
             selected->presenter_active = false;
@@ -2545,6 +2711,7 @@ int main(int argc, char** argv) {
         }
         // Virtual WaitFrame must return even while synthesis is deliberately
         // marked busy and no director is running. No tick/fence gate survives.
+        std::cerr<<"Director fixture: virtual prediction\n"<<std::flush;
         { std::scoped_lock lock(g_state_mutex); g_sessions[state->handle] = state; }
         state->synthesis_busy = true;
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
@@ -2590,10 +2757,13 @@ int main(int argc, char** argv) {
 
         // Real director, mock pixels. Verify downstream blocking keeps A's
         // slot owned and prevents an early synthetic from overwriting it.
+        std::cerr<<"Director fixture: actual consumer 49 cycles\n"<<std::flush;
+        RegisteredFixtureSession director_registration(state);
         state->three_slots.push_real(frame(1));
         state->three_slots.shift_empty(); state->three_slots.shift_empty();
         state->presenter_thread = std::thread(three_slot_director_main, state);
         for (unsigned n = 2; n <= 25; ++n) {
+            std::cerr<<"Director fixture: admit real "<<n<<'\n'<<std::flush;
             until(state, [&] { return state->three_slots.can_accept_real(); });
             {
                 std::scoped_lock lock(state->presenter_mutex);
@@ -2627,9 +2797,11 @@ int main(int argc, char** argv) {
         check(presented.back() == std::pair<unsigned,bool>{25,false}, "last real drain");
         check(waits == begins && begins == ends && ends == 49, "frame cycle mismatch");
 
+        std::cerr<<"Director fixture: refused output recovery\n"<<std::flush;
         refused_frame_recovery_test();
 
         auto failing = session();
+        RegisteredFixtureSession failing_registration(failing);
         failing->three_slots.push_real(frame(1));
         failing->three_slots.shift_empty(); failing->three_slots.shift_empty();
         failing->three_slots.push_real(frame(2));
@@ -2641,6 +2813,7 @@ int main(int argc, char** argv) {
         fail_runtime = false;
 
         auto held = session();
+        RegisteredFixtureSession held_registration(held);
         held->three_slots.push_real(frame(1));
         held->three_slots.shift_empty(); held->three_slots.shift_empty();
         const auto before_stop = ends.load();
@@ -2651,6 +2824,7 @@ int main(int argc, char** argv) {
         // The actual worker error path must wake both producer rendezvous and
         // director. A missing mapping cannot silently strand a busy worker.
         auto failed = session();
+        RegisteredFixtureSession failed_registration(failed);
         auto job = std::make_shared<SynthesisJob>();
         job->current = frame(1); failed->synthesis_job = job; failed->synthesis_busy = true;
         failed->synthesis_thread = std::thread(synthesis_worker_main, failed);

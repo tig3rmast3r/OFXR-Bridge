@@ -1,7 +1,9 @@
 #include "xrfg/d3d12_history.hpp"
+#include "xrfg/d3d11_dlss_guides.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/luke_color_origin.hpp"
+#include "xrfg/luke_origin_continuity.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 // Private test session; no keyboard input or shipping test control.
@@ -21,6 +23,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -231,7 +234,7 @@ public:
     [[nodiscard]] std::uint64_t last_submitted_value() const noexcept { return next_fence_value_ - 1; }
 
     template <typename Recorder>
-    void execute_and_wait(Recorder&& recorder) {
+    void execute_and_wait(Recorder&& recorder,bool report_submission=true) {
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> command_list;
         require_hresult(
@@ -252,6 +255,7 @@ public:
         require_hresult(command_list->Close(), "ID3D12GraphicsCommandList::Close");
         ID3D12CommandList* command_lists[] = {command_list.Get()};
         queue_->ExecuteCommandLists(1, command_lists);
+        if(report_submission)xrfg::report_dlss_motion_vector_submission(queue_.Get(),1,command_lists);
 
         const std::uint64_t fence_value = next_fence_value_++;
         require_hresult(queue_->Signal(fence_.Get(), fence_value), "ID3D12CommandQueue::Signal");
@@ -1337,13 +1341,15 @@ void require_readback_matches(
         "ID3D12Resource::Map(readback)");
     const auto* mapped_bytes = static_cast<const std::byte*>(mapped_memory);
     for (UINT eye = 0; eye < kEyeCount; ++eye) {
-        for (UINT y = 0; y < kHeight; ++y) {
+        require(expected[eye].size()==description.Width*description.Height*kBytesPerPixel,
+            std::string(label)+" expected pattern extent differs from actual texture");
+        for (UINT y = 0; y < description.Height; ++y) {
             const std::byte* actual =
                 mapped_bytes + layouts[eye].Offset +
                 static_cast<std::size_t>(y) * layouts[eye].Footprint.RowPitch;
             const std::uint8_t* wanted =
                 expected[eye].data() +
-                static_cast<std::size_t>(y) * kWidth * kBytesPerPixel;
+                static_cast<std::size_t>(y) * description.Width * kBytesPerPixel;
             if (std::memcmp(actual, wanted, static_cast<std::size_t>(row_sizes[eye])) != 0) {
                 std::size_t first_difference = 0;
                 while (first_difference < row_sizes[eye] &&
@@ -1773,7 +1779,7 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
     std::vector<std::shared_ptr<const xrfg::DlssMotionVectorFrame>> held;
     std::shared_ptr<const xrfg::DlssMotionVectorFrame> published;
     std::uint64_t production_sequence{};
-    const auto publish = [&](unsigned n, bool reset = false) {
+    const auto publish = [&](unsigned n, bool reset = false,bool submit_receipt=true) {
         upload_pattern(fixture, motion.Get(), make_pattern(static_cast<std::uint8_t>(n * 13)));
         upload_pattern(fixture, depth.Get(), make_pattern(static_cast<std::uint8_t>(n * 17)));
         fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
@@ -1792,14 +1798,16 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
             p.raw_clip_to_previous_clip[12]=float(n)*.25F;
             p.raw_previous_clip_to_clip[12]=-float(n)*.25F;
             published = xrfg::publish_dlss_motion_vectors(p);
-        });
+        },submit_receipt);
         const auto resolved = xrfg::resolve_dlss_motion_vectors(1, fixture.queue());
         require(resolved && resolved->eye_count == 1 && resolved->eyes[0], "protected guide resolution");
         return resolved->eyes[0];
     };
     constexpr unsigned snapshot_capacity = 16;
     for (unsigned n = 1; n <= snapshot_capacity; ++n) {
-        auto frame = publish(n);
+        // Preserve the explicit cross-queue ownership counterfactual below:
+        // actual GPU copies finish, but n3/n4 have no admitted receipt yet.
+        auto frame = publish(n,false,n!=3 && n!=4);
         require(published && published->publication == frame->publication &&
             published->color_origin_token != 0 &&
             published->color_origin_token == frame->color_origin_token &&
@@ -1941,6 +1949,10 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
     require_readback_matches(fixture, recycled->motion_vectors.Get(), make_pattern(221), "recycled MV", snapshot_state);
     held.clear();
     const auto reset = publish(10, true);
+    const auto reset_metadata=xrfg::luke_native_origin_metadata(reset->color_origin_token,fixture.device());
+    require(reset_metadata&&reset_metadata->epoch==reset->epoch&&reset_metadata->serial==1&&
+        xrfg::luke_native_stream_reset(reset->stream,recycled->epoch,fixture.device()),
+        "ordinary non-GTA native reset preflight remained title-restricted");
     require(reset->publication == recycled->publication + 1 && reset->serial == 1 &&
         reset->color_origin_token > recycled->color_origin_token &&
         !xrfg::resolve_luke_guide_token(recycled->color_origin_token, fixture.queue(), fixture.device()) &&
@@ -1997,7 +2009,7 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
                 p.resource_state = p.depth_resource_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
                 p.protect_snapshot_lifetime = true;
                 exact_frame = xrfg::publish_dlss_motion_vectors(p);
-            });
+            },false); // the proxy-owner negative test supplies its receipt explicitly
             require(exact_frame != nullptr, "unused original metadata blocked protected publication");
         }
         require(unused_color->device_queries() == 0, "publisher queried an unsnapshotted unused color device");
@@ -2094,7 +2106,7 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
         std::shared_ptr<const xrfg::DlssMotionVectorFrame> frame;
         ComPtr<ID3D12Resource> color;
     };
-    const auto publish=[&](std::uint64_t stream,unsigned n,unsigned seed,bool reset=false) {
+    const auto publish=[&](std::uint64_t stream,unsigned n,unsigned seed,bool reset=false,bool submit_receipt=true) {
         upload_pattern(fixture,motion.Get(),make_pattern(static_cast<std::uint8_t>(seed+n)));
         upload_pattern(fixture,depth.Get(),make_pattern(static_cast<std::uint8_t>(seed+n+50)));
         FrozenOrigin recorded{};recorded.color=create_single_slice_texture(fixture,512,32);
@@ -2120,7 +2132,7 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
                 transition_barrier(color.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET),
                 transition_barrier(recorded.color.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_RENDER_TARGET)};
             list->ResourceBarrier(2,after);
-        });
+        },submit_receipt);
         return recorded;
     };
     const auto read=[&](const FrozenOrigin& source) {
@@ -2130,7 +2142,10 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
         require(token==source.frame->color_origin_token,"multi-handle frozen color lost its exact origin");
         return token;
     };
-    auto a1=publish(90499,1,10),a2=publish(90499,2,10),a3=publish(90499,3,10);
+    auto a1=publish(90499,1,10);
+    // The exact A2/A3 originals execute now, but their ownership receipt is
+    // deliberately withheld for the cross-queue negative/positive pair below.
+    auto a2=publish(90499,2,10,false,false),a3=publish(90499,3,10,false,false);
     const auto a_token=read(a3);
     require(xrfg::resolve_luke_guide_token(a_token,fixture.queue(),fixture.device())!=nullptr,
         "single-handle baseline did not resolve exact color");
@@ -2179,7 +2194,12 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
     // Deliberately corrupt this fixture's registry claim: a process-unique
     // token cannot have two native owners. Preserve the actual GPU colors and
     // restore the fixture immediately after exercising the fail-closed guard.
-    auto forged_owner=std::const_pointer_cast<xrfg::DlssMotionVectorFrame>(b3.frame);
+    // Submission stamps an immutable registry copy. Corrupt that ACTUAL owner
+    // temporarily, not the earlier CPU publication object returned by publish.
+    const auto native_owner=xrfg::resolve_dlss_guide_publication(90500,b3.frame->publication,fixture.queue());
+    require(native_owner && native_owner->color_origin_token==b3.frame->color_origin_token,
+        "duplicate-origin counterfactual did not identify the actual submitted registry owner");
+    auto forged_owner=std::const_pointer_cast<xrfg::DlssMotionVectorFrame>(native_owner);
     const auto b_token=forged_owner->color_origin_token;
     forged_owner->color_origin_token=a_token;
     require(!xrfg::resolve_luke_guide_token(read(a3),fixture.queue(),fixture.device()),
@@ -2210,7 +2230,51 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
     std::cout<<"Multi-handle native color: actual CRC transport, exact own N-1/N-2, old/current pixels, crossqueue/device/interval/reset/retirement/eviction guards PASS\n";
 }
 
-void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_span=1) {
+void test_gta_origin_continuity(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    auto color=create_source_texture(fixture),motion=create_source_texture(fixture),depth=create_source_texture(fixture);
+    xrfg::LukeOriginContinuity continuity;unsigned continued=0;
+    std::vector<std::shared_ptr<const xrfg::DlssMotionVectorFrame>> pins;
+    for(unsigned n=1;n<=12;++n) {
+        upload_pattern(fixture,motion.Get(),make_pattern(static_cast<std::uint8_t>(n*3)));
+        upload_pattern(fixture,depth.Get(),make_pattern(static_cast<std::uint8_t>(n*5)));
+        std::shared_ptr<const xrfg::DlssMotionVectorFrame> frame;
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list){xrfg::DlssMotionVectorPublication p;
+            p.stream=91500;p.output=color.Get();p.motion_vectors=motion.Get();p.depth=depth.Get();
+            p.producer_queue=fixture.queue();p.producer_command_list=list;p.protect_snapshot_lifetime=true;p.raw_motion_native_span=1;
+            p.output_width=p.motion_width=p.depth_width=kWidth;p.output_height=p.motion_height=p.depth_height=kHeight;
+            p.resource_state=p.depth_resource_state=D3D12_RESOURCE_STATE_RENDER_TARGET;
+            p.camera_frame_token_valid=p.camera_data_valid=p.camera_matrices_valid=true;p.camera_frame_token=1000+n;
+            p.camera_right={1,0,0};p.camera_up={0,1,0};p.camera_forward={0,0,-1};p.camera_position={float(n)*.2F,0,0};
+            p.camera_view_to_clip[0]=p.camera_view_to_clip[5]=1;p.camera_view_to_clip[11]=-1;p.camera_view_to_clip[14]=.1F;
+            p.camera_clip_to_view[0]=p.camera_clip_to_view[5]=1;p.camera_clip_to_view[11]=10;p.camera_clip_to_view[14]=-1;
+            p.frame_time_delta_ms=16;p.reset=n==8;frame=xrfg::publish_dlss_motion_vectors(p);});
+        require(frame!=nullptr,"continuity original native publication missing");pins.push_back(frame);
+        if(n<3)continue;
+        const unsigned step=n-3;xrfg::LukeOriginSequenceFrame stamp;stamp.stream=frame->stream;stamp.epoch=frame->epoch;
+        stamp.publication=frame->publication;stamp.native=frame->camera_frame_token;stamp.token=frame->color_origin_token;
+        stamp.eye=step&1;stamp.owner=99;stamp.contexts={10,20};stamp.captures={50+step/2,50+(step+1)/2};stamp.shape={kWidth,kHeight,kWidth,kHeight};
+        if(n<=4){require(xrfg::resolve_luke_guide_token(stamp.token,fixture.queue(),fixture.device())!=nullptr,"CRC anchor did not resolve its own native history");continuity.confirm(stamp,true,n*11);continue;}
+        const auto prediction=continuity.predict(n*11,stamp.eye,stamp.captures,stamp.contexts);
+        require(prediction&&xrfg::LukeOriginContinuity::matches(prediction->frame,stamp),"continued key differs from original produced key");
+        const auto guide=xrfg::resolve_luke_guide_token(prediction->frame.token,fixture.queue(),fixture.device());
+        if(n==8){require(!guide,"continuity crossed a reset into old camera/vector history");continue;}
+        require(guide&&guide->publication==stamp.publication&&guide->camera_frame_token==stamp.native&&guide->previous_opposite_guide&&
+            guide->previous_opposite_guide->epoch==guide->epoch&&guide->previous_opposite_guide->publication+1==guide->publication,
+            "continued token did not resolve exact fresh native guides");
+        require_readback_matches(fixture,guide->motion_vectors.Get(),make_pattern(static_cast<std::uint8_t>(n*3)),"continued native MV is fresh",guide->resource_state);
+        require_readback_matches(fixture,guide->previous_opposite_guide->depth.Get(),make_pattern(static_cast<std::uint8_t>((n-1)*5)),"continued opposite depth is exact",guide->previous_opposite_guide->depth_resource_state);
+        continuity.used();++continued;
+        if(n==12)require(!continuity.confirm(stamp,true,n*11),"matching CRC recovery reset exact continued GPU history");
+    }
+    require(continued==7,"continuity GPU fixture did not cover the expected new native frames");
+    require(!xrfg::resolve_luke_guide_token(UINT32_MAX,fixture.queue(),fixture.device()),"unknown sequence key fell back to latest guide");
+    xrfg::configure_dlss_motion_vector_tracking(false);pins.clear();xrfg::retire_disabled_dlss_motion_vector_resources();
+    std::cout<<"GTA continuation GPU: actual new MV/depth/fence keys, reset refusal, own-epoch recovery and matching CRC return PASS\n";
+}
+
+void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_span=1, bool reset_transition=false) {
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
     xrfg::configure_dlss_motion_vector_tracking(true);
@@ -2259,6 +2323,67 @@ void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_sp
             "interleaved exact N-1 depth",joined->previous_opposite_guide->depth_resource_state);
         if(n>=22)require(std::abs(joined->calibrated_game_eye_baseline-6.4F)<.0001F,
             "interleaved production calibration did not cancel camera translation");
+    }
+    if(reset_transition) {
+        const auto token23=produced[22]->color_origin_token,token24=produced[23]->color_origin_token;
+        std::shared_ptr<const xrfg::DlssMotionVectorFrame> last;
+        {
+        const auto old23=produced[22],old24=produced[23];
+        const auto reset25=publish(25,0,true);
+        require(reset25->epoch==old23->epoch+1 && reset25->serial==1,
+            "GTA fixture did not reproduce one native eye reset before delayed XR consumption");
+        require(xrfg::luke_native_stream_reset(old23->stream,old23->epoch,fixture.device()) &&
+            !xrfg::luke_native_stream_reset(old23->stream,reset25->epoch,fixture.device()) &&
+            !xrfg::luke_native_stream_reset(old23->stream,old23->epoch,nullptr),
+            "reset control preflight lost its exact accepted owner/epoch");
+        const auto metadata=xrfg::luke_native_origin_metadata(reset25->color_origin_token,fixture.device());
+        require(metadata&&metadata->stream==reset25->stream&&metadata->epoch==reset25->epoch&&
+            metadata->publication==reset25->publication&&metadata->serial==1&&
+            !xrfg::luke_native_origin_metadata(0,fixture.device())&&
+            !xrfg::luke_native_origin_metadata(reset25->color_origin_token,nullptr),
+            "reset metadata guessed a key or admitted a foreign consumer");
+        const auto delayed24=xrfg::resolve_luke_guide_token(token24,fixture.queue(),fixture.device());
+        require(delayed24 && delayed24->publication==old24->publication && delayed24->previous_opposite_guide &&
+            delayed24->previous_opposite_guide->publication==old23->publication && delayed24->previous_same_guide &&
+            delayed24->previous_same_guide->publication==produced[21]->publication,
+            "GTA native reset discarded the exact in-flight old color N-1/N-2");
+        const auto delayed23=xrfg::resolve_luke_guide_token(token23,fixture.queue(),fixture.device());
+        require(delayed23 && delayed23->epoch==old23->epoch && delayed23->serial==old23->serial &&
+            delayed23->previous_opposite_guide->publication==produced[21]->publication,
+            "GTA old color was relabelled with the newest owner epoch");
+        require_readback_matches(fixture,delayed24->motion_vectors.Get(),make_pattern(72),
+            "GTA reset retained exact old MV",delayed24->resource_state);
+        require_readback_matches(fixture,delayed24->previous_opposite_guide->depth.Get(),make_pattern(115),
+            "GTA reset retained exact old N-1 depth",delayed24->previous_opposite_guide->depth_resource_state);
+        require(!xrfg::resolve_luke_guide_token(reset25->color_origin_token,fixture.queue(),fixture.device()),
+            "GTA new reset epoch borrowed the old opposite history");
+        const auto next26=publish(26),next27=publish(27);
+        require(!xrfg::resolve_luke_guide_token(next26->color_origin_token,fixture.queue(),fixture.device()) &&
+            !xrfg::resolve_luke_guide_token(next27->color_origin_token,fixture.queue(),fixture.device()),
+            "GTA incomplete/reset A/B/A interval was admitted");
+        last=publish(28);
+        auto recovered=xrfg::resolve_luke_guide_token(last->color_origin_token,fixture.queue(),fixture.device());
+        require(recovered && recovered->publication==last->publication && recovered->previous_opposite_guide &&
+            recovered->previous_opposite_guide->publication==next27->publication &&
+            recovered->previous_same_guide->publication==next26->publication,
+            "GTA new epoch failed to recover its exact new A/B/A history");
+        }
+        // Release test pins; only real registry ownership may limit reuse now.
+        // No unbounded history: old keys expire naturally under the same ring limit.
+        produced.clear();
+        for(unsigned n=29;n<=56;++n)last=publish(n);
+        require(!xrfg::resolve_luke_guide_token(token24,fixture.queue(),fixture.device()) &&
+            !xrfg::resolve_luke_guide_token(token23,fixture.queue(),fixture.device()),
+            "GTA reset history escaped the bounded exact-color cache");
+        const auto recovered=xrfg::resolve_luke_guide_token(last->color_origin_token,fixture.queue(),fixture.device());
+        require(recovered!=nullptr,"GTA bounded history blocked ongoing producer slots");
+        xrfg::invalidate_dlss_motion_vector_stream_history(last->stream);
+        require(!xrfg::resolve_luke_guide_token(last->color_origin_token,fixture.queue(),fixture.device()),
+            "GTA explicit failed-native invalidation retained a stale color");
+        xrfg::configure_dlss_motion_vector_tracking(false);
+        xrfg::retire_disabled_dlss_motion_vector_resources();
+        std::cout<<"GTA reset: delayed exact GPU guides, old epoch identity, strict new prime, bounded eviction and explicit invalidation PASS\n";
+        return;
     }
     auto bad=publish(25,999);
     require(!xrfg::resolve_luke_guide_token(bad->color_origin_token,fixture.queue(),fixture.device()),
@@ -3678,6 +3803,225 @@ void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
     xrfg::retire_dlss_motion_vector_stream(633);
 }
 
+// MSFS 2024's foveated rendering, ported from 0.2's V515: DLSS once per
+// view, four a frame - per eye a periphery over the whole field at a
+// fraction of its pixels and an inset - none the size of an eye image. Each
+// eye takes the stream whose camera covers its field, placed scaled.
+void test_view_placed_dlss_guides(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    // A D3D-style row-vector projection with these edge tangents (w = z).
+    const auto projection = [](float left, float right, float up, float down) {
+        std::array<float, 16> m{};
+        m[0] = 2.0F / (right - left);
+        m[5] = 2.0F / (up - down);
+        m[8] = -(right + left) / (right - left);
+        m[9] = -(up + down) / (up - down);
+        m[10] = 0.0F;
+        m[11] = 1.0F;
+        m[14] = 0.1F;
+        return m;
+    };
+    {
+        xrfg::DlssMotionVectorFrame frame{};
+        frame.camera_matrices_valid = true;
+        frame.camera_view_to_clip = projection(-1.25F, 0.95F, 1.1F, -1.3F);
+        const auto g = xrfg::dlss_view_geometry(frame);
+        require(g.known && std::fabs(g.tan_left + 1.25F) < 1e-4F && std::fabs(g.tan_right - 0.95F) < 1e-4F &&
+                std::fabs(g.tan_up - 1.1F) < 1e-4F && std::fabs(g.tan_down + 1.3F) < 1e-4F,
+            "the edge tangents of an asymmetric projection were not read back");
+        frame.camera_matrices_valid = false;
+        require(!xrfg::dlss_view_geometry(frame).known, "a camera without valid matrices had a field");
+    }
+    const auto texture = [&](UINT width, UINT height) {
+        auto description = stereo_texture_description(width, height);
+        description.DepthOrArraySize = 1;
+        description.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const auto properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> resource;
+        require_hresult(fixture.device()->CreateCommittedResource(&properties,
+            D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_COMMON,
+            nullptr, IID_PPV_ARGS(&resource)), "foveated texture");
+        return resource;
+    };
+    const auto periphery_output = texture(96, 96), inset_output = texture(64, 64);
+    const auto periphery_motion = texture(48, 48), inset_motion = texture(32, 32);
+    struct View { float left, right, up, down; float x; };
+    const auto publish = [&](std::uint64_t stream, const View& v, bool periphery) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::DlssMotionVectorPublication p{};
+            p.stream = stream;
+            p.output = periphery ? periphery_output.Get() : inset_output.Get();
+            p.motion_vectors = periphery ? periphery_motion.Get() : inset_motion.Get();
+            p.output_width = p.output_height = periphery ? 96 : 64;
+            p.motion_width = p.motion_height = periphery ? 48 : 32;
+            p.producer_queue = fixture.queue(); p.producer_command_list = list;
+            p.resource_state = D3D12_RESOURCE_STATE_COMMON;
+            p.camera_view_to_clip = projection(v.left, v.right, v.up, v.down);
+            p.camera_position = {v.x, 0.0F, 0.0F};
+            p.camera_right = {1.0F, 0.0F, 0.0F};
+            p.camera_up = {0.0F, 1.0F, 0.0F};
+            p.camera_forward = {0.0F, 0.0F, 1.0F};
+            p.camera_data_valid = p.camera_matrices_valid = true;
+            require(xrfg::publish_dlss_motion_vectors(p) != nullptr, "foveated publication failed");
+        });
+        return xrfg::dlss_motion_vector_publications();
+    };
+    // Canted eyes, each wider outward. The peripheries reach a little past
+    // their eye's field; the insets sit inside it.
+    const View left_eye{-1.2F, 0.9F, 1.0F, -1.2F, -0.03F}, right_eye{-0.9F, 1.2F, 1.0F, -1.2F, 0.03F};
+    const View left_periphery{-1.25F, 0.95F, 1.05F, -1.25F, -0.03F};
+    const View right_periphery{-0.95F, 1.25F, 1.05F, -1.25F, 0.03F};
+    const View left_inset{-0.4F, 0.3F, 0.3F, -0.4F, -0.03F}, right_inset{-0.3F, 0.4F, 0.3F, -0.4F, 0.03F};
+    const auto eye_view = [](const View& v) {
+        return xrfg::DlssEyeView{v.left, v.right, v.up, v.down, 0, 0, 200, 220};
+    };
+    const std::array<xrfg::DlssEyeView, 2> eyes{eye_view(left_eye), eye_view(right_eye)};
+    std::uint64_t release{};
+    for (int frame = 0; frame < 2; ++frame) {
+        publish(901, left_inset, false);
+        publish(902, right_periphery, true);
+        publish(903, left_periphery, true);
+        release = publish(904, right_inset, false);
+    }
+    const auto placed = xrfg::resolve_view_placed_dlss_guides(fixture.queue(), eyes, {release, release});
+    require(placed[0] && placed[1] && placed[0]->eyes[0]->stream == 903 &&
+            placed[1]->eyes[0]->stream == 902,
+        "each eye did not take the periphery whose camera covers its field");
+    const auto& left = *placed[0]->eyes[0];
+    // The left eye's field starts 0.05 of the periphery's 2.2 to its right:
+    // 48 * 0.05 / 2.2 texels in, and spans 2.1 of the 2.2.
+    require(left.placed && left.output_x == 0 && left.output_width == 200 && left.output_height == 220 &&
+            std::fabs(left.placed_motion_rect[0] - 48.0F * 0.05F / 2.2F) < 1e-3F &&
+            std::fabs(left.placed_motion_rect[2] - 48.0F * 2.1F / 2.2F) < 1e-3F &&
+            std::fabs(left.placed_motion_rect[1] - 48.0F * 0.05F / 2.3F) < 1e-3F,
+        "the periphery was not placed over the eye's image by its camera");
+    const auto mr = xrfg::guide_motion_rect(left);
+    require(mr == left.placed_motion_rect, "a placed guide's vectors are not its placed rectangle");
+    require(placed[0]->eyes[0]->serial == 2 && placed[1]->eyes[0]->serial == 2,
+        "the newest evaluation by the release was not taken");
+    // A release before this frame's evaluations takes the stream's previous.
+    const auto earlier = xrfg::resolve_view_placed_dlss_guides(fixture.queue(), eyes, {release - 4, release - 4});
+    require(earlier[0] && earlier[0]->eyes[0]->serial == 1, "a release did not bound its eye's evaluation");
+    // Without the peripheries no camera covers an eye: neither eye is placed.
+    for (const auto stream : {901ULL, 902ULL, 903ULL, 904ULL})
+        xrfg::retire_dlss_motion_vector_stream(stream);
+    publish(905, left_inset, false);
+    const auto inset_only = publish(906, right_inset, false);
+    const auto none = xrfg::resolve_view_placed_dlss_guides(fixture.queue(), eyes, {inset_only, inset_only});
+    require(!none[0] && !none[1], "an inset that covers no eye was placed");
+    xrfg::retire_dlss_motion_vector_stream(905);
+    xrfg::retire_dlss_motion_vector_stream(906);
+    // A symmetric field both peripheries cover alike: the camera further
+    // left is the left eye, whichever was published first.
+    const View symmetric{-1.0F, 1.0F, 1.0F, -1.0F, 0.0F};
+    View periphery_a{-1.05F, 1.05F, 1.05F, -1.05F, 0.03F}, periphery_b = periphery_a;
+    periphery_b.x = -0.03F;
+    publish(907, periphery_a, true);
+    const auto both = publish(908, periphery_b, true);
+    const std::array<xrfg::DlssEyeView, 2> symmetric_eyes{eye_view(symmetric), eye_view(symmetric)};
+    const auto sided = xrfg::resolve_view_placed_dlss_guides(fixture.queue(), symmetric_eyes, {both, both});
+    require(sided[0] && sided[1] && sided[0]->eyes[0]->stream == 908 && sided[1]->eyes[0]->stream == 907,
+        "the camera positions did not decide two equally fitting peripheries");
+    xrfg::retire_dlss_motion_vector_stream(907);
+    xrfg::retire_dlss_motion_vector_stream(908);
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    std::cout << "Foveated guides placed by their cameras: field from projection, periphery per eye, release bound, insets refused, camera side PASS\n";
+}
+
+// Cheeky Foveated DLSS without Streamline: no camera on any stream. Each
+// eye's periphery is its view enlarged (the shape to 1%, at most three times
+// smaller); the insets are not. Both eyes or neither; the first evaluated is
+// the left unless the motion inputs sit apart.
+void test_enlarged_dlss_guides(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    const auto texture = [&](UINT width, UINT height) {
+        auto description = stereo_texture_description(width, height);
+        description.DepthOrArraySize = 1;
+        description.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const auto properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> resource;
+        require_hresult(fixture.device()->CreateCommittedResource(&properties,
+            D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_COMMON,
+            nullptr, IID_PPV_ARGS(&resource)), "enlarged guide texture");
+        return resource;
+    };
+    // Eyes 200 x 220 side by side; peripheries 100 x 110 (the shape, half the
+    // size), insets 64 x 64 (neither the shape nor within three times).
+    const auto periphery_a = texture(100, 110), periphery_b = texture(100, 110);
+    const auto inset_a = texture(64, 64), inset_b = texture(64, 64);
+    const auto motion = texture(96, 48);
+    const auto publish = [&](std::uint64_t stream, ID3D12Resource* output, UINT width, UINT height,
+                             UINT motion_x = 0) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::DlssMotionVectorPublication p{};
+            p.stream = stream;
+            p.output = output;
+            p.motion_vectors = motion.Get();
+            p.output_width = width; p.output_height = height;
+            p.motion_x = motion_x; p.motion_width = 48; p.motion_height = 48;
+            p.producer_queue = fixture.queue(); p.producer_command_list = list;
+            p.resource_state = D3D12_RESOURCE_STATE_COMMON;
+            require(xrfg::publish_dlss_motion_vectors(p) != nullptr, "enlarged publication failed");
+        });
+        return xrfg::dlss_motion_vector_publications();
+    };
+    const std::array<xrfg::DlssEyeView, 2> eyes{
+        xrfg::DlssEyeView{-1.0F, 1.0F, 1.0F, -1.0F, 0, 0, 200, 220},
+        xrfg::DlssEyeView{-1.0F, 1.0F, 1.0F, -1.0F, 200, 0, 200, 220}};
+    std::uint64_t release{};
+    for (int frame = 0; frame < 2; ++frame) {
+        publish(911, inset_a.Get(), 64, 64);
+        publish(912, periphery_a.Get(), 100, 110);
+        publish(913, periphery_b.Get(), 100, 110);
+        release = publish(914, inset_b.Get(), 64, 64);
+    }
+    const auto enlarged = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, release);
+    require(enlarged[0] && enlarged[1] && enlarged[0]->eyes[0] && enlarged[1]->eyes[0] &&
+            enlarged[0]->eyes[0]->stream == 912 && enlarged[1]->eyes[0]->stream == 913,
+        "the peripheries were not taken in evaluation order, or the insets were");
+    const auto& left = *enlarged[0]->eyes[0];
+    const auto& right = *enlarged[1]->eyes[0];
+    require(left.placed && left.output_x == 0 && left.output_y == 0 && left.output_width == 200 &&
+            left.output_height == 220 && right.placed && right.output_x == 200 && right.output_width == 200 &&
+            left.placed_motion_rect == std::array<float, 4>{0.0F, 0.0F, 48.0F, 48.0F} &&
+            xrfg::guide_motion_rect(left) == left.placed_motion_rect,
+        "a periphery was not placed over its eye's half with all of its vectors");
+    require(left.serial == 2 && right.serial == 2, "the newest evaluation by the release was not taken");
+    const auto earlier = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, release - 4);
+    require(earlier[0] && earlier[0]->eyes[0]->serial == 1, "a release did not bound the evaluation taken");
+    // A third enlarging stream is a guess: nothing.
+    const auto third = publish(915, periphery_a.Get(), 100, 110);
+    const auto guess = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, third);
+    require(!guess[0] && !guess[1], "three enlarging streams were paired");
+    xrfg::retire_dlss_motion_vector_stream(915);
+    // One periphery alone: neither eye.
+    xrfg::retire_dlss_motion_vector_stream(913);
+    const auto alone = publish(912, periphery_a.Get(), 100, 110);
+    const auto single = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, alone);
+    require(!single[0] && !single[1], "a single periphery was placed");
+    // Motion inputs apart decide the eyes, not the evaluation order.
+    for (const auto stream : {911ULL, 912ULL, 914ULL}) xrfg::retire_dlss_motion_vector_stream(stream);
+    publish(921, periphery_a.Get(), 100, 110, 48);
+    const auto apart = publish(922, periphery_b.Get(), 100, 110, 0);
+    const auto sided = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, apart);
+    require(sided[0] && sided[1] && sided[0]->eyes[0]->stream == 922 && sided[1]->eyes[0]->stream == 921,
+        "the motion inputs' positions did not decide the eyes");
+    // A stream the game stopped evaluating keeps its last frame; after enough
+    // other publications it is no longer recent, and the pair is gone.
+    for (int n = 0; n < 40; ++n) publish(923, inset_a.Get(), 64, 64);
+    const auto stale = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, xrfg::dlss_motion_vector_publications());
+    require(!stale[0] && !stale[1], "stale peripheries were still paired");
+    for (const auto stream : {921ULL, 922ULL, 923ULL}) xrfg::retire_dlss_motion_vector_stream(stream);
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    std::cout << "Enlarged guides: peripheries over both eyes, insets refused, release bound, third refused, single refused, input side, stale refused PASS\n";
+}
+
 void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
     using Mode = xrfg::D3D12FrameGenerationMode;
     require(xrfg::use_release_bound_game_guides(Mode::ofxr, true, false) &&
@@ -3714,7 +4058,7 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
             p.producer_queue = fixture.queue(); p.producer_command_list = list;
             p.resource_state = D3D12_RESOURCE_STATE_COMMON; p.reset = reset;
             require(xrfg::publish_dlss_motion_vectors(p) != nullptr, "R15 publication failed");
-        });
+        },false); // this helper owns the deliberate submit_receipt counterfactual
         if (submit_receipt) {
             ID3D12CommandList* lists[] = {recorded.Get()};
             xrfg::report_dlss_motion_vector_submission(fixture.queue(), 1, lists);
@@ -3795,6 +4139,39 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
     xrfg::retire_dlss_motion_vector_stream(722);
     xrfg::retire_dlss_motion_vector_stream(766);
 
+    // No Man's Sky: one evaluation per frame for both eyes side by side, each
+    // eye in the matching half of an image the evaluation's size. Both eyes
+    // take the frame's evaluation, chained to the previous frame's; without
+    // both_eyes the shared-stream rule gave the left eye the previous frame's
+    // and left every pair's serials unchained (DLSS-G skip 1, detail 5).
+    // Each takes its half of the vectors, its output on its view's half.
+    const xrfg::DlssReleasedEyeIdentity both_eyes{false, 0, 0, true, 0};
+    const xrfg::DlssReleasedEyeIdentity both_eyes_right{false, 0, 0, true, 1};
+    std::uint64_t both_previous{};
+    for (int frame = 0; frame < 3; ++frame) {
+        const auto release = publish(799, color.Get());
+        const auto both_left = xrfg::resolve_dlss_motion_vectors(xr_color.Get(), fixture.queue(),
+            0, release, release, both_eyes);
+        const auto both_right = xrfg::resolve_dlss_motion_vectors(xr_color.Get(), fixture.queue(),
+            1, release, release, both_eyes_right);
+        require(both_left && both_right && both_left->eyes[0]->publication == release &&
+                both_right->eyes[0]->publication == release &&
+                both_left->eyes[0]->previous_serial + 1 == both_left->eyes[0]->serial &&
+                (!both_previous || both_left->eyes[0]->previous_serial == both_previous),
+            "a both-eyes evaluation did not go to both eyes, chained frame to frame");
+        const auto& l = *both_left->eyes[0];
+        const auto& r = *both_right->eyes[0];
+        require(l.motion_x == 0 && l.motion_width == 32 && r.motion_x == 32 && r.motion_width == 32 &&
+                l.output_x == 0 && l.output_width == 32 && r.output_x == 32 && r.output_width == 32,
+            "a both-eyes evaluation did not give each eye its own half");
+        both_previous = both_left->eyes[0]->serial;
+    }
+    const auto alternating = resolve(0, xrfg::dlss_motion_vector_publications(),
+        xrfg::dlss_motion_vector_publications());
+    require(alternating && alternating->eyes[0]->serial + 1 == both_previous,
+        "without both_eyes one shared stream no longer gave the left eye the earlier evaluation");
+    xrfg::retire_dlss_motion_vector_stream(799);
+
     // A CPU publication on another queue is insufficient. Only the actual
     // producer submission attaches the fence to the selected older snapshot.
     ComPtr<ID3D12CommandQueue> consumer;
@@ -3819,7 +4196,7 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
     require(publish(788, color.Get()) > watermark, "R15 watermark reused an old publication after toggle");
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
-    std::cout << "R15 release-bound guides: right-first shared/separate, stale/spectator, resets, ambiguity, cross-queue receipts; FSR/OFA/AFW legacy preserved PASS\n";
+    std::cout << "R15 release-bound guides: right-first shared/separate, stale/spectator, resets, ambiguity, both-eyes evaluations, cross-queue receipts; FSR/OFA/AFW legacy preserved PASS\n";
 }
 
 // A game that renders both eyes through one view (UEVR's Synchronized
@@ -4091,6 +4468,22 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
         native_left.Get(), fixture.queue());
     require(native_mono && native_mono->eye_count == 1,
         "ordinary mono resolution changed with Native Stereo guides");
+    // The pair must be recent: a stream the game stopped evaluating keeps its
+    // last frame, and nine publications of another stream later the eye-sized
+    // pair is stale (Cheeky Foveated DLSS toggling foveation off and on).
+    const auto unrelated_output = create_texture(24, 24, 1);
+    for (int n = 0; n < 9; ++n)
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+            xrfg::publish_dlss_motion_vectors({
+                505, unrelated_output.Get(), motion.Get(), fixture.queue(), 0, 0, 24, 24,
+                0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
+                D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+        });
+    const auto stale_native = xrfg::resolve_dlss_motion_vectors(
+        native_xr.Get(), fixture.queue());
+    require(!stale_native || stale_native->eye_count != 2,
+        "a stale eye-sized pair was still matched to the double-wide image");
+    xrfg::retire_dlss_motion_vector_stream(505);
 
     xrfg::configure_dlss_motion_vector_tracking(false);
     require(!xrfg::resolve_dlss_motion_vectors(xr_output.Get(), fixture.queue()),
@@ -5201,14 +5594,25 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 
 #include "native_dlssg_gpu.inc"
 
+#include "panel_synthesis_tests.inc"
+
 }  // namespace
 
 #include "r19_upstream_camera.inc"
 #include "hybrid_gpu.inc"
 
 #include "history_v474_wait_tests.inc"
+#include "synthesis_memory_lifecycle_tests.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1&&std::string_view(argv[1])=="panel") {
+        try {
+            D3D12WarpFixture fixture(true);
+            test_flat_panel_marker_synthesis(fixture,xrfg::D3D12OpticalFlowBackend::fidelity_fx,false,true);
+            for(UINT move:{6U,10U})test_flat_panel_marker_synthesis(fixture,xrfg::D3D12OpticalFlowBackend::fidelity_fx,false,true,move,true);
+            fixture.require_no_debug_errors();return 0;
+        } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     const bool trace_test = std::getenv("XRFG_TEST_GPU_TRACE") != nullptr;
     const auto trace_dir = std::filesystem::temp_directory_path() /
         ("xrfg-v072-gpu-" + std::to_string(GetCurrentProcessId()));
@@ -5219,6 +5623,15 @@ int main(int argc, char** argv) {
         xrfg::bridge_flight_logger().initialize(trace_dir);
     }
     try {
+        if(argc>1 && std::string_view(argv[1])=="memory-lifecycle") {
+            D3D12WarpFixture fixture;
+            std::cout<<"MEMORY_TEST history begin"<<std::endl;
+            test_history_memory_lifecycle(fixture);
+            std::cout<<"MEMORY_TEST method begin"<<std::endl;
+            test_synthesis_method_memory(fixture);
+            fixture.require_no_debug_errors();
+            return 0;
+        }
         if(argc>1 && std::string_view(argv[1])=="init-diagnostics") {
             const auto root=std::filesystem::temp_directory_path()/("ofxr-init-guard-"+std::to_string(GetCurrentProcessId()));
             std::filesystem::create_directories(root);
@@ -5298,6 +5711,13 @@ int main(int argc, char** argv) {
             return 0;
         }
 #ifdef XRFG_NATIVE_DLSSG
+        if (argc > 1 && std::string_view(argv[1]) == "native-resized-eye") {
+            if (!native_test_has_supported_nvidia_adapter()) return 77;
+            D3D12WarpFixture fixture(true);
+            if(xrfg::native_dlssg_max_generated_frames(fixture.device())==0)return 77;
+            test_native_dlss_packed_stereo(fixture,false,kFormat,false,nullptr,true);
+            fixture.require_no_debug_errors();return 0;
+        }
         if (argc > 1 && std::string_view(argv[1]) == "native-dlssg-capture") {
             if (!native_test_has_supported_nvidia_adapter()) return 77;
             D3D12WarpFixture fixture(true);
@@ -5478,6 +5898,17 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string_view(argv[1]) == "release-bound-guides") {
             D3D12WarpFixture fixture;
             test_release_bound_dlss_guides(fixture);
+            test_view_placed_dlss_guides(fixture);
+            test_enlarged_dlss_guides(fixture);
+            fixture.require_no_debug_errors();
+            return 0;
+        }
+        if(argc>1&&std::string_view(argv[1])=="gta-origin-continuity") {
+            D3D12WarpFixture fixture;test_gta_origin_continuity(fixture);fixture.require_no_debug_errors();return 0;
+        }
+        if (argc > 1 && std::string_view(argv[1]) == "gta-reset-origins") {
+            D3D12WarpFixture fixture;
+            test_luke_interleaved_origins(fixture,2,true);
             fixture.require_no_debug_errors();
             return 0;
         }

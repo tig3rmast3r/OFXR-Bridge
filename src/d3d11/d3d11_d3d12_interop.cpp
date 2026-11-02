@@ -2,6 +2,7 @@
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/two_frame_capture.hpp"
 #include "xrfg/native_ingress/D3D_DeviceOwner.h"
+#include "xrfg/owned_d11_output.hpp"
 
 #include <windows.h>
 #include <dxgi1_2.h>
@@ -363,10 +364,21 @@ struct D3D11D3D12SwapchainInterop::Impl {
         D3D11InteropInitializationStage handle_stage,
         D3D11InteropInitializationStage device1_stage,
         D3D11InteropInitializationStage open_stage,
-        D3D11InteropInitializationStage* failure_stage) {
+        D3D11InteropInitializationStage* failure_stage,
+        const std::vector<ComPtr<ID3D11Texture2D>>* owned_outputs=nullptr) {
         images->resize(count);
         views->reserve(count);
-        for (SharedImage& image : *images) {
+        for (std::size_t index=0;index<count;++index) {
+            auto& image=(*images)[index];
+            if(owned_outputs) {
+                const auto& output=(*owned_outputs)[index];
+                image.d3d12=owned_d11_output::backing_for(output.Get(),d3d12_device.Get());
+                if(image.d3d12) {
+                    image.d3d11=output;
+                    views->push_back(image.d3d12.Get());
+                    continue;
+                }
+            }
             const HRESULT result = create_shared_image(
                 &image,
                 create_stage,
@@ -551,7 +563,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
             D3D11InteropInitializationStage::current_create_handle,
             D3D11InteropInitializationStage::current_device1,
             D3D11InteropInitializationStage::current_open_d3d11,
-            failure_stage);
+            failure_stage,&current_destination_images);
         if (FAILED(result)) {
             return result;
         }
@@ -563,7 +575,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
             D3D11InteropInitializationStage::synthetic_create_handle,
             D3D11InteropInitializationStage::synthetic_device1,
             D3D11InteropInitializationStage::synthetic_open_d3d11,
-            failure_stage);
+            failure_stage,&synthetic_destination_images);
         if (FAILED(result)) {
             return result;
         }
@@ -765,6 +777,9 @@ struct D3D11D3D12SwapchainInterop::Impl {
             return result;
         }
 
+        // An owned output may already be the shared D12 backing's D11 view.
+        // Keep every timeline transition below; only a true self-copy vanishes.
+        if(current_destination_images[current_target]!=shared_current_destinations[current_destination_index].d3d11)
         copy_mip_zero(
             d3d11_context.Get(),
             current_destination_images[current_target].Get(),
@@ -779,6 +794,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
             }());
         if (synthetic_destination_index) {
             const std::uint32_t index = *synthetic_destination_index;
+            if(synthetic_destination_images[*synthetic_target]!=shared_synthetic_destinations[index].d3d11)
             copy_mip_zero(
                 d3d11_context.Get(),
                 synthetic_destination_images[*synthetic_target].Get(),
@@ -993,6 +1009,7 @@ HRESULT D3D11D3D12SwapchainInterop::capture_published_current(
         HRESULT result = impl_->d3d11_context4->Wait(impl_->d3d11_fence.Get(),
             receipt.copy_complete_value);
         if (FAILED(result)) return result;
+        if(impl_->shared_current_destinations[private_index].d3d11!=impl_->current_destination_images[index])
         copy_mip_zero(impl_->d3d11_context.Get(),
             impl_->shared_current_destinations[private_index].d3d11.Get(),
             impl_->current_destination_images[index].Get(),

@@ -1,4 +1,5 @@
 #include "xrfg/d3d11_bridge.hpp"
+#include "xrfg/two_frame_capture.hpp"
 
 #include <array>
 #include <limits>
@@ -610,6 +611,19 @@ struct D3D11BridgeSwapchain::Impl {
 
 D3D11BridgeSwapchain::D3D11BridgeSwapchain() : impl_(std::make_unique<Impl>()) {}
 D3D11BridgeSwapchain::~D3D11BridgeSwapchain() = default;
+
+HRESULT D3D11BridgeSwapchain::diagnostic_capture_application(
+    std::uint32_t index,const TwoFrameImageInfo& info) noexcept {
+    if (!two_frame_capture_images_active()) return S_FALSE;
+    try {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->enabled || index>=impl_->shared_images.size() ||
+            impl_->path==D3D11BridgePath::depth_private) return E_INVALIDARG;
+        return two_frame_capture_record_queue(info,impl_->d3d12_device.Get(),
+            impl_->d3d12_queue.Get(),impl_->shared_images[index].Get(),
+            D3D12_RESOURCE_STATE_COMMON);
+    } catch (...) { return E_FAIL; }
+}
 
 HRESULT D3D11BridgeSwapchain::initialize(
     ID3D11Device* d3d11_device,

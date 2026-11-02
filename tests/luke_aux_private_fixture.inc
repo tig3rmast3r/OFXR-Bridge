@@ -4,6 +4,10 @@
 void luke_aux_private_test(bool private_path=true, bool afw=true) {
     auto s=session();s->presenter_active=false;
     s->luke_afw_enabled=afw;s->dispatch->steamvr_runtime=private_path;
+    s->dispatch->virtual_desktop_runtime=!private_path;s->vdxr_legacy=!private_path;
+    // Manual sessions bypass create_session's transport selection. Set the
+    // immutable route too, rather than treating a runtime-name flag as it.
+    check(comparison_delivery_runtime(*s)==private_path,"auxiliary fixture transport identity");
     check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,
         D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,
         &s->d3d11_device,nullptr,&s->d3d11_context)),"private auxiliary device");
@@ -235,6 +239,7 @@ void luke_aux_private_test(bool private_path=true, bool afw=true) {
         // including Luke's one-XR publication sink and legacy D11 outputs.
         for(bool steam:{true,false}) {
             s->dispatch->steamvr_runtime=steam;
+            s->dispatch->virtual_desktop_runtime=!steam;s->vdxr_legacy=!steam;
             auto retained=capture(0xff123456);
             XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};
             const auto before=runtime.chains.size();

@@ -5,6 +5,7 @@ void native_prediction_clock_test() {
         auto s = session();
         s->graphics_binding = SessionGraphicsBinding::d3d12;
         s->dispatch->steamvr_runtime = true;
+        s->vdxr_legacy = false; // explicit comparison transport, as real SteamVR session setup selects
         s->menu_enabled = true;
         s->presenter_display_period = physical;
         s->three_slot_director = route == 2;
@@ -58,6 +59,7 @@ void native_prediction_clock_test() {
         s->three_slot_director = false;s->fsr_two_slot_presenter = false;
         for (unsigned excluded = 0; excluded < 4; ++excluded) {
             s->dispatch->steamvr_runtime = excluded != 0;
+            s->vdxr_legacy = excluded == 0;
             s->graphics_binding = excluded == 1 ? SessionGraphicsBinding::d3d11 : SessionGraphicsBinding::d3d12;
             s->d3d11_bridge.reset();s->vulkan_bridge.reset();
             if (excluded == 2) s->d3d11_bridge = std::make_unique<SessionState::D3D11Bridge>();
@@ -67,7 +69,7 @@ void native_prediction_clock_test() {
             check(XR_SUCCEEDED(layer_wait_frame_impl(s->handle, nullptr, &old)) &&
                 old.predictedDisplayPeriod == physical * 4, "excluded transport acquired native SteamVR clock policy");
         }
-        s->d3d11_bridge.reset();s->vulkan_bridge.reset();s->dispatch->steamvr_runtime = true;
+        s->d3d11_bridge.reset();s->vulkan_bridge.reset();s->dispatch->steamvr_runtime = true;s->vdxr_legacy=false;
         for (const XrDuration unavailable : {0LL, 1LL, 60'000'000LL}) {
             s->presenter_display_period = unavailable;s->last_virtual_display_time = 0;
             s->application_wait_pending_begin = false;

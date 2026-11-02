@@ -8,6 +8,7 @@
 
 
 #include <windows.h>
+#include <d3d11.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -39,6 +40,8 @@ struct Shot {
     std::uint64_t row_bytes{};
     std::uint64_t bytes{};
     ComPtr<ID3D12Resource> readback;
+    std::vector<std::byte> cpu_pixels;
+    bool cpu_ready{}; // Session::mutex; publish only after the owner-thread Map/copy.
     ComPtr<ID3D12CommandList> producer_list;
     ComPtr<ID3D12CommandAllocator> owned_allocator;
     ComPtr<ID3D12Fence> fence;
@@ -67,6 +70,7 @@ struct Session {
     std::vector<TwoFrameNativeDlssgEvaluation> native_dlssg_evaluations;
     std::vector<TimelineShot> timeline;
     std::vector<std::uint64_t> dlssg_streams;
+    std::vector<std::uint64_t> application_swapchains;
     std::filesystem::path directory;
     std::string settings;
     std::uint64_t allocated{};
@@ -74,6 +78,7 @@ struct Session {
     std::uint32_t suppressed_upstream_images{};
     TwoFrameCaptureStageBudget stage_budget;
     bool sealed{};
+    bool automatic_origin_loss{};
     std::atomic_bool write_finished{false};
     std::atomic_bool safe_to_release{true};
 };
@@ -185,8 +190,8 @@ std::filesystem::path capture_directory() {
 std::shared_ptr<Shot> prepare_shot(
     const std::shared_ptr<Session>& session, std::uint32_t frame,
     const TwoFrameImageInfo& info, ID3D12Device* device,
-    ID3D12Resource* source) {
-    if (!session || !device || !source || !info.stage) return {};
+    ID3D12Resource* source, const D3D12_RESOURCE_DESC* cpu_description=nullptr) {
+    if (!session || !device || (!source&&!cpu_description) || !info.stage) return {};
     {
         std::scoped_lock lock(session->mutex);
         if (session->sealed) return {};
@@ -198,7 +203,7 @@ std::shared_ptr<Shot> prepare_shot(
     auto shot = std::make_shared<Shot>();
     shot->info = info;
     shot->frame = frame;
-    shot->description = source->GetDesc();
+    shot->description = cpu_description?*cpu_description:source->GetDesc();
     const auto& desc = shot->description;
     const auto format = typed_format(desc.Format);
     const bool supported_format =
@@ -239,7 +244,9 @@ std::shared_ptr<Shot> prepare_shot(
                 session->allocated += shot->bytes;
             }
         }
-        if (SUCCEEDED(shot->status)) {
+        if (SUCCEEDED(shot->status) && cpu_description) {
+            shot->cpu_pixels.resize(static_cast<std::size_t>(shot->bytes));
+        } else if (SUCCEEDED(shot->status)) {
             D3D12_HEAP_PROPERTIES heap{};
             heap.Type = D3D12_HEAP_TYPE_READBACK;
             D3D12_RESOURCE_DESC buffer{};
@@ -299,6 +306,7 @@ void record_copy(
 }
 
 bool completed(const Shot& shot) noexcept {
+    if (!shot.cpu_pixels.empty()) return shot.cpu_ready;
     return shot.fence && shot.fence_value &&
         shot.fence->GetCompletedValue() >= shot.fence_value;
 }
@@ -383,7 +391,10 @@ void write_session(const std::shared_ptr<Session>& session) {
         "\tmotion_current_to_middle_same\tmotion_current_to_previous_same\tmotion_current_to_middle_opposite"
         "\tdepth_native_history_valid\tdepth_native_previous_publication\tdepth_current_to_native_previous"
         "\tcamera_forward_sign\tcamera_up_sign\traw_motion_native_span"
-        "\tnative_camera_token\tcolor_origin_token\tnative_production_sequence\tinterleaved_history\n";
+        "\tnative_camera_token\tcolor_origin_token\tnative_production_sequence\tinterleaved_history"
+        "\tgta_current_render\tgta_current_mode\tgta_current_yaw\tgta_current_tracking_valid\tgta_current_tracking"
+        "\tgta_peer_render\tgta_peer_mode\tgta_peer_yaw\tgta_peer_tracking_valid\tgta_peer_tracking"
+        "\tgta_same_render\tgta_same_mode\tgta_same_yaw\tgta_same_tracking_valid\tgta_same_tracking\n";
     const auto write_array = [&guide_manifest](const auto& values) {
         for (std::size_t i = 0; i < values.size(); ++i) {
             if (i) guide_manifest << ',';
@@ -455,7 +466,13 @@ void write_session(const std::shared_ptr<Session>& session) {
         write_array(c.depth_current_to_native_previous); guide_manifest << '\t';
         guide_manifest << c.camera_forward_sign << '\t' << c.camera_up_sign << '\t' << c.raw_motion_native_span
             << '\t' << c.native_camera_token << '\t' << c.color_origin_token
-            << '\t' << c.native_production_sequence << '\t' << c.interleaved_history << '\n';
+            << '\t' << c.native_production_sequence << '\t' << c.interleaved_history;
+        for(unsigned i=0;i<3;++i) {
+            guide_manifest << '\t' << c.gta_tracking_render[i] << '\t' << c.gta_tracking_mode[i]
+                << '\t' << c.gta_tracking_yaw[i] << '\t' << c.gta_tracking_valid[i] << '\t';
+            write_array(c.gta_tracking_poses[i]);
+        }
+        guide_manifest << '\n';
     }
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::seconds(15);
@@ -486,7 +503,8 @@ void write_session(const std::shared_ptr<Session>& session) {
         if (SUCCEEDED(status)) {
             void* data = nullptr;
             const D3D12_RANGE read_range{0, static_cast<SIZE_T>(shot.bytes)};
-            status = shot.readback->Map(0, &read_range, &data);
+            if (!shot.cpu_pixels.empty()) data=const_cast<std::byte*>(shot.cpu_pixels.data());
+            else status = shot.readback->Map(0, &read_range, &data);
             if (SUCCEEDED(status) && data) {
                 file = "image-" + std::to_string(index) + ".raw";
                 std::ofstream raw(session->directory / file, std::ios::binary);
@@ -494,7 +512,7 @@ void write_session(const std::shared_ptr<Session>& session) {
                     static_cast<std::streamsize>(shot.bytes));
                 if (!raw) status = E_FAIL;
                 const D3D12_RANGE written{0, 0};
-                shot.readback->Unmap(0, &written);
+                if (shot.readback) shot.readback->Unmap(0, &written);
             } else if (SUCCEEDED(status)) {
                 status = E_FAIL;
             }
@@ -519,10 +537,14 @@ void write_session(const std::shared_ptr<Session>& session) {
         session->directory.string() + "\n";
     std::ofstream summary(session->directory / L"README.txt", std::ios::binary);
     summary << "V23286 AFW/OFXR frame-slot and projection-pose audit.\n"
-        << "Trigger: F8; capture ends after two AFW evaluations or eight XR frames.\n"
+        << "Trigger: " << (session->automatic_origin_loss ? "automatic GTA origin loss (F9)" : "F8")
+        << "; capture ends after two AFW evaluations or eight XR frames.\n"
         << "NGX source, AFW inputs, OpenXR eyes, camera matrices and xr-timeline.tsv.\n"
         << "V601: afw_plugin_returned_eye -> afw_generated_eye -> afw_xr_terminal_eye.\n"
         << "xr_final_eye is the application source release BEFORE AFW.\n"
+        << "V690 luke_origin_loss_color: exact frozen pair at the CRC failure, recorded immediately before release/reuse; not a guessed guide. origin_loss_crc stores original HRESULT/token per eye.\n"
+        << "V685 xr_application_original: ordered D11 application-side shared image, independent of AFW history/runtime output. serial is acquired image index.\n"
+        << "layer_type/layer_image/rect/quad timeline records identify the application's actual submitted layers. Original snapshots: at most one per swapchain.\n"
         << "Terminal eyes carry original publication, XR swapchain, pose interval, acquired index and fence receipts.\n"
         << "Raw images include D3D12 row padding; see manifest.tsv.\n"
         << "Max images=48, max total readback=1.25 GiB. Dropped images="
@@ -540,6 +562,27 @@ void write_session(const std::shared_ptr<Session>& session) {
 }
 
 }  // namespace
+
+bool two_frame_capture_request_origin_loss() noexcept {
+    try {
+        if (!bridge_flight_logger().enabled() || diagnostic_ring_enabled) return false;
+        auto& state=manager();
+        std::scoped_lock lock(state.mutex);
+        if (state.session || state.active_frame || state.has_session) return false;
+        if (state.writer.joinable()) state.writer.join();
+        auto session=std::make_shared<Session>();
+        session->directory=capture_directory();
+        session->settings=capture_settings();
+        session->automatic_origin_loss=true;
+        state.session=std::move(session);
+        state.has_session.store(true,std::memory_order_relaxed);
+        state.pending_start=false;
+        state.afw_completed_frame=false;
+        state.observed_end_frames=0;
+        state.active_frame.store(1,std::memory_order_release);
+        return true;
+    } catch (...) { return false; }
+}
 
 std::uint32_t two_frame_capture_begin_end_frame() noexcept {
     try {
@@ -631,6 +674,19 @@ bool two_frame_capture_active() noexcept {
 
 bool two_frame_capture_images_active() noexcept {
     return manager().active_frame.load() != 0;
+}
+
+bool two_frame_capture_claim_application(std::uint64_t swapchain) noexcept {
+    if (!swapchain || !two_frame_capture_images_active()) return false;
+    try {
+        auto& state=manager();std::scoped_lock lock(state.mutex);
+        if (!state.session || !state.active_frame) return false;
+        std::scoped_lock session_lock(state.session->mutex);
+        auto& handles=state.session->application_swapchains;
+        if(state.session->sealed || handles.size()>=8 ||
+            std::find(handles.begin(),handles.end(),swapchain)!=handles.end())return false;
+        handles.push_back(swapchain);return true;
+    } catch (...) { return false; }
 }
 
 bool two_frame_capture_claim_dlssg_pair(std::uint64_t stream) noexcept {
@@ -765,6 +821,44 @@ void two_frame_capture_record_ng_x(
         if (SUCCEEDED(shot->status)) shot->producer_list = list;
     } catch (...) {
     }
+}
+
+HRESULT two_frame_capture_record_d3d11(const TwoFrameImageInfo& info,
+    ID3D12Device* footprint_device,ID3D11DeviceContext* context,ID3D11Texture2D* source) noexcept {
+    if (!two_frame_capture_images_active()) return S_FALSE;
+    try {
+        if (!footprint_device||!context||!source) return E_INVALIDARG;
+        std::shared_ptr<Session> session;std::uint32_t frame{};
+        {auto& state=manager();std::scoped_lock lock(state.mutex);session=state.session;frame=state.active_frame;}
+        if(!session||!frame)return S_FALSE;
+        ComPtr<ID3D11Device> owner,context_device;source->GetDevice(&owner);context->GetDevice(&context_device);
+        ComPtr<IUnknown> oi,ci;
+        if(!owner||!context_device||FAILED(owner.As(&oi))||FAILED(context_device.As(&ci))||oi.Get()!=ci.Get())return E_INVALIDARG;
+        D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
+        if(desc.SampleDesc.Count!=1||info.slice>=desc.ArraySize||!desc.MipLevels)return E_INVALIDARG;
+        D3D12_RESOURCE_DESC converted{};converted.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        converted.Width=desc.Width;converted.Height=desc.Height;converted.DepthOrArraySize=static_cast<UINT16>(desc.ArraySize);
+        converted.MipLevels=static_cast<UINT16>(desc.MipLevels);converted.Format=desc.Format;converted.SampleDesc.Count=1;
+        auto shot=prepare_shot(session,frame,info,footprint_device,nullptr,&converted);
+        if(!shot)return E_OUTOFMEMORY;if(FAILED(shot->status))return shot->status;
+        auto staging_desc=desc;staging_desc.MipLevels=staging_desc.ArraySize=1;
+        staging_desc.Usage=D3D11_USAGE_STAGING;staging_desc.BindFlags=staging_desc.MiscFlags=0;
+        staging_desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;HRESULT result=owner->CreateTexture2D(&staging_desc,nullptr,&staging);
+        if(SUCCEEDED(result)) {
+            context->CopySubresourceRegion(staging.Get(),0,0,0,0,source,info.slice*desc.MipLevels,nullptr);
+            D3D11_MAPPED_SUBRESOURCE mapped{};result=context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped);
+            if(SUCCEEDED(result)) {
+                if(!mapped.pData||mapped.RowPitch<shot->row_bytes)result=E_INVALIDARG;
+                else for(UINT y=0;y<desc.Height;++y)
+                    std::memcpy(shot->cpu_pixels.data()+shot->footprint.Offset+y*shot->footprint.Footprint.RowPitch,
+                        static_cast<const std::byte*>(mapped.pData)+y*mapped.RowPitch,static_cast<std::size_t>(shot->row_bytes));
+                context->Unmap(staging.Get(),0);
+            }
+        }
+        {std::scoped_lock lock(session->mutex);shot->status=result;shot->cpu_ready=SUCCEEDED(result);}
+        return result;
+    } catch(...) {return E_FAIL;}
 }
 
 HRESULT two_frame_capture_record_queue(

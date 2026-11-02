@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.681.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.773.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -93,6 +93,16 @@ if(XRFG_BUILD_TESTS)
         target_compile_features(xrfg_luke_detection_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_luke_detection_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN XRFG_LUKE_DETECTION_TESTS)
         add_dependencies(xrfg_luke_detection_tests xrfg_luke_marker_custom xrfg_luke_marker_named)
+        foreach(game DOOMTheDarkAges TheGreatCircle)
+            add_test(NAME xrfg_luke_detection_legacy_${game} COMMAND "${CMAKE_COMMAND}"
+                "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_detection_tests>"
+                "-DCUSTOM_MARKER=$<TARGET_FILE:xrfg_luke_marker_custom>"
+                "-DNAMED_MARKER=$<TARGET_FILE:xrfg_luke_marker_named>"
+                "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/legacy-recognition-${game}"
+                "-DGAME_EXE=${game}.exe"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_legacy_luke_detection.cmake")
+        endforeach()
+
         add_test(NAME xrfg_luke_detection_lifecycle COMMAND xrfg_luke_detection_tests
             "$<TARGET_FILE:xrfg_luke_marker_custom>" "$<TARGET_FILE:xrfg_luke_marker_named>")
         add_test(NAME xrfg_luke_detection_preloaded COMMAND xrfg_luke_detection_tests
@@ -144,6 +154,18 @@ if(XRFG_BUILD_TESTS)
     target_include_directories(xrfg_luke_counter_probe_tests PRIVATE include)
     target_compile_features(xrfg_luke_counter_probe_tests PRIVATE cxx_std_20)
     add_test(NAME xrfg_luke_counter_probe_tests COMMAND xrfg_luke_counter_probe_tests)
+    add_executable(xrfg_gta_headlock_tests tests/luke_gta_headlock_tests.cpp)
+    target_include_directories(xrfg_gta_headlock_tests PRIVATE include)
+    target_compile_features(xrfg_gta_headlock_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_gta_headlock_tests COMMAND xrfg_gta_headlock_tests)
+    add_executable(xrfg_gta_eye_reference_tests tests/luke_gta_eye_reference_tests.cpp)
+    target_include_directories(xrfg_gta_eye_reference_tests PRIVATE include)
+    target_compile_features(xrfg_gta_eye_reference_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_gta_eye_reference_tests COMMAND xrfg_gta_eye_reference_tests)
+    add_executable(xrfg_luke_origin_continuity_tests tests/luke_origin_continuity_tests.cpp)
+    target_include_directories(xrfg_luke_origin_continuity_tests PRIVATE include)
+    target_compile_features(xrfg_luke_origin_continuity_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_luke_origin_continuity_tests COMMAND xrfg_luke_origin_continuity_tests)
     add_executable(xrfg_core_tests tests/core_tests.cpp)
     target_link_libraries(xrfg_core_tests PRIVATE xrfg_core)
     if(MSVC)
@@ -157,6 +179,16 @@ if(XRFG_BUILD_TESTS)
         target_compile_features(xrfg_luke_world_scale_config_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_luke_world_scale_config_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         add_test(NAME xrfg_luke_world_scale_config COMMAND xrfg_luke_world_scale_config_tests)
+        add_executable(xrfg_osr_hole_fill_tests tests/osr_hole_fill_tests.cpp)
+        target_include_directories(xrfg_osr_hole_fill_tests PRIVATE include)
+        target_compile_features(xrfg_osr_hole_fill_tests PRIVATE cxx_std_20)
+        target_compile_definitions(xrfg_osr_hole_fill_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        add_test(NAME xrfg_osr_hole_fill COMMAND xrfg_osr_hole_fill_tests)
+        add_executable(xrfg_osr_full_warp_tests tests/osr_full_warp_tests.cpp)
+        target_include_directories(xrfg_osr_full_warp_tests PRIVATE include)
+        target_compile_features(xrfg_osr_full_warp_tests PRIVATE cxx_std_20)
+        target_compile_definitions(xrfg_osr_full_warp_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        add_test(NAME xrfg_osr_full_warp COMMAND xrfg_osr_full_warp_tests)
     endif()
     add_executable(xrfg_fps_overlay_tests tests/fps_overlay_tests.cpp)
     target_link_libraries(xrfg_fps_overlay_tests PRIVATE xrfg_core)
@@ -234,7 +266,17 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_LUKE_DEPTH_CALIBRATE_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_depth_calibrate_shader.hpp")
     set(XRFG_LUKE_AFW_COLOR_SCALE_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_afw_color_scale_shader.hpp")
     set(XRFG_LUKE_COMPOSE_MOTION_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_compose_motion_shader.hpp")
+    set(XRFG_OSR_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_clear_shader.hpp")
+    set(XRFG_OSR_SPLAT_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_splat_shader.hpp")
+    set(XRFG_OSR_FILL_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_fill_shader.hpp")
+    set(XRFG_OSR_FULL_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_clear_shader.hpp")
+    set(XRFG_OSR_FULL_SPLAT_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_splat_shader.hpp")
+    set(XRFG_OSR_FULL_SPLAT_HISTORY_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_splat_history_shader.hpp")
+    set(XRFG_OSR_FULL_SPLAT_OFFSET_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_splat_offset_shader.hpp")
+    set(XRFG_OSR_FULL_RESOLVE_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_shader.hpp")
+    set(XRFG_OSR_FULL_INPAINT_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_inpaint_shader.hpp")
     set(XRFG_VULKAN_D24_DECODE_HEADER "${XRFG_GENERATED_SHADER_DIR}/vulkan_d24_decode_shader.hpp")
+    set(XRFG_D3D11_DEPTH_UNPACK_HEADER "${XRFG_GENERATED_SHADER_DIR}/d3d11_depth_unpack_shader.hpp")
     add_custom_command(
         OUTPUT
             "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
@@ -259,7 +301,17 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_LUKE_DEPTH_CALIBRATE_HEADER}"
             "${XRFG_LUKE_COMPOSE_MOTION_HEADER}"
             "${XRFG_LUKE_AFW_COLOR_SCALE_HEADER}"
+            "${XRFG_OSR_CLEAR_HEADER}"
+            "${XRFG_OSR_SPLAT_HEADER}"
+            "${XRFG_OSR_FILL_HEADER}"
+            "${XRFG_OSR_FULL_CLEAR_HEADER}"
+            "${XRFG_OSR_FULL_SPLAT_HEADER}"
+            "${XRFG_OSR_FULL_SPLAT_HISTORY_HEADER}"
+            "${XRFG_OSR_FULL_SPLAT_OFFSET_HEADER}"
+            "${XRFG_OSR_FULL_RESOLVE_HEADER}"
+            "${XRFG_OSR_FULL_INPAINT_HEADER}"
             "${XRFG_VULKAN_D24_DECODE_HEADER}"
+            "${XRFG_D3D11_DEPTH_UNPACK_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeGameMotionMidpointPS
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
@@ -353,12 +405,55 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_LUKE_COMPOSE_MOTION_HEADER}" /Vn g_xrfg_luke_compose_motion_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_compose_motion.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrClearCoverage
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_CLEAR_HEADER}" /Vn g_xrfg_osr_clear_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrSplatCoverage
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_SPLAT_HEADER}" /Vn g_xrfg_osr_splat_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFillHoles
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FILL_HEADER}" /Vn g_xrfg_osr_fill_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullClear
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_CLEAR_HEADER}" /Vn g_xrfg_osr_full_clear_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullSplat
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_SPLAT_HEADER}" /Vn g_xrfg_osr_full_splat_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullSplatHistory
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_SPLAT_HISTORY_HEADER}" /Vn g_xrfg_osr_full_splat_history_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullSplatOffset
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_SPLAT_OFFSET_HEADER}" /Vn g_xrfg_osr_full_splat_offset_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullResolve
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_RESOLVE_HEADER}" /Vn g_xrfg_osr_full_resolve_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullInpaint
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FULL_INPAINT_HEADER}" /Vn g_xrfg_osr_full_inpaint_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_0 /E UnpackDepth
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_D3D11_DEPTH_UNPACK_HEADER}" /Vn g_xrfg_d3d11_depth_unpack_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d11/d3d11_depth_unpack.hlsl"
         DEPENDS
             "${XRFG_SYNTHESIS_SHADER}"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/fsr_cinema_projection.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_depth_convert.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_compose_motion.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/ingress/vulkan_d24_decode.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d11/d3d11_depth_unpack.hlsl"
         VERBATIM)
 
     add_library(xrfg_d3d12_history STATIC
@@ -398,7 +493,17 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_LUKE_DEPTH_CALIBRATE_HEADER}"
         "${XRFG_LUKE_COMPOSE_MOTION_HEADER}"
         "${XRFG_LUKE_AFW_COLOR_SCALE_HEADER}"
-        "${XRFG_VULKAN_D24_DECODE_HEADER}")
+        "${XRFG_OSR_CLEAR_HEADER}"
+        "${XRFG_OSR_SPLAT_HEADER}"
+        "${XRFG_OSR_FILL_HEADER}"
+        "${XRFG_OSR_FULL_CLEAR_HEADER}"
+        "${XRFG_OSR_FULL_SPLAT_HEADER}"
+        "${XRFG_OSR_FULL_SPLAT_HISTORY_HEADER}"
+        "${XRFG_OSR_FULL_SPLAT_OFFSET_HEADER}"
+        "${XRFG_OSR_FULL_RESOLVE_HEADER}"
+        "${XRFG_OSR_FULL_INPAINT_HEADER}"
+        "${XRFG_VULKAN_D24_DECODE_HEADER}"
+        "${XRFG_D3D11_DEPTH_UNPACK_HEADER}")
     foreach(stage decide compose)
         set(header "${XRFG_GENERATED_SHADER_DIR}/guide_composer_${stage}_shader.hpp")
         if(stage STREQUAL "decide")
@@ -578,15 +683,23 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(xrfg_private_d11_release_readiness PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
         add_test(NAME xrfg_private_buffer_controls_gpu COMMAND xrfg_private_release_readiness_tests buffer)
         set_tests_properties(xrfg_private_buffer_controls_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-        target_link_libraries(xrfg_private_openxr_runtime_tests PRIVATE xrfg_steamvr_delivery)
+        target_link_libraries(xrfg_private_openxr_runtime_tests PRIVATE xrfg_steamvr_delivery xrfg_d3d12_history)
         target_compile_features(xrfg_private_openxr_runtime_tests PRIVATE cxx_std_20)
         add_test(NAME xrfg_private_openxr_runtime_gpu COMMAND xrfg_private_openxr_runtime_tests)
+        add_test(NAME xrfg_private_framework_expired_clock_gpu COMMAND xrfg_private_openxr_runtime_tests framework-expired)
+        set_tests_properties(xrfg_private_framework_expired_clock_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_private_framework_bypass_gpu COMMAND xrfg_private_openxr_runtime_tests bypass)
         set_tests_properties(xrfg_private_framework_bypass_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_private_native_timing_gpu COMMAND xrfg_private_openxr_runtime_tests metrics)
         set_tests_properties(xrfg_private_native_timing_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_private_publication_pool_gpu COMMAND xrfg_private_openxr_runtime_tests pool)
         set_tests_properties(xrfg_private_publication_pool_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        add_test(NAME xrfg_private_vram_pool_gpu COMMAND xrfg_private_openxr_runtime_tests vram)
+        set_tests_properties(xrfg_private_vram_pool_gpu PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+        add_test(NAME xrfg_private_vram_pool_hdr_gpu COMMAND xrfg_private_openxr_runtime_tests vram-hdr)
+        set_tests_properties(xrfg_private_vram_pool_hdr_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        add_test(NAME xrfg_private_owned_d11_output_gpu COMMAND xrfg_private_openxr_runtime_tests owned-d11)
+        set_tests_properties(xrfg_private_owned_d11_output_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         # This aggregate includes all ownership/clock cases plus D11/D12 single-source reuse.
         # Individual progress/cadence limits remain in the assertions.
         set_tests_properties(xrfg_private_openxr_runtime_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
@@ -618,7 +731,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
 
     add_library(XR_APILAYER_XRFrameBridge_diagnostic ${XRFG_LAYER_KIND}
         ${XRFG_LAYER_SOURCE})
-    target_sources(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE src/layer/ngx_guide_capture.cpp src/layer/provider_api.cpp src/ingress/native_ingress.cpp src/ingress/luke_detection.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp)
+    target_sources(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE src/layer/ngx_guide_capture.cpp src/layer/provider_api.cpp src/ingress/native_ingress.cpp src/ingress/luke_detection.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp src/ingress/vulkan_guide_ingress.cpp)
     target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE safetyhook version)
     if(TARGET xrfg_vulkan_capture_suspended_tests)
         add_dependencies(xrfg_vulkan_capture_suspended_tests XR_APILAYER_XRFrameBridge_diagnostic)
@@ -811,15 +924,18 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_compile_definitions(xrfg_d3d11_bridge_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         add_test(NAME xrfg_d3d11_bridge_tests COMMAND xrfg_d3d11_bridge_tests)
         set_tests_properties(xrfg_d3d11_bridge_tests PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME xrfg_quarantine_history_recovery COMMAND xrfg_three_slot_director_tests quarantine-history-recovery)
+        set_tests_properties(xrfg_quarantine_history_recovery PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_release_bound_guides COMMAND xrfg_d3d12_history_tests release-bound-guides)
         set_tests_properties(xrfg_release_bound_guides PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_elliott_controller_layer COMMAND xrfg_three_slot_director_tests elliott-controller)
         add_test(NAME xrfg_v474_policy_lifecycle COMMAND xrfg_three_slot_director_tests v474-policy)
         add_test(NAME xrfg_v474_d3d11_bridge COMMAND xrfg_three_slot_director_tests v474-bridge)
+        add_test(NAME xrfg_vulkan_deferred_release COMMAND xrfg_three_slot_director_tests vulkan-deferred-release)
         add_test(NAME xrfg_v474_history_wait COMMAND xrfg_d3d12_history_tests v474-wait)
         add_test(NAME xrfg_v474_vd_restore COMMAND xrfg_three_slot_director_tests v474-vd)
         set_tests_properties(xrfg_v474_vd_restore PROPERTIES TIMEOUT 30)
-        set_tests_properties(xrfg_v474_policy_lifecycle xrfg_v474_d3d11_bridge xrfg_v474_history_wait PROPERTIES TIMEOUT 30)
+        set_tests_properties(xrfg_v474_policy_lifecycle xrfg_v474_d3d11_bridge xrfg_v474_history_wait xrfg_vulkan_deferred_release PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_interface_cycle_layer COMMAND xrfg_three_slot_director_tests cycle-metrics)
         set_tests_properties(xrfg_interface_cycle_layer PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_fsr_release_identity COMMAND xrfg_three_slot_director_tests fsr-release-identity)
@@ -852,6 +968,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_compile_definitions(xrfg_luke_color_origin_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         target_link_libraries(xrfg_luke_color_origin_tests PRIVATE d3d12 dxgi xrfg_bridge_flight_logger)
         add_test(NAME xrfg_luke_color_origin COMMAND xrfg_luke_color_origin_tests)
+        add_test(NAME xrfg_doom_hdr_origin COMMAND ${CMAKE_COMMAND}
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_color_origin_tests>"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/doom-hdr-origin"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_doom_hdr_origin_test.cmake")
+        set_tests_properties(xrfg_doom_hdr_origin PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
         set_tests_properties(xrfg_luke_color_origin PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_outlaws_protected_origin COMMAND ${CMAKE_COMMAND}
             "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_color_origin_tests>"
@@ -1037,6 +1159,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_luke_early_projection_isolation COMMAND xrfg_private_runtime_layer_tests hfw-early-solo-luke-d11-new)
         set_tests_properties(xrfg_luke_early_projection_isolation PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         set_tests_properties(xrfg_hfw_director xrfg_hfw_director_toggle xrfg_hfw_reference_director xrfg_hfw_djules_director xrfg_hfw_director_offon PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        add_test(NAME xrfg_unbridged_vulkan_session COMMAND xrfg_private_runtime_layer_tests unbridged-vulkan-session)
+        set_tests_properties(xrfg_unbridged_vulkan_session PROPERTIES TIMEOUT 20)
         add_test(NAME xrfg_luke_isolated_raw COMMAND xrfg_three_slot_director_tests luke-isolated-raw)
         set_tests_properties(xrfg_luke_isolated_post_afw xrfg_luke_isolated_raw PROPERTIES TIMEOUT 25 RUN_SERIAL TRUE)
         add_test(NAME xrfg_luke_missing_afw_guides_gpu COMMAND xrfg_three_slot_director_tests luke-missing-afw-guides)
@@ -1077,6 +1201,23 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_executable(xrfg_three_slot_d3d12_tests tests/three_slot_d3d12_tests.cpp
             src/common/embedded_control.cpp)
         add_executable(xrfg_private_runtime_layer_tests tests/private_runtime_layer_tests.cpp src/common/embedded_control.cpp)
+        foreach(shape native-split native-array native-packed luke-split)
+            foreach(format rgba8 rgba16f)
+                add_test(NAME xrfg_steamvr_vram_${shape}_${format}
+                    COMMAND xrfg_private_runtime_layer_tests vram-budget ${shape} 2048 ${format})
+                set_tests_properties(xrfg_steamvr_vram_${shape}_${format} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+            endforeach()
+        endforeach()
+        foreach(method fidelity ref new djules fsr hybrid dlssg)
+            add_test(NAME xrfg_steamvr_vram_steady_${method}
+                COMMAND xrfg_private_runtime_layer_tests vram-steady-${method} 2048)
+            set_tests_properties(xrfg_steamvr_vram_steady_${method} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+        endforeach()
+        foreach(sequence switch benchmark-sequence benchmark-dlssg-sequence)
+            add_test(NAME xrfg_steamvr_vram_steady_${sequence}
+                COMMAND xrfg_private_runtime_layer_tests vram-steady-${sequence} 2048)
+            set_tests_properties(xrfg_steamvr_vram_steady_${sequence} PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+        endforeach()
         add_test(NAME xrfg_pimax_native_session_gpu COMMAND xrfg_private_runtime_layer_tests pimax-session)
         add_test(NAME xrfg_pimax_forced_framework_session_gpu COMMAND xrfg_private_runtime_layer_tests force-framework-pimax-session)
         set_tests_properties(xrfg_pimax_native_session_gpu xrfg_pimax_forced_framework_session_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
@@ -1389,6 +1530,17 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_dependencies(xrfg_luke_depth_gpu_tests xrfg_implicit_layer xrfg_d3d12_history)
         add_test(NAME xrfg_luke_depth_gpu COMMAND xrfg_luke_depth_gpu_tests)
         add_executable(xrfg_d3d12_history_tests tests/d3d12_history_tests.cpp)
+        add_test(NAME xrfg_synthesis_memory_lifecycle COMMAND xrfg_d3d12_history_tests memory-lifecycle)
+        set_tests_properties(xrfg_synthesis_memory_lifecycle PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        add_executable(xrfg_dlss_snapshot_lifetime_tests tests/dlss_snapshot_lifetime_tests.cpp)
+        target_include_directories(xrfg_dlss_snapshot_lifetime_tests PRIVATE include)
+        target_compile_features(xrfg_dlss_snapshot_lifetime_tests PRIVATE cxx_std_20)
+        target_compile_definitions(xrfg_dlss_snapshot_lifetime_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_link_libraries(xrfg_dlss_snapshot_lifetime_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
+        add_test(NAME xrfg_dlss_snapshot_lifetime_gpu COMMAND xrfg_dlss_snapshot_lifetime_tests)
+        add_test(NAME xrfg_dlss_snapshot_lifetime_warp COMMAND xrfg_dlss_snapshot_lifetime_tests warp)
+        set_tests_properties(xrfg_dlss_snapshot_lifetime_gpu xrfg_dlss_snapshot_lifetime_warp
+            PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         add_test(NAME xrfg_synthesis_init_diagnostics COMMAND xrfg_d3d12_history_tests init-diagnostics)
         set_tests_properties(xrfg_synthesis_init_diagnostics PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_luke_deferred_flow_copy COMMAND xrfg_d3d12_history_tests copy-deferred)
@@ -1435,6 +1587,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         endif()
         add_test(NAME xrfg_d3d12_history_tests COMMAND xrfg_d3d12_history_tests)
         add_test(NAME xrfg_native_dlssg_unsupported COMMAND xrfg_d3d12_history_tests native-unsupported)
+        add_test(NAME xrfg_native_resized_eye COMMAND xrfg_d3d12_history_tests native-resized-eye)
+        set_tests_properties(xrfg_native_resized_eye PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
         add_test(NAME xrfg_native_dlssg_output_capture COMMAND xrfg_d3d12_history_tests native-dlssg-capture)
         set_tests_properties(xrfg_native_dlssg_output_capture PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
         add_test(NAME xrfg_packed_game_vectors_warp COMMAND xrfg_d3d12_history_tests packed-game-vectors)
@@ -1461,6 +1615,19 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         endif()
 
         add_test(NAME xrfg_luke_protected_guides COMMAND xrfg_d3d12_history_tests protected-guides)
+        add_test(NAME xrfg_gta_reset_origins COMMAND ${CMAKE_COMMAND}
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_d3d12_history_tests>"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/gta-reset-origins"
+            -DTEST_MODE=gta-reset-origins
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gta_origin_test.cmake")
+        set_tests_properties(xrfg_gta_reset_origins PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        add_test(NAME xrfg_gta_origin_continuity_gpu COMMAND ${CMAKE_COMMAND}
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_d3d12_history_tests>"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/gta-origin-continuity"
+            -DTEST_MODE=gta-origin-continuity
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gta_origin_test.cmake")
+        set_tests_properties(xrfg_gta_origin_continuity_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
 
 
 
@@ -1516,7 +1683,7 @@ if(TARGET xrfg_streamline_native_interface_tests)
 endif()
 if(XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
     foreach(t xrfg_three_slot_director_tests xrfg_three_slot_d3d12_tests xrfg_private_runtime_layer_tests xrfg_openxr_elliott_meter_tests)
-        target_sources(${t} PRIVATE src/layer/ngx_guide_capture.cpp src/ingress/native_ingress.cpp src/ingress/luke_detection.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp)
+        target_sources(${t} PRIVATE src/layer/ngx_guide_capture.cpp src/ingress/native_ingress.cpp src/ingress/luke_detection.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp src/ingress/vulkan_guide_ingress.cpp)
         target_include_directories(${t} PRIVATE "${XRFG_DLSS_SDK_ROOT}/include" "${XRFG_DEPENDENCY_ROOT}/Streamline")
         target_include_directories(${t} PRIVATE "${XRFG_GENERATED_SHADER_DIR}")
         target_link_libraries(${t} PRIVATE xrfg_autonomous_control xrfg_neural_rendering safetyhook version)
@@ -1580,6 +1747,12 @@ if(TARGET xrfg_three_slot_director_tests AND TARGET xrfg_sl_fixture_legacy)
         crimson-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
     set_tests_properties(xrfg_crimson_ngx_actual_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    foreach(unlisted_motion swap original)
+      add_test(NAME xrfg_unlisted_motion_${unlisted_motion}_capture COMMAND xrfg_three_slot_director_tests
+          unlisted-motion-${unlisted_motion}-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+          "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+      set_tests_properties(xrfg_unlisted_motion_${unlisted_motion}_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    endforeach()
     add_test(NAME xrfg_kcd_logical_capture COMMAND xrfg_three_slot_director_tests
         kcd-ngx-logical-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
@@ -1627,6 +1800,10 @@ if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
     add_test(NAME xrfg_luke_stale_synthesis_context COMMAND xrfg_three_slot_director_tests luke-stale-synthesis-context)
     set_tests_properties(xrfg_luke_stale_synthesis_context PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
     add_test(NAME xrfg_luke_late_alias_context COMMAND xrfg_three_slot_director_tests luke-late-alias-context)
+    add_test(NAME xrfg_luke_afw_resource_lifecycle COMMAND xrfg_three_slot_director_tests luke-afw-resource-lifecycle)
+    set_tests_properties(xrfg_luke_afw_resource_lifecycle PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+    add_test(NAME xrfg_native_reset_lifetime COMMAND xrfg_three_slot_director_tests native-reset-lifetime)
+    set_tests_properties(xrfg_native_reset_lifetime PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
     set_tests_properties(xrfg_luke_late_alias_context PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
     add_test(NAME xrfg_outlaws_startup COMMAND xrfg_three_slot_director_tests outlaws-startup
         "$<TARGET_FILE:xrfg_luke_runtime_fixture>" "${XRFG_AFW_RUNTIME}")
@@ -1718,6 +1895,12 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
         "-DSHADING_RATE=${shading_index}" -DEPOCH_TRANSITION=ON
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
     set_tests_properties(xrfg_luke_epoch_recovery_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+    add_test(NAME xrfg_luke_async_epoch_recovery_${shading_index} COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+        "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/luke-async-epoch-recovery-${shading_index}"
+        "-DSHADING_RATE=${shading_index}" -DEPOCH_TRANSITION=ON -DASYNC_RESET=ON
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+    set_tests_properties(xrfg_luke_async_epoch_recovery_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
   endforeach()
   foreach(shading_index 0 4 8)
     add_test(NAME xrfg_luke_geometry_recovery_${shading_index} COMMAND "${CMAKE_COMMAND}"
@@ -1726,6 +1909,14 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
         "-DSHADING_RATE=${shading_index}" -DGEOMETRY_TRANSITION=ON
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
     set_tests_properties(xrfg_luke_geometry_recovery_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+  endforeach()
+  foreach(shading_index 4 8)
+    add_test(NAME xrfg_luke_async_interleaved_reset_${shading_index} COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+        "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/luke-async-interleaved-reset-${shading_index}"
+        "-DSHADING_RATE=${shading_index}" -DEPOCH_TRANSITION=ON -DASYNC_RESET=ON -DINTERLEAVED=ON
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+    set_tests_properties(xrfg_luke_async_interleaved_reset_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
   endforeach()
   add_test(NAME xrfg_luke_indiana_live_shading COMMAND "${CMAKE_COMMAND}"
       "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
@@ -1745,6 +1936,47 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/gta-native-quality" -DTITLE=GTAVE
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
   set_tests_properties(xrfg_luke_gta_native_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+  add_test(NAME xrfg_luke_gta_headlock_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/gta-headlock-quality" -DTITLE=GTAVE
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_headlock_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1")
+  add_test(NAME xrfg_luke_gta_current_scene_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_current_scene_quality" -DTITLE=GTAVE -DSHADING_RATE=0
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_current_scene_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1")
+  add_test(NAME xrfg_luke_gta_current_scene_half_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_current_scene_half_quality" -DTITLE=GTAVE -DSHADING_RATE=4
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_current_scene_half_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1")
+  add_test(NAME xrfg_luke_gta_eye_reference_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_eye_reference_quality" -DTITLE=GTAVE -DSHADING_RATE=0
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_eye_reference_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1;XRFG_TEST_GTA_EYE_REFERENCE=1")
+  add_test(NAME xrfg_luke_gta_eye_reference_half_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_eye_reference_half_quality" -DTITLE=GTAVE -DSHADING_RATE=4
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_eye_reference_half_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1;XRFG_TEST_GTA_EYE_REFERENCE=1")
+  add_test(NAME xrfg_luke_gta_calibration_recovery_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_calibration_recovery_quality" -DTITLE=GTAVE -DSHADING_RATE=0
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_calibration_recovery_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1;XRFG_TEST_GTA_CALIBRATION_RECOVERY=1")
+  add_test(NAME xrfg_luke_gta_calibration_recovery_half_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_calibration_recovery_half_quality" -DTITLE=GTAVE -DSHADING_RATE=4
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_calibration_recovery_half_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1;XRFG_TEST_GTA_CALIBRATION_RECOVERY=1")
   add_test(NAME xrfg_luke_dead_space_native_quality COMMAND "${CMAKE_COMMAND}"
       "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/dead-space-native-quality" -DTITLE=DS2023
@@ -1768,5 +2000,63 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
    set_tests_properties(xrfg_luke_kcd_quality_game PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
        PASS_REGULAR_EXPRESSION "KCD full quality:")
   endif()
+ endif()
+endif()
+
+if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
+  add_test(NAME xrfg_gta_flat_scene COMMAND "${CMAKE_COMMAND}"
+    "-DTEST_EXE=$<TARGET_FILE:xrfg_three_slot_director_tests>"
+    "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/gta-flat-scene" -DTEST_MODE=gta-flat-scene
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gta_origin_test.cmake")
+  set_tests_properties(xrfg_gta_flat_scene PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS)
+  add_executable(xrfg_composition_panels_tests tests/composition_panels_tests.cpp)
+  target_compile_features(xrfg_composition_panels_tests PRIVATE cxx_std_20)
+  target_include_directories(xrfg_composition_panels_tests PRIVATE include external/OpenXR-SDK/include)
+  add_test(NAME xrfg_composition_panels_tests COMMAND xrfg_composition_panels_tests)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
+  add_test(NAME xrfg_layer_shared_swapchain_panels COMMAND xrfg_layer_call_chain
+    $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+    "${CMAKE_CURRENT_BINARY_DIR}/shared-panels.log" flight-shared-panels)
+  add_test(NAME xrfg_panel_synthesis_gpu COMMAND xrfg_d3d12_history_tests panel)
+  set_tests_properties(xrfg_layer_shared_swapchain_panels xrfg_panel_synthesis_gpu PROPERTIES TIMEOUT 90)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
+  foreach(route new solo-new solo-djules3 solo-fsr solo-hybrid solo-dlssg)
+    add_test(NAME xrfg_private_panels_${route}_gpu COMMAND xrfg_private_runtime_layer_tests panels-${route})
+    set_tests_properties(xrfg_private_panels_${route}_gpu PROPERTIES TIMEOUT 90)
+  endforeach()
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
+  add_test(NAME xrfg_panel_metadata_ownership COMMAND xrfg_private_runtime_layer_tests panel-metadata)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS)
+ add_executable(xrfg_osr_peer_pose_tests tests/osr_peer_pose_tests.cpp)
+ target_include_directories(xrfg_osr_peer_pose_tests PRIVATE include)
+ target_compile_features(xrfg_osr_peer_pose_tests PRIVATE cxx_std_20)
+ add_test(NAME xrfg_osr_peer_pose_math COMMAND xrfg_osr_peer_pose_tests)
+ if(TARGET xrfg_d3d12_history)
+  add_executable(xrfg_osr_scene_cut_tests tests/osr_scene_cut_tests.cpp)
+  target_include_directories(xrfg_osr_scene_cut_tests PRIVATE include src/d3d12 "${XRFG_GENERATED_SHADER_DIR}")
+  target_compile_features(xrfg_osr_scene_cut_tests PRIVATE cxx_std_20)
+  target_compile_definitions(xrfg_osr_scene_cut_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(xrfg_osr_scene_cut_tests PRIVATE d3d12 dxgi)
+  add_dependencies(xrfg_osr_scene_cut_tests xrfg_d3d12_history)
+  add_test(NAME xrfg_osr_scene_cut_gpu COMMAND xrfg_osr_scene_cut_tests)
+  set_tests_properties(xrfg_osr_scene_cut_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+ endif()
+ set(XRFG_TEST_OSR_POSE_REPLAY "" CACHE FILEPATH "Optional sealed render-camera pose replay")
+ if(XRFG_TEST_OSR_POSE_REPLAY)
+  add_test(NAME xrfg_osr_peer_pose_replay COMMAND xrfg_osr_peer_pose_tests "${XRFG_TEST_OSR_POSE_REPLAY}")
+ endif()
+ if(TARGET xrfg_private_runtime_layer_tests)
+  add_test(NAME xrfg_osr_peer_pose_metadata COMMAND xrfg_private_runtime_layer_tests osr-peer-pose)
  endif()
 endif()

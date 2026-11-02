@@ -5,6 +5,7 @@
 #include <set>
 
 #include "nr_feature.hpp"
+#include "NrGuideRegion.h"
 #include "NrBeforeSrContract.h"
 #include "NrRetirementCadence.h"
 #include "NrHistoryContract.h"
@@ -163,6 +164,8 @@ struct NrPerHandle
 
     // The frame shrunk for the model, when it is working below full resolution.
     ID3D12Resource* colorSmall = nullptr;
+    ID3D12Resource* depthSmall = nullptr;
+    ID3D12Resource* motionSmall = nullptr;
 
     unsigned int workWidth = 0;
     unsigned int workHeight = 0;
@@ -820,7 +823,7 @@ void ReleaseSurfacesIfFormatChanged(NrPerHandle& nr, DXGI_FORMAT needed)
     ParkNrEvaluateParams(nr);
 
     for (ID3D12Resource** r :
-         { &nr.output, &nr.colorCopy, &nr.hdrCopy, &nr.colorSmall, &nr.resolveCopy })
+         { &nr.output, &nr.colorCopy, &nr.hdrCopy, &nr.colorSmall, &nr.depthSmall, &nr.motionSmall, &nr.resolveCopy })
         ParkNrResource(*r);
 
     nr.reset = true;
@@ -891,6 +894,50 @@ ID3D12Resource* PrivateNrGuide(ID3D12Device* device, ID3D12GraphicsCommandList* 
 //
 // The game's IsHDR flag is a statement of intent that is not always true, and believing it over a
 // format that cannot hold linear light means encoding an already-encoded frame a second time.
+// Lifetime remains per native handle, under the existing exact submission
+// retirement. Restore our small guides on every exit; never alter game guides.
+struct MatchedNrGuides {
+ ID3D12GraphicsCommandList* list{};ID3D12Resource* depth{},*motion{};
+ ~MatchedNrGuides(){if(depth) {
+  Barrier(list,depth,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"NR small depth reusable");
+  Barrier(list,motion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"NR small motion reusable");
+ }}
+};
+bool MatchPrivateNrGuides(NrPerHandle& nr,ID3D12Device* device,ID3D12GraphicsCommandList* list,
+ const NVSDK_NGX_Parameter* params,unsigned renderWidth,unsigned renderHeight,
+ unsigned outputWidth,unsigned outputHeight,unsigned workWidth,unsigned workHeight,unsigned flags,
+ bool reduced,ID3D12Resource*& depth,ID3D12Resource*& motion,unsigned& suppliedWidth,unsigned& suppliedHeight,
+ float& scaleX,float& scaleY,MatchedNrGuides& restore) {
+ const auto get=[&](const char* name){unsigned v{};params->Get(name,&v);return v;};
+ const bool low=(flags&NVSDK_NGX_DLSS_Feature_Flags_MVLowRes)!=0;
+ const unsigned referenceW=low?renderWidth:outputWidth,referenceH=low?renderHeight:outputHeight;
+ const DlssNr::GuideRegion d{get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X),get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y),renderWidth,renderHeight};
+ const DlssNr::GuideRegion m{get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X),get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y),referenceW,referenceH};
+ const auto dd=depth->GetDesc(),md=motion->GetDesc();
+ if(!DlssNr::GuideFits(d,dd.Width,dd.Height)||!DlssNr::GuideFits(m,md.Width,md.Height))return false;
+ suppliedWidth=m.width;suppliedHeight=m.height;
+ if(reduced) {
+  for(auto resource:{&nr.depthSmall,&nr.motionSmall})if(*resource) {
+   const auto desc=(*resource)->GetDesc();if(desc.Width!=workWidth||desc.Height!=workHeight)ParkNrResource(*resource);
+  }
+  if(!nr.depthSmall)nr.depthSmall=CreateScratch(device,DXGI_FORMAT_R32_FLOAT,workWidth,workHeight);
+  if(!nr.motionSmall)nr.motionSmall=CreateScratch(device,DXGI_FORMAT_R32G32_FLOAT,workWidth,workHeight);
+  if(!nr.depthSmall||!nr.motionSmall)return false;
+  DlssNrConstants c{};c.Mode=DlssNrMode_ResizePrivateGuides;c.Width=workWidth;c.Height=workHeight;
+  c.DepthX=d.x;c.DepthY=d.y;c.DepthWidth=d.width;c.DepthHeight=d.height;
+  c.MotionX=m.x;c.MotionY=m.y;c.MotionWidth=m.width;c.MotionHeight=m.height;
+  if(!nr.compose->Dispatch(list,c,depth,motion,nullptr,nullptr,nullptr,nr.depthSmall,nr.motionSmall))return false;
+  depth=nr.depthSmall;motion=nr.motionSmall;
+  Barrier(list,depth,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,L"NR small depth ready");
+  Barrier(list,motion,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,L"NR small motion ready");
+  restore.list=list;restore.depth=depth;restore.motion=motion;
+  suppliedWidth=workWidth;suppliedHeight=workHeight;
+ }else if(d.x||d.y||m.x||m.y)return false; // full-size model has no ROI fields
+ scaleX=DlssNr::GuideScale(nr.guideMvScaleX,suppliedWidth,referenceW);
+ scaleY=DlssNr::GuideScale(nr.guideMvScaleY,suppliedHeight,referenceH);
+ return true;
+}
+
 bool FormatCanHoldLinearHdr(DXGI_FORMAT format)
 {
     switch (format)
@@ -1220,11 +1267,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     // silently read another eye/region for layouts that need a separate offset-aware integration.
     bool unsupportedOffset = false;
     for (const char* key : { NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X,
-                            NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y,
-                            NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X,
-                            NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y,
-                            NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X,
-                            NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y })
+                            NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y })
     {
         unsigned int offset = 0;
         if (params->Get(key, &offset) == NVSDK_NGX_Result_Success && offset != 0)
@@ -1557,8 +1600,13 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         return;
     }
 
-    // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
-    const float mvToWork = width != 0 ? (float) workWidth / (float) width : 1.0f;
+    MatchedNrGuides matchedGuides;
+    unsigned modelGuideWidth{},modelGuideHeight{};float modelScaleX{},modelScaleY{};
+    if(!MatchPrivateNrGuides(nr,device,cmdList,params,guideWidth,guideHeight,(unsigned)(srOutput?srOutput->GetDesc().Width:width),(unsigned)(srOutput?srOutput->GetDesc().Height:height),
+        workWidth,workHeight,createFlags,reduced,depthIn,motionIn,modelGuideWidth,modelGuideHeight,
+        modelScaleX,modelScaleY,matchedGuides)) {
+        g_runtime.reason="the private NR guide regions could not be matched";device->Release();return;
+    }
 
     NVSDK_NGX_Parameter* const evaluateParams =
         EvaluateParamsForCommandList(nr, cmdList, device);
@@ -1586,12 +1634,11 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR pre-SR model");
         result = g_runtime.evaluate(
             cmdList, nr.feature, evaluateParams, modelInput, depthIn, motionIn, nr.output,
-            workWidth, workHeight, guideWidth, guideHeight, nr.guideDepthInverted ? 1 : 0,
+            workWidth, workHeight, modelGuideWidth, modelGuideHeight, nr.guideDepthInverted ? 1 : 0,
             nr.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
             (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
             cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
-            cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, nr.guideMvScaleX * mvToWork,
-            nr.guideMvScaleY * mvToWork);
+            cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, modelScaleX, modelScaleY);
     }
 
 
@@ -2158,8 +2205,13 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
         return;
     }
 
-    // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
-    const float mvToWork = width != 0 ? (float) workWidth / (float) width : 1.0f;
+    MatchedNrGuides matchedGuides;
+    unsigned modelGuideWidth{},modelGuideHeight{};float modelScaleX{},modelScaleY{};
+    if(!MatchPrivateNrGuides(nr,device,cmdList,params,guideWidth,guideHeight,width,height,
+        workWidth,workHeight,createFlags,reduced,depthIn,motionIn,modelGuideWidth,modelGuideHeight,
+        modelScaleX,modelScaleY,matchedGuides)) {
+        g_runtime.reason="the private NR guide regions could not be matched";device->Release();return;
+    }
 
     NVSDK_NGX_Parameter* const evaluateParams =
         EvaluateParamsForCommandList(nr, cmdList, device);
@@ -2187,12 +2239,11 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
         DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR post-SR model");
         result = g_runtime.evaluate(
             cmdList, nr.feature, evaluateParams, modelInput, depthIn, motionIn, nr.output,
-            workWidth, workHeight, guideWidth, guideHeight, nr.guideDepthInverted ? 1 : 0,
+            workWidth, workHeight, modelGuideWidth, modelGuideHeight, nr.guideDepthInverted ? 1 : 0,
             nr.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
             (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
             cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
-            cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, nr.guideMvScaleX * mvToWork,
-            nr.guideMvScaleY * mvToWork);
+            cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, modelScaleX, modelScaleY);
     }
 
 
@@ -2353,7 +2404,7 @@ void ReleaseForHandleLocked(unsigned int sourceHandleId)
     ParkNrEvaluateParams(nr);
     ParkNrCodec(nr.compose);
 
-    for (ID3D12Resource** r : { &nr.output, &nr.colorCopy, &nr.hdrCopy, &nr.colorSmall, &nr.resolveCopy,
+    for (ID3D12Resource** r : { &nr.output, &nr.colorCopy, &nr.hdrCopy, &nr.colorSmall, &nr.depthSmall, &nr.motionSmall, &nr.resolveCopy,
                                 &nr.depthClone, &nr.motionClone })
         ParkNrResource(*r);
 
@@ -2447,7 +2498,7 @@ void Shutdown()
             }
         }
 
-        for (ID3D12Resource* r : { nr.output, nr.colorCopy, nr.hdrCopy, nr.colorSmall, nr.resolveCopy,
+        for (ID3D12Resource* r : { nr.output, nr.colorCopy, nr.hdrCopy, nr.colorSmall, nr.depthSmall, nr.motionSmall, nr.resolveCopy,
                                    nr.depthClone, nr.motionClone })
         {
             if (r != nullptr)

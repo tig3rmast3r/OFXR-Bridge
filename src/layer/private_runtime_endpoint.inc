@@ -57,6 +57,11 @@ XrResult XRAPI_CALL private_runtime_get_proc(XrInstance instance,const char* nam
 
 HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     if(state->afw_only || !comparison_delivery_runtime(*state))return S_FALSE;
+    // The endpoint owns D3D images. A session still on a non-D3D binding (a
+    // Vulkan session the bridge declined, OpenGL) has no device for it: pass
+    // the valid runtime session through instead of failing xrCreateSession.
+    if(state->graphics_binding!=SessionGraphicsBinding::d3d11 &&
+        state->graphics_binding!=SessionGraphicsBinding::d3d12)return S_FALSE;
     state->uevr_application=GetModuleHandleW(L"UEVRBackend.dll")!=nullptr;
     auto original=state->dispatch;
     xrfg::PrivateOpenXrRuntime::Options options;

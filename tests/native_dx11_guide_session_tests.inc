@@ -14,6 +14,12 @@ void native_dx11_guide_session_test() {
     for (bool converted : {false,true}) {
         std::cerr<<"DX11 guide session: create session converted="<<converted<<'\n'<<std::flush;
         auto dispatch=std::make_shared<Dispatch>();dispatch->d3d11_bridge=converted;
+        // This fixture isolates native/converted guide ownership and supplies
+        // only the original runtime's image/release calls. Select that actual
+        // Legacy runtime contract explicitly; complete private SteamVR endpoint
+        // creation and image ownership are covered by private-runtime fixtures.
+        dispatch->virtual_desktop_runtime=true;dispatch->inline_unless_pipelined=true;
+        dispatch->runtime_name="Virtual Desktop";
         dispatch->get_instance_proc_addr=[](XrInstance,const char*,PFN_xrVoidFunction* function)->XrResult {
             *function=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;
         };

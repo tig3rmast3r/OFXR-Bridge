@@ -1,5 +1,6 @@
 // Shipping API/worker/generator code, with only the downstream runtime mocked.
 #include "xrfg/benchmark_suite.hpp"
+#include "xrfg/d3d12_native_dlssg.hpp"
 #include <fstream>
 #include "../src/layer/openxr_layer.cpp"
 #define main private_transport_core_main
@@ -9,10 +10,118 @@
 #include <d3d12sdklayers.h>
 
 #include "afw_only_session_test.inc"
+#include "steamvr_vram_budget_test.inc"
 
 static bool framework_session_probe{},vdxr_legacy_probe{};
+// Star Citizen loads no implicit Vulkan layer, so the bridge declines its
+// Vulkan session, which SteamVR then creates natively. The private endpoint
+// has no D3D device to own; xrCreateSession must pass that session through,
+// not destroy it with XR_ERROR_INITIALIZATION_FAILED.
+static int unbridged_vulkan_session_test() {
+    for(const auto binding:{SessionGraphicsBinding::vulkan,SessionGraphicsBinding::opengl}) {
+        auto dispatch=std::make_shared<Dispatch>();
+        dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=true;
+        auto state=std::make_shared<SessionState>(dispatch);
+        state->handle=reinterpret_cast<XrSession>(2);state->graphics_binding=binding;state->vdxr_legacy=false;
+        check(comparison_delivery_runtime(*state),"SteamVR Auto selects the private endpoint");
+        check(install_private_runtime(state)==S_FALSE && !state->private_runtime && state->dispatch==dispatch,
+            "non-D3D session kept its native binding and runtime dispatch");
+    }
+    std::puts("Unbridged Vulkan/OpenGL session pass-through: PASS");
+    return 0;
+}
+
+static int panel_metadata_contract() {
+    XrCompositionLayerProjectionView view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+    view.pose.orientation.w=1;view.fov={-.7f,.7f,.7f,-.7f};
+    view.subImage.swapchain=reinterpret_cast<XrSwapchain>(50);view.subImage.imageRect.extent={4,4};
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=1;projection.views=&view;
+    XrCompositionLayerQuad q{XR_TYPE_COMPOSITION_LAYER_QUAD};q.space=projection.space;
+    q.pose.orientation.w=1;q.pose.position.x=1;q.size={1,1};
+    q.subImage.swapchain=reinterpret_cast<XrSwapchain>(99);q.subImage.imageRect.extent={2,4};
+    auto other=q;other.pose.position.x=5;other.subImage.imageRect.offset.x=2;
+    const XrCompositionLayerBaseHeader* layers[]={reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q),reinterpret_cast<const XrCompositionLayerBaseHeader*>(&other)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.layerCount=3;end.layers=layers;
+    ProjectionSnapshot snapshot;check(capture_projection_snapshot(&end,&snapshot),"capture panel metadata");
+    snapshot.panel_corrections=true;snapshot.previous_panels=snapshot.panels;
+    snapshot.previous_panels[0].pose.position.x=0;
+    std::array<ProjectionResourceDestination,2> destinations{{{view.subImage.swapchain,view.subImage.swapchain},
+        {q.subImage.swapchain,reinterpret_cast<XrSwapchain>(77),false,true}}};
+    for(const float fraction:{.25f,1.f/3,.5f,2.f/3,.75f}) {
+        GeneratedFrameEndInfo frame;
+        check(build_generated_frame_end_info(&end,snapshot,true,destinations,&frame,nullptr,fraction),"synthetic panel metadata");
+        auto owned=make_presenter_owned_frame(std::move(frame));check(bool(owned),"own interpolated panel metadata");
+        const auto* a=reinterpret_cast<const XrCompositionLayerQuad*>(owned->info.layers[1]);
+        const auto* b=reinterpret_cast<const XrCompositionLayerQuad*>(owned->info.layers[2]);
+        check(std::abs(a->pose.position.x-fraction)<1e-5f&&b->pose.position.x==5,"private atlas panel poses or fraction changed");
+        check(a->subImage.swapchain==reinterpret_cast<XrSwapchain>(77)&&b->subImage.swapchain==a->subImage.swapchain,
+            "generated atlas handle or second rectangle lost");
+        check(b->subImage.imageRect.offset.x==2,"generated atlas rectangle lost");
+        q.pose.position.x=999;check(std::abs(a->pose.position.x-fraction)<1e-5f,"async metadata borrowed the next application pose");q.pose.position.x=1;
+    }
+    GeneratedFrameEndInfo still;
+    check(build_generated_frame_end_info(&end,snapshot,true,std::span(destinations.data(),1),&still),"stationary panel metadata");
+    check(still.info.layers[2]==layers[2],"stationary passthrough panel was unnecessarily replaced");
+    snapshot.panel_corrections=false;GeneratedFrameEndInfo unchanged;
+    check(build_generated_frame_end_info(&end,snapshot,true,std::span(destinations.data(),1),&unchanged),"REAL VR panel passthrough");
+    check(reinterpret_cast<const XrCompositionLayerQuad*>(unchanged.info.layers[1])->pose.position.x==1,
+        "disabled panel corrections changed REAL VR placement");
+    std::puts("Shipping panel metadata ownership, atlas rects, 2X/3X/4X fractions and REAL VR passthrough PASS");return 0;
+}
+
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route=="osr-peer-pose") {
+        std::array<XrCompositionLayerProjectionView,2> views{};
+        for(unsigned i=0;i<2;++i) {
+            auto& v=views[i];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;
+            v.pose.position={float(i),.1F,.2F};v.fov={-.7F,.7F,.7F,-.7F};
+            v.subImage.swapchain=reinterpret_cast<XrSwapchain>(12+i);v.subImage.imageRect.extent={64,64};
+        }
+        views[1].pose.orientation={0,.1F,0,std::sqrt(.99F)};
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(1);
+        projection.viewCount=2;projection.views=views.data();const auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+        XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=123;end.layerCount=1;end.layers=&layer;
+        ProjectionSnapshot original;check(capture_projection_snapshot(&end,&original),"capture original AER metadata");
+        auto pair=std::make_shared<HeldAfwPair>();pair->projection=original;
+        ProjectionResourceMapping mapping;mapping.views.push_back({0,1});
+        check(apply_osr_peer_position(pair->projection,mapping,{.068F,.1F,.2F}),"correct only reconstructed peer position");
+        check(std::memcmp(&pair->projection.layers[0].views[0],&original.layers[0].views[0],sizeof(views[0]))==0,"real source eye unchanged");
+        const auto& peer=pair->projection.layers[0].views[1];
+        check(std::memcmp(&peer.pose.orientation,&views[1].pose.orientation,sizeof(XrQuaternionf))==0 &&
+            std::memcmp(&peer.fov,&views[1].fov,sizeof(XrFovf))==0,"peer orientation and FOV unchanged");
+        PreparedProjectionFrame produced;produced.kind=PreparedGenerationKind::prime;produced.scene_serial=5;
+        for(unsigned i=0;i<2;++i){PreparedProjectionResource r;r.application_swapchain=views[i].subImage.swapchain;
+            r.generation.current_handle=reinterpret_cast<XrSwapchain>(100+i);produced.resources.push_back(r);}
+        produced.reconstructed_afw_pair=pair;
+        check(!produced.held_afw_pair,"fresh corrected metadata must not signal a held source");
+        for(bool held:{false,true}) {
+            if(held){produced.held_afw_pair=pair;produced.reconstructed_afw_pair.reset();}
+            GeneratedFrameEndInfo terminal;ProjectionSnapshot snapshot;
+            check(build_afw_terminal_submission(&end,original,produced,terminal,snapshot),"fresh/held terminal ownership");
+            check(snapshot.layers[0].views[1].pose.position.x==.068F && snapshot.layers[0].views[0].pose.position.x==0,
+                "terminal and downstream snapshot preserve the exact corrected position");
+            check(terminal.info.displayTime==123,"metadata correction does not reschedule displayTime");
+        }
+        produced.held_afw_pair.reset();GeneratedFrameEndInfo legacy;ProjectionSnapshot legacy_snapshot;
+        check(build_afw_terminal_submission(&end,original,produced,legacy,legacy_snapshot) &&
+            legacy_snapshot.layers[0].views[1].pose.position.x==1,"absent OSR receipt preserves the existing AFW/pass-through metadata");
+        std::puts("OSR fresh/held terminal metadata, unchanged source/orientation/FOV/time and legacy PASS");return 0;
+    }
+    const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
+    if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
+    if(route=="unbridged-vulkan-session")return unbridged_vulkan_session_test();
+    if(route=="panel-metadata")return panel_metadata_contract();
+    const bool steady_benchmark=route=="steady-benchmark-sequence" || route=="vram-steady-benchmark-sequence";
+    const bool steady_memory=route.starts_with("vram-steady-") || steady_benchmark;
+    if(steady_benchmark)route="benchmark-sequence";
+    else if(steady_memory)route=route.substr(12);
+    constexpr unsigned memory_phase_frames=16;
+    const UINT image_width=steady_memory?(argc>2?UINT(std::stoul(argv[2])):2048):256;
+    const UINT image_height=steady_memory?image_width:128;
+    check(!steady_memory || (image_width>=128 && image_width<=4096),"steady VRAM per-eye extent 128..4096");
     const bool hfw=route.starts_with("hfw-");if(hfw)route=route.substr(4);
     const bool hfw_early=hfw && route.starts_with("early-");if(hfw_early)route=route.substr(6);
     const bool hfw_offon=hfw && route.starts_with("offon-");if(hfw_offon)route=route.substr(6);
@@ -33,8 +142,10 @@ int main(int argc,char** argv) {
     const bool outlaws_budget=route=="outlaws-budget" || route=="outlaws-unshared-budget";
     const bool publication_budget=outlaws_budget || shared_budget || unshared_budget;
     if(publication_budget)route="d11-ref";
-    const bool benchmark_sequence=route=="benchmark-sequence";
-    if(benchmark_sequence)route="solo-djules3";
+    const bool benchmark_dlssg_transition=route=="benchmark-dlssg-transition";
+    const bool benchmark_dlssg_sequence=route=="benchmark-dlssg-sequence" || benchmark_dlssg_transition;
+    const bool benchmark_sequence=route=="benchmark-sequence" || benchmark_dlssg_sequence;
+    if(benchmark_sequence)route=benchmark_dlssg_sequence?"solo-dlssg3":"solo-djules3";
     const bool off_session_probe=route=="off-pacing-session";if(off_session_probe)route="session";
     framework_session_probe=route=="framework-session";if(framework_session_probe)route="session";
     const bool measured=route.starts_with("metrics-");if(measured)route=route.substr(8);
@@ -42,7 +153,8 @@ int main(int argc,char** argv) {
     const bool deep=route.starts_with("deep-");if(deep)route=route.substr(5);
     const bool toggling=route.starts_with("toggle-");if(toggling)route=route.substr(7);
     const bool blocked=route.starts_with("blocked-");if(blocked)route=route.substr(8);
-    const bool sole=route.starts_with("solo-");if(sole)route=route.substr(5);
+    const bool sole_prefix=route.starts_with("solo-");if(sole_prefix)route=route.substr(5);
+    const bool sole=sole_prefix || steady_memory;
     const bool canonical=route.starts_with("canonical-");if(canonical)route=route.substr(10);
     const bool pooled=route.starts_with("pooled-");if(pooled)route=route.substr(7);
     const bool unpooled=route.starts_with("unpooled-");if(unpooled)route=route.substr(9);
@@ -52,6 +164,7 @@ int main(int argc,char** argv) {
     const bool switching=route=="switch";if(switching)route="new";
     const bool luke=route.starts_with("luke-");if(luke)route=route.substr(5);
     const bool native12=!route.starts_with("d11-");if(!native12)route=route.substr(4);
+    check(!steady_memory || native12,"steady VRAM mode currently uses the native D12 route fixtures");
     const bool triple=route.ends_with('3');if(triple)route.pop_back();
     xrfg_fixture::ControlProfile profile;
     if(large_buffer) {
@@ -86,11 +199,11 @@ int main(int argc,char** argv) {
         check(xrfg::autonomous::request(desired),"select framework transport before session");
         xrfg::autonomous::apply_runtime_settings();
     }
-    if(sole) {
+    if(sole || (split_eyes && route=="hybrid")) {
         auto desired=xrfg::autonomous::snapshot().desired;
         xrfg::autonomous::select_generation(desired,route=="fsr"?1:route=="dlssg"?2:route=="hybrid"?3:0,
             route=="ref"?1:route=="new"?2:route=="djules"?3:0);
-        desired.enabled=true;desired.pacing_mode=1;
+        desired.enabled=!steady_memory;desired.pacing_mode=1;
         desired.lower_vram=b;desired.separate_synthesis=a;
         desired.motion_vectors=route=="fsr" || route=="hybrid" || route=="dlssg";
         desired.triple_frame_gen=triple;desired.prefer_fps=triple || deep;
@@ -332,14 +445,14 @@ int main(int argc,char** argv) {
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         const auto clock=GetTickCount64();tick_benchmark(clock);
         check(snapshot().benchmark.phase==BenchmarkPhase::running,"memory trial applied");
-        tick_benchmark(clock+9750);
+        tick_benchmark(clock+kBenchmarkMemoryRequestMs);
         sample_benchmark_memory(*state);
         check(!take_benchmark_memory_request(),"game sampler consumes one request only");
         check(state->video_memory_adapter!=nullptr,"sampler finds the actual rendering adapter with F9 off");
         DXGI_QUERY_VIDEO_MEMORY_INFO expected{};
         ok(state->video_memory_adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&expected),"independent process VRAM query");
         const auto path=std::filesystem::u8path(snapshot().benchmark.csv_path);
-        tick_benchmark(clock+10000);
+        tick_benchmark(clock+kBenchmarkDurationMs);
         std::ifstream csv(path);std::string line;bool gpu{},ram{};
         while(std::getline(csv,line)) {
             for(const auto& key:{std::string("VRAM end MiB,"),std::string("RAM working set end MiB,")}) {
@@ -385,6 +498,14 @@ int main(int argc,char** argv) {
     else state->control_revision=xrfg::embedded::snapshot().revision;
     {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;g_instances[dispatch->instance]=dispatch;}
     ok(install_private_runtime(state),"install real SteamVR private dispatch");
+    if(benchmark_dlssg_sequence) {
+        // Manual SessionState fixtures must make the same real SDK capacity
+        // query as xrCreateSession. Never grant a synthetic 3X capability.
+        refresh_native_generation_capacity(*state);
+        std::fprintf(stderr,"DLSS-G benchmark actual max-generated-frames=%u admitted-output-multiplier=%u\n",
+            state->native_dlss_generated_frames,state->native_dlss_generated_frames>=2?3U:2U);std::fflush(stderr);
+        check(state->native_dlss_generated_frames>=1,"DLSS-G benchmark requires actual SDK frame-generation support");
+    }
     if(hfw) {
         check(fresh_luke_director_worker(*state) && !presenter_forbidden(*state),"HFW source filter incorrectly forces inline synthesis");
         state->single_threaded_d3d11=true;check(presenter_forbidden(*state),"single-threaded guard lost");state->single_threaded_d3d11=false;
@@ -536,7 +657,7 @@ int main(int argc,char** argv) {
         ok(wait_composition_fence(progress.Get(),1),"reacquire proof drain");
         check(SUCCEEDED(independent),"private reacquire must not join the real runtime queue");
     }
-    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};info.width=256;info.height=128;info.arraySize=split_eyes?1:2;info.faceCount=info.mipCount=info.sampleCount=1;info.format=DXGI_FORMAT_R8G8B8A8_UNORM;info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};info.width=image_width;info.height=image_height;info.arraySize=split_eyes?1:2;info.faceCount=info.mipCount=info.sampleCount=1;info.format=DXGI_FORMAT_R8G8B8A8_UNORM;info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
     XrSwapchain chain{};xr_ok(layer_create_swapchain_impl(state->handle,&info,&chain),"shipping application swapchain");
     std::array<XrSwapchainImageD3D12KHR,3> images;for(auto& image:images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};unsigned count{};
     if(native12)xr_ok(layer_enumerate_swapchain_images_impl(chain,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"shipping enumerate/capture setup");
@@ -549,9 +670,56 @@ int main(int argc,char** argv) {
         for(auto& image:right_images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
         xr_ok(layer_enumerate_swapchain_images_impl(right,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(right_images.data())),"right-eye capture setup");
     }
+    XrSwapchain panel_chain{};
+    if(panel_test) {
+        const auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
+        auto ci=info;ci.arraySize=1;
+        xr_ok(layer_create_swapchain_impl(state->handle,&ci,&panel_chain),"independent panel atlas");
+        f.create_state=saved;
+        std::array<XrSwapchainImageD3D12KHR,3> pi;for(auto& i:pi)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
+        unsigned pc{};xr_ok(layer_enumerate_swapchain_images_impl(panel_chain,3,&pc,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(pi.data())),"panel atlas capture setup");
+    }
+    ComPtr<IDXGIAdapter3> memory_adapter;
+    std::unique_ptr<steamvr_vram_test::Ledger> memory_ledger;
+    std::vector<XrSwapchain> memory_applications{chain};if(split_eyes)memory_applications.push_back(right);
+    UINT64 memory_app_baseline{},memory_game_baseline{},memory_peak{},memory_native_baseline{},memory_native_peak{},memory_private_peak{};
+    std::array<UINT64,7> memory_phase_peaks{};
+    if(steady_memory) {
+        ComPtr<IDXGIFactory4> memory_factory;ok(CreateDXGIFactory1(IID_PPV_ARGS(&memory_factory)),"steady VRAM adapter factory");
+        ok(memory_factory->EnumAdapterByLuid(f.device12->GetAdapterLuid(),IID_PPV_ARGS(&memory_adapter)),"steady VRAM actual rendering adapter");
+        memory_ledger=std::make_unique<steamvr_vram_test::Ledger>(f.device12.Get());
+    }
+    const auto sample_memory=[&](const char* phase,unsigned frame) {
+        if(!steady_memory)return;
+        steamvr_vram_test::observe_resources(f,state,memory_applications,*memory_ledger);
+        const auto process=steamvr_vram_test::residency(memory_adapter.Get());
+        const auto native_bytes=memory_ledger->bytes(steamvr_vram_test::Kind::native);
+        const auto application_bytes=memory_ledger->bytes(steamvr_vram_test::Kind::application);
+        const auto generated_bytes=memory_ledger->bytes(steamvr_vram_test::Kind::generated);
+        const auto interop_bytes=memory_ledger->bytes(steamvr_vram_test::Kind::interop);
+        const auto control=xrfg::autonomous::snapshot().desired;
+        const auto phase_index=benchmark_sequence && frame?(frame-1)/memory_phase_frames:0;
+        if(phase_index<memory_phase_peaks.size())memory_phase_peaks[phase_index]=std::max(memory_phase_peaks[phase_index],process);
+        memory_peak=std::max(memory_peak,process);memory_native_peak=std::max(memory_native_peak,native_bytes);
+        memory_private_peak=std::max(memory_private_peak,application_bytes+generated_bytes+interop_bytes);
+        std::printf("VRAM_STEADY route=%s eye=%ux%u phase=%s phase_index=%u frame=%u backend=%d frame_generation=%d hybrid=%u pacing=%d separate=%d lower_vram=%d triple=%u buffer=%u physical_outputs=%u generation_state=%u process_bytes=%llu native_bytes=%llu application_private_bytes=%llu generated_private_bytes=%llu interop_bytes=%llu\n",
+            route.c_str(),image_width,image_height,phase,unsigned(phase_index),frame,control.backend,control.frame_generation,
+            unsigned(control.frame_generation==3),control.pacing_mode,control.separate_synthesis,control.lower_vram,
+            unsigned(control.triple_frame_gen),control.increase_buffer?3U:2U,f.real_ends.load(),unsigned(state->generation_status.load()),
+            process,native_bytes,application_bytes,generated_bytes,interop_bytes);std::fflush(stdout);
+        const auto features=xrfg::native_dlssg_lifetime_snapshot();
+        std::printf("VRAM_NATIVE_FEATURES phase=%s phase_index=%u frame=%u create_attempts=%llu created=%llu failed_create_handles=%llu release_attempts=%llu released=%llu release_failures=%llu live=%llu\n",
+            phase,unsigned(phase_index),frame,features.create_attempts,features.created,features.failed_create_handles,
+            features.release_attempts,features.released,features.release_failures,features.live);std::fflush(stdout);
+    };
+    if(steady_memory) {
+        sample_memory("application-enumerated",0);memory_app_baseline=memory_peak;
+        memory_native_baseline=memory_ledger->bytes(steamvr_vram_test::Kind::native);
+    }
     ComPtr<ID3D12Resource> depth,motion;
     if(vectors) {
-        D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;desc.Width=256;desc.Height=128;desc.DepthOrArraySize=2;desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;desc.Width=image_width;desc.Height=image_height;desc.DepthOrArraySize=2;desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;desc.Format=DXGI_FORMAT_R32_FLOAT;
         ok(f.device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&depth)),"owned depth guide");desc.Format=DXGI_FORMAT_R16G16_FLOAT;
         ok(f.device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&motion)),"owned motion guide");
@@ -568,7 +736,7 @@ int main(int argc,char** argv) {
                 recorded=list;xrfg::DlssMotionVectorPublication p{};
                 p.stream=handle==chain?100:200;p.output=c->enumerated_d3d12_images[index].Get();
                 p.motion_vectors=motion.Get();p.depth=depth.Get();p.producer_queue=f.queue.Get();p.producer_command_list=list;
-                p.output_width=p.motion_width=p.depth_width=256;p.output_height=p.motion_height=p.depth_height=128;
+                p.output_width=p.motion_width=p.depth_width=image_width;p.output_height=p.motion_height=p.depth_height=image_height;
                 check(bool(xrfg::publish_dlss_motion_vectors(p)),"real per-eye release-bound guide publication");
             });
             ID3D12CommandList* lists[]={recorded.Get()};xrfg::report_dlss_motion_vector_submission(f.queue.Get(),1,lists);
@@ -579,9 +747,29 @@ int main(int argc,char** argv) {
             return release_swapchain_with_identity(c,&release,xrfg::LukeRenderIdentity{0x649,++serial});}
         return layer_release_swapchain_image_impl(handle,&release);
     };
+    if(steady_memory) {
+        sample_memory("game-guides-ready",0);memory_game_baseline=steamvr_vram_test::residency(memory_adapter.Get());
+        auto enabled=xrfg::autonomous::snapshot().desired;enabled.enabled=true;
+        check(xrfg::autonomous::request(enabled),"steady memory real OFF-to-ON activation");xrfg::autonomous::apply_runtime_settings();
+        ok(apply_embedded_control(state),"steady memory apply active generator after game-only baseline");
+    }
     unsigned phase_outputs{};
-    const unsigned trial_frames=16;
-    const unsigned input_count=benchmark_sequence?7*trial_frames:8;
+    const unsigned trial_frames=memory_phase_frames;
+    const bool completed_frame_memory=steady_memory && (!benchmark_sequence ||
+        (benchmark_dlssg_sequence && !benchmark_dlssg_transition && state->native_dlss_generated_frames<2));
+    // Six phases already cover Framework/Director/Combined x Normal/Fast.
+    // The seventh exists only to test a REAL 3X->2X capacity transition. On an
+    // SDK limited to one generated frame it would instead test an unrelated
+    // prefer_fps scheduling change while repeating the same 2X Fast policy.
+    const unsigned benchmark_policy_phases=benchmark_dlssg_sequence && !benchmark_dlssg_transition && state->native_dlss_generated_frames<2?6:7;
+    const unsigned input_count=benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:8;
+    if(benchmark_sequence) {
+        std::fprintf(stderr,"BENCH policies=%u real_inputs=%u actual_3x_to_2x_transition=%u explicit_prefer_fps_transition_diagnostic=%u memory_sampling=%s\n",
+            benchmark_policy_phases,input_count,unsigned(benchmark_policy_phases==7 &&
+                (!benchmark_dlssg_sequence || state->native_dlss_generated_frames>=2)),
+            unsigned(benchmark_dlssg_transition && state->native_dlss_generated_frames<2),
+            completed_frame_memory?"completed-frame-drain":"overlapped-phase-drain");std::fflush(stderr);
+    }
     std::vector<std::shared_ptr<xrfg::InterfaceCycle>> measured_cycles;
     bool hfw_gate_proven=false;
     for(unsigned n=1;n<=input_count;++n) {
@@ -607,15 +795,16 @@ int main(int argc,char** argv) {
             auto desired=xrfg::autonomous::snapshot().desired;
             desired.pacing_mode=phase<6?phase/2:2;
             desired.lower_vram=desired.separate_synthesis=phase<6?phase%2:1;
-            desired.triple_frame_gen=phase<6;desired.prefer_fps=phase<6;
+            desired.triple_frame_gen=phase<6 && (!benchmark_dlssg_sequence || state->native_dlss_generated_frames>=2);
+            desired.prefer_fps=phase<6;
             check(xrfg::autonomous::request(desired),"actual benchmark pacing/Fast request");
             xrfg::autonomous::apply_runtime_settings();
-            if(phase==6) {
+            if(phase==6 || (phase==0 && benchmark_dlssg_sequence && state->native_dlss_generated_frames<2)) {
                 // Exercise both actual pipeline observations without a wall-clock
                 // sleep: first records the candidate, second reconciles capacity.
                 for(int observation=0;observation<2;++observation) {
                     state->djules_pipeline_poll={};
-                    xr_ok(poll_djules_pipeline(state),"live3X->2X Fast capacity reconciliation");
+                    xr_ok(poll_djules_pipeline(state),"actual multiplier capacity reconciliation");
                 }
             }
             phase_outputs=f.real_ends.load();
@@ -651,14 +840,24 @@ int main(int argc,char** argv) {
         }
         std::fprintf(stderr,"frame %u write (physical=%u)\n",n,f.real_ends.load());
         const auto color=((n-1)%8+1)*20;f.write(chain,color);if(split_eyes)f.write(right,color+7);
+        if(panel_test)f.write(panel_chain,30+n);
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
-            for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=256;g->output_height=g->depth_height=g->motion_height=128;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
+            for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=image_width;g->output_height=g->depth_height=g->motion_height=image_height;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
         XrFrameState prediction{XR_TYPE_FRAME_STATE};xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
         if(measured)if(auto cycle=state->interface_waited_cycle.load())measured_cycles.push_back(std::move(cycle));
         std::array<XrCompositionLayerProjectionView,2> views;
-        for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={256,128};}
+        for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={int(image_width),int(image_height)};}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
+        std::array<XrCompositionLayerQuad,2> panel_quads;
+        std::array<const XrCompositionLayerBaseHeader*,3> panel_layers{layer};
+        if(panel_test) {
+            for(unsigned i=0;i<2;++i){auto& q=panel_quads[i];q={XR_TYPE_COMPOSITION_LAYER_QUAD};
+                q.space=projection.space;q.pose.orientation.w=1;q.pose.position.x=i?5.f:.1f*n;
+                q.size={1,1};q.subImage.swapchain=panel_chain;q.subImage.imageRect={{int(i*image_width/2),0},{int(image_width/2),int(image_height)}};
+                panel_layers[i+1]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);}
+            end.layerCount=3;end.layers=panel_layers.data();
+        }
         if(hfw) std::fprintf(stderr,"HFW before%u active%u worker%u request%u forbidden%u mode%u enabled%u\n",n,
             unsigned(continuous_presenter_active(state)),unsigned(state->three_slot_director),unsigned(state->presenter_start_requested),
             unsigned(presenter_forbidden(*state)),unsigned(state->single_director_requested.load()),unsigned(state->menu_enabled.load()));
@@ -687,7 +886,7 @@ int main(int argc,char** argv) {
             xr_ok(producer.get(),"shipping End while native End is withheld");
             check(independent,"bridge acceptance returns to game before blocked native End with spare credits");
         } else xr_ok(layer_end_frame_impl(state->handle,&end),"shipping OFXR End handoff");
-        check(xrfg::autonomous::snapshot().runtime.eye_long_side==256,
+        check(xrfg::autonomous::snapshot().runtime.eye_long_side==std::max(image_width,image_height),
             "shipping runtime publishes the actual per-eye projection extent for benchmark quality limits");
         if(sole && !benchmark_sequence && !blocked && !toggling && n==2 && state->three_slot_director) {
             xr_ok(wait_for_synthesis_handoff(state),"second real generated without a future source");
@@ -695,13 +894,26 @@ int main(int argc,char** argv) {
             check(f.real_ends>=2,"ready real is delivered before a third application source exists");
         }
         std::fprintf(stderr,"frame %u accepted\n",n);
+        if(completed_frame_memory) {
+            // Measure actual completed prime/pair work, including lazily
+            // allocated provider intermediates. These drains belong only to
+            // the memory probe; the normal asynchronous fixture is unchanged.
+            xr_ok(wait_for_synthesis_handoff(state),"steady memory completed synthesis");
+            if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"steady memory completed presenter");
+            xr_ok(f.transport->drain(),"steady memory completed native FIFO");
+            f.gpu_wait();if(f.delivery_queue)f.gpu_wait(f.delivery_queue.Get());
+            sample_memory("completed-frame",n);
+        }
         if(benchmark_sequence && n%trial_frames==0) {
             xr_ok(wait_for_synthesis_handoff(state),"phase synthesis complete");
             if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"phase presenter complete");
             xr_ok(f.transport->drain(),"phase physical FIFO complete");
             const auto phase=n/trial_frames-1,outputs=f.real_ends.load()-phase_outputs;
+            const bool actual_triple=phase<6 && (!benchmark_dlssg_sequence || state->native_dlss_generated_frames>=2);
+            const bool phase_fast=phase<6?phase%2!=0:true;
+            const unsigned expected_rings=(actual_triple || !phase_fast)?2U:1U;
             std::fprintf(stderr,"BENCH phase%u mode%u fast%u physical%u expected3X=%u state%u director%u queue%u extra%u\n",
-                phase,phase<6?phase/2:2,phase<6?phase%2:1,outputs,unsigned(phase<6),unsigned(state->generation_status.load()),
+                phase,phase<6?phase/2:2,phase<6?phase%2:1,outputs,unsigned(actual_triple),unsigned(state->generation_status.load()),
                 unsigned(state->three_slot_director),unsigned(state->queued_nvidia_presenter),unsigned(extra_output_capacity(*state)));
             xrfg::bridge_flight_logger().flush();
             auto c=find_swapchain(chain);
@@ -709,11 +921,20 @@ int main(int argc,char** argv) {
                 unsigned(bool(c->frame_generation)),unsigned(c->generation_eligible_pending),unsigned(c->generation_declined),
                 unsigned(c->generation_refusal),unsigned(bool(c->last_released_capture)),unsigned(state->presenter_active),
                 unsigned(presenter_forbidden(*state)),unsigned(state->generation_resume_display_time!=0));
-            check(c->frame_generation && c->frame_generation->current_runtime_rings==(phase<6?2U:1U) &&
-                c->frame_generation->synthetic_runtime_rings==(phase<6?2U:1U) &&
-                c->frame_generation->direct_extra_outputs==(phase<6),
-                "Fast 3X preserves the minimum distinct A/B and S1/S2 output ownership");
-            check(outputs>=(phase<6?2*trial_frames+1:trial_frames+1),"Every normal 3X phase must deliver two generated frames per real, including after Fast");
+            check(c->frame_generation && c->frame_generation->current_runtime_rings==expected_rings &&
+                c->frame_generation->synthetic_runtime_rings==expected_rings &&
+                c->frame_generation->direct_extra_outputs==actual_triple,
+                "actual SDK multiplier and Fast policy must retain distinct live output ownership");
+            check(outputs>=(actual_triple?2*trial_frames+1:trial_frames+1),
+                "each actual 3X/2X phase must generate beyond its real sources, including after Fast");
+            if(steady_memory) {
+                f.gpu_wait();if(f.delivery_queue)f.gpu_wait(f.delivery_queue.Get());
+                sample_memory("completed-phase",n);
+                const auto control=xrfg::autonomous::snapshot().desired;
+                std::printf("VRAM_STEADY_PHASE_SUMMARY phase=%u real_inputs=%u physical_outputs=%u backend=%d frame_generation=%d pacing=%d lower_vram=%d separate=%d triple=%u actual_multiplier=%u process_peak_bytes=%llu\n",
+                    phase,trial_frames,outputs,control.backend,control.frame_generation,control.pacing_mode,
+                    control.lower_vram,control.separate_synthesis,unsigned(control.triple_frame_gen),actual_triple?3U:2U,memory_phase_peaks[phase]);std::fflush(stdout);
+            }
         }
     }
     if(hfw && !toggling)check(hfw_gate_proven,"HFW never promoted to actual synthesis worker");
@@ -721,7 +942,7 @@ int main(int argc,char** argv) {
     if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"generator transport drained");
     xr_ok(f.transport->drain(),"common physical FIFO drained");
     stop_continuous_presenter(state);
-    auto generated=count>0 && f.real_ends>=((switching || hfw_offon)?10:12);
+    auto generated=count>0 && f.real_ends>=(steady_memory?input_count+4:(switching || hfw_offon)?10:12);
     std::printf("%s physical outputs=%u generation state=%u\n",route.c_str(),f.real_ends.load(),unsigned(state->generation_status.load()));
     if(!generated) {
         const auto ext=xrfg::autonomous::snapshot();const auto inner=xrfg::embedded::snapshot();const auto chain_state=find_swapchain(chain);
@@ -731,10 +952,10 @@ int main(int argc,char** argv) {
             int(state->frame_generation_mode),state->dlss_motion_vectors,state->control_revision,state->luke_afw_enabled,
             bool(chain_state->last_released_capture),bool(chain_state->last_released_motion_vectors),int(chain_state->generation_refusal),chain_state->generation_eligible_pending,chain_state->generation_refusal_detail);
     }
-    check(generated,"actual generator must produce beyond eight real inputs");
+    check(generated,"actual generator must produce synthetic outputs beyond accepted real inputs");
     if(sole) {
         check(std::is_sorted(f.positions.begin(),f.positions.end()),"all generated and real metadata leave in source order");
-        for(unsigned source=1;source<=8;++source)
+        for(unsigned source=1;source<=(steady_memory?input_count:8);++source)
             check(std::any_of(f.positions.begin(),f.positions.end(),[&](float x){return std::abs(x-(float(source)-.032F))<.001F;}),
                 "every accepted real source reaches native End, including final drain");
         check(!f.pixels.empty() && f.pixels.back()==160,"last real retains its own pixels through bridge/drain");
@@ -791,16 +1012,54 @@ int main(int argc,char** argv) {
         xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,false);
     }
     if(split_eyes) {
-        check(f.chains.size()==(pooled?4:10),"only UEVR separate eyes share native publication sinks");
+        check(f.chains.size()==4,"ordinary and UEVR separate eyes share one physical publication sink per source");
         for(auto source:{chain,right}) {
-            auto c=find_swapchain(source);check(c->pooled_publication==pooled && c->frame_generation,"both source output sets obey scoped pool admission");
+            auto c=find_swapchain(source);check(c->pooled_publication && c->frame_generation,"both non-Luke source output sets obey shared publication admission");
             check(!state->lower_vram && !state->separate_synthesis,"pool does not activate Lower VRAM");
         }
+    }
+    if(steady_memory) {
+        auto disabled=xrfg::autonomous::snapshot().desired;disabled.enabled=false;disabled.afw_mode=0;
+        check(xrfg::autonomous::request(disabled),"steady memory actual OFF request");xrfg::autonomous::apply_runtime_settings();
+        ok(apply_embedded_control(state),"steady memory drained OFF provider retirement");
+        f.gpu_wait();if(f.delivery_queue)f.gpu_wait(f.delivery_queue.Get());
+        sample_memory("off-application-alive",input_count);
+        check(memory_ledger->bytes(steamvr_vram_test::Kind::native)==memory_native_baseline &&
+            !memory_ledger->bytes(steamvr_vram_test::Kind::generated) && !memory_ledger->bytes(steamvr_vram_test::Kind::interop),
+            "actual generation OFF kept physical/private/interop output allocations");
+        for(const auto& app:find_swapchains(state))check(!app->frame_generation,"actual generation OFF retained its provider context");
+    }
+    if(panel_test) {
+        xr_ok(wait_for_synthesis_handoff(state),"panel worker finished");
+        if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"panel presenter finished");
+        xr_ok(f.transport->drain(),"panel physical FIFO drained");
+        const auto p=find_swapchain(panel_chain);
+        check(p&&p->panel_source&&p->frame_generation,"independent panel engine armed");
+        check(!state->panel_generated.empty(),"panel engine actually produced output");
+        unsigned fractional{};check(!f.panel_positions.empty(),"physical frames retain both kneeboards");
+        for(const auto& v:f.panel_positions){check(v[1]==5.f,"second kneeboard moved toward first");
+            if(std::abs(v[0]*10-std::round(v[0]*10))>.05f)++fractional;}
+        check(fractional>0,"private outputs lost interpolated panel poses");
+        std::printf("Private panel atlas: %zu physical frames, %u fractional poses PASS\n",f.panel_positions.size(),fractional);
     }
     f.transport->stop();
     for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
     xr_ok(layer_destroy_swapchain_impl(chain),"shipping destroy");
+    if(panel_test)xr_ok(layer_destroy_swapchain_impl(panel_chain),"panel atlas cleanup");
     if(split_eyes){xr_ok(layer_destroy_swapchain_impl(right),"shipping right destroy");check(f.chains.empty(),"shipping pool cleanup leaves no native handles");}
+    if(steady_memory) {
+        depth.Reset();motion.Reset();f.release_callback={};sample_memory("application-teardown",input_count);
+        check(!memory_ledger->bytes(steamvr_vram_test::Kind::native) && !memory_ledger->bytes(steamvr_vram_test::Kind::application) &&
+            !memory_ledger->bytes(steamvr_vram_test::Kind::generated) && !memory_ledger->bytes(steamvr_vram_test::Kind::interop),
+            "steady generation teardown retained a measured color allocation");
+        const auto features=xrfg::native_dlssg_lifetime_snapshot();
+        check(!features.release_failures && !features.failed_create_handles && !features.live &&
+            features.created==features.released,
+            "steady generation teardown retained an NGX feature or silently failed to release it");
+        std::printf("VRAM_STEADY_SUMMARY route=%s eye=%ux%u real_inputs=%u physical_outputs=%u application_baseline_bytes=%llu game_baseline_bytes=%llu process_peak_bytes=%llu generation_delta_bytes=%llu native_peak_bytes=%llu private_peak_bytes=%llu\n",
+            route.c_str(),image_width,image_height,input_count,f.real_ends.load(),memory_app_baseline,memory_game_baseline,
+            memory_peak,memory_peak>memory_game_baseline?memory_peak-memory_game_baseline:0,memory_native_peak,memory_private_peak);std::fflush(stdout);
+    }
     ComPtr<ID3D12InfoQueue> messages;
     if(SUCCEEDED(f.device12.As(&messages)))for(UINT64 i=0;i<messages->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T bytes{};messages->GetMessage(i,nullptr,&bytes);std::vector<char> data(bytes);auto* message=reinterpret_cast<D3D12_MESSAGE*>(data.data());messages->GetMessage(i,message,&bytes);if(message->Severity<=D3D12_MESSAGE_SEVERITY_ERROR){std::fprintf(stderr,"D3D12: %s\n",message->pDescription);check(false,"actual generator resource state/ownership validation");}}
     {std::scoped_lock lock(g_state_mutex);g_sessions.clear();g_swapchains.clear();g_instances.clear();}

@@ -1,3 +1,6 @@
+if(ASYNC_RESET)
+  set(ENV{XRFG_TEST_AFW_ASYNC_RESET} 1)
+endif()
 foreach(argument TEST_EXE PROVIDER DESTINATION)
     if(NOT DEFINED ${argument})
         message(FATAL_ERROR "Missing ${argument}")

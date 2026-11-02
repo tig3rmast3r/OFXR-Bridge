@@ -5,7 +5,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <memory>
+#include <string>
 #include <mutex>
 #include <vector>
 #include <cstdio>
@@ -15,25 +17,62 @@
 
 namespace xrfg {
 namespace {
+bool origin_from_bottom() noexcept;
+// Black bars measured on the eye images by the reader (left|top|bottom, 16
+// bits each) and the eye extent they were measured on. Writer and reader
+// place the mark from the same values.
+std::atomic<std::uint64_t> g_bars{}, g_bars_extent{};
+LukeOriginBars stored_bars(unsigned width, unsigned height) noexcept {
+    if (g_bars_extent.load(std::memory_order_acquire) != ((static_cast<std::uint64_t>(width) << 32) | height)) return {};
+    const auto bits = g_bars.load(std::memory_order_acquire);
+    return {static_cast<unsigned>(bits >> 32) & 0xffffu, static_cast<unsigned>(bits >> 16) & 0xffffu,
+        static_cast<unsigned>(bits) & 0xffffu};
+}
 // Outlaws' final REAL VR color can translate the corner barcode beyond the
 // eye boundary; its FPS text also covers that corner. Keep its exact token
-// inside the eye, away from that overlay. GTA's final reprojection clips its
-// original top-edge band; use the measured vertical margin only for that title.
-std::array<unsigned,2> origin_inset() noexcept {
-    static const auto inset=[] {
+// inside the eye, away from that overlay. GTA additionally masks the top of
+// realtime scripted scenes; its bounded scan follows the full-size eye height.
+// Black bars around the picture move it inside (luke_origin_inset_with_bars).
+std::array<unsigned,2> origin_inset(unsigned color_width, unsigned color_height) noexcept {
+    static const auto title=[] {
         wchar_t path[MAX_PATH]{};
         GetModuleFileNameW(nullptr,path,MAX_PATH);
         const auto* name=wcsrchr(path,L'\\');
-        return luke_origin_inset_for_title(name?name+1:path);
+        return std::wstring(name?name+1:path);
     }();
-    return inset;
+    return luke_origin_inset_with_bars(luke_origin_inset_for_title(title,color_height),
+        stored_bars(color_width,color_height),color_width,color_height,origin_from_bottom());
+}
+bool bright_primary_origin() noexcept {
+    static const bool selected=[] {
+        wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
+        const auto* name=wcsrchr(path,L'\\');
+        return luke_origin_bright_primary_for_title(name?name+1:path);
+    }();
+    return selected;
+}
+bool gta_color_origin() noexcept {
+    static const bool result=[] {wchar_t p[MAX_PATH]{};GetModuleFileNameW(nullptr,p,MAX_PATH);
+        const auto* n=wcsrchr(p,L'\\');return !_wcsicmp(n?n+1:p,L"GTA5_Enhanced.exe");}();
+    return result;
+}
+// Uncharted: bottom-left, below its post-DLSS night sky and rain.
+bool origin_from_bottom() noexcept {
+    static const bool bottom=[] {
+        wchar_t path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr,path,MAX_PATH);
+        const auto* name=wcsrchr(path,L'\\');
+        return luke_origin_from_bottom_for_title(name?name+1:path);
+    }();
+    return bottom;
 }
 using Microsoft::WRL::ComPtr;
 struct Uploads {
     ComPtr<ID3D12Device> device;
     DXGI_FORMAT format{};
     UINT height{};
-    std::array<ComPtr<ID3D12Resource>, 2> colors;
+    std::array<ComPtr<ID3D12Resource>, 2> colors;        // black, dim white
+    std::array<ComPtr<ID3D12Resource>, 2> bright_colors; // black, full white (float outputs)
 };
 struct Reader {
     std::mutex mutex;
@@ -46,6 +85,14 @@ struct Reader {
     UINT64 bytes{}, last_fence{}, next_fence{1};
     HANDLE event{};
     bool poisoned{};
+    std::array<LukeOriginRowWindow, 2> windows{}; // per color slot, under mutex
+    // Black bars: a measurement is adopted once kBarAgreement consecutive ones
+    // agree within kBarTolerance pixels, so a dark scene beside a bar does not
+    // move the mark from frame to frame. Under mutex.
+    LukeOriginBars bar_candidate{};
+    unsigned bar_agree{};
+    std::uint64_t bar_extent{};
+    std::uint64_t last_used{}; // GetTickCount64 of the last get_reader, under the cache mutex
     ~Reader() { if (event) CloseHandle(event); }
 };
 // Three sleeping helpers plus the caller: bounded CPU parallelism, no frame
@@ -102,7 +149,7 @@ D3D12_RESOURCE_BARRIER transition(ID3D12Resource* color, D3D12_RESOURCE_STATES f
     return barrier;
 }
 HRESULT immutable_upload(ID3D12Device* device, DXGI_FORMAT format, UINT height,
-    bool white, ComPtr<ID3D12Resource>& output) {
+    bool white, ComPtr<ID3D12Resource>& output, bool bright = false) {
     D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_UPLOAD;
     heap.CreationNodeMask = heap.VisibleNodeMask = 1;
     D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -120,7 +167,7 @@ HRESULT immutable_upload(ID3D12Device* device, DXGI_FORMAT format, UINT height,
     const auto pixel_bytes = luke_origin_pixel_bytes(format);
     for (UINT y = 0; y < height; ++y)
         for (UINT x = 0; x < 2; ++x)
-            luke_origin_pixel(bytes + static_cast<UINT64>(y) * 256 + x * pixel_bytes, format, white);
+            luke_origin_pixel(bytes + static_cast<UINT64>(y) * 256 + x * pixel_bytes, format, white, bright);
     const D3D12_RANGE written{0, static_cast<SIZE_T>(desc.Width)};
     output->Unmap(0, &written);
     return S_OK;
@@ -137,15 +184,36 @@ HRESULT get_uploads(ID3D12Device* device, DXGI_FORMAT format, UINT height,
     created->device = device; created->format = format; created->height = height;
     HRESULT result = immutable_upload(device, format, height, false, created->colors[0]);
     if (SUCCEEDED(result)) result = immutable_upload(device, format, height, true, created->colors[1]);
+    if (SUCCEEDED(result)) result = immutable_upload(device, format, height, false, created->bright_colors[0], true);
+    if (SUCCEEDED(result)) result = immutable_upload(device, format, height, true, created->bright_colors[1], true);
     if (FAILED(result)) return result;
     c.uploads.push_back(created); output = std::move(created);
     return S_OK;
 }
 HRESULT get_reader(ID3D12CommandQueue* queue, std::shared_ptr<Reader>& output) {
     auto& c = cache(); std::scoped_lock lock(c.mutex);
+    const auto now = GetTickCount64();
     for (const auto& candidate : c.readers)
-        if (candidate->queue.Get() == queue) { output = candidate; return S_OK; }
-    if (c.readers.size() >= 8) return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
+        if (candidate->queue.Get() == queue) { candidate->last_used = now; output = candidate; return S_OK; }
+    if (c.readers.size() >= 8) {
+        // Each OpenXR session brings its own queue, and REAL VR recreates the
+        // session on every resolution or DLSS mode change. Retire the least
+        // recently used reader nobody holds whose last copy has completed;
+        // the cache owns its only reference, so no read is in flight.
+        auto victim = c.readers.end();
+        for (auto it = c.readers.begin(); it != c.readers.end(); ++it) {
+            const auto& reader = *it;
+            if (reader.use_count() != 1) continue;
+            const auto completed = reader->fence->GetCompletedValue();
+            if (completed != UINT64_MAX && completed < reader->last_fence) continue;
+            if (victim == c.readers.end() || reader->last_used < (*victim)->last_used) victim = it;
+        }
+        if (victim == c.readers.end()) return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
+        // 1194: origin reader retired; b = its queue, c = ms since its last use.
+        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage, S_OK, 1194,
+            reinterpret_cast<std::uint64_t>((*victim)->queue.Get()), now - (*victim)->last_used);
+        c.readers.erase(victim);
+    }
     if (queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return E_INVALIDARG;
     auto created = std::make_shared<Reader>(); created->queue = queue;
     HRESULT result = queue->GetDevice(IID_PPV_ARGS(created->device.GetAddressOf()));
@@ -159,6 +227,7 @@ HRESULT get_reader(ID3D12CommandQueue* queue, std::shared_ptr<Reader>& output) {
     if (FAILED(result)) return result;
     created->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!created->event) return HRESULT_FROM_WIN32(GetLastError());
+    created->last_used = now;
     c.readers.push_back(created); output = std::move(created);
     return S_OK;
 }
@@ -293,9 +362,10 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             return E_PENDING; // Actual eye viewport is not known during startup.
         }
         LukeColorOriginLayout layout;
-        const auto inset=origin_inset();
+        const auto inset=origin_inset(static_cast<UINT>(color_extent >> 32),static_cast<UINT>(color_extent));
         if (!compact_luke_origin_layout(rect.width, rect.height,
-                static_cast<UINT>(color_extent >> 32), static_cast<UINT>(color_extent), layout,inset[0],inset[1]))
+                static_cast<UINT>(color_extent >> 32), static_cast<UINT>(color_extent), layout,inset[0],inset[1],
+                origin_from_bottom()))
         {
             report_origin_layout(true,2,extent_bits(rect.width,rect.height),color_extent);
             return E_PENDING;
@@ -314,12 +384,13 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             auto barrier = transition(color, state, D3D12_RESOURCE_STATE_COPY_DEST);
             list->ResourceBarrier(1, &barrier);
         }
+        const bool primary_bright=bright_primary_origin();
         for(unsigned band=0;band<layout.band_count;++band) {
             const UINT x=rect.x+layout.bands[band].x,y=rect.y+layout.bands[band].y;
             for (unsigned cell = 0; cell < kLukeOriginBits * 2; ++cell) {
             const bool white = luke_origin_white(token, cell * 2);
             D3D12_TEXTURE_COPY_LOCATION source{};
-            source.pResource = patterns->colors[white ? 1 : 0].Get();
+            source.pResource = ((layout.bright[band]||primary_bright) ? patterns->bright_colors : patterns->colors)[white ? 1 : 0].Get();
             source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
             source.PlacedFootprint.Footprint = {format, 2, kLukeOriginHeight, 1, 256};
                 list->CopyTextureRegion(&destination, x + cell * 2, y, 0, &source, nullptr);
@@ -347,7 +418,9 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 namespace {
 HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
     std::uint32_t* tokens, HRESULT* results, unsigned count,
-    D3D12_RESOURCE_STATES state, DWORD timeout_ms) noexcept {
+    D3D12_RESOURCE_STATES state, DWORD timeout_ms, bool* nonblack=nullptr,
+    LukeColorOriginReadReceipt* receipt=nullptr) noexcept {
+    if(receipt)*receipt={};
     struct Plan {
         D3D12_RESOURCE_DESC original{};
         LukeColorOriginLayout layout{};
@@ -358,6 +431,7 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
     std::array<ReadReport, 2> reports{};
     for (unsigned i=0; i<count; ++i) {
         tokens[i]=0; results[i]=E_UNEXPECTED; reports[i].token=&tokens[i];
+        if(nonblack)nonblack[i]=false;
     }
     const auto finish = [&](HRESULT hr) {
         for (unsigned i=0; i<count; ++i) {
@@ -385,9 +459,9 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
                 report_origin_layout(false,1,0,extent_bits(static_cast<UINT>(original.Width),original.Height));
                 results[i]=E_PENDING; continue;
             }
-            const auto inset=origin_inset();
+            const auto inset=origin_inset(static_cast<UINT>(original.Width),original.Height);
             if (!compact_luke_origin_layout(static_cast<UINT>(output_extent>>32),static_cast<UINT>(output_extent),
-                    static_cast<UINT>(original.Width),original.Height,plan.layout,inset[0],inset[1])) {
+                    static_cast<UINT>(original.Width),original.Height,plan.layout,inset[0],inset[1],origin_from_bottom())) {
                 report_origin_layout(false,2,output_extent,extent_bits(static_cast<UINT>(original.Width),original.Height));
                 results[i]=E_PENDING; continue;
             }
@@ -415,6 +489,23 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
                 ~(UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT)-1);
             reader->device->GetCopyableFootprints(&roi,0,1,offset,&plan.footprint,nullptr,nullptr,nullptr);
             bytes=plan.footprint.Offset+UINT64(plan.footprint.Footprint.RowPitch)*roi.Height;
+        }
+        // Black bars: the middle column (top and bottom) and middle row (left)
+        // of the first valid eye.
+        int bars_from=-1;
+        for (unsigned i=0;i<count;++i) if (plans[i].valid) { bars_from=static_cast<int>(i); break; }
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT column_footprint{}, row_footprint{};
+        if (bars_from>=0) {
+            const auto& original=plans[bars_from].original;
+            const auto place=[&](UINT64 width, UINT height, D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint) {
+                auto strip=original; strip.Width=width; strip.Height=height; strip.MipLevels=1;
+                const UINT64 offset=(bytes+D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT-1) &
+                    ~(UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT)-1);
+                reader->device->GetCopyableFootprints(&strip,0,1,offset,&footprint,nullptr,nullptr,nullptr);
+                bytes=footprint.Offset+UINT64(footprint.Footprint.RowPitch)*height;
+            };
+            place(1,original.Height,column_footprint);
+            place(original.Width,1,row_footprint);
         }
         if (!reader->readback || reader->bytes!=bytes) {
             D3D12_HEAP_PROPERTIES heap{}; heap.Type=D3D12_HEAP_TYPE_READBACK;
@@ -448,6 +539,15 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             const auto& scan=plan.layout.scan;
             const D3D12_BOX box{scan.x,scan.y,0,scan.x+scan.width,scan.y+scan.height,1};
             reader->list->CopyTextureRegion(&destination,0,0,0,&source,&box);
+            if (static_cast<int>(i)==bars_from) {
+                const UINT width=static_cast<UINT>(plan.original.Width),height=plan.original.Height;
+                destination.PlacedFootprint=column_footprint;
+                const D3D12_BOX column{width/2,0,0,width/2+1,height,1};
+                reader->list->CopyTextureRegion(&destination,0,0,0,&source,&column);
+                destination.PlacedFootprint=row_footprint;
+                const D3D12_BOX row{0,height/2,0,width,height/2+1,1};
+                reader->list->CopyTextureRegion(&destination,0,0,0,&source,&row);
+            }
             if (state!=D3D12_RESOURCE_STATE_COPY_SOURCE) {
                 auto barrier=transition(colors[i],D3D12_RESOURCE_STATE_COPY_SOURCE,state);
                 reader->list->ResourceBarrier(1,&barrier);
@@ -455,10 +555,13 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
         }
         result=reader->list->Close();
         if (FAILED(result)) return finish(result);
-        ID3D12CommandList* lists[]{reader->list.Get()}; queue->ExecuteCommandLists(1,lists);
+        ID3D12CommandList* lists[]{reader->list.Get()};
+        if(receipt)receipt->submitted=true;
+        queue->ExecuteCommandLists(1,lists);
         const auto value=reader->next_fence++;
         result=queue->Signal(reader->fence.Get(),value);
         if (FAILED(result)) { reader->poisoned=true; return finish(result); }
+        if(receipt) {receipt->fence=reader->fence;receipt->value=value;}
         reader->last_fence=value;
         phase(126,static_cast<HRESULT>(valid_count)); // Number of colors in this submission.
         phase(123,result);
@@ -474,14 +577,57 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
         void* mapped{}; const D3D12_RANGE range{0,static_cast<SIZE_T>(bytes)};
         result=reader->readback->Map(0,&range,&mapped);
         if (FAILED(result)) return finish(result);
+        if (bars_from>=0) {
+            const auto& original=plans[bars_from].original;
+            const auto bpp=luke_origin_pixel_bytes(original.Format);
+            const auto* base=static_cast<const std::byte*>(mapped);
+            std::vector<float> column(original.Height),row(static_cast<std::size_t>(original.Width));
+            for (UINT y=0;y<original.Height;++y)
+                column[y]=luke_origin_luma(base+column_footprint.Offset+UINT64(column_footprint.Footprint.RowPitch)*y,original.Format);
+            for (UINT64 x=0;x<original.Width;++x)
+                row[static_cast<std::size_t>(x)]=luke_origin_luma(base+row_footprint.Offset+x*bpp,original.Format);
+            LukeOriginBars measured{};
+            if (luke_origin_black_run(column,false,measured.top) && luke_origin_black_run(column,true,measured.bottom) &&
+                luke_origin_black_run(row,false,measured.left)) {
+                constexpr unsigned kBarAgreement=8, kBarTolerance=2;
+                const auto extent=extent_bits(static_cast<UINT>(original.Width),original.Height);
+                const auto within=[](unsigned a,unsigned b){return (a>b?a-b:b-a)<=kBarTolerance;};
+                auto& candidate=reader->bar_candidate;
+                if (reader->bar_extent==extent && within(candidate.left,measured.left) &&
+                    within(candidate.top,measured.top) && within(candidate.bottom,measured.bottom)) ++reader->bar_agree;
+                else { candidate=measured; reader->bar_agree=1; reader->bar_extent=extent; }
+                if (reader->bar_agree==kBarAgreement) {
+                    const auto clamp16=[](unsigned v){return static_cast<std::uint64_t>(std::min(v,0xffffu));};
+                    const auto bits=(clamp16(candidate.left)<<32)|(clamp16(candidate.top)<<16)|clamp16(candidate.bottom);
+                    if (g_bars.load(std::memory_order_acquire)!=bits || g_bars_extent.load(std::memory_order_acquire)!=extent) {
+                        g_bars.store(bits,std::memory_order_release);
+                        g_bars_extent.store(extent,std::memory_order_release);
+                        // 1250: black bars adopted; b = left<<32 | top<<16 | bottom, c = eye extent.
+                        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,S_OK,1250,bits,extent);
+                    }
+                }
+            }
+        }
         std::array<LukeColorOriginImage,2> image_rows{};
         std::array<LukeColorOriginDecode,2> decoded{};
+        std::array<std::uint64_t,2> geometry{};
         for(unsigned i=0;i<count;++i)if(plans[i].valid) {
             const auto& p=plans[i];
             image_rows[i]={static_cast<const std::byte*>(mapped)+p.footprint.Offset,
                 p.original.Format,p.layout.scan.width,p.layout.scan.height,p.footprint.Footprint.RowPitch};
+            // FNV-1a over everything that places the band inside this scan.
+            std::uint64_t key=1469598103934665603ULL;
+            for(const std::uint64_t value:{p.original.Width,std::uint64_t(p.original.Height),
+                    std::uint64_t(p.original.Format),std::uint64_t(p.layout.scan.x),std::uint64_t(p.layout.scan.y),
+                    std::uint64_t(p.layout.scan.width),std::uint64_t(p.layout.scan.height)})
+                {key^=value;key*=1099511628211ULL;}
+            geometry[i]=key|1;
         }
-        decode_luke_origin_images(std::span(image_rows.data(),count),std::span(decoded.data(),count));
+        for(unsigned i=0;i<count;++i)image_rows[i].rgb_fallback=gta_color_origin();
+        const auto narrowed=decode_luke_origin_images_windowed(std::span(image_rows.data(),count),
+            std::span(geometry.data(),count),std::span(reader->windows.data(),count),
+            std::span(decoded.data(),count),nonblack?std::span<bool>(nonblack,count):std::span<bool>{});
+        phase(127,static_cast<HRESULT>(narrowed)); // Bit per color decoded from its learned rows.
         HRESULT decode_status=S_OK;
         for(unsigned i=0;i<count;++i)if(plans[i].valid) {
             results[i]=decoded[i].ambiguous ? HRESULT_FROM_WIN32(ERROR_INVALID_DATA) :
@@ -497,9 +643,11 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
 } // namespace
 
 void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
-    std::span<LukeColorOriginDecode> results) noexcept {
+    std::span<LukeColorOriginDecode> results, std::span<bool> nonblack) noexcept {
     if(results.size()!=images.size())return;
     std::fill(results.begin(),results.end(),LukeColorOriginDecode{});
+    const bool observe_color=nonblack.size()==images.size()&&!nonblack.empty();
+    if(observe_color)std::fill(nonblack.begin(),nonblack.end(),false);
     try {
         std::size_t total{};
         std::vector<std::size_t> offsets{0};
@@ -509,6 +657,7 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
             offsets.push_back(total);
         }
         std::vector<LukeColorOriginDecode> rows(total);
+        std::vector<unsigned char> color_rows(observe_color?total:0);
         const auto decode=[&](unsigned worker,unsigned step) noexcept {
             try {
                 std::vector<float> row;
@@ -520,6 +669,8 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
                         const auto* pixels=image.pixels+(index-offsets[i])*image.row_pitch;
                         for(unsigned x=0;x<image.width;++x)row[x]=luke_origin_luma(pixels+x*bpp,image.format);
                         rows[index]=decode_luke_origin_row(row);
+                        if(observe_color)color_rows[index]=std::any_of(row.begin(),row.end(),
+                            [](float v){return std::isfinite(v)&&v!=0.F;});
                     }
                 }
             } catch(...) {for(std::size_t i=worker;i<rows.size();i+=step)rows[i].ambiguous=true;}
@@ -528,11 +679,103 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
             static auto* workers=new OriginDecodeWorkers;
             workers->run([&](unsigned worker) noexcept {decode(worker,4);});
         } else decode(0,1);
-        for(unsigned i=0;i<images.size();++i)for(std::size_t y=offsets[i];y<offsets[i+1];++y) {
-            const auto row=rows[y];auto& result=results[i];result.ambiguous|=row.ambiguous;
-            if(row.token) {if(result.token&&result.token!=row.token)result.ambiguous=true;result.token=row.token;}
+        for(unsigned i=0;i<images.size();++i) {
+            // The rows reported are one band: the longest run of decoded rows
+            // (later on a tie). A layout with a bright copy 64 rows above the
+            // band (Uncharted at night) otherwise learned both bands and the
+            // gap, so every narrowed read decoded 104 rows for 8 that matter.
+            int run_first=-1,run_last=-1,best_first=-1,best_last=-1;
+            auto& result=results[i];
+            for(std::size_t y=offsets[i];y<offsets[i+1];++y) {
+                const auto row=rows[y];result.ambiguous|=row.ambiguous;
+                if(observe_color)nonblack[i]=nonblack[i]||color_rows[y]!=0;
+                if(!row.token)continue;
+                if(result.token&&result.token!=row.token)result.ambiguous=true;result.token=row.token;
+                const auto scan_row=static_cast<int>(y-offsets[i]);
+                if(run_first<0||scan_row>run_last+2)run_first=scan_row;
+                run_last=scan_row;
+                if(best_first<0||run_last-run_first>=best_last-best_first) {best_first=run_first;best_last=run_last;}
+            }
+            result.first_row=best_first;result.last_row=best_last;
+        }
+        for(unsigned i=0;i<images.size();++i) {
+            const auto& image=images[i];auto& result=results[i];
+            if(result.token||result.ambiguous||!image.rgb_fallback||offsets[i]==offsets[i+1])continue;
+            const bool rgba=image.format==DXGI_FORMAT_R8G8B8A8_UNORM||image.format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB||image.format==DXGI_FORMAT_R8G8B8A8_TYPELESS;
+            const bool bgra=image.format==DXGI_FORMAT_B8G8R8A8_UNORM||image.format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB||image.format==DXGI_FORMAT_B8G8R8A8_TYPELESS;
+            if(!rgba&&!bgra)continue;
+            std::vector<float> row(image.width);
+            for(unsigned channel=0;channel<3;++channel)for(unsigned y=0;y<image.height;++y) {
+                const auto* pixels=image.pixels+y*image.row_pitch;
+                for(unsigned x=0;x<image.width;++x)row[x]=std::to_integer<unsigned char>(pixels[x*4+channel])/255.F;
+                const auto decoded=decode_luke_origin_row(row);
+                result.ambiguous|=decoded.ambiguous;
+                if(decoded.token) {
+                    if(result.token&&result.token!=decoded.token)result.ambiguous=true;
+                    result.token=decoded.token;
+                }
+            }
         }
     } catch(...) {for(auto& result:results)result={0,true};}
+}
+unsigned decode_luke_origin_images_windowed(std::span<const LukeColorOriginImage> images,
+    std::span<const std::uint64_t> geometry, std::span<LukeOriginRowWindow> windows,
+    std::span<LukeColorOriginDecode> results,std::span<bool> nonblack) noexcept {
+    constexpr std::size_t capacity=8;
+    const auto count=images.size();
+    if(geometry.size()!=count||windows.size()!=count||results.size()!=count||count>capacity) {
+        decode_luke_origin_images(images,results,nonblack);return 0;
+    }
+    std::array<LukeColorOriginImage,capacity> first{};
+    std::array<unsigned,capacity> top{};
+    unsigned narrowed{};
+    for(std::size_t i=0;i<count;++i) {
+        first[i]=images[i];
+        auto& window=windows[i];
+        if(!geometry[i]||window.geometry!=geometry[i]) {window={};continue;}
+        const auto& image=images[i];
+        if(!image.pixels||window.first>window.last||window.last>=image.height)continue;
+        const unsigned begin=window.first>kLukeOriginWindowMargin?window.first-kLukeOriginWindowMargin:0;
+        const unsigned end=std::min(image.height-1,window.last+kLukeOriginWindowMargin);
+        if(end-begin+1>=image.height)continue;
+        first[i].pixels=image.pixels+static_cast<std::size_t>(begin)*image.row_pitch;
+        first[i].height=end-begin+1;
+        top[i]=begin;narrowed|=1U<<i;
+    }
+    decode_luke_origin_images(std::span(first.data(),count),results,nonblack);
+    std::array<LukeColorOriginImage,capacity> retry{};
+    std::array<std::size_t,capacity> retry_index{};
+    std::size_t retries{};
+    for(std::size_t i=0;i<count;++i) {
+        if(!(narrowed&(1U<<i)))continue;
+        auto& result=results[i];
+        if(result.token&&!result.ambiguous&&result.first_row>=0) {
+            // Follow small drift; the margin still bounds what is skipped.
+            result.first_row+=static_cast<int>(top[i]);result.last_row+=static_cast<int>(top[i]);
+            auto& window=windows[i];
+            window.first=static_cast<unsigned>(result.first_row);
+            window.last=static_cast<unsigned>(result.last_row);
+            continue;
+        }
+        narrowed&=~(1U<<i);
+        retry[retries]=images[i];retry_index[retries++]=i;
+    }
+    if(retries) {
+        std::array<LukeColorOriginDecode,capacity> whole{};
+        std::array<bool,capacity> whole_nonblack{};
+        decode_luke_origin_images(std::span(retry.data(),retries),std::span(whole.data(),retries),nonblack.empty()?std::span<bool>{}:std::span<bool>(whole_nonblack.data(),retries));
+        for(std::size_t k=0;k<retries;++k){results[retry_index[k]]=whole[k];if(!nonblack.empty())nonblack[retry_index[k]]=whole_nonblack[k];}
+    }
+    for(std::size_t i=0;i<count;++i) {
+        if(narrowed&(1U<<i))continue;
+        // Whole-scan result: learn its rows, or forget a stale window.
+        const auto& result=results[i];
+        windows[i]=geometry[i]&&result.token&&!result.ambiguous&&result.first_row>=0
+            ? LukeOriginRowWindow{geometry[i],static_cast<unsigned>(result.first_row),
+                static_cast<unsigned>(result.last_row)}
+            : LukeOriginRowWindow{};
+    }
+    return narrowed;
 }
 HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
     std::uint32_t* token, D3D12_RESOURCE_STATES state, DWORD timeout_ms) noexcept {
@@ -543,7 +786,9 @@ HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
 }
 HRESULT read_luke_color_origin_pair(ID3D12CommandQueue* queue,
     const std::array<ID3D12Resource*,2>& colors, std::array<std::uint32_t,2>& tokens,
-    std::array<HRESULT,2>& results, D3D12_RESOURCE_STATES state, DWORD timeout_ms) noexcept {
-    return read_origins(queue,colors.data(),tokens.data(),results.data(),2,state,timeout_ms);
+    std::array<HRESULT,2>& results, D3D12_RESOURCE_STATES state, DWORD timeout_ms,
+    std::array<bool,2>* nonblack, LukeColorOriginReadReceipt* receipt) noexcept {
+    return read_origins(queue,colors.data(),tokens.data(),results.data(),2,state,timeout_ms,
+        nonblack?nonblack->data():nullptr,receipt);
 }
 } // namespace xrfg
