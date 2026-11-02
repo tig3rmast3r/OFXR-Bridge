@@ -112,10 +112,11 @@ int main(int argc,char** argv) {
     }
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
     const bool rife_report=route=="rife-report";
+    const bool rife_replay=route=="rife-replay";
     const bool rife_switch=route.starts_with("rife-switch");
     const int rife_pacing=route.ends_with("director")?1:0;
     const bool rife_fast=route.find("fast")!=std::string::npos;
-    const unsigned rife_factor=rife_report?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
+    const unsigned rife_factor=(rife_report||rife_replay)?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
     if(rife_factor)route="new";
 
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
@@ -797,6 +798,7 @@ int main(int argc,char** argv) {
             completed_frame_memory?"completed-frame-drain":"overlapped-phase-drain");std::fflush(stderr);
     }
     std::vector<std::shared_ptr<xrfg::InterfaceCycle>> measured_cycles;
+    std::optional<XrTime> rife_replay_time;
     unsigned rife_phase_start{};
     unsigned rife_phase_factor=rife_factor;
     bool hfw_gate_proven=false;
@@ -902,6 +904,12 @@ int main(int argc,char** argv) {
                 q.size={1,1};q.subImage.swapchain=panel_chain;q.subImage.imageRect={{int(i*image_width/2),0},{int(image_width/2),int(image_height)}};
                 panel_layers[i+1]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);}
             end.layerCount=3;end.layers=panel_layers.data();
+        }
+        if(rife_replay) {
+            // Exact app timestamp gap of the first failing V739 pair; image
+            // captures and real runtime delivery remain independently owned.
+            if(rife_replay_time)end.displayTime=*rife_replay_time+(n%2?34'935'700:34'294'989);
+            rife_replay_time=end.displayTime;
         }
         if(hfw) std::fprintf(stderr,"HFW before%u active%u worker%u request%u forbidden%u mode%u enabled%u\n",n,
             unsigned(continuous_presenter_active(state)),unsigned(state->three_slot_director),unsigned(state->presenter_start_requested),

@@ -12801,6 +12801,11 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     const ProjectionSnapshot& current_snapshot, unsigned index=0) noexcept {
     const unsigned frames=state?native_frame_multiplier(*state):2;
     const float kFixedMidpoint=float(index+1)/float(frames);
+    // RIFE multi-output batches sample fixed model times. A short irregular
+    // XR interval can place S1 below0.05; the provider sanitizes it to0.5,
+    // crossing S2 in4X and correctly rejecting the now-unordered request.
+    if(state && state->nvidia_options.rife_model>=0 && frames>2)
+        return kFixedMidpoint;
     if (state && state->frame_generation_mode == xrfg::D3D12FrameGenerationMode::native_dlss)
         return kFixedMidpoint;
     // Match the validated new NVIDIA image contract. Predicted XR-time gaps

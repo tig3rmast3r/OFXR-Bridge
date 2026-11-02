@@ -190,3 +190,13 @@ output handles and buffer capacity survive later log wrapping. Normal output,
 models and pacing are unchanged. No failure journal or snapshot is written
 with diagnostics off. V739 native-cycle renewal is retained; the real4X
 worker failure is not declared fixed by this diagnostic build.
+
+
+V741 fixes the RIFE3X/4X model timestep selection. Irregular application XR
+predictions previously changed the intermediate fractions. Near a34ms source
+gap at90Hz,4X could request a first fraction below0.05; the generic sanitizer
+replaced it with0.5, crossing the second fraction and causing E_INVALIDARG
+before GPU work. RIFE multi-output now always samples1/3,2/3 or1/4,1/2,3/4.
+Provider validity checks remain intact. This does not change the selected
+inference resolution, including1/6, full-resolution colour, RIFE2X, other
+engines, physical pacing or buffer counts. V740 first-error capture is retained.

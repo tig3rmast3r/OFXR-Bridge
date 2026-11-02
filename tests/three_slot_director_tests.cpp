@@ -2385,6 +2385,21 @@ void test_rife_layer_multiframe_contract() {
         check(djules_application_period(*state,11111111)==multiplier*11111111LL,"RIFE advertised game period");
         for(unsigned i=0;i<unsigned(multiplier-1);++i)
             check(std::abs(synthetic_interpolation_fraction(state,{},ProjectionSnapshot{},i)-float(i+1)/multiplier)<.00001F,"RIFE intermediate time order");
+        if(multiplier>2) {
+            state->minimum_runtime_display_period=11'111'111;
+            ProjectionSnapshot old_frame{},new_frame{};old_frame.display_time=1'000'000'000;
+            for(const XrDuration gap:{34'935'700LL,34'294'989LL,33'400'000LL,40'000'000LL,50'000'000LL,77'000'000LL,88'000'000LL,0LL,-1LL}) {
+                new_frame.display_time=old_frame.display_time+gap;
+                float prior{};
+                for(unsigned i=0;i<unsigned(multiplier-1);++i) {
+                    const auto fraction=synthetic_interpolation_fraction(state,old_frame,new_frame,i);
+                    check(std::abs(fraction-float(i+1)/multiplier)<.00001F,
+                        "RIFE multiframe fractions followed irregular XR predictions instead of fixed model times");
+                    check(fraction>.05F && fraction<.95F && fraction>prior,"RIFE fractions invalid after model sanitizer");
+                    prior=fraction;
+                }
+            }
+        }
     }
     auto receipt=std::make_shared<xrfg::D3D12NativeFrameResult>();receipt->outputs=3;receipt->mask=7;
     PreparedProjectionFrame prepared;prepared.resources.emplace_back();auto& g=prepared.resources.back().generation;
