@@ -1,4 +1,5 @@
 #include "xrfg/luke_afw.hpp"
+#include "xrfg/osr_peer_pose.hpp"
 #include "xrfg/afw_provider_device.hpp"
 #include "xrfg/luke_depth_format.hpp"
 #include "xrfg/luke_motion_format.hpp"
@@ -1507,7 +1508,9 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
     const D3D12ReprojectionView& destination_view,
     std::uint32_t source_eye,
     float xr_eye_baseline,
-    const embedded::AfwSettings& settings,bool native_peer_camera) noexcept {
+    const embedded::AfwSettings& settings,bool native_peer_camera,
+    std::optional<Vec3>* reconstructed_position) noexcept {
+    if(reconstructed_position)reconstructed_position->reset();
     try {
         std::scoped_lock lock(mutex_);
         report_stage(AfwStage::enter, S_OK, source_eye, guide.publication);
@@ -2883,6 +2886,18 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         if (SUCCEEDED(result)) {
             embedded::report_afw_shading_rate(impl_->active_shading_rate);
             if (full_osr) impl_->osr_full.commit();
+            if(full_osr && reconstructed_position) {
+                float game_baseline{};
+                if(luke_game_eye_baseline(xr_eye_baseline,impl_->world_scale,units,game_baseline)) {
+                    const float x_sign=native_peer_camera || right_axis==0
+                        ? std::copysign(1.F,guide.camera_view_to_clip[0]):right_axis;
+                    *reconstructed_position=osr_peer_position(source_view.pose,
+                        camera.source_view_to_world.values,camera.destination_view_to_world.values,
+                        {x_sign,std::copysign(1.F,guide.camera_view_to_clip[5]),
+                            -std::copysign(1.F,guide.camera_view_to_clip[11])},
+                        xr_eye_baseline,game_baseline);
+                }
+            }
             impl_->last_submission_fence = fence_value;
             impl_->last_evaluated_publication = guide.publication;
             impl_->last_evaluated_eye = source_eye;

@@ -46,7 +46,8 @@ public:
         std::uint32_t source_eye,
         float xr_eye_baseline,
         const embedded::AfwSettings& settings,
-        bool native_peer_camera=false) noexcept;
+        bool native_peer_camera=false,
+        std::optional<Vec3>* reconstructed_position=nullptr) noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
     // Prepare a fresh isolated provider while published XR pixels stay intact.

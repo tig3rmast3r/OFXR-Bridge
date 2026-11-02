@@ -73,6 +73,43 @@ static int panel_metadata_contract() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route=="osr-peer-pose") {
+        std::array<XrCompositionLayerProjectionView,2> views{};
+        for(unsigned i=0;i<2;++i) {
+            auto& v=views[i];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;
+            v.pose.position={float(i),.1F,.2F};v.fov={-.7F,.7F,.7F,-.7F};
+            v.subImage.swapchain=reinterpret_cast<XrSwapchain>(12+i);v.subImage.imageRect.extent={64,64};
+        }
+        views[1].pose.orientation={0,.1F,0,std::sqrt(.99F)};
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(1);
+        projection.viewCount=2;projection.views=views.data();const auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+        XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=123;end.layerCount=1;end.layers=&layer;
+        ProjectionSnapshot original;check(capture_projection_snapshot(&end,&original),"capture original AER metadata");
+        auto pair=std::make_shared<HeldAfwPair>();pair->projection=original;
+        ProjectionResourceMapping mapping;mapping.views.push_back({0,1});
+        check(apply_osr_peer_position(pair->projection,mapping,{.068F,.1F,.2F}),"correct only reconstructed peer position");
+        check(std::memcmp(&pair->projection.layers[0].views[0],&original.layers[0].views[0],sizeof(views[0]))==0,"real source eye unchanged");
+        const auto& peer=pair->projection.layers[0].views[1];
+        check(std::memcmp(&peer.pose.orientation,&views[1].pose.orientation,sizeof(XrQuaternionf))==0 &&
+            std::memcmp(&peer.fov,&views[1].fov,sizeof(XrFovf))==0,"peer orientation and FOV unchanged");
+        PreparedProjectionFrame produced;produced.kind=PreparedGenerationKind::prime;produced.scene_serial=5;
+        for(unsigned i=0;i<2;++i){PreparedProjectionResource r;r.application_swapchain=views[i].subImage.swapchain;
+            r.generation.current_handle=reinterpret_cast<XrSwapchain>(100+i);produced.resources.push_back(r);}
+        produced.reconstructed_afw_pair=pair;
+        check(!produced.held_afw_pair,"fresh corrected metadata must not signal a held source");
+        for(bool held:{false,true}) {
+            if(held){produced.held_afw_pair=pair;produced.reconstructed_afw_pair.reset();}
+            GeneratedFrameEndInfo terminal;ProjectionSnapshot snapshot;
+            check(build_afw_terminal_submission(&end,original,produced,terminal,snapshot),"fresh/held terminal ownership");
+            check(snapshot.layers[0].views[1].pose.position.x==.068F && snapshot.layers[0].views[0].pose.position.x==0,
+                "terminal and downstream snapshot preserve the exact corrected position");
+            check(terminal.info.displayTime==123,"metadata correction does not reschedule displayTime");
+        }
+        produced.held_afw_pair.reset();GeneratedFrameEndInfo legacy;ProjectionSnapshot legacy_snapshot;
+        check(build_afw_terminal_submission(&end,original,produced,legacy,legacy_snapshot) &&
+            legacy_snapshot.layers[0].views[1].pose.position.x==1,"absent OSR receipt preserves the existing AFW/pass-through metadata");
+        std::puts("OSR fresh/held terminal metadata, unchanged source/orientation/FOV/time and legacy PASS");return 0;
+    }
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
     if(route=="unbridged-vulkan-session")return unbridged_vulkan_session_test();

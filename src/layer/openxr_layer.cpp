@@ -11996,6 +11996,7 @@ struct PreparedProjectionFrame {
     bool anchor_is_current{};
     bool preserve_previous{};
     std::shared_ptr<const HeldAfwPair> held_afw_pair;
+    std::shared_ptr<const HeldAfwPair> reconstructed_afw_pair; // fresh OSR metadata, not a held-frame decision
     std::optional<LukeAfwStartupCandidate> startup_candidate;
     std::uint64_t scene_serial{};
     xrfg::SceneIdentity original_scene;
@@ -13726,6 +13727,17 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     return true;
 }
 
+[[nodiscard]] bool apply_osr_peer_position(ProjectionSnapshot& snapshot,
+    const ProjectionResourceMapping& mapping,const xrfg::Vec3& position) noexcept {
+    if(!std::isfinite(position.x)||!std::isfinite(position.y)||!std::isfinite(position.z))return false;
+    for(const auto& ref:mapping.views)
+        if(ref.projection_index>=snapshot.layers.size() ||
+            ref.view_index>=snapshot.layers[ref.projection_index].views.size())return false;
+    for(const auto& ref:mapping.views)
+        snapshot.layers[ref.projection_index].views[ref.view_index].pose.position={position.x,position.y,position.z};
+    return !mapping.views.empty();
+}
+
 [[nodiscard]] bool build_afw_terminal_submission(const XrFrameEndInfo* source,
     const ProjectionSnapshot& snapshot, const PreparedProjectionFrame& produced,
     GeneratedFrameEndInfo& terminal, ProjectionSnapshot& terminal_snapshot) {
@@ -13735,8 +13747,10 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     if (produced.kind == PreparedGenerationKind::none ||
         !build_generated_frame_end_info(source, snapshot, false, destinations, &terminal))
         return false;
-    if (produced.held_afw_pair) {
-        const auto& owned = produced.held_afw_pair->projection;
+    const auto& reconstruction_metadata=produced.held_afw_pair
+        ? produced.held_afw_pair:produced.reconstructed_afw_pair;
+    if (reconstruction_metadata) {
+        const auto& owned = reconstruction_metadata->projection;
         if (!projection_resource_layout_compatible(owned, snapshot)) return false;
         for (std::size_t layer = 0; layer < terminal.projections.size(); ++layer) {
             auto& copy = terminal.projections[layer];
@@ -14550,6 +14564,7 @@ struct LukeOriginHistoryProbe {
             source.guide->publication,native_peer_camera);
         HRESULT afw_result = E_UNEXPECTED;
         bool afw_evaluated = false;
+        std::optional<xrfg::Vec3> reconstructed_position;
         const auto& afw_settings = afw_status.desired;
         {
             std::scoped_lock gpu_lock(session->gpu_mutex);
@@ -14557,8 +14572,20 @@ struct LukeOriginHistoryProbe {
                 source_images[source.prepared.current_destination_index],
                 destination_images[destination.prepared.current_destination_index],
                 *source.guide, source.views.front(), destination.views.front(),
-                source.logical_eye, *xr_eye_baseline, afw_settings,native_peer_camera);
+                source.logical_eye, *xr_eye_baseline, afw_settings,native_peer_camera,&reconstructed_position);
             afw_evaluated = SUCCEEDED(afw_result);
+        }
+        if(afw_evaluated && reconstructed_position) {
+            const auto position=*reconstructed_position;
+            destination.views.front().pose.position=position;
+            if(xrfg::two_frame_capture_active()) {
+                const float xyz[]{position.x,position.y,position.z};
+                for(unsigned axis=0;axis<3;++axis) {
+                    std::uint32_t bits{};std::memcpy(&bits,&xyz[axis],sizeof(bits));
+                    xrfg::two_frame_capture_timeline("osr_peer_position",destination.logical_eye*10+axis,
+                        source.guide->publication,snapshot.display_time,bits);
+                }
+            }
         }
         if (afw_evaluated) {
             std::scoped_lock gpu_lock(session->gpu_mutex);
@@ -14697,6 +14724,12 @@ struct LukeOriginHistoryProbe {
         }
         auto pair = std::make_shared<HeldAfwPair>();
         pair->projection = snapshot;
+        if(reconstructed_position) {
+            // Reuse this exact metadata for fresh, retained and post-OSR
+            // consumers. The source eye and the peer orientation/FOV stay put.
+            if(apply_osr_peer_position(pair->projection,mappings[&destination-entries.data()],*reconstructed_position))
+                output.reconstructed_afw_pair=pair;
+        }
         pair->revision = afw_status.revision;
         pair->production_serial = frame_serial;
         pair->native_domains[source.logical_eye]={source.guide->stream,source.guide->epoch,source.guide->publication,source.guide->serial};
