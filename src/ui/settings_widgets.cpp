@@ -1,3 +1,4 @@
+#include <optional>
 #include "xrfg/presented_output_rate.hpp"
 #include "xrfg/settings_widgets.hpp"
 #include "xrfg/dlssg_profile.hpp"
@@ -556,16 +557,24 @@ static void luke_swapchain_budget(const Snapshot& state) {
     if(b.unassigned_native)ImGui::TextColored(ImVec4(1.F,.75F,.25F,1.F),"Warning: some native swapchains have no assigned owner.");
 }
 
-bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& state,
+bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& initial,
     SettingsWidgetOptions options) {
     set_interface_visible(options.compact ? InterfaceSurface::headset : InterfaceSurface::desktop, true);
-    synchronize_settings_widgets(ui, state);
+    synchronize_settings_widgets(ui, initial);
     ui.scale_editing = false;
     ImGui::PushID("OFXRBridgeSettings");
     if (options.compact) ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 7));
-    status(state);
-    const auto profile=configuration_path();
-    ImGui::TextWrapped("Settings: %s",profile==global_configuration_path()?"Global defaults":utf8(profile.filename().wstring()).c_str());
+    status(initial);
+    std::optional<Snapshot> selected;
+    if(!options.compact && options.desktop_profile_header) {
+        if(options.desktop_profile_header(ui)) {
+            selected=snapshot();synchronize_settings_widgets(ui,*selected);
+        }
+    } else {
+        const auto profile=configuration_path();
+        ImGui::TextWrapped("Settings: %s",profile==global_configuration_path()?"Global defaults":utf8(profile.filename().wstring()).c_str());
+    }
+    const auto& state=selected?*selected:initial;
     if(const auto warning=overlay_limit_text(state.runtime.overlay_limit_mask);!warning.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1.F,.75F,.25F,1.F));
         ImGui::TextWrapped("%.*s",static_cast<int>(warning.size()),warning.data());

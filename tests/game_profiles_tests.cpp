@@ -1,4 +1,5 @@
 #include "xrfg/autonomous_control.hpp"
+#include "xrfg/desktop_profiles.hpp"
 #include "xrfg/benchmark_suite.hpp"
 #include <windows.h>
 #include <filesystem>
@@ -42,6 +43,8 @@ int child(const std::filesystem::path& game,const std::wstring& mode,const std::
     else check(first.backend==1 && first.scale==3 && first.afw_only && first.advanced_mode && first.nr_second_pass,
         "new game inherits customized main settings including second NR pass");
     check(a::configuration_path()==a::game_configuration_path(game),"process bound to own game profile");
+    {const auto global=a::global_configuration_path();a::ScopedConfigurationSelection selected(global);
+     check(a::configuration_path()==a::game_configuration_path(game),"desktop selection cannot redirect a bound game/headset profile");}
     check(read(a::configuration_path()).find("[tray]")==std::string::npos && read(a::configuration_path()).find("[benchmark]")==std::string::npos,"global sections excluded from game files");
     if(mode!=L"factory") {auto edit=first;edit.backend=3;edit.nr_intensity=.625F;edit.nr_second_pass=mode!=L"reset";check(a::request(edit),"game edit saved");}
     a::RuntimeStatus report{};report.sessions=report.ready=1;a::report_runtime(report);
@@ -79,15 +82,27 @@ int wmain(int argc,wchar_t** argv) {
         check(a::request(customized),"customize desktop template");
         check(a::write_configuration_sections(a::global_configuration_path(),"[tray]\npacing=force_vdxr\ncrash_debug=1\n[benchmark]\nenabled=1\n[dlssg]\npreset=3\n"),"save global choices");
         const auto original=read(a::global_configuration_path());
+        a::DesktopProfiles desktop;
+        desktop.observe(a::active_game_profile());
+        check(desktop.choose(a::global_configuration_path()),"desktop pins Global before a game launch");
         wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);
         const auto suffix=std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64());
         {
             Child alpha(executable,L"Alpha.exe",L"independent",suffix+L"-a");
             check(a::configuration_path()==a::game_configuration_path(L"Alpha.exe"),"desktop discovers running game");
+            desktop.observe(a::active_game_profile());
+            check(desktop.selected()==a::game_configuration_path(L"Alpha.exe"),"already-open desktop automatically follows a new process");
+            check(desktop.choose(a::global_configuration_path()),"manually select Global while Alpha runs");
+            desktop.observe(a::active_game_profile());check(desktop.selected()==a::global_configuration_path(),"same running process does not override a manual desktop choice");
+            {a::ScopedConfigurationSelection selected(desktop.selected());check(a::snapshot().desired==a::sanitize(customized),"selected Global UI reads Global preferences");
+             {a::ScopedConfigurationSelection hotkey;check(a::configuration_path()==a::game_configuration_path(L"Alpha.exe"),"reentrant tray message follows live game even inside a desktop profile operation");}
+             check(a::configuration_path()==a::global_configuration_path(),"reentrant message restores the desktop's selected profile");}
+            check(a::configuration_path()==a::game_configuration_path(L"Alpha.exe"),"outside desktop scope tray actions still target active Alpha");
             check(a::snapshot().desired.nr_intensity==.625F && a::snapshot().desired.nr_second_pass,"desktop follows active game mapping");
             {
                 Child beta(executable,L"Beta.exe",L"reset",suffix+L"-b");
                 check(a::configuration_path()==a::game_configuration_path(L"Beta.exe"),"second game has separate mapping");
+                desktop.observe(a::active_game_profile());check(desktop.selected()==a::game_configuration_path(L"Beta.exe"),"new game overrides manual desktop Global selection");
                 check(!a::snapshot().desired.nr_second_pass,"second game can disable its inherited second pass independently");
                 check(a::reset_to_defaults(),"reset active game");
                 check(!a::snapshot().desired.nr_second_pass,"factory reset disables second Neural Rendering pass");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "xrfg/autonomous_control.hpp"
+#include <functional>
 
 namespace xrfg::autonomous {
 void apply_settings_style();
@@ -28,6 +29,7 @@ struct SettingsWidgetState {
 struct SettingsWidgetOptions {
     bool compact{}; // tighter spacing for the in-headset 1024 x 768 surface
     bool defer_publication{}; // containing menu publishes after its drag/size footer
+    std::function<bool(SettingsWidgetState&)> desktop_profile_header; // never called for compact/headset
 };
 
 void synchronize_settings_widgets(SettingsWidgetState& ui, const Snapshot& state) noexcept;

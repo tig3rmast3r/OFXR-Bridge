@@ -2,6 +2,7 @@
 #include "xrfg/standalone_launcher.hpp"
 #include "xrfg/rife_runtime_locator.hpp"
 #include "xrfg/autonomous_control.hpp"
+#include "xrfg/desktop_profiles.hpp"
 #include "xrfg/autonomous_ui.hpp"
 #include "xrfg/benchmark_suite.hpp"
 #include "xrfg/dlssg_profile.hpp"
@@ -1151,6 +1152,7 @@ LRESULT CALLBACK window_procedure(
     UINT message,
     WPARAM wparam,
     LPARAM lparam) {
+    xrfg::autonomous::ScopedConfigurationSelection automatic_routing;
     auto* state = reinterpret_cast<AppState*>(
         GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {

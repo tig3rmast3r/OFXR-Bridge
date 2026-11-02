@@ -24,6 +24,7 @@ struct Context {
     ImVec2 size{};
     bool compact{};
     std::string rendered_text;
+    std::function<bool(SettingsWidgetState&)> profile_header;
     explicit Context(ImVec2 dimensions, bool small) : size(dimensions), compact(small) {
         context = ImGui::CreateContext();
         ImGui::SetCurrentContext(context);
@@ -51,7 +52,7 @@ struct Context {
         ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoDecoration |
             ImGuiWindowFlags_NoSavedSettings);
         if(capture_text)ImGui::LogToBuffer();
-        render_settings_widgets(widgets, snapshot(), {.compact = compact});
+        render_settings_widgets(widgets, snapshot(), {.compact = compact,.desktop_profile_header = profile_header});
         if(capture_text){rendered_text=GImGui->LogBuffer.c_str();ImGui::LogFinish();}
         ImGui::End();
         ImGui::Render();
@@ -542,15 +543,24 @@ void automatic_buttons() {
 }
 } // namespace
 
+void desktop_header_is_not_a_headset_control() {
+    int called{};
+    Context headset({1024,768},true);headset.profile_header=[&](auto&){++called;return false;};headset.draw();
+    require(called==0,"headset never invokes the desktop profile picker");
+    Context desktop({690,900},false);desktop.profile_header=[&](auto&){++called;return false;};desktop.draw();
+    require(called==1,"desktop may render its profile header");
+}
+
 int main(int argc, char** argv) {
     const auto profile = std::filesystem::temp_directory_path() /
         (L"ofxr-settings-widgets-" + std::to_wstring(GetCurrentProcessId()) +
             L"-" + std::to_wstring(GetTickCount64()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", profile.c_str());
     try {
-        if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
+        if (argc == 2 && std::strcmp(argv[1], "--desktop-header") == 0) desktop_header_is_not_a_headset_control();
+        else if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--route-multiplier") == 0) route_multiplier_widgets();
-        else { rebase_and_publish(); release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); }
+        else { desktop_header_is_not_a_headset_control(); rebase_and_publish(); release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); }
         std::filesystem::remove(configuration_path());
         std::filesystem::remove(profile/L"dlssg-profile-selection.ini");
         std::filesystem::remove(profile);

@@ -1,5 +1,6 @@
 #include "xrfg/autonomous_ui.hpp"
 #include "xrfg/settings_widgets.hpp"
+#include "xrfg/desktop_profile_picker.hpp"
 #include "xrfg/benchmark_suite.hpp"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -21,6 +22,8 @@ constexpr wchar_t kClassName[] = L"OFXRBridgeSettingsV449";
 constexpr UINT_PTR kRenderTimer = 1;
 
 struct Window {
+    DesktopProfiles profiles;
+    bool rendering{};
     HWND handle{};
     ImGuiContext* imgui{};
     ComPtr<ID3D11Device> device;
@@ -75,9 +78,17 @@ struct Window {
         dx11_ready = win32_ready && ImGui_ImplDX11_Init(device.Get(), context.Get());
         return dx11_ready;
     }
+    void finish_edits() {
+        const auto& file=widgets.configuration_file.empty()?profiles.selected():widgets.configuration_file;
+        ScopedConfigurationSelection selection(file);
+        finish_settings_widget_edits(widgets);
+        set_interface_visible(InterfaceSurface::desktop,false);
+    }
     void render(bool present = true) {
+        if(rendering)return; // Native file dialogs can pump this window's timer.
+        struct FrameGuard {bool& active;explicit FrameGuard(bool& value):active(value){active=true;}~FrameGuard(){active=false;}} frame_guard(rendering);
         if (!dx11_ready || !target || (present && !IsWindowVisible(handle)) || IsIconic(handle)) {
-            set_interface_visible(InterfaceSurface::desktop, false); return;
+            finish_edits(); return;
         }
         ImGui::SetCurrentContext(imgui);
         ImGui_ImplDX11_NewFrame();
@@ -88,7 +99,16 @@ struct Window {
         ImGui::SetNextWindowSize(size);
         ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoSavedSettings);
-        render_settings_widgets(widgets, snapshot());
+        const auto previous=profiles.selected();
+        if(profiles.observe(active_game_profile()) && widgets.initialized) {
+            ScopedConfigurationSelection old(previous);
+            finish_settings_widget_edits(widgets);
+            set_interface_visible(InterfaceSurface::desktop,false);
+        }
+        ScopedConfigurationSelection selection(profiles.selected());
+        SettingsWidgetOptions options;
+        options.desktop_profile_header=[&](SettingsWidgetState& ui){return render_desktop_profile_picker(profiles,ui,selection);};
+        render_settings_widgets(widgets,snapshot(),std::move(options));
         ImGui::End();
         ImGui::Render();
         const float clear[]{.06F, .07F, .09F, 1};
@@ -150,6 +170,7 @@ struct Window {
 std::unique_ptr<Window> window;
 
 LRESULT CALLBACK procedure(HWND handle, UINT message, WPARAM wparam, LPARAM lparam) {
+    ScopedConfigurationSelection automatic_routing;
     auto* state = reinterpret_cast<Window*>(GetWindowLongPtrW(handle, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
         state = static_cast<Window*>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams);
@@ -173,8 +194,7 @@ LRESULT CALLBACK procedure(HWND handle, UINT message, WPARAM wparam, LPARAM lpar
         }
         return 0;
     case WM_CLOSE:
-        set_interface_visible(InterfaceSurface::desktop, false);
-        if (state) finish_settings_widget_edits(state->widgets);
+        if (state) state->finish_edits();
         ShowWindow(handle, SW_HIDE);
         if (!GetWindow(handle, GW_OWNER)) PostQuitMessage(0);
         return 0;
@@ -215,7 +235,7 @@ bool show_settings_window(HWND owner) noexcept {
 }
 void close_settings_window() noexcept {
     if (window) {
-        finish_settings_widget_edits(window->widgets);
+        window->finish_edits();
         KillTimer(window->handle, kRenderTimer);
         DestroyWindow(window->handle);
         window.reset();

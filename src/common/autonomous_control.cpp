@@ -1,4 +1,5 @@
 #include "xrfg/autonomous_control.hpp"
+#include "xrfg/desktop_profiles.hpp"
 #include "xrfg/benchmark_suite.hpp"
 #include "xrfg/presented_output_rate.hpp"
 #include "xrfg/osr_full_warp.hpp"
@@ -80,7 +81,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 82401;
+constexpr std::uint32_t kAbi = 82501;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -180,6 +181,7 @@ bool save_sections(const std::filesystem::path& path, std::string_view sections)
 bool save(const Shared& shared, const Settings& value) {
     return save_sections(std::filesystem::path(shared.configuration_file),serialize_settings(value));
 }
+thread_local const std::filesystem::path* desktop_configuration{};
 std::filesystem::path process_profile;
 std::atomic_bool process_profile_bound{};
 std::uint64_t path_identity(const std::filesystem::path& path) {
@@ -201,19 +203,23 @@ public:
         if(mapping)data=static_cast<DiscoveryState*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(DiscoveryState)));
     }
     ~Discovery(){if(data)UnmapViewOfFile(data);if(mapping)CloseHandle(mapping);if(mutex)CloseHandle(mutex);}
-    std::filesystem::path active() {
-        if(!mutex || !data)return {};
+    std::optional<ActiveGameProfile> observed() {
+        if(!mutex || !data)return std::nullopt;
         const auto result=WaitForSingleObject(mutex,0);
-        if(result!=WAIT_OBJECT_0 && result!=WAIT_ABANDONED)return {};
+        if(result!=WAIT_OBJECT_0 && result!=WAIT_ABANDONED)return std::nullopt;
         const auto state=*data;ReleaseMutex(mutex);
         const auto now=GetTickCount64();
-        if(!state.pid || !state.heartbeat || now<state.heartbeat)return {};
+        if(!state.pid || !state.heartbeat || now<state.heartbeat)return ActiveGameProfile{};
         const auto handle=OpenProcess(SYNCHRONIZE,FALSE,state.pid);
-        if(!handle)return {};
+        if(!handle)return ActiveGameProfile{};
         const bool alive=WaitForSingleObject(handle,0)==WAIT_TIMEOUT;CloseHandle(handle);
-        if(!alive)return {};
+        if(!alive)return ActiveGameProfile{};
         const std::filesystem::path name(state.executable);
-        return name==name.filename() ? game_configuration_path(name) : std::filesystem::path{};
+        if(name!=name.filename())return ActiveGameProfile{};
+        return ActiveGameProfile{game_configuration_path(name),state.pid};
+    }
+    std::filesystem::path active() {
+        const auto value=observed();return value?value->file:std::filesystem::path{};
     }
     void report(const RuntimeStatus& status) {
         static std::atomic_uint64_t last{};
@@ -530,11 +536,63 @@ std::filesystem::path game_configuration_path(const std::filesystem::path& execu
 }
 std::filesystem::path configuration_path() {
     if(process_profile_bound.load(std::memory_order_acquire))return process_profile;
+    if(desktop_configuration)return *desktop_configuration;
 #ifdef _WIN32
     if(const auto active=discovery().active();!active.empty())return active;
 #endif
     return global_configuration_path();
 }
+ScopedConfigurationSelection::ScopedConfigurationSelection() noexcept
+    :previous_(desktop_configuration) {desktop_configuration=nullptr;}
+ScopedConfigurationSelection::ScopedConfigurationSelection(const std::filesystem::path& file) noexcept
+    :previous_(desktop_configuration) {desktop_configuration=&file;}
+ScopedConfigurationSelection::~ScopedConfigurationSelection() {desktop_configuration=previous_;}
+void ScopedConfigurationSelection::select(const std::filesystem::path& file) noexcept {desktop_configuration=&file;}
+namespace {
+std::wstring profile_key(const std::filesystem::path& file) {
+    auto value=file.lexically_normal().wstring();
+#ifdef _WIN32
+    for(auto& c:value)c=static_cast<wchar_t>(std::towlower(c));
+#endif
+    return value;
+}
+}
+bool same_profile_file(const std::filesystem::path& a,const std::filesystem::path& b) {
+    return profile_key(a)==profile_key(b);
+}
+bool is_saved_game_profile(const std::filesystem::path& file) noexcept {
+    try {
+        const auto folder=common_folder()/L"Profiles";
+        if(!same_profile_file(file.parent_path(),folder))return false;
+        auto extension=file.extension().wstring();for(auto& c:extension)c=static_cast<wchar_t>(std::towlower(c));
+        if(extension!=L".ini")return false;
+        std::error_code error;
+        if(!std::filesystem::is_regular_file(file,error) || error)return false;
+        const auto canonical_file=std::filesystem::weakly_canonical(file,error);if(error)return false;
+        const auto canonical_folder=std::filesystem::weakly_canonical(folder,error);
+        return !error && same_profile_file(canonical_file.parent_path(),canonical_folder);
+    }catch(...){return false;}
+}
+std::vector<std::filesystem::path> saved_game_profiles() noexcept {
+    std::vector<std::filesystem::path> files;
+    try {
+        std::error_code error;
+        for(std::filesystem::directory_iterator it(common_folder()/L"Profiles",error),end;!error && it!=end;it.increment(error))
+            if(is_saved_game_profile(it->path()))files.push_back(it->path());
+        std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return profile_key(a.filename())<profile_key(b.filename());});
+    }catch(...){}
+    return files;
+}
+std::optional<ActiveGameProfile> active_game_profile() noexcept {
+    try {
+#ifdef _WIN32
+        return discovery().observed();
+#else
+        return ActiveGameProfile{};
+#endif
+    }catch(...){return std::nullopt;}
+}
+
 bool initialize_game_configuration(const std::filesystem::path& executable) noexcept {
     try {
         if(process_profile_bound.load(std::memory_order_acquire))return true;
