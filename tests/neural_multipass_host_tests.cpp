@@ -86,13 +86,13 @@ struct Gpu {
         D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=w;d.Height=h;d.DepthOrArraySize=array;d.MipLevels=d.SampleDesc.Count=1;d.Format=format;d.Flags=flags;
         D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;ComPtr<ID3D12Resource> r;hr(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,state,nullptr,IID_PPV_ARGS(&r)));return r;
     }
-    void fill(ID3D12Resource* r,D3D12_RESOURCE_STATES state,std::array<float,4> pixel,unsigned ox=0,unsigned oy=0,unsigned w=0,unsigned h=0){
+    void fill(ID3D12Resource* r,D3D12_RESOURCE_STATES state,std::array<float,4> pixel,unsigned ox=0,unsigned oy=0,unsigned w=0,unsigned h=0,unsigned slice=0){
         auto d=r->GetDesc();if(w)d.Width=w;if(h)d.Height=h;d.DepthOrArraySize=1;D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};UINT64 bytes{};device->GetCopyableFootprints(&d,0,1,0,&fp,nullptr,nullptr,&bytes);
         auto u=buffer(bytes,D3D12_HEAP_TYPE_UPLOAD);void* p{};D3D12_RANGE empty{};hr(u->Map(0,&empty,&p));
         const unsigned channels=d.Format==DXGI_FORMAT_R32_FLOAT?1:d.Format==DXGI_FORMAT_R32G32_FLOAT?2:4;
         for(unsigned y=0;y<d.Height;++y)for(unsigned x=0;x<d.Width;++x)memcpy(static_cast<char*>(p)+fp.Offset+y*fp.Footprint.RowPitch+x*channels*sizeof(float),pixel.data(),channels*sizeof(float));u->Unmap(0,nullptr);
         move(list.Get(),r,state,D3D12_RESOURCE_STATE_COPY_DEST);
-        D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=u.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;src.PlacedFootprint=fp;dst.pResource=r;dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=u.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;src.PlacedFootprint=fp;dst.pResource=r;dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;dst.SubresourceIndex=slice;
         list->CopyTextureRegion(&dst,ox,oy,0,&src,nullptr);move(list.Get(),r,D3D12_RESOURCE_STATE_COPY_DEST,state);uploads.push_back(u);
     }
     Readback capture(ID3D12Resource* r,D3D12_RESOURCE_STATES state){
@@ -130,7 +130,7 @@ int __cdecl evaluate(ID3D12GraphicsCommandList* list,void* handle,void*,ID3D12Re
 struct Eye {unsigned id;Params params;ComPtr<ID3D12Resource> color,output;};
 }
 
-void quad_run(nr_test::Gpu& gpu,float scale,bool noUav=false) {
+void quad_run(nr_test::Gpu& gpu,float scale,bool noUav=false,bool arrayDepth=false) {
     using namespace nr_test;
     constexpr auto state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     auto color=gpu.texture(256,192,DXGI_FORMAT_R32G32B32A32_FLOAT,state,1,noUav?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
@@ -139,6 +139,14 @@ void quad_run(nr_test::Gpu& gpu,float scale,bool noUav=false) {
     // Output array belongs to SR. Pre-SR must touch ONLY each input colour ROI.
     auto output=gpu.texture(200,160,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,4);
     gpu.fill(color.Get(),state,{.03f,.03f,.03f,.6f});gpu.fill(depth.Get(),state,{.9f,0,0,0});gpu.fill(motion.Get(),state,{8,8,0,0});
+    auto depthArray=gpu.texture(100,80,DXGI_FORMAT_R32_FLOAT,state,4);
+    if(arrayDepth)for(unsigned slice=0;slice<4;++slice)
+        gpu.fill(depthArray.Get(),state,{slice?.8f:.1f,0,0,0},0,0,100,80,slice);
+    if(arrayDepth)for(unsigned slice=1;slice<4;++slice) {
+        D3D12_RESOURCE_BARRIER barrier{};barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition={depthArray.Get(),slice,state,D3D12_RESOURCE_STATE_COPY_DEST};
+        gpu.list->ResourceBarrier(1,&barrier);
+    }
     std::array<Eye,4> views{{{301},{302},{303},{304}}};
     std::array<std::array<unsigned,2>,4> origins{{{0,0},{128,0},{0,96},{128,96}}};
     for(unsigned i=0;i<4;++i){auto& v=views[i];v.color=color;v.output=output;
@@ -151,6 +159,11 @@ void quad_run(nr_test::Gpu& gpu,float scale,bool noUav=false) {
         v.params.Set(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X,m[0]);v.params.Set(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y,m[1]);
         v.params.Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,unsigned(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes));
         v.params.Set(NVSDK_NGX_Parameter_MV_Scale_X,100.f);v.params.Set(NVSDK_NGX_Parameter_MV_Scale_Y,80.f);
+        if(arrayDepth && i==0) {
+            v.params.Set(NVSDK_NGX_Parameter_Depth,depthArray.Get());
+            v.params.Set(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X,0U);
+            v.params.Set(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y,0U);
+        }
         gpu.fill(depth.Get(),state,{.1f*(i+1),0,0,0},d[0],d[1],100,80);
         gpu.fill(motion.Get(),state,{.01f*(i+1),.02f*(i+1),0,0},m[0],m[1],100,80);
     }
@@ -175,7 +188,7 @@ void quad_run(nr_test::Gpu& gpu,float scale,bool noUav=false) {
     }
     need(std::abs(gpu.pixel(result,110,90)[0]-.03f)<.00001f,"outside ALL view rectangles remains untouched");
     gpu.reset();record();gpu.submit();for(auto& e:gpu.evaluations)need(!e.reset,"four histories remain independently stable");
-    gpu.reset();views[0].params.Set(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X,0U);views[0].params.Set(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y,96U);
+    gpu.reset();views[0].params.Set(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X,128U);views[0].params.Set(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y,96U);
     record();gpu.submit();for(auto& e:gpu.evaluations)need(bool(e.reset)==(e.source==views[0].id),"a changed guide region resets only its own two model histories");
     for(auto& v:views)xrfg::neural_rendering::retire_handle(v.id);TickNrRetired();xrfg::neural_rendering::shutdown();need(live.empty(),"all quad-view histories retire");
     std::printf("NR QUAD %.0f%%: four histories, independent colour/depth/MV regions, exact resolve and guard pixels PASS\n",scale*100);
@@ -191,7 +204,7 @@ int main(int argc,char** argv)try{
     g_runtime.forwarder=LoadLibraryW(L"kernel32.dll");g_runtime.forwarderReady=true;g_runtime.floatSlotKnown=true;
     g_runtime.create=create;g_runtime.evaluate=evaluate;g_runtime.release=release;g_runtime.setContract=contract;g_runtime.setExtras=extras;g_capabilityFloatSlot=1;
     services().initialized=true;services().capability=capabilities;services().destroy=destroy_parameters;
-    if(argc>1 && std::string_view(argv[1]).starts_with("quad")){quad_run(gpu,std::string_view(argv[1])=="quad-half"?.5f:1.f,std::string_view(argv[1])=="quad-copy");
+    if(argc>1 && std::string_view(argv[1]).starts_with("quad")){quad_run(gpu,std::string_view(argv[1]).find("half")!=std::string_view::npos?.5f:1.f,std::string_view(argv[1])=="quad-copy",std::string_view(argv[1]).starts_with("quad-array"));
         if(gpu.messages)for(UINT64 i=0;i<gpu.messages->GetNumStoredMessages();++i){SIZE_T size{};gpu.messages->GetMessage(i,nullptr,&size);std::vector<char> b(size);auto* m=reinterpret_cast<D3D12_MESSAGE*>(b.data());hr(gpu.messages->GetMessage(i,m,&size));need(m->Severity!=D3D12_MESSAGE_SEVERITY_ERROR&&m->Severity!=D3D12_MESSAGE_SEVERITY_CORRUPTION,m->pDescription);}
         std::filesystem::remove(folder/L"nvngx_dlssnr.dll");std::filesystem::remove(folder);return 0;}
     auto depth=gpu.texture(100,80,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);

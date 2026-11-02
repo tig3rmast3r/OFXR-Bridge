@@ -90,6 +90,7 @@ public:
         // and required display-edge+guard coverage (V651). This is bounded to one
         // attempt per packet, separate from expired-cycle recovery. A still-current
         // replacement may retain a shorter horizon; never spin for that preference.
+        // Stage33: real Begin entry/return QPC in b/c; emitted after the packet is known.
         // Stage32: diagnostic GPU copy start/end calibrated to QPC ns, b/c.
         // No extra submission or wait; read after the existing copy fence.
         // Stage31: buffered intended handoff QPC, c=ready lead at that deadline.

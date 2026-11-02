@@ -620,10 +620,12 @@ struct PrivateOpenXrRuntime::Impl {
                 }
                 if(XR_FAILED(result)){fail(result);break;}
                 auto begun_at=clock_ns();
+                const auto initial_begin_enter=begin_enter,initial_begin_leave=begun_at;
                 std::shared_ptr<Packet> packet;
                 {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || !prepared.empty();});
                  if(stopping)break;packet=std::move(prepared.front());prepared.pop_front();}
                 const bool directed=packet->director;
+                if(diagnostic)options.trace(33,packet->sequence,initial_begin_enter,initial_begin_leave);
                 if(packet->policy_epoch!=applied_policy) {
                     // A live bypass round-trip must not revive an old phase,
                     // work floor or adaptive delay. Native/image owners stay.

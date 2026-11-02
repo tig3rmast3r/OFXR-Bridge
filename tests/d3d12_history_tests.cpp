@@ -423,6 +423,51 @@ void test_fsr_generated_array_follows_color_extent(
         "FSR generated array changed its slice, format, or flags contract");
 }
 
+void test_fsr_temporal_continuity(D3D12WarpFixture& fixture) {
+    const auto texture = [&](DXGI_FORMAT format) {
+        auto desc = stereo_texture_description(64, 64);
+        desc.DepthOrArraySize = 1;
+        desc.Format = format;
+        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> resource;
+        require_hresult(fixture.device()->CreateCommittedResource(&heap,
+            D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
+            nullptr, IID_PPV_ARGS(&resource)), "FSR continuity texture");
+        return resource;
+    };
+    auto color = texture(kFormat), depth = texture(DXGI_FORMAT_R32_FLOAT),
+         motion = texture(DXGI_FORMAT_R32G32_FLOAT);
+    xrfg::D3D12FsrFrameGenerator generator;
+    require_hresult(generator.initialize(fixture.device(), color->GetDesc(), kFormat),
+                    "FSR continuity initialize");
+    xrfg::D3D12FsrEyeInput input{};
+    input.color = color.Get(); input.depth = depth.Get(); input.motion_vectors = motion.Get();
+    input.color_rect = input.depth_rect = input.motion_rect = {0, 0, 64, 64};
+    input.camera_pose.orientation.w = 1;
+    input.guide_stream = 81; input.guide_epoch = 1;
+    const auto step = [&](std::uint64_t serial, std::uint64_t previous, bool reset) {
+        input.guide_serial = serial; input.guide_previous_serial = previous;
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            ID3D12Resource* output{};
+            require_hresult(generator.dispatch(list, {&input, 1}, &output),
+                            "actual FSR continuity dispatch");
+            require(output != nullptr, "FSR continuity output");
+            require(generator.output_is_current(0) == reset,
+                    "FSR must reset exactly at a temporal discontinuity");
+        });
+    };
+    step(10, 9, true); step(11, 10, false);
+    step(15, 14, true); step(16, 15, false);
+    input.guide_stream = 82; step(17, 16, true); step(18, 17, false);
+    ++input.guide_epoch; step(19, 18, true); step(20, 19, false);
+    input.reset = true; step(21, 20, true);
+    input.reset = false; step(22, 21, false);
+    // Older unstamped clients retain their previous contract.
+    input.guide_stream = 0; step(0, 0, false);
+    std::cout << "Actual FSR provider: continuous, skipped, stream, epoch and explicit resets PASS\n";
+}
+
 void clear_double_wide_pattern(
     D3D12WarpFixture& fixture,
     ID3D12Resource* texture,
@@ -5897,6 +5942,11 @@ int main(int argc, char** argv) {
         xrfg::bridge_flight_logger().initialize(trace_dir);
     }
     try {
+        if(argc>1 && std::string_view(argv[1])=="fsr-continuity") {
+            D3D12WarpFixture fixture(true);
+            test_fsr_temporal_continuity(fixture);
+            fixture.require_no_debug_errors(); return 0;
+        }
         if(argc>1 && std::string_view(argv[1])=="rife-headset") {
             D3D12WarpFixture fixture(true);
             for(int model:{2,3,4})for(auto scale:{xrfg::D3D12NvidiaInputScale::quarter,xrfg::D3D12NvidiaInputScale::fifth})

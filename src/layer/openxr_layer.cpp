@@ -1577,6 +1577,15 @@ private:
         state.graphics_binding == SessionGraphicsBinding::d3d12 &&
         state.dlss_motion_vectors && !state.luke_afw_enabled;
 }
+
+// Stable eye identity also protects Hybrid. FSR's whole-texel placement
+// restrictions below remain specific to the FSR provider.
+[[nodiscard]] bool strict_release_eye_identity(const SessionState& state) noexcept {
+    return strict_fsr_release_guides(state) ||
+        (state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr &&
+         state.hybrid_requested && state.graphics_binding == SessionGraphicsBinding::d3d12 &&
+         state.dlss_motion_vectors && !state.luke_afw_enabled);
+}
 [[nodiscard]] bool release_bound_projection_guides(const SessionState& state) noexcept {
     return strict_fsr_release_guides(state) || xrfg::use_release_bound_game_guides(
         state.frame_generation_mode, state.dlss_motion_vectors, state.luke_afw_enabled);
@@ -8025,7 +8034,7 @@ XrResult release_swapchain_image_locked(
                     release_bound_guides && (eye == 0 || eye == 1)
                         ? state->session->eye_release_publication[1 - eye].load(
                               std::memory_order_relaxed) : 0,
-                    strict_fsr_release_guides(*state->session)
+                    strict_release_eye_identity(*state->session)
                         ? both_eyes_identity(*state, {true, state->fsr_eye_identity.stream, state->fsr_eye_identity.epoch})
                         : both_eyes_identity(*state, {}));
             };
@@ -11130,7 +11139,7 @@ void refresh_release_bound_projection_guides(
             resolved[eye] = releases[eye] ? xrfg::resolve_dlss_motion_vectors(
                 chains[eye]->enumerated_d3d12_images[*chains[eye]->last_released_index].Get(),
                 session.d3d12_queue.Get(), static_cast<int>(eye), releases[eye], releases[1 - eye],
-                strict_fsr_release_guides(session)
+                strict_release_eye_identity(session)
                     ? both_eyes_identity(*chains[eye], {true, chains[eye]->fsr_eye_identity.stream,
                         chains[eye]->fsr_eye_identity.epoch})
                     : both_eyes_identity(*chains[eye], {})) : nullptr;
@@ -11200,7 +11209,7 @@ void refresh_release_bound_projection_guides(
                         (eighths(frame.placed_motion_rect[3]) << 48U),
                     frame.publication);
             }
-            if (strict_fsr_release_guides(session) && releases[0] && releases[1] &&
+            if (strict_release_eye_identity(session) && releases[0] && releases[1] &&
                     guides && guides->eyes[0]) {
                 const auto& guide = *guides->eyes[0];
                 chains[eye]->fsr_eye_identity = {true, guide.stream, guide.epoch};

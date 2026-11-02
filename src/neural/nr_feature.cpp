@@ -893,7 +893,8 @@ ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned
 }
 
 void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
-             D3D12_RESOURCE_STATES to, const wchar_t* role)
+             D3D12_RESOURCE_STATES to, const wchar_t* role,
+             UINT subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES)
 {
     if (from == to)
         return;
@@ -901,7 +902,7 @@ void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESO
     D3D12_RESOURCE_BARRIER b {};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     b.Transition.pResource = res;
-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.Subresource = subresource;
     b.Transition.StateBefore = from;
     b.Transition.StateAfter = to;
     DredMarkers::BeforeBarrier(cmdList, role, res, from, to);
@@ -1468,7 +1469,8 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     const unsigned motionHeight=lowMotion?height:unsigned(srOutput?srOutput->GetDesc().Height:height);
     const std::array<unsigned,6> origins{colorX,colorY,depthX,depthY,motionX,motionY};
     if(!nr.inputOriginsKnown || nr.inputOrigins!=origins) {nr.reset=true;nr.inputOrigins=origins;nr.inputOriginsKnown=true;}
-    if(!separate2D(desc) || !separate2D(depthDesc) || !separate2D(motionDesc) ||
+    const auto guide2D=[](const D3D12_RESOURCE_DESC& d){return d.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.DepthOrArraySize>=1 && d.SampleDesc.Count==1;};
+    if(!separate2D(desc) || !guide2D(depthDesc) || !guide2D(motionDesc) ||
         (desc.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) ||
         !DlssNr::GuideFits({colorX,colorY,width,height},desc.Width,desc.Height) ||
         !DlssNr::GuideFits({depthX,depthY,width,height},depthDesc.Width,depthDesc.Height) ||
@@ -1980,9 +1982,9 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
 
         ++nr.resolvedFrames;
         if(NrFlightTrace::Enabled() && (nr.resolvedFrames<=4 || nr.resolvedFrames%128==0))
-            LOG_INFO("NR_VIEW resolved handle={} count={} color={}x{} origin={},{} depth_origin={},{} motion_origin={},{} work={}x{} guides={}x{} second={}",
+            LOG_INFO("NR_VIEW resolved handle={} count={} color={}x{} origin={},{} depth_origin={},{} motion_origin={},{} work={}x{} guides={}x{} second={} depth_array={} depth_slice=0",
                 sourceHandleId,nr.resolvedFrames,width,height,colorX,colorY,depthX,depthY,motionX,motionY,
-                workWidth,workHeight,modelGuideWidth,modelGuideHeight,cfg.DlssNrSecondPass.value_or_default());
+                workWidth,workHeight,modelGuideWidth,modelGuideHeight,cfg.DlssNrSecondPass.value_or_default(),depthDesc.DepthOrArraySize);
         // Matched capture readbacks are mapped only after their native submissions retire.
         if (g_capture.isActive())
         {

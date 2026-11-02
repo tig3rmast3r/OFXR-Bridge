@@ -3889,6 +3889,8 @@ struct D3D12FrameSynthesizer::Impl {
                 guide.camera_data_valid,
             };
             inputs[view_index].motion_slice = guide.motion_slice;
+            inputs[view_index].guide_stream=guide.stream;inputs[view_index].guide_epoch=guide.epoch;
+            inputs[view_index].guide_serial=guide.serial;inputs[view_index].guide_previous_serial=guide.previous_serial;
             midpoint_views[view_index] = current_source.views[view_index];
             midpoint_views[view_index].image_rect = color_rect;
             midpoint_views[view_index].pose = interpolate_pose(

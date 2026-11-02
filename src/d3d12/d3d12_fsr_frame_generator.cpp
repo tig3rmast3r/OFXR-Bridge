@@ -251,6 +251,8 @@ struct D3D12FsrFrameGenerator::Impl {
         UINT render_height{};
         UINT context_flags{};
         std::uint64_t frame_id{};
+        std::uint64_t guide_stream{},guide_epoch{},guide_serial{};
+        bool last_reset{};
     };
 
     std::array<bool,kMaximumEyes> last_reset{};
@@ -583,7 +585,10 @@ struct D3D12FsrFrameGenerator::Impl {
         generation.outputs[0] = ffxApiGetResourceDX12(
             eye.output.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
         generation.numGeneratedFrames = 1;
-        generation.reset = input.reset || frame_id == 1;
+        generation.reset = input.reset || frame_id == 1 ||
+            (input.guide_stream && eye.guide_stream &&
+             (input.guide_stream!=eye.guide_stream || input.guide_epoch!=eye.guide_epoch ||
+              input.guide_previous_serial!=eye.guide_serial));
         generation.backbufferTransferFunction =
             FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
         generation.minMaxLuminance[0] = 0.0F;
@@ -593,6 +598,10 @@ struct D3D12FsrFrameGenerator::Impl {
         if (dispatch(&eye.context, &generation.header) != FFX_API_RETURN_OK)
             return E_FAIL;
         eye.output_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        eye.guide_stream = input.guide_stream;
+        eye.guide_epoch = input.guide_epoch;
+        eye.guide_serial = input.guide_serial;
+        eye.last_reset = generation.reset;
         return S_OK;
     }
 };
@@ -698,7 +707,7 @@ HRESULT D3D12FsrFrameGenerator::dispatch(
             report_fsr_frame_generation_attempt(false);
             return result;
         }
-        impl_->last_reset[eye_index]=input.reset || eye.frame_id==1;
+        impl_->last_reset[eye_index]=eye.last_reset;
         const auto before = transition(eye.output.Get(), eye.output_state,
                                        D3D12_RESOURCE_STATE_COPY_SOURCE);
         commands->ResourceBarrier(1, &before);

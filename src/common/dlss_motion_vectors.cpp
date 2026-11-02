@@ -1879,6 +1879,19 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                         chosen->serial + 1 != other->serial)) return stale();
                 }
             }
+            // Distinct release watermarks can still select the opposite
+            // stream when native evaluation order changes. A known active
+            // stream remains this eye's, including during an epoch reset.
+            if (identity.strict && identity.stream && chosen && chosen->stream != identity.stream) {
+                const auto known = std::find_if(candidates.begin(), candidates.end(),
+                    [&](const Candidate& c) { return c.frame->stream == identity.stream; });
+                if (known != candidates.end()) {
+                    if (known->frame->epoch != identity.epoch) return stale();
+                    chosen = known->frame->publication <= released_at ? known->frame : known->previous;
+                    if (!chosen || chosen->epoch != identity.epoch || chosen->publication > released_at)
+                        return stale();
+                }
+            }
             if (!chosen || frames.empty() || chosen->publication > released_at ||
                 frames.front()->publication - chosen->publication > kMaximumStereoPublicationGap)
                 return stale();

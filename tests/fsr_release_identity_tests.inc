@@ -1,6 +1,6 @@
 // Actual layer release + guide refresh with owned WARP snapshots. No fake
 // resolver or generator is substituted. First discovery deliberately is RIGHT.
-void fsr_release_identity_test(bool foveated=false) {
+void fsr_release_identity_test(bool foveated=false, bool hybrid=false) {
     using Microsoft::WRL::ComPtr;
     const auto original_settings = xrfg::embedded::snapshot().desired;
     auto s = session(); s->presenter_active = false;
@@ -12,6 +12,12 @@ void fsr_release_identity_test(bool foveated=false) {
     check(!strict_fsr_release_guides(*s), "D11 receipt path preserved");
     s->graphics_binding = SessionGraphicsBinding::d3d12; s->luke_afw_enabled = true;
     check(!strict_fsr_release_guides(*s), "Luke/AFW path preserved"); s->luke_afw_enabled = false;
+    if(hybrid) {
+        s->frame_generation_mode=xrfg::D3D12FrameGenerationMode::ofxr;
+        s->hybrid_requested=true;
+        check(strict_release_eye_identity(*s) && !strict_fsr_release_guides(*s),
+              "Hybrid keeps stable eyes without FSR placement restrictions");
+    }
     ComPtr<IDXGIFactory4> factory; ComPtr<IDXGIAdapter> adapter;
     check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) &&
         SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter))), "FSR WARP adapter");
@@ -132,6 +138,12 @@ void fsr_release_identity_test(bool foveated=false) {
     if(!foveated)check(legacy && legacy->eyes[0]->stream==46411, "baseline reproduces right guides assigned to left");
     publish(1);release(1);publish(0);release(0);refresh();verify();
     publish(1);publish(0);release(0);release(1);refresh();verify();
+    if(!foveated) {
+        // A release can fall between the two native streams while their
+        // evaluation order changes. This MUST NOT exchange learned eyes.
+        publish(0);release(1);publish(1);release(0);refresh();verify();
+        publish(1);release(0);publish(0);release(1);refresh();verify();
+    }
     const auto left_identity=chains[0]->fsr_eye_identity;
     for (int mode : {2,1}) {
         auto desired=xrfg::embedded::snapshot().desired;desired.enabled=false;desired.frame_generation=mode;desired.motion_vectors=1;
@@ -157,6 +169,15 @@ void fsr_release_identity_test(bool foveated=false) {
         chains[0]->last_released_motion_vectors->eyes[0]->epoch!=left_identity.epoch,
         "camera-proven reset must retain the new epoch rather than old history");
     publish(1);release(1);publish(0);release(0);refresh();verify();
+    if(!foveated) {
+        publish(0,true);release(1);publish(1);release(0);refresh();
+        check(!chains[0]->last_released_motion_vectors,
+              "an active stream reset cannot rebind its eye to the opposite stream");
+        check(chains[1]->last_released_motion_vectors &&
+              chains[1]->last_released_motion_vectors->eyes[0]->stream==46411,
+              "the other eye keeps its stream while this eye resets");
+        publish(1);release(1);publish(0);release(0);refresh();verify();
+    }
     std::swap(projection.layers[0].views[0].subImage,projection.layers[0].views[1].subImage);
     mappings=build_projection_resource_mappings(projection);note_projection_eyes(projection,mappings);
     check(chains[0]->fsr_eye_identity.stream==0 && chains[1]->fsr_eye_identity.stream==0, "changed eye layout clears learned identity");

@@ -2536,6 +2536,10 @@ xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
         try { fsr_release_identity_test();return 0; }
         catch(const std::exception& e) { std::cerr<<e.what()<<"\n";return 1; }
     }
+    if (argc>1 && std::string_view(argv[1])=="hybrid-release-identity") {
+        try { fsr_release_identity_test(false,true);return 0; }
+        catch(const std::exception& e) { std::cerr<<e.what()<<'\n';return 1; }
+    }
     {
         ProjectionSnapshot a{},b{}; a.layers.resize(1);b.layers.resize(1);
         a.layers[0].views.resize(2);b.layers[0].views.resize(2);

@@ -40,6 +40,7 @@ struct D3D12FsrEyeInput {
     bool reset{};
     bool camera_data_valid{};
     std::uint32_t motion_slice{};
+    std::uint64_t guide_stream{},guide_epoch{},guide_serial{},guide_previous_serial{};
 };
 
 [[nodiscard]] bool fsr_generated_array_description(

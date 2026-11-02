@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.810.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.811.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2151,6 +2151,18 @@ if(TARGET xrfg_private_openxr_runtime_tests)
     set_tests_properties(xrfg_buffer_early_metadata_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()
 
+if(TARGET xrfg_d3d12_history_tests AND EXISTS "${XRFG_FSR_RUNTIME}")
+    add_custom_command(TARGET xrfg_d3d12_history_tests POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${XRFG_FSR_RUNTIME}"
+            "$<TARGET_FILE_DIR:xrfg_d3d12_history_tests>/")
+    add_test(NAME xrfg_fsr_temporal_continuity_gpu COMMAND xrfg_d3d12_history_tests fsr-continuity)
+    set_tests_properties(xrfg_fsr_temporal_continuity_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+if(TARGET xrfg_three_slot_director_tests)
+ add_test(NAME xrfg_hybrid_release_identity COMMAND xrfg_three_slot_director_tests hybrid-release-identity)
+ set_tests_properties(xrfg_hybrid_release_identity PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
 if(TARGET xrfg_three_slot_director_tests)
     add_test(NAME xrfg_fsr_foveated_release COMMAND xrfg_three_slot_director_tests fsr-foveated-release)
     set_tests_properties(xrfg_fsr_foveated_release PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
@@ -2159,4 +2171,9 @@ if(TARGET xrfg_three_slot_d3d12_tests AND EXISTS "${XRFG_FSR_RUNTIME}")
     add_test(NAME xrfg_fsr_foveated_inline_gpu COMMAND xrfg_three_slot_d3d12_tests fsr-foveated)
     add_test(NAME xrfg_fsr_foveated_queue_gpu COMMAND xrfg_three_slot_d3d12_tests fsr-queue-foveated)
     set_tests_properties(xrfg_fsr_foveated_inline_gpu xrfg_fsr_foveated_queue_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+endif()
+
+if(TARGET xrfg_private_openxr_runtime_tests)
+    add_test(NAME xrfg_buffer_cold_start_logging_off_gpu COMMAND xrfg_private_openxr_runtime_tests buffer-cold-quiet)
+    set_tests_properties(xrfg_buffer_cold_start_logging_off_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()
