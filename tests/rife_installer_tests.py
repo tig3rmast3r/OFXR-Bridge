@@ -65,6 +65,31 @@ class InstallerTests(unittest.TestCase):
         self.root.mkdir()
         (self.root / "existing-worker.txt").write_text("working-runtime")
 
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell check")
+    def test_check_ignores_package_and_ancestor_runtimes(self):
+        package = self.directory / "lab/packages/package with spaces"
+        (package / "tools").mkdir(parents=True)
+        (package / "python/rife").mkdir(parents=True)
+        shutil.copy2(SOURCE / "tools/Setup-RifeRuntime.ps1", package / "tools")
+        shutil.copy2(SOURCE / "python/rife/runtime-lock.json", package / "python/rife")
+        for candidate in (self.directory / "lab/runtime/rife", package / "rife"):
+            (candidate / "python").mkdir(parents=True)
+            (candidate / "app").mkdir()
+            (candidate / "python/python.exe").write_bytes(b"must never be executed")
+            (candidate / "app/worker.py").write_text("must never be loaded")
+        local = self.directory / "isolated AppData"
+        managed = local / "ofxr-bridge/RIFE/runtime"
+        result = self.directory / "check.json"
+        environment = dict(os.environ, LOCALAPPDATA=str(local))
+        command = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                   "-File", str(package / "tools/Setup-RifeRuntime.ps1"), "-Check", "-ResultJson", str(result)]
+        check = subprocess.run(command, env=environment, capture_output=True, timeout=20)
+        self.assertIn(check.returncode, (10, 12), check.stdout + check.stderr)
+        status = json.loads(result.read_text(encoding="utf-8"))
+        self.assertEqual(Path(status["root"]), managed)
+        self.assertIn(status["status"], ("missing", "unsupported"))
+        self.assertFalse(managed.exists())
+
     def test_source_lock_and_complete_same_release_overlay(self):
         lock = json.loads((SOURCE / "python/rife/runtime-lock.json").read_text())
         manifest = json.loads((SOURCE / "python/rife/overlay-manifest.json").read_text())

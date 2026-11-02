@@ -60,6 +60,8 @@ struct LauncherSettings {
     // the layer's ini as excluded_processes. Pimax Home by default (see
     // implicit_layer.hpp). No menu entry; edit tray.ini.
     std::string excluded_processes{"PimaxHome-Win64-Shipping.exe"};
+    // Manual global developer override only; empty uses the managed AppData runtime.
+    std::string rife_runtime_dir;
     // One private swapchain per output (see the layer's
     // single_swapchain_rings): "Lower VRAM" checkbox. Off by default.
     // Enabling private output staging reduces XR surface allocations and

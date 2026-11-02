@@ -22,6 +22,7 @@ What changed in this version: see the [release notes](https://github.com/tig3rma
 **On nightly:** experimental NVIDIA **RIFE** frame generation is also available,
 with models 4.6, 4.4 and 4.3, a Quality selector and optional TensorRT acceleration
 for 4.4. Use **Check RIFE...** in the tray to set up its pinned per-user runtime.
+RIFE is installed in `%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`; no package or parent folders are searched.
 See the [RIFE guide](docs/RIFE.md). The stable release remains a separate download;
 a nightly or self-compiled build must be signed separately for anti-cheat use.
 

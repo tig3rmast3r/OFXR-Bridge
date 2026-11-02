@@ -47,7 +47,7 @@ constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
 constexpr UINT_PTR kBenchmarkTimer = 558;
-constexpr UINT_PTR kRifeSetupTimer = 836;
+constexpr UINT_PTR kRifeSetupTimer = 837;
 constexpr int kPauseHotkeyId = 1;
 constexpr UINT kArmPollMilliseconds = 250;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
@@ -256,8 +256,8 @@ void log_lifecycle(const std::filesystem::path& local_directory,
         L"flush_each_event",
         0,
         source.empty() ? destination.c_str() : source.c_str()) != 0;
-    std::string configuration = xrfg::with_rife_runtime(xrfg::standalone::build_runtime_ini(
-        state.settings, xrfg::autonomous::snapshot().desired, max_file_mb, flush_each_event),state.executable_directory);
+    std::string configuration = xrfg::standalone::build_runtime_ini(
+        state.settings, xrfg::autonomous::snapshot().desired, max_file_mb, flush_each_event);
     if (!manifest.empty()) {
         const auto control = xrfg::implicit_layer::arm_signal_name(manifest);
         std::string ascii_control;
@@ -834,7 +834,8 @@ bool begin_rife_operation(AppState& state,bool installing,std::wstring* error) {
     try {
         const auto script=state.executable_directory/L"tools/Setup-RifeRuntime.ps1";
         if(!std::filesystem::is_regular_file(script))throw std::runtime_error("Missing tools/Setup-RifeRuntime.ps1. Extract the complete OFXR archive first.");
-        const auto root=state.local_directory/L"RIFE/runtime";
+        const auto root=xrfg::managed_rife_runtime();
+        if(root.empty())throw std::runtime_error("Local application data is unavailable.");
         const auto status=state.local_directory/L"RIFE/status";
         std::filesystem::create_directories(status);
         static std::atomic_uint request{};
@@ -920,7 +921,7 @@ void report_rife_completion(AppState& state,const RifeCompletion& completion) {
         MessageBoxW(state.window,text.c_str(),L"Check RIFE",MB_OK|MB_ICONINFORMATION);return;
     }
     if(!completion.installing&&xrfg::rife_setup::offers_install(result.status)) {
-        RifeInstallDialog dialog{state.local_directory/L"RIFE/runtime",result.message};
+        RifeInstallDialog dialog{xrfg::managed_rife_runtime(),result.message};
         const auto answer=DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_RIFE_INSTALL),state.window,
             rife_install_dialog_procedure,reinterpret_cast<LPARAM>(&dialog));
         if(answer==IDOK) {

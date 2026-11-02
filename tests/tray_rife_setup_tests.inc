@@ -79,6 +79,7 @@ void rife_setup_ui_tests() {
     require(!r::parse_result("{\"schema\":1,\"schema\":1}",0),"duplicate JSON fields rejected");
     require(!r::parse_result(json("ready")+"trailing",0),"trailing invalid JSON rejected");
     Fixture fixture;auto& app=fixture.state;
+    app.settings.rife_runtime_dir="D:/developer override must not affect Check RIFE";
     app.executable_directory=app.local_directory/L"Package O'Brian $()";
     std::filesystem::create_directories(app.executable_directory/L"tools");
     // Owned synthetic helper: no Python/CUDA download, live runtime or profile.
@@ -102,6 +103,7 @@ exit 10
     while(!completion&&GetTickCount64()<deadline){completion=collect_rife_completion(app);if(!completion)Sleep(10);}
     require(completion&&completion->result&&completion->result->status==r::Status::missing&&!app.rife.process,
         "actual helper result is collected once, without starting installation");
+    require(completion->result->root==xrfg::managed_rife_runtime(),"Check RIFE uses AppData even with a manual development override");
     require(std::filesystem::is_regular_file(completion->fallback_log),"hidden check keeps console diagnostics");
     require(!collect_rife_completion(app),"completed process cannot be delivered twice");
     require(begin_rife_operation(app,false,&error),"second owned check for timeout test");

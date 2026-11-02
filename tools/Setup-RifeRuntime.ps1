@@ -75,19 +75,6 @@ try{
  $lock=Get-Content -LiteralPath (Join-Path $sourceRoot 'python/rife/runtime-lock.json') -Raw|ConvertFrom-Json
  Recover-Runtime
  if($Check){
-  $defaultRoot=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ofxr-bridge/RIFE/runtime'))
-  if($runtimeRoot -eq $defaultRoot -and -not [IO.Directory]::Exists($runtimeRoot)){
-   $found=$false
-   foreach($relative in @('runtime/rife','rife')){
-    $directory=$sourceRoot
-    for($i=0;$i -lt 12;$i++){
-     $candidate=Join-Path $directory $relative
-     if((Test-Path -LiteralPath (Join-Path $candidate 'python/python.exe')) -and (Test-Path -LiteralPath (Join-Path $candidate 'app/worker.py'))){$runtimeRoot=$candidate;$result.root=$candidate;$found=$true;break}
-     $next=Split-Path -Parent $directory;if(-not $next -or $next -eq $directory){break};$directory=$next
-    }
-    if($found){break}
-   }
-  }
   $python=Join-Path $runtimeRoot 'python/python.exe'
   if(-not (Test-Path -LiteralPath $python)){
    if(-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32/nvcuda.dll'))){Write-Result 'unsupported' 'No NVIDIA CUDA driver was found. This release supports NVIDIA only.';exit 12}

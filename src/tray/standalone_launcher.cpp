@@ -230,6 +230,8 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "triple_frame_gen") {
                     settings.triple_frame_gen = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "rife_runtime_dir") {
+                    settings.rife_runtime_dir = value;
                 } else if (key == "excluded_processes") {
                     settings.excluded_processes = value;
                 } else if (key == "separate_synthesis") {
@@ -323,6 +325,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\nnr_hotkey=" + settings.nr_hotkey +
            "\r\nlogging_hotkey=" + settings.logging_hotkey +
            "\r\ndump_hotkey=" + settings.dump_hotkey +
+           (settings.rife_runtime_dir.empty() ? std::string{} : "\r\nrife_runtime_dir=" + settings.rife_runtime_dir) +
            "\r\n";
 }
 
@@ -636,6 +639,7 @@ std::string build_runtime_ini(
            "\r\nvulkan_bridge=" + (settings.vulkan_support ? "1" : "0") +
            "\r\nd3d11_bridge=" + (settings.d3d11_bridge ? "1" : "0") +
            "\r\ncapture_at_end_frame=" + (settings.capture_at_end_frame ? "1" : "0") +
+           (settings.rife_runtime_dir.empty() ? std::string{} : "\r\nrife_runtime_dir=" + settings.rife_runtime_dir) +
            "\r\n\r\n[diagnostics]\r\nlogging_enabled=" +
            (settings.diagnostics ? "1" : "0") +
            "\r\ncrash_debug=" + (settings.crash_debug ? "1" : "0") +

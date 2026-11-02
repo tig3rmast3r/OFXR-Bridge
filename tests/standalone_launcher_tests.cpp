@@ -654,6 +654,18 @@ int main() {
         }
     }
 
+    {
+        using namespace xrfg::standalone;
+        const auto defaults=parse_settings("[tray]\n");
+        if(contains(serialize_settings(defaults),"rife_runtime_dir=") ||
+           contains(build_runtime_ini(defaults),"rife_runtime_dir="))return 1;
+        const std::string manual="D:/developer folder/RIFE runtime";
+        const auto configured=parse_settings("[tray]\nrife_runtime_dir="+manual+"\n");
+        const auto restored=parse_settings(serialize_settings(configured));
+        if(restored.rife_runtime_dir!=manual ||
+           !contains(build_runtime_ini(restored),"\r\nrife_runtime_dir="+manual+"\r\n"))return 1;
+        if(!parse_settings("[ofxr]\nrife_runtime_dir="+manual+"\n").rife_runtime_dir.empty())return 1;
+    }
     std::cout << "OFXR manual persistent launcher support tests passed\n";
     return 0;
 }

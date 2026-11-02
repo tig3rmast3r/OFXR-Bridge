@@ -32,13 +32,30 @@ is performed.
 
 **Check RIFE** verifies the pinned dependencies, model and adapter files, and
 runs a small actual RIFE 4.4 CUDA inference. A ready result reports the GPU and
-available backend. A compatible existing shared or portable runtime can still
-be used if the managed runtime is absent.
+available backend. No package, development or ancestor directories are searched. If the AppData
+runtime is absent, the check offers installation even if another copy exists.
 
 If the GPU is unsupported, busy or out of memory, or the check times out, the
 tray reports the problem without offering automatic reinstallation. Close GPU
 applications and retry a busy check. A repair offer is reserved for a missing
 or damaged runtime. The result includes the log path for diagnosing failures.
+
+## Explicit developer override
+
+Normal installations use AppData only. For development, a runtime may be selected
+by manually adding an absolute path to the global `%LOCALAPPDATA%\ofxr-bridge\ofxr-bridge.ini`:
+
+```ini
+[tray]
+rife_runtime_dir=D:/RifeDevelopment/runtime
+```
+
+The tray preserves this manual value and copies it into the generated runtime
+INI's `[ofxr]` section. Remove or clear the key to restore AppData. An invalid
+explicit path fails instead of looking elsewhere. Restart the tray and game
+after changing it. This has no menu control and is not saved in game profiles.
+**Check RIFE** always checks/installs the AppData runtime, including when this
+developer override is present. No automatic runtime lookup is performed.
 
 ## Models, Quality and multipliers
 
@@ -80,7 +97,7 @@ Engines are reused from
 model code can require a new engine or CUDA graph warm-up. First use can take
 longer than later launches. TensorRT unavailability, a failed compilation or
 an invalid engine cache leaves the PyTorch fallback available. Other RIFE
-models use PyTorch. A compatible existing PyTorch-only runtime is usable.
+models use PyTorch. A valid AppData runtime can use the PyTorch fallback.
 
 The two eyes share model weights while retaining separate image histories.
 Reusing a runtime or cache does not mix the eyes or game sessions. Cache files
