@@ -4,7 +4,8 @@ The Frame generation menu includes RIFE between OFXR and Hybrid. Model choices
 are 4.6, 4.4 and 4.3. New RIFE profiles select 4.4 with15% motion
 inference. The inference slider ranges from10% to40% and applies on release. Explicit settings in existing profiles are preserved. Existing OFXR defaults are unchanged.
 
-This is a NVIDIA CUDA / PyTorch experiment, not TensorRT and not an AMD backend.
+This is a NVIDIA CUDA experiment with an optional TensorRT backend for4.4 and
+a portable PyTorch fallback. It is not an AMD backend.
 No DLSS motion vectors or depth are needed. Default remains 2X. Experimental 3X/4X
 are available on private native D3D12 and on Luke Ross's completed post-AFW
 D3D11 route with its isolated synthesis queue (Framework or Director). Legacy,
@@ -59,7 +60,7 @@ complete prepared runtime to another PC does not require Visual Studio or an
 installed VC runtime. Do not replace shared worker files during a RIFE test.
 
 One persistent worker/model is shared by all RIFE synthesizers on the matching
-adapter LUID. Both eyes execute serially with the same weights and independent
+adapter LUID. In the earlier path both eyes execute serially with the same weights and independent
 same-eye temporal inputs. CUDA Graphs avoid repeated small Torch launches.
 CPU pipes carry commands and completion receipts, never image pixels. Planar
 FP16 inputs and five-plane flow/mask outputs use shared D3D12 buffers imported

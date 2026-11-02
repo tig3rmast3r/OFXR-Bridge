@@ -38,6 +38,8 @@ class Worker {
     std::mutex mutex_;
     std::string line_;
     std::atomic<bool> live_{};
+    std::atomic<bool> optimizing_{}, tensorrt_{};
+    std::atomic<std::uint64_t> execution_updated_ms_{};
     std::atomic<std::uint64_t> memory_until_{};
     std::mutex memory_mutex_;
     RifeMemoryStatus memory_{};
@@ -47,6 +49,12 @@ class Worker {
         ++at;while(at<text.size() && text[at]==' ')++at;
         const auto parsed=std::from_chars(text.data()+at,text.data()+text.size(),out);
         return parsed.ec==std::errc{};
+    }
+    static bool boolean(const std::string& text,const char* key) noexcept {
+        auto at=text.find(key);if(at==std::string::npos)return false;
+        at=text.find(':',at);if(at==std::string::npos)return false;
+        ++at;while(at<text.size() && (text[at]==' ' || text[at]=='\t'))++at;
+        return text.compare(at,4,"true")==0;
     }
     std::string read(DWORD timeout) {
         const auto deadline=GetTickCount64()+timeout;
@@ -71,7 +79,7 @@ class Worker {
         }
     }
     void stop() noexcept {
-        live_=false; input_.reset();
+        live_=false;optimizing_=false;tensorrt_=false;execution_updated_ms_=0;input_.reset();
         if(process_.value && WaitForSingleObject(process_.value,500)!=WAIT_OBJECT_0){TerminateProcess(process_.value,1);WaitForSingleObject(process_.value,5000);}
         process_.reset();output_.reset();job_.reset();
     }
@@ -121,6 +129,10 @@ public:
         std::vector<std::wstring> vars{L"SystemRoot="+std::wstring(system),L"WINDIR="+std::wstring(system),
             L"PATH="+(root/L"python").wstring()+L";"+(root/L"python/Lib/site-packages/torch/lib").wstring()+L";"+std::wstring(system)+L"\\System32"};
         wchar_t temp[32768]{};if(GetTempPathW(32768,temp)){vars.push_back(L"TEMP="+std::wstring(temp));vars.push_back(L"TMP="+std::wstring(temp));}
+        // One per-user engine cache; keep Python/CUDA search paths scrubbed.
+        wchar_t local_appdata[32768]{};
+        if(GetEnvironmentVariableW(L"LOCALAPPDATA",local_appdata,32768))
+            vars.push_back(L"LOCALAPPDATA="+std::wstring(local_appdata));
         std::sort(vars.begin(),vars.end());std::wstring environment;for(auto& var:vars){environment+=var;environment+=L'\0';}environment+=L'\0';
         auto python=root/L"python/python.exe";
         std::wstring command=L"\""+python.wstring()+L"\" -I -u \""+(root/L"app/worker.py").wstring()+L"\"";
@@ -141,6 +153,13 @@ public:
     }
     ~Worker(){stop();}
     bool alive() const noexcept {return live_.load(std::memory_order_acquire);}
+    RifeExecutionStatus execution() const noexcept {
+        const auto updated=execution_updated_ms_.load(std::memory_order_acquire);
+        const auto now=GetTickCount64();
+        const bool active=alive() && updated && now>=updated && now-updated<5000;
+        return {updated,active,active && optimizing_.load(std::memory_order_relaxed),
+            active && tensorrt_.load(std::memory_order_relaxed)};
+    }
     RifeMemoryStatus memory(bool request) noexcept {
         const auto now=GetTickCount64();
         if(request)memory_until_.store(now+2000,std::memory_order_relaxed);
@@ -165,6 +184,15 @@ public:
             if(!WriteFile(input_.value,text.data(),static_cast<DWORD>(text.size()),&written,nullptr)||written!=text.size())throw E_FAIL;
             const auto reply=read(30000); // first model graph warm-up may take seconds
             if(reply.find("\"ok\": true")==std::string::npos)throw E_FAIL;
+            if(message.find("\"op\":\"infer\"")!=std::string::npos) {
+                optimizing_.store(boolean(reply,"\"optimizing\""),std::memory_order_relaxed);
+                // Protocol values are emitted by our owned portable worker.
+                auto backend=reply.find("\"backend\"");
+                backend=backend==std::string::npos?backend:reply.find(':',backend);
+                const auto value=backend==std::string::npos?backend:reply.find('"',backend+1);
+                tensorrt_.store(value!=std::string::npos && reply.compare(value,10,"\"tensorrt\"")==0,std::memory_order_relaxed);
+                execution_updated_ms_.store(GetTickCount64(),std::memory_order_release);
+            }
             std::uint64_t usage{},reserved{};
             if(number(reply,"\"vram_private\"",usage) && number(reply,"\"torch_reserved\"",reserved)){
                 std::scoped_lock sample(memory_mutex_);
@@ -203,6 +231,22 @@ RifeMemoryStatus rife_memory_for_adapter(LUID adapter,bool request) noexcept {
         const auto found=workers.find(key);if(found==workers.end())return {};
         auto worker=found->second.lock();lock.unlock();
         return worker?worker->memory(request):RifeMemoryStatus{};
+    }catch(...){return {};}
+}
+RifeExecutionStatus rife_execution_status() noexcept {
+    try {
+        std::unique_lock lock(registry_mutex,std::try_to_lock);
+        if(!lock.owns_lock())return {};
+        RifeExecutionStatus result;
+        for(const auto& [luid,weak]:workers) {
+            if(auto worker=weak.lock()) {
+                const auto value=worker->execution();
+                if(!value.active)continue;
+                result.updated_ms=std::max(result.updated_ms,value.updated_ms);
+                result.active=true;result.optimizing|=value.optimizing;result.tensorrt|=value.tensorrt;
+            }
+        }
+        return result;
     }catch(...){return {};}
 }
 struct D3D12Rife::Impl{
@@ -247,7 +291,7 @@ struct D3D12Rife::Impl{
         desc.Height=1;desc.DepthOrArraySize=1;desc.MipLevels=1;desc.SampleDesc.Count=1;
         desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         D3D12_HEAP_PROPERTIES properties{};properties.Type=D3D12_HEAP_TYPE_DEFAULT;
-        std::ostringstream message;message<<"{\"op\":\"configure\",\"id\":"<<id<<",\"luid\":"<<luid<<",\"width\":"<<w<<",\"height\":"<<h<<",\"eyes\":"<<count<<",\"buffers\":[";
+        std::ostringstream message;message<<"{\"op\":\"configure\",\"optimize\":true,\"id\":"<<id<<",\"luid\":"<<luid<<",\"width\":"<<w<<",\"height\":"<<h<<",\"eyes\":"<<count<<",\"buffers\":[";
         // NT handles are duplicated only into our child, never inherited by
         // the game or exposed by name. CUDA closes them after importing.
         std::array<HANDLE,3> duplicate{};

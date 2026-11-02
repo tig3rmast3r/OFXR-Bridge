@@ -69,6 +69,46 @@ int main(int argc,char** argv){try{
     const auto good=rasterize_elliott_meter(active,now,false,false);
     const auto count=[](const auto& p,unsigned color){return std::count(p.begin(),p.end(),color);};
     check(count(good,green)>100 && count(good,red)==0,"working OFXR label and counters must be green");
+    auto optimizing=active;optimizing.desired.frame_generation=4;
+    optimizing.runtime.generation_mode=4;optimizing.runtime.rife_optimizing=true;
+    constexpr unsigned yellow=0xff48c0ff;
+    check(autonomous::interface_state_text(optimizing)=="Optimizing, please wait",
+        "RIFE optimization uses the exact shared desktop/headset status");
+    const auto optimizing_pixels=rasterize_elliott_meter(optimizing,now,false,false);
+    check(count(optimizing_pixels,yellow)>100 && count(optimizing_pixels,green)>100,
+        "optimization warning does not turn healthy fallback frame counters red");
+    auto warming=optimizing;warming.runtime.ready=0;
+    warming.runtime.generation_state=autonomous::GenerationState::waiting;
+    warming.runtime.telemetry={};
+    check(autonomous::interface_state_text(warming)=="Optimizing, please wait" &&
+        count(rasterize_elliott_meter(warming,now,false,false),yellow)>100,
+        "optimization remains visible before any ready frame or valid FPS exists");
+    auto optimization_paused=optimizing;
+    optimization_paused.runtime.generation_state=autonomous::GenerationState::paused;
+    check(autonomous::interface_state_text(optimization_paused)=="Paused" &&
+        count(rasterize_elliott_meter(optimization_paused,now,false,false),yellow)==0,
+        "Pause takes priority over an in-progress optimization receipt");
+    auto optimization_pending=optimizing;optimization_pending.runtime.pending=1;
+    check(autonomous::interface_state_text(optimization_pending)=="Applying settings" &&
+        count(rasterize_elliott_meter(optimization_pending,now,false,false),yellow)==0,
+        "pending settings keep their normal header while an engine compiles");
+    auto optimized=optimizing;optimized.runtime.rife_optimizing=false;
+    check(autonomous::interface_state_text(optimized)!="Optimizing, please wait" &&
+        count(rasterize_elliott_meter(optimized,now,false,false),yellow)==0,
+        "completed optimization restores the normal framework header");
+    auto other_route=optimizing;other_route.desired.frame_generation=0;
+    other_route.runtime.generation_mode=0;
+    check(autonomous::interface_state_text(other_route)!="Optimizing, please wait" &&
+        count(rasterize_elliott_meter(other_route,now,false,false),yellow)==0,
+        "a stale RIFE optimization receipt cannot label another route");
+    auto optimization_disabled=optimizing;optimization_disabled.desired.enabled=false;
+    check(autonomous::interface_state_text(optimization_disabled)!="Optimizing, please wait" &&
+        count(rasterize_elliott_meter(optimization_disabled,now,false,false),yellow)==0,
+        "disabling frame generation clears the optimization header");
+    auto optimization_disconnected=optimizing;optimization_disconnected.connected=false;
+    check(autonomous::interface_state_text(optimization_disconnected)!="Optimizing, please wait" &&
+        count(rasterize_elliott_meter(optimization_disconnected,now,false,false),yellow)==0,
+        "a disconnected runtime cannot keep an optimization header visible");
     check(autonomous::interface_status_text(active).find("AFW: N/A")!=std::string::npos,
         "AFW outside Luke must be not applicable");
     auto idle=active;idle.runtime.telemetry.generating=false;

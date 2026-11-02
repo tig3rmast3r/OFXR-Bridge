@@ -9,6 +9,12 @@ struct RifeMemoryStatus {
 };
 // Nonblocking cached telemetry; requests are serviced by the next inference.
 RifeMemoryStatus rife_memory_for_adapter(LUID adapter,bool request) noexcept;
+struct RifeExecutionStatus {
+    std::uint64_t updated_ms{};
+    bool active{}, optimizing{}, tensorrt{};
+};
+// CPU-only cached worker receipts, independent of logging and memory sampling.
+RifeExecutionStatus rife_execution_status() noexcept;
 // Experimental portable-Python generator. Owns no XR objects or pacing policy.
 // The caller queues both producer receipts before generate(). The only CPU
 // synchronization is with this worker's exact GPU transactions, never a game tail.

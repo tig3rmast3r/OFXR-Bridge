@@ -13,6 +13,7 @@
 #include "xrfg/diagnostic_hotkeys.hpp"
 #include "xrfg/luke_vulkan_scope.hpp"
 #include "xrfg/dlssg_profile.hpp"
+#include "xrfg/d3d12_rife.hpp"
 
 namespace xrfg::autonomous {
 inline std::atomic_uint64_t applied_runtime_revision{};
@@ -116,6 +117,12 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     if (ingress.luke && ingress.camera_rejected && !ingress.camera_accepted)
         snprintf(out.message,sizeof(out.message),"Luke: awaiting an exact native camera packet");
     const auto desired=snapshot().desired;
+    if(desired.enabled && desired.frame_generation==4 && !afw_only) {
+        const auto rife=xrfg::rife_execution_status();
+        out.rife_execution_active=rife.active;
+        out.rife_optimizing=rife.active && rife.optimizing;
+        out.rife_tensorrt=rife.active && rife.tensorrt;
+    }
     const auto observed=native_ingress::upscaler_observation();
     const auto guides=dlss_motion_vector_statistics();
     out.upscaler_evaluations=observed.evaluations;

@@ -80,7 +80,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 79901;
+constexpr std::uint32_t kAbi = 80001;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1169,6 +1169,8 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
     }
     if (r.generation_state == GenerationState::paused) return "Paused";
     if (r.pending || r.applied_revision != s.revision) return "Applying settings";
+    if(s.desired.enabled && s.desired.frame_generation==4 && r.rife_optimizing)
+        return "Optimizing, please wait";
     const bool active = r.telemetry.updated_ms && GetTickCount64() - r.telemetry.updated_ms < 2000 && r.telemetry.generating;
     if (active && (r.generation_mode == 0 || r.generation_mode == 3) && r.motion_source == 1 &&
         r.generation_state != GenerationState::ready) return "Fallback";
@@ -1197,6 +1199,11 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
     return r.ready ? "Real frames only" : "Waiting";
 }
 bool interface_generation_active(const Snapshot& s) noexcept {
+    if(s.connected && s.desired.enabled && s.desired.frame_generation==4 && s.runtime.rife_optimizing) {
+        const auto& r=s.runtime;const auto now=GetTickCount64();
+        return !r.pending && r.applied_revision==s.revision && r.generation_state!=GenerationState::paused &&
+            r.telemetry.updated_ms && now>=r.telemetry.updated_ms && now-r.telemetry.updated_ms<2000 && r.telemetry.generating;
+    }
     const auto text=interface_state_text(s);
     return s.desired.enabled && (text.starts_with("FidelityFX") || text.starts_with("OFXR ") ||
         text.starts_with("RIFE") || text.starts_with("Hybrid") || text.starts_with("FSR") || text.starts_with("DLSS-G"));
@@ -1222,6 +1229,10 @@ std::string interface_status_text(const Snapshot& s) {
         if (!result.empty()) result += " | "; result += text;
     };
     const auto& r = s.runtime;
+    if(s.desired.enabled && s.desired.frame_generation==4) {
+        if(r.rife_optimizing)add("Optimizing, please wait");
+        else if(r.rife_tensorrt)add("TensorRT FP16");
+    }
     if (r.shared_queue) add("Shared queue");
     if(pacing_comparison_runtime(r) && r.pacing_mode>=0 && r.pacing_mode!=kAfwOnlyPacingMode && r.pacing_mode!=s.desired.pacing_mode)
         add("Applying pacing policy");

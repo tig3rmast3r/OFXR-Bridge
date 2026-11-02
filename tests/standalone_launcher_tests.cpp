@@ -598,6 +598,8 @@ int main() {
             !contains(without, "\"paused\": false,") ||
             !contains(without, "\"multiplier\": 2,") ||
             !contains(without, "\"generating\": null,") ||
+            !contains(without, "\"rife_optimizing\": false,") ||
+            !contains(without, "\"rife_backend\": null,") ||
             !contains(without, "\"output_fps\": null,") ||
             !contains(without, "\"latency_ms\": null,") ||
             !contains(without, "\"build\": 735") ||
@@ -618,6 +620,36 @@ int main() {
             !contains(without, "\"session\": null\n}\n") ||
             !contains(with, "\"deep_pipeline\": false\n  }\n}\n")) {
             std::cerr << "status.json was not as documented\n";
+            return 1;
+        }
+        auto optimizing = running;
+        optimizing.paused = false;
+        optimizing.session.rife_execution_active = true;
+        optimizing.session.rife_optimizing = true;
+        const auto torch = build_status_json(optimizing);
+        auto optimized = optimizing;
+        optimized.session.rife_optimizing = false;
+        optimized.session.rife_tensorrt = true;
+        const auto tensorrt = build_status_json(optimized);
+        auto unknown = optimized;
+        unknown.session.rife_execution_active = false;
+        unknown.session.rife_optimizing = true; // stale payload cannot invent a backend.
+        const auto missing_receipt = build_status_json(unknown);
+        auto paused = optimized;
+        paused.paused = true;
+        const auto paused_json = build_status_json(paused);
+        auto disconnected = optimized;
+        disconnected.session_present = false;
+        const auto disconnected_json = build_status_json(disconnected);
+        if (!contains(torch, "\"rife_optimizing\": true,") ||
+            !contains(torch, "\"rife_backend\": \"torch\",") ||
+            !contains(tensorrt, "\"rife_optimizing\": false,") ||
+            !contains(tensorrt, "\"rife_backend\": \"tensorrt\",") ||
+            !contains(missing_receipt, "\"rife_optimizing\": false,") ||
+            !contains(missing_receipt, "\"rife_backend\": null,") ||
+            !contains(paused_json, "\"rife_backend\": null,") ||
+            !contains(disconnected_json, "\"rife_backend\": null,")) {
+            std::cerr << "status.json must export only a known active RIFE backend\n";
             return 1;
         }
     }

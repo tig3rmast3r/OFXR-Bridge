@@ -232,7 +232,7 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         }
         editing_resolution=resolution_active;
         ImGui::TextWrapped("3X/4X require the private route. Luke Ross also requires the isolated post-AFW synthesis queue. Additional intermediates increase GPU work and memory use.");
-        ImGui::TextWrapped("Experimental portable Python/CUDA. One model, sequential eyes. Motion inference uses the selected percentage; output stays at full resolution. Requires the bundled RIFE runtime.");
+        ImGui::TextWrapped("Experimental portable Python/CUDA. RIFE 4.4 processes both eyes together, with automatic TensorRT optimization. Motion inference uses the selected percentage; output stays at full resolution. Requires the shared RIFE runtime.");
     } else if (draft.frame_generation==3) {
         ImGui::TextWrapped("Game motion vectors + FidelityFX optical flow (25% per axis). If game guides are unavailable or rejected, uses FidelityFX optical flow.");
     } else {

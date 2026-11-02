@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.799.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.800.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1605,6 +1605,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             dxgi)
         target_compile_features(xrfg_d3d12_history_tests PRIVATE cxx_std_20)
         if(XRFG_TEST_RIFE_GPU)
+            add_executable(xrfg_rife_tensorrt_status_tests tests/rife_tensorrt_status_tests.cpp)
+            target_include_directories(xrfg_rife_tensorrt_status_tests PRIVATE include
+                "${CMAKE_CURRENT_BINARY_DIR}/generated-shaders" "${XRFG_DLSS_SDK_ROOT}/include")
+            target_compile_features(xrfg_rife_tensorrt_status_tests PRIVATE cxx_std_20)
+            target_compile_definitions(xrfg_rife_tensorrt_status_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+            target_link_libraries(xrfg_rife_tensorrt_status_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
+            set(XRFG_TEST_RIFE_RUNTIME "" CACHE PATH "Isolated portable RIFE runtime for integration tests")
+            if(XRFG_TEST_RIFE_RUNTIME)
+                add_test(NAME xrfg_rife_trt_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
+                    -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_trt_python_tests.py")
+                add_test(NAME xrfg_rife_runtime_setup COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
+                    -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_runtime_setup_tests.py")
+                add_test(NAME xrfg_rife_tensorrt_status COMMAND xrfg_rife_tensorrt_status_tests
+                    "${XRFG_TEST_RIFE_RUNTIME}" "${CMAKE_CURRENT_BINARY_DIR}/rife-tensorrt-status")
+                set_tests_properties(xrfg_rife_tensorrt_status PROPERTIES TIMEOUT 240 RUN_SERIAL TRUE)
+            endif()
             add_test(NAME xrfg_rife_stereo_gpu COMMAND xrfg_d3d12_history_tests rife)
             add_test(NAME xrfg_rife_async_gpu COMMAND xrfg_d3d12_history_tests rife-async)
             add_test(NAME xrfg_rife_multiframe_gpu COMMAND xrfg_d3d12_history_tests rife-multi)

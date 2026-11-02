@@ -942,6 +942,15 @@ void write_status(const AppState& state, bool final = false) {
             // Luke Ross's R.E.A.L. VR runs at 2X whatever the multiplier asked for.
             session.multiplier = runtime.luke_detected ? 2U : current.desired.triple_frame_gen ? 3U : 2U;
             session.deep_pipeline = current.desired.prefer_fps;
+            const bool runtime_fresh = runtime.heartbeat_ms && tick >= runtime.heartbeat_ms &&
+                tick - runtime.heartbeat_ms < 2000;
+            session.rife_execution_active = runtime_fresh && current.desired.enabled &&
+                current.desired.frame_generation == 4 && runtime.generation_mode == 4 &&
+                !runtime.pending && runtime.applied_revision == current.revision &&
+                runtime.generation_state != xrfg::autonomous::GenerationState::paused &&
+                runtime.rife_execution_active;
+            session.rife_optimizing = session.rife_execution_active && runtime.rife_optimizing;
+            session.rife_tensorrt = session.rife_execution_active && runtime.rife_tensorrt;
             // Frames generated in the last second, by OFXR or by AFW alone.
             session.generating = (fresh && m.generating) ||
                 xrfg::autonomous::interface_afw_only_active(current, tick);

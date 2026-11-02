@@ -183,5 +183,54 @@
       "0": "4.25.lite",
       "1": "4.16.lite"
     }
+  },
+  "tensorrt_backend": {
+    "version": "10.14.1.48",
+    "platform": "Windows x64, CPython 3.12, CUDA 12",
+    "optional": true,
+    "default_install": true,
+    "destination": "backends/tensorrt",
+    "model": "4.4",
+    "precision": "FP16 with FP32 warp coordinates",
+    "opset": 19,
+    "assets": [
+      {
+        "path": "downloads/tensorrt/onnx-1.19.1-cp312-cp312-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/c7/5e/d1cb16693598a512c2cf9ffe0841d8d8fd2c83ae8e889efd554f5aa427cf/onnx-1.19.1-cp312-cp312-win_amd64.whl",
+        "sha256": "bc7e2e4e163e679721e547958b5a7db875bf822cad371b7c1304aa4401a7c7a4",
+        "bytes": 16465621
+      },
+      {
+        "path": "downloads/tensorrt/protobuf-6.33.0-cp310-abi3-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/7b/c6/7a465f1825872c55e0341ff4a80198743f73b69ce5d43ab18043699d1d81/protobuf-6.33.0-cp310-abi3-win_amd64.whl",
+        "sha256": "9a031d10f703f03768f2743a1c403af050b6ae1f3480e9c140f39c45f81b13ee",
+        "bytes": 436882
+      },
+      {
+        "path": "downloads/tensorrt/ml_dtypes-0.5.3-cp312-cp312-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/50/c1/85e6be4fc09c6175f36fb05a45917837f30af9a5146a5151cb3a3f0f9e09/ml_dtypes-0.5.3-cp312-cp312-win_amd64.whl",
+        "sha256": "da65e5fd3eea434ccb8984c3624bc234ddcc0d9f4c81864af611aaebcc08a50e",
+        "bytes": 208182
+      },
+      {
+        "path": "downloads/tensorrt/tensorrt_cu12_bindings-10.14.1.48-cp312-none-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/ca/5d/4b12dc504c6652d45fe04f3ba45eb405e16f68bc10cc2e892f81a72c5b13/tensorrt_cu12_bindings-10.14.1.48-cp312-none-win_amd64.whl",
+        "sha256": "a02075a1385a1a42ab35290c9147759bfb870c47134f17d9766204c7b707bd70",
+        "bytes": 768613
+      },
+      {
+        "path": "downloads/tensorrt/tensorrt_cu12_libs-10.14.1.48-py2.py3-none-win_amd64.whl",
+        "url": "https://pypi.nvidia.com/tensorrt-cu12-libs/tensorrt_cu12_libs-10.14.1.48-py2.py3-none-win_amd64.whl",
+        "sha256": "4585a3e8ff288ab63699f40566d9931dae663e3baa242c6c5b2e0b2262f1d777",
+        "bytes": 1879160299
+      },
+      {
+        "path": "downloads/tensorrt/tensorrt_cu12-10.14.1.48.tar.gz",
+        "url": "https://files.pythonhosted.org/packages/2d/b1/ce3941c368bc54d7e73cbc703ce1ceac2ad28bc8a9ee7614cfbf1626f1fa/tensorrt_cu12-10.14.1.48.tar.gz",
+        "sha256": "1c6574f3532085a837c3d34d9ee8fae24e35f6d2324d851edfd95b41e185ab64",
+        "bytes": 18291,
+        "format": "tensorrt-wrapper-sdist"
+      }
+    ]
   }
 }

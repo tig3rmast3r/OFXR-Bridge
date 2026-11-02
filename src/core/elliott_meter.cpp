@@ -338,6 +338,7 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     // State labels include the actual generator and active optional stages.
     // An enabled optional stage must run; AFW has no work outside Luke Ross.
     const auto& r=state.runtime;
+    const bool optimizing=status=="Optimizing, please wait";
     const bool fresh=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000;
     const bool optional_ready=(!state.desired.nr_enabled || (fresh && r.nr_running)) &&
         (!r.luke_detected || state.desired.afw_mode==0 || (fresh && r.afw_running));
@@ -372,7 +373,8 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const auto vram=autonomous::interface_vram_text(state);
     c.text(w/2-8*int(vram.size()),18,vram,body,PanelTone::dim);
     const int header_status_scale=status.size()>24 ? 1 : body;
-    c.text(w-margin-8*header_status_scale*int(status.size()),18,status,header_status_scale,tone);
+    c.text(w-margin-8*header_status_scale*int(status.size()),18,status,header_status_scale,
+        optimizing ? PanelTone::warn : tone);
     c.rule(margin,w-margin,50,2);
     for(int i=0;i<int(std::size(numbers));++i){
         const int column=(w-2*margin)/(i<4?4:3);

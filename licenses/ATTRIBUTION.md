@@ -1,5 +1,11 @@
 # Source and provider notices
 
+V800 optionally downloads NVIDIA TensorRT 10.14.1.48 into the shared RIFE
+runtime. Its original vendor license files remain with the extracted official
+packages under `backends/tensorrt`. The bridge ZIP contains the pinned setup
+metadata and source integration, not those vendor libraries. RIFE model code
+and weights retain their upstream MIT notices.
+
 The combined autonomous source and layer use GPL-3.0, supplied in the root
 LICENSE. Original component notices and licences remain preserved below.
 

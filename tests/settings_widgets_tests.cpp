@@ -180,20 +180,28 @@ void route_motion_widgets() {
     headset.choose("OFXR engine", 2, "Nvidia 0.2.13 (medium latency, high compatibility)");
     require(snapshot().desired.backend == 3, "new display order keeps 0.2.13 on persisted backend 3");
     tray.draw();
-    tray.choose("Frame generation", 1, "Hybrid (slow, needs DLSS)");
+    tray.choose("Frame generation", 1, "RIFE (experimental, NVIDIA)");
+    require(snapshot().desired.frame_generation == 4,
+        "RIFE is displayed after OFXR while keeping its persisted mode ID 4");
+    headset.draw();
+    headset.choose("Frame generation", 0, "OFXR (fast)");
+    require(snapshot().desired.motion_vectors == 0,
+        "returning from RIFE preserves the independent OFXR optical-flow selection");
+    tray.draw();
+    tray.choose("Frame generation", 2, "Hybrid (slow, needs DLSS)");
     require(snapshot().desired.frame_generation == 3, "actual tray selects Hybrid with stable mode ID");
     headset.draw();
     headset.choose("Frame generation", 0, "OFXR (fast)");
     require(snapshot().desired.motion_vectors == 0, "Hybrid preserves independent OFXR optical flow selection");
     tray.draw();
-    tray.choose("Frame generation", 2, "FSR 3.1 (slow, needs DLSS)");
+    tray.choose("Frame generation", 3, "FSR 3.1 (slow, needs DLSS)");
     require(snapshot().desired.frame_generation == 1, "actual tray selects FSR");
     headset.draw();
     headset.choose("Frame generation", 0, "OFXR (fast)");
     require(snapshot().desired.motion_vectors == 0,
         "returning from FSR restores OFXR optical flow");
     tray.draw();
-    tray.choose("Frame generation", 3, "DLSS Frame Generation (slowest, needs DLSS)");
+    tray.choose("Frame generation", 4, "DLSS Frame Generation (slowest, needs DLSS)");
     headset.draw();
     headset.choose("Frame generation", 0, "OFXR (fast)");
     require(snapshot().desired.motion_vectors == 0,
@@ -209,7 +217,7 @@ void route_multiplier_widgets() {
     tray.choose("Multiplier", 1, "3X");
     require(snapshot().desired.triple_frame_gen, "actual DJ menu selects 3X");
     headset.draw();
-    headset.choose("Frame generation", 3, "DLSS Frame Generation (slowest, needs DLSS)");
+    headset.choose("Frame generation", 4, "DLSS Frame Generation (slowest, needs DLSS)");
     require(!snapshot().desired.triple_frame_gen,
         "DLSS-G keeps its own 2X after DJ selects 3X");
     headset.choose("Multiplier", 1, "3X");
@@ -218,7 +226,7 @@ void route_multiplier_widgets() {
     // after leaving it instead of assuming DLSS-G retained a Djules presenter.
     tray.choose("OFXR engine", 2, "Nvidia 0.2.13 (medium latency, high compatibility)");
     tray.choose("Multiplier", 0, "2X");
-    headset.draw(); headset.choose("Frame generation", 3, "DLSS Frame Generation (slowest, needs DLSS)");
+    headset.draw(); headset.choose("Frame generation", 4, "DLSS Frame Generation (slowest, needs DLSS)");
     require(snapshot().desired.triple_frame_gen,
         "DLSS-G keeps its 3X after DJ selects 2X");
     tray.draw(); tray.choose("Frame generation", 0, "OFXR (fast)");

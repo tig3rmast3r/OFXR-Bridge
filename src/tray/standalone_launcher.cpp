@@ -339,6 +339,11 @@ std::string build_status_json(const StatusInputs& inputs) {
         std::to_string(session ? running.multiplier : configured) + ",\n";
     json += std::string("  \"generating\": ") +
         (session ? json_bool(running.generating) : "null") + ",\n";
+    const bool rife_active = session && !inputs.paused && running.rife_execution_active;
+    json += std::string("  \"rife_optimizing\": ") +
+        json_bool(rife_active && running.rife_optimizing) + ",\n";
+    json += "  \"rife_backend\": " + (rife_active
+        ? json_string(running.rife_tensorrt ? "tensorrt" : "torch") : "null") + ",\n";
     json += "  \"app_fps\": " +
         (session && running.rates_valid ? json_rate(running.app_fps) : "null") + ",\n";
     json += "  \"output_fps\": " +

@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$Root,[string]$CrtSource)
+param([Parameter(Mandatory=$true)][string]$Root,[string]$CrtSource,[switch]$SkipTensorRT)
 $ErrorActionPreference = 'Stop'
 $runtimeRoot = [System.IO.Path]::GetFullPath($Root)
 $sourceRoot = Split-Path -Parent $PSScriptRoot
@@ -30,5 +30,6 @@ foreach ($file in $lock.msvc_crt.files) {
 }
 $setupArguments = @('-I',(Join-Path $PSScriptRoot 'prepare_rife_runtime.py'),'--root',$runtimeRoot)
 if ($CrtSource) { $setupArguments += @('--crt-source',$CrtSource) }
+if ($SkipTensorRT) { $setupArguments += '--skip-tensorrt' }
 & $pythonPath @setupArguments
 if ($LASTEXITCODE -ne 0) { throw 'Portable RIFE setup failed.' }

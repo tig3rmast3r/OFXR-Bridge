@@ -2,7 +2,8 @@
 
 This interpreter, Torch and model weights live in one shared portable runtime.
 Only the selected model lives on the GPU. Temporal state belongs to the caller,
-never to an eye-agnostic feature cache. Both eyes execute serially on one stream.
+never to an eye-agnostic feature cache. RIFE4.4 batches the independent eyes;
+other models retain their original serial inference path.
 """
 import ctypes as C
 import importlib
@@ -10,12 +11,17 @@ import json
 from pathlib import Path
 import sys
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import torch
 import torch.nn.functional as F
 from cuda.bindings import driver as cu
 from gpu_memory import GpuMemory
+from trt_backend import Backend
 
 ROOT = Path(sys.executable).resolve().parent.parent
+APP_ROOT = Path(__file__).resolve().parent
+BACKEND_ROOT = APP_ROOT.parent
 MODELS = (("4.25.lite", "4_25_lite"), ("4.16.lite", "4_16_lite"), ("4.6", "4_6"), ("4.4", "4_4"), ("4.3", "4_3"))
 
 
@@ -95,6 +101,11 @@ class Runner:
         self.device = None
         self.memory = None
         self.import_charges = {}
+        self.optimization_enabled = False
+        self.trt = None
+        self._fast_warp = None
+        self._warp_attempted = False
+        self._warp_note = ""
         torch.set_num_threads(1)
         torch.backends.cudnn.benchmark = False  # no per-frame search stalls
 
@@ -118,21 +129,45 @@ class Runner:
                     self.memory = GpuMemory(luid)
                 except (OSError, RuntimeError):
                     self.memory = None
+                if self.trt is not None:
+                    self.trt.set_device(index)
                 return
         raise RuntimeError("No CUDA device matches the OpenXR D3D12 adapter LUID")
 
-    def select_model(self, index):
-        if index == self.model_id:
-            return
-        if index not in range(len(MODELS)):
-            raise ValueError("Unsupported RIFE model")
-        torch.cuda.synchronize()
+    def _clear_torch(self):
         self.net = self.head = None
         self.graph_state = None
         self.grids.clear()
         torch.cuda.empty_cache()
+
+    def select_model(self, index, load=True):
+        if index not in range(len(MODELS)):
+            raise ValueError("Unsupported RIFE model")
+        if index != self.model_id:
+            torch.cuda.synchronize()
+            if self.trt is not None:
+                self.trt.suspend()
+            self._clear_torch()
+            self.model_id = index
+        if not load or self.net is not None:
+            return
         version, module = MODELS[index]
         code = importlib.import_module("models.IFNet_HDv3_v" + module)
+        if index == 3 and self.optimization_enabled:
+            if not self._warp_attempted:
+                self._warp_attempted = True
+                try:
+                    from fused_warp import FusedWarp
+                    self._fast_warp = FusedWarp()
+                except Exception as error:
+                    self._warp_note = "Fused warp unavailable: " + str(error)
+            if self._fast_warp is not None:
+                # Only this module alias changes; other models still use their
+                # original warp and the compiler is a separate clean process.
+                code.warp = self._fast_warp
+        elif index == 3:
+            from models.warplayer import warp
+            code.warp = warp
         weights = torch.load(ROOT / "models" / f"flownet_v{version}.pkl",
                              map_location="cpu", weights_only=True, mmap=True)
         weights = {k.removeprefix("module."): v for k, v in weights.items()}
@@ -143,22 +178,26 @@ class Runner:
         self.net.load_state_dict(net_weights, strict=True)
         self.net.ofxr_flow_output = True
         self.net.to(device=self.device, dtype=torch.float16)
+        if index == 3 and self.optimization_enabled:
+            # Weight layout alone supplies the tested gain. Converting every
+            # planar input to channels_last would add an unnecessary copy.
+            self.net.to(memory_format=torch.channels_last)
         if hasattr(code, "Head"):
             self.head = self.net.encode
-        self.model_id = index
 
     @torch.inference_mode()
     def infer(self, a, b):
+        n = a.shape[0]
         h, w = a.shape[-2:]
         modulo = 128 if self.model_id == 0 else 32
         pw, ph = ((w + modulo - 1) // modulo * modulo, (h + modulo - 1) // modulo * modulo)
-        key = (pw, ph)
+        key = (pw, ph, n)
         if key not in self.grids:
             horizontal = torch.linspace(-1, 1, pw, device=self.device).view(1, 1, 1, pw).expand(1, 1, ph, pw)
             vertical = torch.linspace(-1, 1, ph, device=self.device).view(1, 1, ph, 1).expand(1, 1, ph, pw)
             self.grids[key] = (torch.tensor([(pw-1)/2, (ph-1)/2], device=self.device),
                               torch.cat((horizontal, vertical), 1),
-                              torch.full((1, 1, ph, pw), .5, device=self.device, dtype=torch.float16))
+                              torch.full((n, 1, ph, pw), .5, device=self.device, dtype=torch.float16))
         div, grid, timestep = self.grids[key]
         a, b = F.pad(a, (0, pw-w, 0, ph-h)), F.pad(b, (0, pw-w, 0, ph-h))
         args = (a, b, timestep, div, grid)
@@ -168,6 +207,22 @@ class Runner:
     def command(self, request):
         op = request["op"]
         if op == "configure":
+            enabled = request.get("optimize") is True
+            if self.configs and enabled != self.optimization_enabled:
+                raise ValueError("Mixed RIFE optimization capabilities in one worker")
+            if enabled != self.optimization_enabled:
+                if self.device is not None:
+                    torch.cuda.synchronize()
+                    self._clear_torch()
+                if self.trt is not None:
+                    self.trt.close()
+                # App/runtime layout remains meaningful when a staging Python
+                # executable is a junction to the shared portable interpreter.
+                self.trt = Backend(BACKEND_ROOT, APP_ROOT) if enabled else None
+                self.optimization_enabled = enabled
+                self.model_id = None
+                if self.trt is not None and self.device is not None:
+                    self.trt.set_device(self.device)
             self.select_device(request["luid"])
             ident = request["id"]
             self.release(ident)
@@ -189,19 +244,44 @@ class Runner:
             self.release(request["id"])
             return {}
         if op == "infer":
-            self.select_model(request["model"])
+            model = request["model"]
+            # A warm engine needs no Torch weights/graph. The normal model is
+            # loaded lazily only while optimizing or if the backend falls back.
+            self.select_model(model, load=not (self.optimization_enabled and model == 3))
             a, b, out = [buffer.tensor for buffer in self.configs[request["id"]]]
-            for eye in range(a.shape[0]):
-                out[eye:eye+1].copy_(self.infer_cached(a[eye:eye+1], b[eye:eye+1], request.get("fraction", .5)))
+            fraction = request.get("fraction", .5)
+            generated = None
+            optimizing = False
+            if model == 3 and self.optimization_enabled:
+                try:
+                    generated, optimizing = self.trt.try_infer(a, b, fraction)
+                except Exception as error:
+                    self.trt.note = "TensorRT unavailable: " + str(error)
+            if generated is not None:
+                out.copy_(generated)
+                backend = "tensorrt"
+            else:
+                self.select_model(model, load=True)
+                if model == 3 and self.optimization_enabled:
+                    out.copy_(self.infer_cached(a, b, fraction))
+                else:
+                    for eye in range(a.shape[0]):
+                        out[eye:eye+1].copy_(self.infer_cached(a[eye:eye+1], b[eye:eye+1], fraction))
+                backend = "torch"
             # The reply is a completion receipt. D3D12 never waits an output
             # semaphore that a failed or terminated worker might not signal.
             torch.cuda.current_stream().synchronize()
+            if backend == "tensorrt" and self.net is not None:
+                self._clear_torch()
+            result = {"optimizing": bool(optimizing), "backend": backend} if self.optimization_enabled else {}
+            if model == 3 and self.trt is not None and self.trt.note:
+                result["optimization_error"] = self.trt.note
             if request.get("memory") and self.memory:
                 usage = self.memory.usage()
                 if usage is not None:
-                    return {"vram_private": max(0, usage-sum(self.import_charges.values())),
-                            "torch_reserved": torch.cuda.memory_reserved(self.device)}
-            return {}
+                    result.update(vram_private=max(0, usage-sum(self.import_charges.values())),
+                                  torch_reserved=torch.cuda.memory_reserved(self.device))
+            return result
         raise ValueError("Unknown worker operation")
 
     @torch.inference_mode()
@@ -239,19 +319,32 @@ class Runner:
             torch.cuda.synchronize()
             for buffer in buffers:
                 buffer.close()
+        if self.optimization_enabled and not self.configs:
+            if self.trt is not None:
+                self.trt.suspend()
+            if self.device is not None:
+                self._clear_torch()
+                self.model_id = None
+
+    def close(self):
+        if self.trt is not None:
+            self.trt.close()
+        for ident in list(self.configs):
+            self.release(ident)
 
 
 def main():
     runner = Runner()
     print(json.dumps({"ok": True, "protocol": 2}), flush=True)
-    for line in sys.stdin:
-        try:
-            result = runner.command(json.loads(line))
-            print(json.dumps({"ok": True, **result}), flush=True)
-        except Exception as error:
-            print(json.dumps({"ok": False, "error": str(error)}), flush=True)
-    for ident in list(runner.configs):
-        runner.release(ident)
+    try:
+        for line in sys.stdin:
+            try:
+                result = runner.command(json.loads(line))
+                print(json.dumps({"ok": True, **result}), flush=True)
+            except Exception as error:
+                print(json.dumps({"ok": False, "error": str(error)}), flush=True)
+    finally:
+        runner.close()
 
 
 if __name__ == "__main__":
