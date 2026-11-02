@@ -1,6 +1,7 @@
 #include <optional>
 #include "xrfg/presented_output_rate.hpp"
 #include "xrfg/settings_widgets.hpp"
+#include "xrfg/rife_resolution.hpp"
 #include "xrfg/dlssg_profile.hpp"
 #include "xrfg/benchmark_suite.hpp"
 #include "imgui.h"
@@ -33,9 +34,11 @@ void status(const Snapshot& state) {
     const float header_x=ImGui::GetCursorPosX(),header_width=ImGui::GetContentRegionAvail().x;
     ImGui::TextDisabled("OFXR-BRIDGE 0.3.2 (v%d)",XRFG_IMPLEMENTATION_VERSION);
     const auto vram=interface_vram_text(state);
+    const auto gpu=interface_gpu_text(state,now);
     const auto vram_width=ImGui::CalcTextSize(vram.c_str()).x;
+    const auto telemetry_width=vram_width+ImGui::GetStyle().ItemSpacing.x+ImGui::CalcTextSize(gpu.c_str()).x;
     ImGui::SameLine();
-    ImGui::SetCursorPosX(header_x+(header_width-vram_width)*.5F);
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),header_x+(header_width-telemetry_width)*.5F));
     ImGui::TextUnformatted(vram.c_str());
     if(ImGui::IsItemHovered()){
         const auto& m=state.runtime.video_memory;
@@ -43,6 +46,8 @@ void status(const Snapshot& state) {
             m.game_bytes/1048576.0,m.rife_private_bytes/1048576.0,
             m.rife_active&&!m.rife_valid?" (sample pending)":"",m.rife_reserved_bytes/1048576.0);
     }
+    ImGui::SameLine();ImGui::TextUnformatted(gpu.c_str());
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("GPU utilization on the rendering adapter, across all processes (including RIFE and compositor).\nBusiest physical engine, sampled in the background about once per second.");
     const auto value = [](const char* label, float number, bool valid, bool rate,
                           const char* tip, bool late = false) {
         ImGui::TableNextColumn();
@@ -221,19 +226,13 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         if(ImGui::Combo("RIFE model", &model,"4.6\0" "4.4\0" "4.3\0")){draft.rife_model=model+2;changed=true;}
         int multiplier=draft.rife_multiplier-2;
         if(ImGui::Combo("RIFE multiplier",&multiplier,"2X\0" "3X\0" "4X\0")){draft.rife_multiplier=multiplier+2;changed=true;}
-        // Commit on release: rebuilding model shapes during every drag tick
-        // would repeatedly retire history and warm a new CUDA graph.
-        static int pending_resolution=15;
-        static bool editing_resolution{};
-        if(!editing_resolution)pending_resolution=draft.rife_resolution;
-        const bool resolution_edited=ImGui::SliderInt("Motion inference resolution",&pending_resolution,10,40,"%d%%");
-        const bool resolution_active=ImGui::IsItemActive();
-        if(ImGui::IsItemDeactivatedAfterEdit() || (resolution_edited && !resolution_active)) {
-            draft.rife_resolution=pending_resolution;changed=true;
+        int resolution=xrfg::rife_resolution_index(draft.rife_resolution);
+        if(ImGui::Combo("Quality",&resolution,
+                "Potato\0Low\0Medium\0High\0Very high\0Ultra\0")) {
+            draft.rife_resolution=xrfg::kRifeResolutions[resolution];changed=true;
         }
-        editing_resolution=resolution_active;
         ImGui::TextWrapped("3X/4X require the private route. Luke Ross also requires the isolated post-AFW synthesis queue. Additional intermediates increase GPU work and memory use.");
-        ImGui::TextWrapped("Experimental portable Python/CUDA. RIFE 4.4 processes both eyes together, with automatic TensorRT optimization. Motion inference uses the selected percentage; output stays at full resolution. Requires the shared RIFE runtime.");
+        ImGui::TextWrapped("Experimental portable Python/CUDA. RIFE 4.4 processes both eyes together, with automatic TensorRT optimization. Motion inference uses the selected quality preset; output stays at full resolution. Requires the shared RIFE runtime.");
     } else if (draft.frame_generation==3) {
         ImGui::TextWrapped("Game motion vectors + FidelityFX optical flow (25% per axis). If game guides are unavailable or rejected, uses FidelityFX optical flow.");
     } else {

@@ -1,4 +1,5 @@
 #pragma once
+#include "xrfg/gpu_usage_status.hpp"
 #include "xrfg/keybinds.hpp"
 
 #include <array>
@@ -42,7 +43,7 @@ struct Settings {
     int backend{2}; // 0 FidelityFX, 1 NVIDIA reference, 2 NVIDIA new, 3 NVIDIA djules
     int motion_vectors{}; // 0 optical flow, 1 native game guides
     int rife_multiplier{2}; // experimental RIFE 2X/3X/4X
-    int rife_resolution{15}; // RIFE inference percent,10..40; native output unchanged
+    int rife_resolution{18}; // Medium; inference presets10/15/18/21/25/30, native output unchanged
     int rife_model{3}; // 2 4.6, 3 4.4, 4 4.3; retired Lite IDs0/1 map to2
     int frame_generation{}; // 0 OFXR, 1 FSR 3, 2 native DLSS Frame Generation, 3 Hybrid, 4 RIFE
     int hybrid_backend{}; // legacy profile key; Hybrid fallback is always FidelityFX
@@ -160,6 +161,7 @@ struct RuntimeStatus {
     SwapchainBudgetStatus swapchains{};
     unsigned dlssg_preset_request{}; // frozen process-start profile, not active NGX model proof
     VideoMemoryStatus video_memory{};
+    GpuUsageStatus gpu_usage{};
     bool luke_shared_swapchains{}, luke_shared_swapchains_forced{}; // active session, not requested next launch
     bool vdxr_runtime{}, vdxr_legacy{true}; // active startup transport, not next-launch preference
     std::uint32_t buffer_capacity{}; // active admission capacity; zero for native Legacy/AFW-only
@@ -218,7 +220,9 @@ bool request_changes(const Settings& base, const Settings& desired) noexcept;
 Settings merge_changes(Settings current, const Settings& base, const Settings& desired) noexcept;
 void report_runtime(RuntimeStatus status) noexcept;
 void report_video_memory(VideoMemoryStatus value) noexcept;
+void report_gpu_usage(GpuUsageStatus value) noexcept;
 std::string interface_vram_text(const Snapshot& value);
+std::string interface_gpu_text(const Snapshot& value,std::uint64_t now_ms);
 bool interface_generation_active(const Snapshot& value) noexcept;
 bool interface_afw_only_active(const Snapshot& value,std::uint64_t now_ms) noexcept;
 enum class OverlaySwapchain : unsigned { fps=1, meter=2, menu=4 };

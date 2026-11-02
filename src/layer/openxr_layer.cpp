@@ -1,4 +1,5 @@
 #include "xrfg/composition_panels.hpp"
+#include "xrfg/gpu_usage.hpp"
 #include "xrfg/luke_vulkan_scope.hpp"
 #define XR_USE_GRAPHICS_API_VULKAN
 #include "xrfg/vulkan_session_bridge.hpp"
@@ -925,6 +926,7 @@ struct SessionState {
     std::mutex video_memory_mutex;
     Microsoft::WRL::ComPtr<IDXGIAdapter3> video_memory_adapter;
     bool video_memory_unavailable{};
+    xrfg::GpuUsageSampler gpu_usage;
     std::chrono::steady_clock::time_point video_memory_poll_at{};
     std::chrono::steady_clock::time_point video_memory_first_poll{};
 
@@ -2304,8 +2306,11 @@ void log_video_memory(
         }
         DXGI_ADAPTER_DESC description{};
         xrfg::RifeMemoryStatus rife_memory;
-        if(SUCCEEDED(adapter->GetDesc(&description)))
+        if(SUCCEEDED(adapter->GetDesc(&description))) {
             rife_memory=xrfg::rife_memory_for_adapter(description.AdapterLuid,true);
+            const auto gpu=session.gpu_usage.request(description.AdapterLuid);
+            if(gpu.valid)xrfg::autonomous::report_gpu_usage(gpu);
+        }
         const auto total=local.CurrentUsage+(rife_memory.valid?rife_memory.private_bytes:0);
         xrfg::autonomous::report_video_memory({GetTickCount64(),total,local.Budget,
             local.CurrentUsage,rife_memory.private_bytes,rife_memory.reserved_bytes,
@@ -16667,6 +16672,7 @@ XrResult layer_end_frame_impl(
         const XrFrameEndInfo* frame;
         xrfg::autonomous::SwapchainBudgetStatus budget{};
         ~RuntimeReportScope() {
+            log_video_memory_periodically(*state);
             sample_benchmark_memory(*state);
             budget.fallback=state->luke_aux_budget_inline.load();
             xrfg::autonomous::publish_runtime_status(state->native_dlss_generated_frames,

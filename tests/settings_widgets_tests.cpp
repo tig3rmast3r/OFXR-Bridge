@@ -25,6 +25,7 @@ struct Context {
     bool compact{};
     std::string rendered_text;
     std::function<bool(SettingsWidgetState&)> profile_header;
+    const Snapshot* injected_snapshot{};
     explicit Context(ImVec2 dimensions, bool small) : size(dimensions), compact(small) {
         context = ImGui::CreateContext();
         ImGui::SetCurrentContext(context);
@@ -52,7 +53,7 @@ struct Context {
         ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoDecoration |
             ImGuiWindowFlags_NoSavedSettings);
         if(capture_text)ImGui::LogToBuffer();
-        render_settings_widgets(widgets, snapshot(), {.compact = compact,.desktop_profile_header = profile_header});
+        render_settings_widgets(widgets, injected_snapshot?*injected_snapshot:snapshot(), {.compact = compact,.desktop_profile_header = profile_header});
         if(capture_text){rendered_text=GImGui->LogBuffer.c_str();ImGui::LogFinish();}
         ImGui::End();
         ImGui::Render();
@@ -543,6 +544,37 @@ void automatic_buttons() {
 }
 } // namespace
 
+void gpu_telemetry_and_quality() {
+    Snapshot sample;sample.connected=true;
+    sample.runtime.heartbeat_ms=GetTickCount64();sample.runtime.gpu_usage={GetTickCount64(),81,true};
+    sample.runtime.video_memory={GetTickCount64(),60,100,40,20,10,123,true,true};
+    for(bool compact:{false,true}) {
+        Context ui(compact?ImVec2(1024,768):ImVec2(690,900),compact);
+        ui.injected_snapshot=&sample;ui.draw();ui.draw(true);
+        require(ui.rendered_text.find("VRAM 60%")!=std::string::npos && ui.rendered_text.find("GPU 81%")!=std::string::npos,
+            "desktop and headset headers both render independently measured memory and GPU percentage");
+        sample.runtime.gpu_usage.updated_ms=GetTickCount64()-4000;ui.draw(true);
+        require(ui.rendered_text.find("GPU N/A")!=std::string::npos,"stale utilization is not kept indefinitely");
+        sample.runtime.gpu_usage.updated_ms=GetTickCount64();
+    }
+    auto desired=snapshot().desired;select_generation(desired,4,2);
+    desired.rife_resolution=18;require(request(desired),"select RIFE Medium");
+    Context desktop({690,900},false);desktop.draw();desktop.draw(true);
+    require(desktop.rendered_text.find("Quality")!=std::string::npos && desktop.rendered_text.find("Medium")!=std::string::npos,
+        "RIFE exposes Quality with Medium default");
+    require(desktop.rendered_text.find("Motion inference resolution")==std::string::npos,"old resolution slider label removed");
+    constexpr const char* names[]{"Potato","Low","Medium","High","Very high","Ultra"};
+    constexpr int values[]{10,15,18,21,25,30};
+    for(int i=0;i<6;++i) {
+        desktop.choose("Quality",i,names[i]);
+        require(snapshot().desired.rife_resolution==values[i],"each named Quality selection publishes the exact preset");
+    }
+    Context headset({1024,768},true);headset.draw();headset.draw();
+    headset.choose("Quality",2,"Medium");desktop.draw();
+    require(snapshot().desired.rife_resolution==18 && desktop.widgets.draft.rife_resolution==18,
+        "headset Quality selection synchronizes with the desktop");
+}
+
 void desktop_header_is_not_a_headset_control() {
     int called{};
     Context headset({1024,768},true);headset.profile_header=[&](auto&){++called;return false;};headset.draw();
@@ -557,7 +589,8 @@ int main(int argc, char** argv) {
             L"-" + std::to_wstring(GetTickCount64()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", profile.c_str());
     try {
-        if (argc == 2 && std::strcmp(argv[1], "--desktop-header") == 0) desktop_header_is_not_a_headset_control();
+        if (argc == 2 && std::strcmp(argv[1], "--gpu-telemetry") == 0) gpu_telemetry_and_quality();
+        else if (argc == 2 && std::strcmp(argv[1], "--desktop-header") == 0) desktop_header_is_not_a_headset_control();
         else if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--route-multiplier") == 0) route_multiplier_widgets();
         else { desktop_header_is_not_a_headset_control(); rebase_and_publish(); release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); }

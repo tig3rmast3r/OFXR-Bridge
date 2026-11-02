@@ -109,7 +109,7 @@ int main() {
     rife_settings.frame_generation=4;rife_settings.rife_model=3;rife_settings.scale=4;
     const auto rife_ini=build_runtime_ini(release_defaults,rife_settings);
     if(!contains(rife_ini,"nvidia_input_scale=20") || !contains(rife_ini,"rife_model=3")) return 1;
-    if(!contains(rife_ini,"rife_resolution=15"))return 1;
+    if(!contains(rife_ini,"rife_resolution=18"))return 1;
     rife_settings.rife_multiplier=4;rife_settings.scale=5;
     const auto sixth_ini=build_runtime_ini(release_defaults,rife_settings);
     if(!contains(sixth_ini,"nvidia_input_scale=1/6") || !contains(sixth_ini,"rife_multiplier=4"))return 1;

@@ -1,4 +1,5 @@
 #include "xrfg/embedded_control.hpp"
+#include "xrfg/rife_resolution.hpp"
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/osr_full_warp.hpp"
 #include <windows.h>
@@ -56,7 +57,7 @@ struct Control {
         wchar_t generation[16]{};
         GetPrivateProfileStringW(L"ofxr", L"frame_generation", L"ofxr", generation, 16, ini().c_str());
         settings.frame_generation = _wcsicmp(generation, L"fsr3") == 0 ? 1 : _wcsicmp(generation, L"dlss") == 0 ? 2 : 0;
-        settings.rife_resolution=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr",L"rife_resolution",15,ini().c_str())),10,40);
+        settings.rife_resolution=xrfg::rife_resolution_preset(static_cast<int>(GetPrivateProfileIntW(L"ofxr",L"rife_resolution",18,ini().c_str())));
         settings.rife_multiplier=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr",L"rife_multiplier",2,ini().c_str())),2,4);
         settings.rife_model=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr",L"rife_model",-1,ini().c_str())),-1,4);
         settings.hybrid = GetPrivateProfileIntW(L"ofxr",L"dlss_flow_hybrid",0,ini().c_str())!=0;
@@ -129,7 +130,7 @@ Snapshot snapshot() {
 bool request(Settings s) {
     if (s.pacing_mode < 0 || s.pacing_mode > 2 || s.backend < 0 || s.backend > 3 || s.preset < 0 || s.preset > 2 ||
         s.scale < 0 || s.scale > (s.rife_model>=0?6:3) || s.motion_vectors < 0 || s.motion_vectors > 1 ||
-        s.frame_generation < 0 || s.frame_generation > 2 || s.rife_model < -1 || s.rife_model > 4 || s.rife_resolution<10 || s.rife_resolution>40 || s.rife_multiplier<2 || s.rife_multiplier>4 ||
+        s.frame_generation < 0 || s.frame_generation > 2 || s.rife_model < -1 || s.rife_model > 4 || s.rife_resolution!=xrfg::rife_resolution_preset(s.rife_resolution) || s.rife_multiplier<2 || s.rife_multiplier>4 ||
         s.native_scale < 25 || s.native_scale > 100 ||
         s.separate_synthesis < 0 || s.separate_synthesis > 1 || s.lower_vram < 0 || s.lower_vram > 1) return false;
     auto& c = control(); std::scoped_lock lock(c.mutex);

@@ -370,9 +370,13 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     if(used_height)*used_height=unsigned(used);
     Canvas c(w,h,bgra,linear);c.panel(used,16,2);
     c.text(margin,18,"OFXR 0.3.0",body,PanelTone::accent);
-    const auto vram=autonomous::interface_vram_text(state);
-    c.text(w/2-8*int(vram.size()),18,vram,body,PanelTone::dim);
+    const auto gpu_memory=autonomous::interface_vram_text(state)+"  "+autonomous::interface_gpu_text(state,now_ms);
     const int header_status_scale=status.size()>24 ? 1 : body;
+    const int status_x=w-margin-8*header_status_scale*int(status.size());
+    const int gpu_left=margin+8*body*10+16; // title plus gap
+    const int gpu_available=status_x-16-gpu_left;
+    const int gpu_scale=8*body*int(gpu_memory.size())<=gpu_available?body:1;
+    c.text(gpu_left+(gpu_available-8*gpu_scale*int(gpu_memory.size()))/2,18,gpu_memory,gpu_scale,PanelTone::dim);
     c.text(w-margin-8*header_status_scale*int(status.size()),18,status,header_status_scale,
         optimizing ? PanelTone::warn : tone);
     c.rule(margin,w-margin,50,2);

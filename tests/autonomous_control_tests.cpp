@@ -245,13 +245,15 @@ void route_profiles() {
     require(minimal_rife.rife_model==3 && minimal_rife.scale==5,"RIFE-only INI defaults to4.4 and1/6");
     const auto explicit_rife=parse_settings("[ofxr]\nframe_generation=4\nrife_model=2\nscale=3\n");
     require(explicit_rife.rife_model==2 && explicit_rife.scale==3,"explicit previous model/resolution remain user choices");
-    require(minimal_rife.rife_resolution==15,"RIFE resolution defaults to15percent");
-    for(int percent:{10,15,23,40}) {
+    require(minimal_rife.rife_resolution==18,"RIFE resolution defaults to Medium");
+    for(int percent:{10,15,18,21,25,30}) {
         auto slider=minimal_rife;slider.rife_resolution=percent;
-        require(parse_settings(serialize_settings(slider)).rife_resolution==percent,"RIFE slider percentage roundtrip");
+        require(parse_settings(serialize_settings(slider)).rife_resolution==percent,"RIFE preset percentage roundtrip");
     }
     auto bounded=minimal_rife;bounded.rife_resolution=1;require(sanitize(bounded).rife_resolution==10,"RIFE slider minimum");
-    bounded.rife_resolution=99;require(sanitize(bounded).rife_resolution==40,"RIFE slider maximum");
+    bounded.rife_resolution=99;require(sanitize(bounded).rife_resolution==30,"RIFE Ultra maximum");
+    require(parse_settings("[ofxr]\nrife_resolution=23\n").rife_resolution==21,"legacy intermediate maps to nearest preset; equal distance prefers lower");
+    require(parse_settings("[ofxr]\nrife_resolution=40\n").rife_resolution==30,"old upper bound migrates to Ultra");
     auto rife=parse_settings("[ofxr]\nframe_generation=4\nrife_model=2\nmotion_vectors=1\ntriple_frame_gen=1\n");
     require(rife.frame_generation==4 && rife.rife_model==2 && rife.motion_vectors==0 && !rife.triple_frame_gen,"RIFE uses no engine guides and is 2X only");
     auto rife_roundtrip=parse_settings(serialize_settings(rife));
@@ -431,6 +433,10 @@ int wmain(int count, wchar_t** arguments) {
             "merged generation selection still enforces native guides");
         using xrfg::autonomous::OverlaySwapchain;
         xrfg::autonomous::report_runtime({}); // current reporter takes over the completed peer fixture
+        xrfg::autonomous::report_gpu_usage({GetTickCount64(),83,true});
+        xrfg::autonomous::report_runtime({});
+        require(xrfg::autonomous::snapshot().runtime.gpu_usage.valid && xrfg::autonomous::snapshot().runtime.gpu_usage.percent==83,
+            "ordinary runtime heartbeats preserve independently sampled GPU telemetry over IPC");
         xrfg::autonomous::report_overlay_limit(OverlaySwapchain::menu,true);
         xrfg::autonomous::report_overlay_limit(OverlaySwapchain::meter,true);
         require(xrfg::autonomous::snapshot().runtime.overlay_limit_mask==6,"independent overlay refusals reach shared UI");

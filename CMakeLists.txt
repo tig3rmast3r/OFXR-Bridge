@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.829.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.830.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2216,7 +2216,7 @@ if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_TEST_RIFE_GPU)
 endif()
 
 if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_TEST_RIFE_GPU AND TARGET xrfg_private_runtime_layer_tests)
-  foreach(route rife-msfs rife-msfs-inherited rife-msfs-inherited-buffer3-director rife-msfs-switch rife-unsupported-ack)
+  foreach(route rife-msfs rife-msfs-inherited rife-msfs-inherited-buffer3-director rife-msfs-switch rife-unsupported-ack rife-msfs-memory)
     add_test(NAME xrfg_${route} COMMAND xrfg_private_runtime_layer_tests ${route})
     set_tests_properties(xrfg_${route} PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
   endforeach()

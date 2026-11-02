@@ -30,6 +30,12 @@ int main(int argc,char** argv){try{
     m.ofxr_time_valid=m.cycle_valid=m.cycle_estimated_valid=true;
     m.game_time_ms=9;m.generation_time_ms=5;m.delivery_time_ms=14.1F;m.stages_valid=true;m.game_time_valid=true;
     unsigned rows{};auto pixels=rasterize_elliott_meter(s,1000,false,false,&rows);
+    auto gpu_sample=s;gpu_sample.runtime.gpu_usage={1000,81,true};
+    gpu_sample.runtime.video_memory={1000,60,100,40,20,10,123,true,true};
+    auto gpu_pixels=rasterize_elliott_meter(gpu_sample,1000,false,false);
+    check(gpu_pixels!=pixels,"GPU and VRAM telemetry are drawn in the meter header");
+    check(std::equal(pixels.begin()+1024*50,pixels.end(),gpu_pixels.begin()+1024*50),
+        "adjacent GPU label does not move or cover the existing metric rows");
     check(pixels.size()==1024*512&&rows>250&&rows<=512,"two metric rows and diagnostics fit");
     check(pixels[0]==0&&pixels[100*1024+30]!=0,"rounded upstream canvas");
     for(int stage=0;stage<3;++stage) {
@@ -141,7 +147,7 @@ int main(int argc,char** argv){try{
     check(count(rasterize_elliott_meter(active,now+2100,false,false),green)==0,"stale meter not green");
     check(rasterize_elliott_meter(s,1000,false,true)!=pixels,"UNORM linear palette conversion");
     check(rasterize_elliott_meter(s,1000,true,false)!=pixels,"BGRA channels supported");
-    if(argc>1){auto preview=rasterize_elliott_meter(bench,1000,false,false,&bench_rows);
+    if(argc>1){auto preview=rasterize_elliott_meter(gpu_sample,1000,false,false,&bench_rows);
         std::ofstream out(argv[1],std::ios::binary);out<<"P6\n1024 "<<bench_rows<<"\n255\n";
         for(unsigned i=0;i<1024*bench_rows;++i){char rgb[]{char(preview[i]),char(preview[i]>>8),char(preview[i]>>16)};out.write(rgb,3);}}
     std::cout<<"Meter supplied metrics, palette, persistence, gesture and placement passed\n";return 0;

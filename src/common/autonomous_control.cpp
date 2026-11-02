@@ -1,4 +1,5 @@
 #include "xrfg/autonomous_control.hpp"
+#include "xrfg/rife_resolution.hpp"
 #include "xrfg/desktop_profiles.hpp"
 #include "xrfg/benchmark_suite.hpp"
 #include "xrfg/presented_output_rate.hpp"
@@ -81,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 82901;
+constexpr std::uint32_t kAbi = 83001;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -398,7 +399,7 @@ Settings sanitize(Settings value) noexcept {
     // silently offered for a guide-only generation backend.
     if (value.frame_generation > 0 && value.frame_generation < 4) value.motion_vectors = 1;
     value.rife_multiplier=std::clamp(value.rife_multiplier,2,4);
-    value.rife_resolution=std::clamp(value.rife_resolution,10,40);
+    value.rife_resolution=xrfg::rife_resolution_preset(value.rife_resolution);
     value.rife_model=std::clamp(value.rife_model,2,4); // retired Lite choices migrate to 4.6
     if(value.frame_generation==4){if(value.scale==1)value.scale=0;value.backend=2;value.motion_vectors=0;value.triple_frame_gen=false;value.backward=false;}
     // Legacy profiles only know the selected route. Keep its explicit values;
@@ -1184,6 +1185,7 @@ void report_runtime(RuntimeStatus status) noexcept {
         if (connection.data->snapshot.runtime.process_id == status.process_id) {
             status.telemetry = connection.data->snapshot.runtime.telemetry;
             status.video_memory = connection.data->snapshot.runtime.video_memory;
+            status.gpu_usage = connection.data->snapshot.runtime.gpu_usage;
         }
         connection.data->snapshot.runtime = status;
 #ifdef _WIN32
@@ -1198,6 +1200,20 @@ void report_video_memory(VideoMemoryStatus value) noexcept {
         if(runtime.process_id && runtime.process_id!=GetCurrentProcessId())return;
         runtime.video_memory=value;
     } catch(...) {}
+}
+void report_gpu_usage(GpuUsageStatus value) noexcept {
+    try {
+        auto& c=channel();Lock lock(c);if(!lock.acquired)return;
+        auto& runtime=c.data->snapshot.runtime;
+        if(runtime.process_id && runtime.process_id!=GetCurrentProcessId())return;
+        runtime.gpu_usage=value;
+    }catch(...){}
+}
+std::string interface_gpu_text(const Snapshot& value,std::uint64_t now) {
+    const auto& gpu=value.runtime.gpu_usage;
+    if(!value.connected || !gpu.valid || !gpu.updated_ms || now<gpu.updated_ms || now-gpu.updated_ms>=3000 ||
+       !std::isfinite(gpu.percent) || gpu.percent<0 || gpu.percent>100)return "GPU N/A";
+    char text[32]{};std::snprintf(text,sizeof(text),"GPU %.0f%%",gpu.percent);return text;
 }
 std::string interface_vram_text(const Snapshot& value) {
     const auto& memory=value.runtime.video_memory;

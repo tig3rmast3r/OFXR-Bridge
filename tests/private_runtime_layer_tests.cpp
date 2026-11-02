@@ -1057,7 +1057,7 @@ int main(int argc,char** argv) {
             rife_phase_factor=factors[(n-1)/rife_phase_frames];
             auto desired=xrfg::autonomous::snapshot().desired;
             desired.rife_multiplier=rife_phase_factor;
-            if(rife_luke){constexpr int percentages[]{10,15,23,40,15};desired.rife_resolution=percentages[(n-1)/rife_phase_frames];}
+            if(rife_luke){constexpr int percentages[]{10,15,21,30,15};desired.rife_resolution=percentages[(n-1)/rife_phase_frames];}
             check(xrfg::autonomous::request(desired),"live RIFE multiplier request");
             xrfg::autonomous::apply_runtime_settings();
             ok(apply_embedded_control(state),"live RIFE output ownership transition");
@@ -1471,6 +1471,16 @@ int main(int argc,char** argv) {
         }
     }
     stop_continuous_presenter(state);
+    if(argc>1 && std::string_view(argv[1])=="rife-msfs-memory") {
+        const auto status=xrfg::autonomous::snapshot();const auto& m=status.runtime.video_memory;
+        std::fprintf(stderr,"RIFE_MEMORY game=%llu private=%llu reserved=%llu active=%u valid=%u stamp=%llu\n",
+            m.game_bytes,m.rife_private_bytes,m.rife_reserved_bytes,unsigned(m.rife_active),unsigned(m.rife_valid),m.updated_ms);
+        check(m.updated_ms && GetTickCount64()-m.updated_ms<2500 && m.rife_active && m.rife_valid,
+            "visible interface must periodically request and publish real RIFE worker memory without a benchmark");
+        check(m.budget_bytes && m.rife_private_bytes && m.used_bytes==m.game_bytes+m.rife_private_bytes,
+            "total includes worker exactly once, not its Torch-reserved subset");
+        check(xrfg::autonomous::interface_vram_text(status)!="VRAM N/A","RIFE VRAM must remain readable after warmup");
+    }
     auto generated=count>0 && f.real_ends>=(steady_memory?input_count+4:(switching || hfw_offon)?10:12);
     std::printf("%s physical outputs=%u generation state=%u\n",route.c_str(),f.real_ends.load(),unsigned(state->generation_status.load()));
     if(!generated) {
