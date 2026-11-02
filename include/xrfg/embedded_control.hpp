@@ -22,6 +22,7 @@ struct Settings {
     unsigned native_scale{100};
     bool hybrid{};
     int rife_multiplier{2};
+    int rife_resolution{15}; // RIFE-only motion inference percent
     int rife_model{-1}; // -1 ordinary routes; otherwise portable RIFE model
     bool operator==(const Settings&) const = default;
 };

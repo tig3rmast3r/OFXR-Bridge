@@ -131,9 +131,24 @@ public:
         std::int64_t prediction,std::int64_t handoff) noexcept {
         return prediction>handoff+handoff_lead+PrivateOutputSchedule::preparation_lead;
     }
-    bool clock(PrivatePhysicalClock value) noexcept {
+    bool clock(PrivatePhysicalClock value,bool stabilize=false) noexcept {
         if(value.at<=handoff_lead || !value.counter || value.period<2'000'000 || value.period>50'000'000)return false;
         if(valid_ && value.counter<clock_.counter)return true; // retain the newer observation
+        if(stabilize && valid_ && value.period==clock_.period) {
+            // Increase buffer already supplies admission headroom. Do not turn
+            // noisy observer timestamps into alternating extra refresh slots.
+            // Follow the same physical counter/frequency, with a bounded phase
+            // correction; no extra packet, pair or historical service floor.
+            if(value.counter==clock_.counter)return true;
+            const auto steps=value.counter-clock_.counter;
+            if(steps<10'000) {
+                const auto predicted=clock_.at+handoff_lead+
+                    static_cast<std::int64_t>(steps)*clock_.period;
+                const auto error=value.at-predicted;
+                if(error>-value.period/4 && error<value.period/4)
+                    value.at=predicted+std::clamp<std::int64_t>(error,-25'000,25'000);
+            }
+        }
         clock_=value;clock_.at-=handoff_lead;valid_=true;return true;
     }
     [[nodiscard]] bool valid() const noexcept {return valid_;}

@@ -12,7 +12,7 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     s.advanced_mode=true;
     s.pacing_mode=desired.pacing_mode;
     s.increase_buffer=desired.increase_buffer;
-    s.rife_model=desired.rife_model; s.rife_multiplier=desired.rife_multiplier;
+    s.rife_resolution=desired.rife_resolution;s.rife_model=desired.rife_model; s.rife_multiplier=desired.rife_multiplier;
     s.enabled=desired.enabled; s.backend=desired.backend; s.preset=desired.preset;
     s.scale=desired.scale; s.backward=desired.backward; s.lower_vram=desired.lower_vram;
     s.separate_synthesis=desired.separate_synthesis;

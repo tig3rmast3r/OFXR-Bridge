@@ -103,6 +103,7 @@ struct PrivateOpenXrRuntime::Impl {
     struct WaitJob {std::int64_t target{};std::uint64_t accepted_ordinal{};};
     Options options;
     std::atomic_bool director_enabled{true};
+    std::atomic_bool stable_phase{};
     std::uint64_t policy_epoch{}; // under accept_mutex
     std::mutex mutex,accept_mutex,copy_mutex,stop_mutex;
     std::condition_variable changed;
@@ -148,7 +149,7 @@ struct PrivateOpenXrRuntime::Impl {
     HANDLE fence_event{CreateEventW(nullptr,FALSE,FALSE,nullptr)};
     HANDLE timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
     HANDLE wait_timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
-    explicit Impl(Options input):options(std::move(input)),director_enabled(options.director_enabled) {}
+    explicit Impl(Options input):options(std::move(input)),director_enabled(options.director_enabled),stable_phase(options.capacity>=3) {}
     ~Impl(){if(fence_event)CloseHandle(fence_event);if(timer)CloseHandle(timer);if(wait_timer)CloseHandle(wait_timer);}
     bool d12() const noexcept {return device12!=nullptr;}
     std::int64_t period(XrDuration fallback) {
@@ -546,7 +547,7 @@ struct PrivateOpenXrRuntime::Impl {
                 {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || pending;});if(stopping)break;}
                 const auto physical=period(prediction.predictedDisplayPeriod);
                 schedule.period(physical);
-                if(director_enabled.load() && options.physical_clock)if(auto clock=options.physical_clock())slots.clock(*clock);
+                if(director_enabled.load() && options.physical_clock)if(auto clock=options.physical_clock())slots.clock(*clock,stable_phase.load(std::memory_order_relaxed));
                 const bool diagnostic=tracing();
                 auto clock=take_wait();if(!clock)break;
                 prediction=clock->prediction;result=clock->result;
@@ -570,7 +571,7 @@ struct PrivateOpenXrRuntime::Impl {
                     schedule={};slots={};schedule.period(physical);
                     if(last_handoff){schedule.runtime_ready(last_handoff,0);schedule.delivered(last_handoff);}
                     if(directed && options.physical_clock)
-                        if(auto clock=options.physical_clock())slots.clock(*clock);
+                        if(auto clock=options.physical_clock())slots.clock(*clock,stable_phase.load(std::memory_order_relaxed));
                     applied_policy=packet->policy_epoch;
                 }
                 // All copies/fences are complete. Commit only this FIFO head's
@@ -651,7 +652,7 @@ struct PrivateOpenXrRuntime::Impl {
                         waited=false;begun=true;begun_at=clock_ns();++renewed;
                         runtime_budget.observe(wait_leave-wait_enter+begun_at-entered,physical);
                         if(slots.valid()) {
-                            if(options.physical_clock)if(auto c=options.physical_clock())slots.clock(*c);
+                            if(options.physical_clock)if(auto c=options.physical_clock())slots.clock(*c,stable_phase.load(std::memory_order_relaxed));
                             deadline=slots.claim(packet->accepted_at,packet->prepared_at,begun_at,
                                 clock_ns(),PrivateRuntimeBudget::presentation_margin);
                         } else {
@@ -887,7 +888,7 @@ XrResult PrivateOpenXrRuntime::set_buffer_capacity(std::size_t capacity) {
     if(s.options.capacity==capacity)return s.failure;
     if(!s.running) {
         if(XR_FAILED(s.failure))return s.failure;
-        s.options.capacity=capacity;++s.policy_epoch;return XR_SUCCESS;
+        s.options.capacity=capacity;s.stable_phase=capacity>=3;++s.policy_epoch;return XR_SUCCESS;
     }
     // Let the ordinary consumer finish every accepted image. Keep the FIFO
     // object and all GPU resources; only reset future admission and learning.
@@ -895,7 +896,7 @@ XrResult PrivateOpenXrRuntime::set_buffer_capacity(std::size_t capacity) {
     if(XR_FAILED(s.failure))return s.failure;
     if(s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
     if(!s.fifo || !s.fifo->set_capacity(capacity))return XR_ERROR_RUNTIME_FAILURE;
-    s.options.capacity=capacity;++s.policy_epoch;
+    s.options.capacity=capacity;s.stable_phase=capacity>=3;++s.policy_epoch;
     if(s.wait_job)s.wait_job->target=0;
     lock.unlock();s.changed.notify_all();return XR_SUCCESS;
 }

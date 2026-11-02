@@ -2583,7 +2583,9 @@ struct D3D12FrameSynthesizer::Impl {
         // path packs both eyes into one texture, so its stride and packed
         // height come from the scaled per-eye height, not the source.
         const NvidiaInputScaleRatio scale =
-            nvidia_input_scale_ratio(input_nvidia_options.input_scale);
+            input_nvidia_options.rife_model>=0 && input_nvidia_options.rife_resolution_percent>0
+                ? NvidiaInputScaleRatio{static_cast<UINT>(std::clamp(input_nvidia_options.rife_resolution_percent,10,40)),100U}
+                : nvidia_input_scale_ratio(input_nvidia_options.input_scale);
         const auto scaled = [&](UINT64 value) -> UINT64 {
             return (value * scale.numerator + scale.denominator - 1U) /
                 scale.denominator;
@@ -2706,7 +2708,9 @@ struct D3D12FrameSynthesizer::Impl {
             rife=std::make_unique<D3D12Rife>();
             constexpr float scales[]{1.F,.75F,.5F,.25F,.20F,1.F/6.F,1.F/3.F};
             result=rife->initialize(device.Get(),queue.Get(),view_format,nvidia_options.rife_model,
-                scales[std::clamp(static_cast<int>(nvidia_options.input_scale),0,6)]);
+                nvidia_options.rife_resolution_percent>0
+                    ? float(std::clamp(nvidia_options.rife_resolution_percent,10,40))/100.F
+                    : scales[std::clamp(static_cast<int>(nvidia_options.input_scale),0,6)]);
             if(FAILED(result))return result;
         }
         if(rife && nvidia_options.rife_async)rife_thread=std::thread([this]{run_rife_work();});

@@ -111,21 +111,23 @@ int main(int argc,char** argv) {
         std::puts("OSR fresh/held terminal metadata, unchanged source/orientation/FOV/time and legacy PASS");return 0;
     }
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
+    const bool rife_luke=route.starts_with("rife-luke");
+    const unsigned rife_luke_factor=route.find("luke4")!=std::string::npos?4:3;
     const bool rife_tail=route.starts_with("rife-tail");
     const unsigned rife_tail_factor=route.find("tail3")!=std::string::npos?3:4;
     const bool rife_latency=route.find("rife-latency")!=std::string::npos;
     const unsigned rife_latency_factor=route.find("latency3")!=std::string::npos?3:4;
     const bool rife_report=route=="rife-report";
     const bool rife_replay=route=="rife-replay";
-    const bool rife_switch=route.starts_with("rife-switch");
+    const bool rife_switch=route.starts_with("rife-switch") || (rife_luke && route.find("switch")!=std::string::npos);
     const bool rife_stress=route.find("stress")!=std::string::npos;
     const bool rife_large=route.find("headset")!=std::string::npos;
     const bool rife_buffer3=route.find("buffer3")!=std::string::npos;
     const unsigned rife_phase_frames=rife_stress?64:12;
     const int rife_pacing=route.ends_with("director")?1:0;
     const bool rife_fast=route.find("fast")!=std::string::npos;
-    const unsigned rife_factor=rife_tail?rife_tail_factor:rife_latency?rife_latency_factor:(rife_report||rife_replay)?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
-    if(rife_factor)route="new";
+    const unsigned rife_factor=rife_luke?(rife_switch?2:rife_luke_factor):rife_tail?rife_tail_factor:rife_latency?rife_latency_factor:(rife_report||rife_replay)?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
+    if(rife_factor)route=rife_luke?(rife_pacing?"hfw-solo-luke-d11-new":"hfw-luke-d11-new"):"new";
 
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
     if(route=="unbridged-vulkan-session")return unbridged_vulkan_session_test();
@@ -226,7 +228,7 @@ int main(int argc,char** argv) {
         check(xrfg::autonomous::request(desired),"select framework transport before session");
         xrfg::autonomous::apply_runtime_settings();
     }
-    if(sole || (split_eyes && route=="hybrid")) {
+    if((sole && !rife_factor) || (split_eyes && route=="hybrid")) {
         auto desired=xrfg::autonomous::snapshot().desired;
         xrfg::autonomous::select_generation(desired,route=="fsr"?1:route=="dlssg"?2:route=="hybrid"?3:0,
             route=="ref"?1:route=="new"?2:route=="djules"?3:0);
@@ -429,7 +431,7 @@ int main(int argc,char** argv) {
     state->single_director_requested=sole;
     state->luke_afw_enabled=luke;
     if(hfw) {
-        check(luke && !native12 && sole,"HFW fixture requires Luke D11 Director");
+        check(luke && !native12 && (sole || rife_luke),"HFW fixture requires Luke D11 with an independent worker");
         state->luke_fresh_only=true;state->luke_source_filter_armed=true;
         state->graphics_binding_capabilities|=hfw_early?4ULL:8ULL;
         initialize_luke_synthesis_queue(*state);
@@ -529,7 +531,7 @@ int main(int argc,char** argv) {
         state->luke_shared_swapchains=shared_budget || (outlaws_budget && !unshared_budget);
         state->graphics_binding_capabilities|=8ULL;
     }
-    if(sole)ok(apply_embedded_control(state),"initial settings match the real public route selection");
+    if(sole && !rife_factor)ok(apply_embedded_control(state),"initial settings match the real public route selection");
     else state->control_revision=xrfg::embedded::snapshot().revision;
     {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;g_instances[dispatch->instance]=dispatch;}
     ok(install_private_runtime(state),"install real SteamVR private dispatch");
@@ -543,11 +545,12 @@ int main(int argc,char** argv) {
         check(state->native_dlss_generated_frames>=1,"DLSS-G benchmark requires actual SDK frame-generation support");
     }
     if(hfw) {
-        check(fresh_luke_director_worker(*state) && !presenter_forbidden(*state),"HFW source filter incorrectly forces inline synthesis");
+        if(!(rife_luke && rife_switch && !rife_pacing))
+            check(fresh_luke_director_worker(*state) && !presenter_forbidden(*state),"HFW source filter incorrectly forces inline synthesis");
         state->single_threaded_d3d11=true;check(presenter_forbidden(*state),"single-threaded guard lost");state->single_threaded_d3d11=false;
         state->split_frame_loop=true;check(presenter_forbidden(*state),"split-loop guard lost");state->split_frame_loop=false;
         state->afw_only=true;check(presenter_forbidden(*state),"AFW-only enters OFXR worker");state->afw_only=false;
-        state->dispatch->steamvr_runtime=false;check(presenter_forbidden(*state),"VDXR pacing changed");state->dispatch->steamvr_runtime=true;
+        state->dispatch->steamvr_runtime=false;if(!rife_luke)check(presenter_forbidden(*state),"VDXR pacing changed");state->dispatch->steamvr_runtime=true;
     }
     f.transport=state->private_runtime;state->uevr_application=pooled;
     if(pooled)f.native_chain_limit=4; // two app chains plus two physical publication sinks
@@ -818,10 +821,13 @@ int main(int argc,char** argv) {
             rife_phase_factor=factors[(n-1)/12];
             auto desired=xrfg::autonomous::snapshot().desired;
             desired.rife_multiplier=rife_phase_factor;
+            if(rife_luke){constexpr int percentages[]{10,15,23,40,15};desired.rife_resolution=percentages[(n-1)/rife_phase_frames];}
             check(xrfg::autonomous::request(desired),"live RIFE multiplier request");
             xrfg::autonomous::apply_runtime_settings();
             ok(apply_embedded_control(state),"live RIFE output ownership transition");
             check(state->private_runtime==f.transport,"RIFE switch retains private endpoint");
+            if(rife_luke)check(state->nvidia_options.rife_resolution_percent==desired.rife_resolution,
+                "RIFE percentage change did not reach the native model setup");
             rife_phase_start=f.real_ends.load();
         }
         if(rife_report && n==5) {
@@ -1061,6 +1067,14 @@ int main(int argc,char** argv) {
             bool(chain_state->last_released_capture),bool(chain_state->last_released_motion_vectors),int(chain_state->generation_refusal),chain_state->generation_eligible_pending,chain_state->generation_refusal_detail);
     }
     if(rife_factor){
+        if(rife_luke) {
+            const auto generation=find_swapchain(chain)->frame_generation;
+            check(generation && generation->afw_temporal_synthesizer && generation->isolated_luke_synthesis,
+                "RIFE Luke bypassed completed post-AFW history or isolated queue");
+            const auto factor=rife_frames(*state);
+            check(generation->synthetic_runtime_rings==(factor>2?factor-1:kSyntheticSlotCount) &&
+                generation->direct_extra_outputs==(factor>2),"RIFE Luke intermediate destinations missing or aliased");
+        }
         std::fprintf(stderr,"RIFE transport factor=%u outputs=%u state=%u private=%u slotcap=%zu worker=%u\n",
             rife_factor,f.real_ends.load(),unsigned(state->generation_status.load()),bool(state->private_runtime),state->three_slots.capacity(),state->three_slot_director);
         check(f.real_ends>=1+5*rife_factor,"RIFE full transport lost one or more intermediate/real outputs");
@@ -1068,10 +1082,10 @@ int main(int argc,char** argv) {
     check(generated,"actual generator must produce synthetic outputs beyond accepted real inputs");
     if(sole) {
         check(std::is_sorted(f.positions.begin(),f.positions.end()),"all generated and real metadata leave in source order");
-        for(unsigned source=1;source<=(steady_memory?input_count:8);++source)
+        for(unsigned source=1;source<=input_count;++source)
             check(std::any_of(f.positions.begin(),f.positions.end(),[&](float x){return std::abs(x-(float(source)-.032F))<.001F;}),
                 "every accepted real source reaches native End, including final drain");
-        check(!f.pixels.empty() && f.pixels.back()==160,"last real retains its own pixels through bridge/drain");
+        check(!f.pixels.empty() && f.pixels.back()==((input_count-1)%8+1)*20,"last real retains its own pixels through bridge/drain");
     }
     check(f.director_policies.size()==f.handoffs.size(),"native handoffs record their effective delivery policy");
     for(unsigned i=1;i<f.handoffs.size();++i) {

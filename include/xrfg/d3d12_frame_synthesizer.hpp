@@ -183,6 +183,7 @@ struct D3D12NvidiaOpticalFlowOptions {
     bool hybrid{}; // explicit optional Hybrid route only
     int rife_model{-1}; // experimental Python/CUDA generator, no OFA/engine guides
     int rife_multiplier{2};
+    int rife_resolution_percent{}; //0 legacy exact fraction; otherwise10..40
     bool rife_async{}; // dedicated producer/consumer queues only; owned FIFO work
 };
 

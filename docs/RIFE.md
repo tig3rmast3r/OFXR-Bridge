@@ -1,14 +1,15 @@
-# Experimental RIFE route (v737)
+# Experimental RIFE route (v744)
 
 The Frame generation menu includes RIFE between OFXR and Hybrid. Model choices
-are 4.6, 4.4 and 4.3. The initial trial selects 4.6 with 25% motion
-inference when entering its new profile. Existing OFXR defaults are unchanged.
+are 4.6, 4.4 and 4.3. New RIFE profiles select 4.4 with15% motion
+inference. The inference slider ranges from10% to40% and applies on release. Explicit settings in existing profiles are preserved. Existing OFXR defaults are unchanged.
 
 This is a NVIDIA CUDA / PyTorch experiment, not TensorRT and not an AMD backend.
 No DLSS motion vectors or depth are needed. Default remains 2X. Experimental 3X/4X
-are available on the private native D3D12 route (Framework or Director). Legacy,
-pipelined and Luke/D3D11/Vulkan interop routes retain 2X; unsupported multi-output
-requests are refused instead of silently duplicating outputs. Benchmarks continue
+are available on private native D3D12 and on Luke Ross's completed post-AFW
+D3D11 route with its isolated synthesis queue (Framework or Director). Legacy,
+pipelined and other interop routes retain2X; unsupported multi-output requests
+are refused instead of silently duplicating outputs. Benchmarks continue
 to test the existing accepted routes; this experiment is selected manually.
 
 ## Native-resolution colour
@@ -18,8 +19,8 @@ camera and sampled at the chosen motion-inference resolution. RIFE predicts
 the forward/backward sampling displacements and blending mask at that size.
 The D3D12 output shader applies those fields to the original full-resolution
 colour images, including their alpha. It does **not** enlarge a low-resolution
-RGB generated frame. The real frame is copied unchanged. The inference menu uses exact fractions per axis:1/1,1/2,1/3,1/4,1/5,1/6.
-The75% option is hidden from RIFE; full-resolution output is retained. Lower inference
+RGB generated frame. The real frame is copied unchanged. The inference slider controls a percentage per axis,10..40%, default15%.
+Full-resolution output is retained. Lower inference
 resolution still reduces motion/occlusion precision, especially on fine edges.
 
 The RIFE model implementations are derived from
@@ -221,3 +222,30 @@ transitions remain covered. Repeated3736x3424-per-eye4.4/1/6 comparisons with
 a mocked90Hz native consumer reduce source-End-to-native-End median latency
 by about13ms in3X and19ms in4X, with equal output counts and private VRAM.
 Those are component test results; game/headset confirmation remains pending.
+
+
+## V744 changes
+
+Luke3X/4X interpolate the already completed post-AFW color pair on the isolated
+synthesis lane. AFW still evaluates once per fresh source, not per generated
+intermediate. Each S output has a separate destination and ownership lease;
+3X/4X/2X switches drain and rebuild the D3D11 output shape before reuse. Legacy,
+shared-queue, single-threaded D3D11 and split-loop safety gates remain intact.
+The worker's model timesteps and the native-resolution color composition are
+unchanged. Tests exercise Framework/Director x Normal/Fast and2->3->4->3->2,
+including live10/15/23/40% model shapes. The AFW ingress GPU fixture uses a
+completed pass-through AFW packet; actual in-game warp quality needs testing.
+
+The RIFE slider has its own persisted `rife_resolution` field, independent of
+the old optical-flow scale enum. It defaults to15%, clamps to10..40 and commits
+when released, so dragging does not repeatedly rebuild history/model shapes.
+The raw internal API retains its old exact-fraction fallback for earlier GPU
+fixtures; it is not the current UI. Native output dimensions never change.
+
+Increase buffer remains2->3 deliveries. With Director and a valid physical
+clock, it also filters small observer phase jitter instead of reanchoring to
+every noisy sample. The correction is bounded to25us per new physical counter;
+real refresh/large-phase changes reanchor normally. No extra pair, service-time
+reserve, fixed latency wait or fourth delivery is added. Framework bypass and
+native VDXR Legacy pacing remain unchanged. Actual variable game/GPU time is
+still measured; this does not force the latency meter to display a fixed value.

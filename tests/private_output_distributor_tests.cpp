@@ -96,6 +96,33 @@ int main(){try {
             require(early.delivered(at),"advanced physical End edge refused");last=at;
         }
     }
+    // The accepted packet is ready50us ahead of the handoff preparation
+    // boundary. Alternating300us measurement noise used to skip whole slots.
+    // The larger-buffer policy must absorb that phase noise without holding
+    // another source pair or increasing the queue's latency budget.
+    {
+        constexpr std::int64_t p=11'111'111,base=1'000'000'000;
+        xrfg::PrivatePhysicalSchedule stable,raw;
+        require(stable.clock({base,p,1000},true) && raw.clock({base,p,1000}),"stable clock initial anchor");
+        unsigned raw_skips{};std::int64_t first{},last{};
+        for(std::int64_t n=1;n<=1000;++n) {
+            const auto phase=(n%2?-300'000:300'000);
+            const auto observed=xrfg::PrivatePhysicalClock{base+(n-1)*p+phase,p,999+static_cast<std::uint64_t>(n)};
+            stable.clock(observed,true);raw.clock(observed);
+            const auto expected=base+n*p-ms;
+            const auto ready=expected-150'000;
+            const auto at=stable.claim(ready-2*ms,ready,ready-2*ms,ready,0);
+            if(raw.claim(ready-2*ms,ready,ready-2*ms,ready,0)>expected+ms)++raw_skips;
+            require(stable.slot()==1000+static_cast<std::uint64_t>(n),"stable ready output lost a physical slot");
+            require(at>=expected-25'000 && at<=expected+25'000 && stable.delay()==0,
+                "stabilizer adds historical delay, extra pair or unbounded phase drift");
+            require(stable.delivered(at),"stable physical output refused");
+            if(!first)first=at;last=at;
+        }
+        require(raw_skips>100,"clock-noise regression no longer reproduces raw skipped slots");
+        require(last-first==999*p+25'000,"stable clock changed long-term headset frequency");
+        require(stable.clock({base+2000*p,8'333'333,4000},true),"refresh change did not reanchor");
+    }
     xrfg::PrivateOutputSchedule clock;
     clock.period(11*ms);clock.ready(20*ms);
     require(clock.eligible(20*ms) && clock.delivered(20*ms),"first output");

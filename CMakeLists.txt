@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.797.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.798.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1247,7 +1247,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_private_d11_entry_gate COMMAND xrfg_private_runtime_layer_tests d11-entry-gate)
         set_tests_properties(xrfg_private_d11_entry_gate PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE)
         if(XRFG_TEST_RIFE_GPU)
-            foreach(rife_case rife2 rife3 rife4 rife-tail3 rife-tail4 rife-tail3-fast-buffer3 rife-tail4-fast-buffer3 rife-report rife-replay rife-switch rife-switch-director rife-switch-fast rife-switch-fast-director)
+            foreach(rife_case rife-luke3 rife-luke4 rife-luke3-director rife-luke4-director rife-luke3-fast-buffer3 rife-luke4-fast-buffer3 rife-luke3-fast-buffer3-director rife-luke4-fast-buffer3-director rife-luke-switch rife-luke-switch-director rife2 rife3 rife4 rife-tail3 rife-tail4 rife-tail3-fast-buffer3 rife-tail4-fast-buffer3 rife-report rife-replay rife-switch rife-switch-director rife-switch-fast rife-switch-fast-director)
                 add_test(NAME xrfg_private_${rife_case}_gpu COMMAND xrfg_private_runtime_layer_tests ${rife_case})
                 set_tests_properties(xrfg_private_${rife_case}_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
             endforeach()

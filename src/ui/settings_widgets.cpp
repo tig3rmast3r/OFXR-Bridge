@@ -220,12 +220,19 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         if(ImGui::Combo("RIFE model", &model,"4.6\0" "4.4\0" "4.3\0")){draft.rife_model=model+2;changed=true;}
         int multiplier=draft.rife_multiplier-2;
         if(ImGui::Combo("RIFE multiplier",&multiplier,"2X\0" "3X\0" "4X\0")){draft.rife_multiplier=multiplier+2;changed=true;}
-        constexpr int fractions[]{0,2,6,3,4,5};
-        int fraction=3;
-        for(int i=0;i<6;++i)if(draft.scale==fractions[i])fraction=i;
-        if(ImGui::Combo("Motion inference resolution",&fraction,"1/1\0" "1/2\0" "1/3\0" "1/4\0" "1/5\0" "1/6\0")){draft.scale=fractions[fraction];changed=true;}
-        ImGui::TextWrapped("3X/4X require the private native D3D12 route. Additional intermediates increase GPU work, memory use and latency.");
-        ImGui::TextWrapped("Experimental portable Python/CUDA. One model, sequential eyes. Motion and blending are estimated at the selected resolution; original full-resolution colours are warped at output. Lower inference resolution reduces motion/occlusion precision. Requires the shared RIFE runtime.");
+        // Commit on release: rebuilding model shapes during every drag tick
+        // would repeatedly retire history and warm a new CUDA graph.
+        static int pending_resolution=15;
+        static bool editing_resolution{};
+        if(!editing_resolution)pending_resolution=draft.rife_resolution;
+        const bool resolution_edited=ImGui::SliderInt("Motion inference resolution",&pending_resolution,10,40,"%d%%");
+        const bool resolution_active=ImGui::IsItemActive();
+        if(ImGui::IsItemDeactivatedAfterEdit() || (resolution_edited && !resolution_active)) {
+            draft.rife_resolution=pending_resolution;changed=true;
+        }
+        editing_resolution=resolution_active;
+        ImGui::TextWrapped("3X/4X require the private route. Luke Ross also requires the isolated post-AFW synthesis queue. Additional intermediates increase GPU work and memory use.");
+        ImGui::TextWrapped("Experimental portable Python/CUDA. One model, sequential eyes. Motion inference uses the selected percentage; output stays at full resolution. Requires the bundled RIFE runtime.");
     } else if (draft.frame_generation==3) {
         ImGui::TextWrapped("Game motion vectors + FidelityFX optical flow (25% per axis). If game guides are unavailable or rejected, uses FidelityFX optical flow.");
     } else {

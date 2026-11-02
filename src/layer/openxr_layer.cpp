@@ -1660,7 +1660,9 @@ private:
 // completed AFW packet back through inline OFXR publication when a private
 // SteamVR director and an isolated synthesis lane are already available.
 [[nodiscard]] bool fresh_luke_director_worker(const SessionState& state) noexcept {
-    return state.luke_fresh_only && !state.afw_only && single_director_pacing(state) &&
+    return state.luke_fresh_only && !state.afw_only &&
+        (single_director_pacing(state) || (state.private_runtime &&
+         state.nvidia_options.rife_model>=0 && state.nvidia_options.rife_multiplier>2)) &&
         state.dispatch->steamvr_runtime && state.luke_synthesis_queue &&
         state.optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
         state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr;
@@ -1708,8 +1710,17 @@ private:
 // Experimental multi-output RIFE uses the native private endpoint's ordered
 // worker. Shared/legacy and AER/interop retain their accepted 2X contract.
 bool rife_multiframe_capable(const SessionState& state) noexcept {
-    return state.private_runtime && state.graphics_binding==SessionGraphicsBinding::d3d12 &&
-        !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled && !state.pipelined_presenter_mode;
+    if(!state.private_runtime || state.pipelined_presenter_mode)return false;
+    if(state.luke_afw_enabled) {
+        // Interpolate completed post-AFW colors on the isolated synthesis lane.
+        // AFW itself still evaluates once per fresh source, never per RIFE output.
+        return !state.afw_only && state.luke_synthesis_queue &&
+            !state.single_threaded_d3d11 && !state.split_frame_loop &&
+            (state.graphics_binding==SessionGraphicsBinding::d3d11 ||
+             state.graphics_binding==SessionGraphicsBinding::d3d12);
+    }
+    return state.graphics_binding==SessionGraphicsBinding::d3d12 &&
+        !state.d3d11_bridge && !state.vulkan_bridge;
 }
 unsigned rife_frames(const SessionState& state) noexcept {
     return state.nvidia_options.rife_model>=0 && rife_multiframe_capable(state)
@@ -3733,7 +3744,8 @@ create_d3d11_frame_generation_swapchains(
             return nullptr;
         }
         log_video_memory(*state->session, VideoMemoryStage::current_ring, handle_value(state->handle));
-        if (!create_current_ring(state, private_info, &synthetic, &refusal)) {
+        if (!create_current_ring(state, private_info, &synthetic, &refusal,
+                rife_frames(*session)>2?rife_frames(*session)-1:kSyntheticSlotCount)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::synthetic_private_swapchain_failed;
@@ -3855,6 +3867,10 @@ create_d3d11_frame_generation_swapchains(
 
         log_video_memory(*state->session, VideoMemoryStage::synthesizer, handle_value(state->handle));
         auto generation = std::make_shared<FrameGenerationSwapchainState>();
+        generation->synthetic_runtime_rings=rife_frames(*session)>2?rife_frames(*session)-1:kSyntheticSlotCount;
+        generation->direct_extra_outputs=rife_frames(*session)>2;
+        if(generation->direct_extra_outputs)
+            for(auto& lease:generation->direct_synthetic_leases)lease=std::make_shared<DirectSyntheticLease>();
         generation->synthesizer = std::move(synthesizer);
         generation->d3d11_interop = std::move(interop);
         generation->isolated_luke_synthesis = isolated_luke;
@@ -5754,6 +5770,7 @@ XrResult layer_create_session_impl(
         initial_control.desired.backward,
         state->nvidia_new_route, xrfg::flow_encoding_for_route(state->nvidia_new_route), state->nvidia_new_route, initial_control.desired.native_scale};
     state->nvidia_options.rife_model=initial_control.desired.rife_model;
+    state->nvidia_options.rife_resolution_percent=initial_control.desired.rife_resolution;
     state->nvidia_options.rife_multiplier=initial_control.desired.rife_multiplier;
     state->menu_enabled = initial_control.desired.enabled;
     state->frame_generation_mode = static_cast<xrfg::D3D12FrameGenerationMode>(initial_control.desired.frame_generation);
@@ -15703,6 +15720,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
         nvidia_new_route, xrfg::flow_encoding_for_route(nvidia_new_route), nvidia_new_route, control.desired.native_scale};
     options.rife_model=control.desired.rife_model;
+    options.rife_resolution_percent=control.desired.rife_resolution;
     options.rife_multiplier=control.desired.rife_multiplier;
     if(control.desired.enabled && !state->afw_only && options.rife_model>=0 && options.rife_multiplier>2 && !rife_multiframe_capable(*state))return E_NOTIMPL;
     options.rife_async=options.rife_model>=0 && async_rife_queue(*state);
@@ -15712,7 +15730,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     }
     const int effective_separation = effective_memory_control(*state,control.desired.separate_synthesis);
     const int effective_reduction = effective_memory_control(*state,control.desired.lower_vram);
-    const bool changed = options.rife_multiplier!=state->nvidia_options.rife_multiplier || options.rife_async!=state->nvidia_options.rife_async || options.rife_model!=state->nvidia_options.rife_model || options.hybrid!=state->nvidia_options.hybrid ||
+    const bool changed = options.rife_resolution_percent!=state->nvidia_options.rife_resolution_percent || options.rife_multiplier!=state->nvidia_options.rife_multiplier || options.rife_async!=state->nvidia_options.rife_async || options.rife_model!=state->nvidia_options.rife_model || options.hybrid!=state->nvidia_options.hybrid ||
         control.desired.hybrid!=state->hybrid_requested || force_startup_rendezvous || state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||
         options.input_scale != state->nvidia_options.input_scale ||
@@ -15830,12 +15848,15 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             chain->generation_refusal_detail = 0;
         }
         const bool admitted_shape_change = changed && chain->frame_generation &&
-            state->graphics_binding == SessionGraphicsBinding::d3d12 &&
+            ((state->graphics_binding == SessionGraphicsBinding::d3d12 &&
             (chain->frame_generation->staged_outputs != staged_native_outputs(*state) ||
              chain->frame_generation->current_runtime_rings != native_current_rings(*state) ||
              chain->frame_generation->synthetic_runtime_rings != native_synthetic_rings(*state) ||
              chain->frame_generation->direct_extra_outputs != (!staged_native_outputs(*state) && extra_output_capacity(*state)) ||
-             chain->frame_generation->staging_stride != (staged_native_outputs(*state) && extra_output_capacity(*state) ? 2U : 1U));
+             chain->frame_generation->staging_stride != (staged_native_outputs(*state) && extra_output_capacity(*state) ? 2U : 1U))) ||
+             (state->graphics_binding == SessionGraphicsBinding::d3d11 &&
+              (chain->frame_generation->synthetic_runtime_rings != (rife_frames(*state)>2?rife_frames(*state)-1:kSyntheticSlotCount) ||
+               chain->frame_generation->direct_extra_outputs != (rife_frames(*state)>2))));
         if (admitted_shape_change) {
             result = chain->frame_generation->synthesizer
                 ? chain->frame_generation->synthesizer->wait_for_idle() : S_OK;

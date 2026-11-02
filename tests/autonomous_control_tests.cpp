@@ -222,7 +222,18 @@ void route_profiles() {
     require(fresh_rife.scale==5 && fresh_rife.rife_model==3,"new RIFE profile defaults to4.4 exact1/6 motion inference");
     auto migrated_rife=parse_settings("[ofxr]\nframe_generation=0\n[route.ofxr_new]\nscale=2\n");
     select_generation(migrated_rife,4,2);migrated_rife=sanitize(migrated_rife);
-    require(migrated_rife.scale==3,"RIFE profile seeds quarter resolution when upgrading an existing profile INI");
+    require(migrated_rife.scale==5,"RIFE profile seeds1/6 when upgrading an existing profile INI");
+    const auto minimal_rife=parse_settings("[ofxr]\nframe_generation=4\n");
+    require(minimal_rife.rife_model==3 && minimal_rife.scale==5,"RIFE-only INI defaults to4.4 and1/6");
+    const auto explicit_rife=parse_settings("[ofxr]\nframe_generation=4\nrife_model=2\nscale=3\n");
+    require(explicit_rife.rife_model==2 && explicit_rife.scale==3,"explicit previous model/resolution remain user choices");
+    require(minimal_rife.rife_resolution==15,"RIFE resolution defaults to15percent");
+    for(int percent:{10,15,23,40}) {
+        auto slider=minimal_rife;slider.rife_resolution=percent;
+        require(parse_settings(serialize_settings(slider)).rife_resolution==percent,"RIFE slider percentage roundtrip");
+    }
+    auto bounded=minimal_rife;bounded.rife_resolution=1;require(sanitize(bounded).rife_resolution==10,"RIFE slider minimum");
+    bounded.rife_resolution=99;require(sanitize(bounded).rife_resolution==40,"RIFE slider maximum");
     auto rife=parse_settings("[ofxr]\nframe_generation=4\nrife_model=2\nmotion_vectors=1\ntriple_frame_gen=1\n");
     require(rife.frame_generation==4 && rife.rife_model==2 && rife.motion_vectors==0 && !rife.triple_frame_gen,"RIFE uses no engine guides and is 2X only");
     auto rife_roundtrip=parse_settings(serialize_settings(rife));
