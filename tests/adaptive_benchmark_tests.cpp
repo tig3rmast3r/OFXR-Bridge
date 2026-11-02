@@ -4,113 +4,137 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <array>
 using namespace xrfg::autonomous;
-void require(bool ok,const char* text) {if(!ok)throw std::runtime_error(text);}
-void report(RuntimeStatus& r) {
+void require(bool ok,const char* text){if(!ok)throw std::runtime_error(text);}
+void report(RuntimeStatus& r){
     const auto s=snapshot();r.applied_revision=s.revision;r.pacing_mode=s.desired.pacing_mode;
     r.afw_shading_rate=s.desired.afw_shading_rate;
-    r.buffer_capacity=r.vdxr_legacy?0:r.steamvr_runtime && s.desired.enabled && s.desired.pacing_mode!=0 ? (s.desired.increase_buffer?4:3) : s.desired.increase_buffer?3:2;report_runtime(r);
+    r.buffer_capacity=r.vdxr_legacy?0:r.steamvr_runtime && s.desired.enabled && s.desired.pacing_mode!=0 ? (s.desired.increase_buffer?4:3):s.desired.increase_buffer?3:2;
+    report_runtime(r);
 }
-void policy() {
-    for(bool modern:{false,true})for(bool full:{false,true}) {
-        for(const auto& step:benchmark_plan(full,false,modern))
-            require(step.disabled || step.generation!=0 || step.backend!=0,"optical Fidelity is never benchmarked");
-        for(const auto side:{0U,2999U,3000U,3999U,4000U}) {
-            const auto p=benchmark_execution_plan(full,true,modern,false,side);
-            require(p.size()==(modern?13U:4U)*(side>=4000?3:side>=3000?2:1),"resolution gates prune execution only");
-            for(const auto& step:p)require(benchmark_afw_quality_allowed(step.shading,side),"ineligible AFW quality scheduled");
-            require(benchmark_export_plan(full,true,modern).size()==(modern?39U:12U),"export layout retains omitted quality cells");
-        }
-    }
-    Settings s;s.enabled=true;s.backend=1;BenchmarkScore score{59.4,35,1,1,true};score.display_hz=90;
-    require(benchmark_2x_sufficient(s,score),"exact 66 percent skips 3X");
-    score.fps=59.39;require(!benchmark_2x_sufficient(s,score),"below threshold keeps 3X");
-    score.fps=90;score.valid=false;require(!benchmark_2x_sufficient(s,score),"failed trial cannot skip 3X");
-    score.valid=true;score.display_hz=0;require(!benchmark_2x_sufficient(s,score),"unknown refresh keeps 3X");
-    score.display_hz=90;s.backend=2;require(!benchmark_2x_sufficient(s,score),"later 0.3.0 does not gate early 3X");
-    s.backend=3;s.triple_frame_gen=true;require(!benchmark_2x_sufficient(s,score),"3X cannot qualify itself");
-    s.triple_frame_gen=false;s.enabled=false;require(!benchmark_2x_sufficient(s,score),"disabled reference cannot skip 3X");
-}
-// Drives the real shared controller with public runtime/telemetry reports. No
-// game, headset, live profile, worker thread, or wall-clock benchmark wait.
-void controller(bool modern,bool full,bool luke,unsigned side,double hz,
-    double generated_fps,double afw_full=60,double afw_half=65,bool confirmed=true,bool csv=true) {
+std::string read(const std::filesystem::path& path){std::ifstream f(path);return {std::istreambuf_iterator<char>(f),{}};}
+void controller(bool modern,bool full,bool luke,double base,double two,double three,double four,
+    unsigned cap=4,bool confirmed=true,bool optimize=false,bool unstable=false,bool only=false){
     auto saved=snapshot().desired;saved.advanced_mode=false;saved.benchmark_auto_pick=true;
-    saved.benchmark_csv=csv;saved.afw_only=false;saved.nr_enabled=true;
-    require(request(saved),"save isolated adaptive settings");saved=snapshot().desired;
+    saved.benchmark_csv=true;saved.afw_only=false;saved.nr_enabled=true;saved.afw_mode=3;
+    require(request(saved),"save isolated settings");saved=snapshot().desired;
     RuntimeStatus r{};r.process_id=GetCurrentProcessId();r.sessions=1;r.luke_detected=luke;
-    r.vdxr_runtime=!modern;r.vdxr_legacy=!modern;r.steamvr_runtime=modern;
-    r.eye_long_side=side;r.generation_state=GenerationState::ready;report(r);
-    require(start_benchmark(full,luke),"start adaptive controller");
-    unsigned done{},triples{},half_refs{};bool after_half{};
-    while(benchmark_active(snapshot().benchmark)) {
-        const auto current=snapshot();const auto settings=current.desired;
-        require(!settings.enabled || settings.frame_generation!=0 || settings.backend!=0,"Fidelity reached live controller");
+    r.vdxr_runtime=!modern;r.vdxr_legacy=!modern;r.steamvr_runtime=modern;r.eye_long_side=3300;
+    r.rife_max_multiplier=modern?cap:2;r.dlssg_preset_request=1;r.generation_state=GenerationState::ready;report(r);
+    require(start_benchmark(full,luke),"start real controller");
+    unsigned done{},triples{};std::array<unsigned,5> multipliers{};bool injected=false;
+    while(benchmark_active(snapshot().benchmark)){
+        auto state=snapshot();const auto settings=state.desired;const bool rife=settings.frame_generation==4;
+        if(rife){
+            ++multipliers[settings.rife_multiplier];require(settings.rife_model==3 && !settings.motion_vectors,"RIFE4.4 never asks for vectors");
+            require(settings.rife_resolution==18 || settings.rife_resolution==21,"RIFE Medium/High only");
+            if(settings.rife_multiplier==3)require(multipliers[2]==(modern?(luke?8:16):(luke?2:4)),"all2X candidates must finish before3X");
+            if(settings.rife_multiplier==4)require(multipliers[3]==(luke?8:16),"all3X candidates must finish before4X");
+        }
         if(settings.triple_frame_gen)++triples;
-        if(luke && settings.afw_shading_rate==4 && !settings.enabled){++half_refs;after_half=true;}
-        else if(luke && !after_half)require(settings.afw_shading_rate==0,"whole 1x1 pass must precede half reference");
-        const auto clock=GetTickCount64()-4000;
-        r.telemetry={};r.afw_running=luke;report(r);report_interface_telemetry({});tick_benchmark(clock);
-        require(snapshot().benchmark.phase==BenchmarkPhase::running,"adaptive step not applied");
-        for(unsigned n=0;n<3;++n) {
+        auto clock=GetTickCount64()-4000;r.telemetry={};r.afw_running=luke || only;
+        r.rife_execution_active=rife && confirmed;r.pending=0;report(r);report_interface_telemetry({});
+        if(optimize && rife && !injected){
+            r.rife_optimizing=true;report(r);const auto index=state.benchmark.index;
+            tick_benchmark(state.benchmark.requested_ms+700000);
+            require(snapshot().benchmark.phase==BenchmarkPhase::applying && snapshot().benchmark.index==index,"optimization must wait without a setup timeout or measured trial");
+            r.rife_optimizing=false;report(r);
+        }
+        tick_benchmark(clock);require(snapshot().benchmark.phase==BenchmarkPhase::running,"trial starts only after application");
+        unsigned sample_index{};
+        const auto sample=[&](double fps){
             const auto previous=GetTickCount64();do{Sleep(1);}while(GetTickCount64()==previous);
             xrfg::InterfaceTelemetry m{};m.updated_ms=GetTickCount64();m.rates_valid=true;
             m.output_source=modern?xrfg::InterfaceSource::steamvr_delivery:xrfg::InterfaceSource::runtime_accepted_delivery;
-            m.output_fps=settings.enabled?generated_fps:settings.afw_shading_rate==4?afw_half:afw_full;
-            m.generating=settings.enabled && confirmed;m.cycle_estimated_valid=true;
-            m.cycle_estimated_ms=settings.enabled?40:25;m.display_hz=hz;
-            report(r);report_interface_telemetry(m);tick_benchmark(GetTickCount64()+n*300);
+            m.output_fps=float(fps);m.generating=settings.enabled;m.cycle_estimated_valid=true;
+            m.cycle_estimated_ms=rife?42:settings.enabled?40:25;m.display_hz=90;
+            r.telemetry=m;r.motion_source=full && settings.frame_generation>0 && settings.frame_generation<4?1:0;
+            report(r);report_interface_telemetry(m);tick_benchmark(GetTickCount64()+sample_index++*300);
+        };
+        if(optimize && rife && !injected){
+            sample(1);r.rife_optimizing=true;report(r);tick_benchmark(GetTickCount64());
+            require(snapshot().benchmark.phase==BenchmarkPhase::applying,"late optimization discards partial samples");
+            r.rife_optimizing=false;report(r);clock=GetTickCount64()-4000;tick_benchmark(clock);sample_index=0;injected=true;
         }
-        tick_benchmark(clock+kBenchmarkDurationMs);++done;require(done<100,"adaptive suite did not terminate");
+        const auto fps=!settings.enabled?(only?81:60):rife?(settings.rife_multiplier==2?two:settings.rife_multiplier==3?three:four):base;
+        for(unsigned n=0;n<3;++n)sample(unstable && (!rife || settings.rife_multiplier==2) && n==1?60:fps);
+        tick_benchmark(clock+kBenchmarkMemoryRequestMs);const auto revision=take_benchmark_memory_request();
+        require(revision==snapshot().benchmark.revision && !take_benchmark_memory_request(),"one memory receipt per applied trial");
+        BenchmarkMemory memory{};memory.revision=revision;memory.updated_ms=clock+kBenchmarkMemoryRequestMs;
+        memory.vram_valid=memory.ram_valid=true;memory.vram_bytes=1048576ULL*(100+done);memory.ram_working_set_bytes=2097152;
+        report_benchmark_memory(memory);tick_benchmark(clock+kBenchmarkDurationMs);++done;
+        require(done<120,"adaptive suite must terminate");
     }
-    const auto result=snapshot();require(result.benchmark.phase==BenchmarkPhase::complete,"early exit is a completed suite");
-    if(!luke) {
-        const bool skip=confirmed && hz>0 && generated_fps+1e-3>=hz*.66;
-        require((triples==0)==skip,"live 3X pruning disagrees with measured gate");
-        const auto original=benchmark_plan(full,false,modern).size();
-        require(done==original-(skip?(modern?8:2):0),"pruning skipped unrelated route/fast/buffer trials");
-        require(result.benchmark.count==done,"meter total does not reflect actual pruned plan");
-        if(csv && skip) {
-            std::ifstream f(std::filesystem::u8path(result.benchmark.csv_path));std::string text((std::istreambuf_iterator<char>(f)),{});
-            require(text.find("Djules 3X")!=std::string::npos && text.find("n.a.")!=std::string::npos,"omitted X3 lost its export columns");
-        }
-    } else {
-        const bool early=hz>0 && (generated_fps>=hz-1 || afw_full>=hz*.9 || (side>=3000 && afw_half>=hz*.9));
-        const auto pass=modern?13U:4U;
-        require(done==(early && side>=3000?pass+1:benchmark_execution_plan(full,true,modern,false,side).size()),"Luke early checkpoint or quality pruning wrong");
-        require(half_refs==(side>=3000?1U:0U),"half reference missing or duplicated");
-        if(hz>0 && afw_full>=hz*.9) {
-            require(result.desired.afw_only && result.desired.afw_shading_rate==0,"full-quality AFW preference lost at early finish");
-            require(std::string(result.benchmark.message).find("Restart the game")!=std::string::npos,"AFW-only restart notice lost");
-        }
-        if(hz>0 && afw_half>=hz*.9 && afw_full<hz*.9)
-            require(result.desired.afw_only && result.desired.afw_shading_rate==4,"winning half-quality AFW not applied");
-    }
-    require(result.desired.nr_enabled && result.desired.luke_shared_swapchains==saved.luke_shared_swapchains,
-        "suite changed unrelated Neural or INI-only sharing");
+    const auto result=snapshot();require(result.benchmark.phase==BenchmarkPhase::complete,"suite completes");
+    require(multipliers[2]==(modern?(luke?8:16):(luke?2:4)),"both RIFE2X qualities and policies are always measured");
+    const bool reached2=!unstable && (base>=90 || (confirmed && two>=90));
+    const bool higher=modern && cap>=3;
+    require((multipliers[3]>0)==(higher && !reached2),"3X gate follows stable preceding results and session capability");
+    require((multipliers[4]>0)==(higher && cap>=4 && !reached2 && !(confirmed && three>=90)),"4X gate waits for all3X results");
+    require(result.desired.nr_enabled && result.desired.overlay_enabled==saved.overlay_enabled,"unrelated settings retained");
+    if(only)require(result.desired.afw_only && !result.desired.enabled,"confirmed reconstruction-only at90percent overrides full refresh in any suite");
+    else if(!confirmed)require(result.desired.frame_generation!=4,"unconfirmed RIFE fallback cannot win");
+    else if(base<90 && (two>=90 || (higher && three>=90) || (higher && cap>=4 && four>=90)))
+        require(result.desired.frame_generation==4,"stable RIFE refresh wins over sub-refresh alternatives");
+    const auto layout_path=std::filesystem::u8path(result.benchmark.csv_path);const auto layout=read(layout_path);
+    require(layout.find("RIFE Medium 2X")!=std::string::npos && layout.find("RIFE High 2X")!=std::string::npos,"CSV distinguishes quality");
+    require(layout.find("2x2")==std::string::npos && layout.find("4x4")==std::string::npos,"Luke reduced quality columns removed");
+    require(std::count(layout.begin(),layout.end(),'\n')==11,"CSV retains six statistics and four memory rows");
+    if(modern && !multipliers[4])require(layout.find("RIFE High 4X")!=std::string::npos && layout.find("n.a.")!=std::string::npos,"pruned tiers retain empty export cells");
+    const auto details=read(layout_path.parent_path()/(layout_path.stem().wstring()+L"-details.csv"));
+    if(multipliers[3])require(details.find(",3,0,")!=std::string::npos,"details record the actual RIFE multiplier");
+    require(r.dlssg_preset_request==1,"suite never changes the startup NVIDIA preset");
+    std::cout<<"suite modern="<<modern<<" full="<<full<<" luke="<<luke<<" trials="<<done<<" RIFE="<<multipliers[2]<<'/'<<multipliers[3]<<'/'<<multipliers[4]<<" PASS\n";
 }
-int main() {
+void setup_edge_cases(bool optimizing){
+    auto saved=snapshot().desired;saved.benchmark_auto_pick=true;saved.benchmark_csv=true;
+    require(request(saved),"save setup-edge settings");saved=snapshot().desired;
+    RuntimeStatus r{};r.process_id=GetCurrentProcessId();r.sessions=1;r.steamvr_runtime=true;
+    r.vdxr_legacy=false;r.rife_max_multiplier=4;report(r);
+    require(start_benchmark(false),"start setup-edge suite");
+    while(benchmark_active(snapshot().benchmark) && snapshot().desired.frame_generation!=4){
+        report(r);const auto now=GetTickCount64()-4000;tick_benchmark(now);tick_benchmark(now+kBenchmarkDurationMs);
+    }
+    require(benchmark_active(snapshot().benchmark),"reach RIFE setup");
+    r.pending=optimizing?0:1;r.rife_optimizing=optimizing;report(r);
+    tick_benchmark(snapshot().benchmark.requested_ms+31000);
+    if(optimizing){
+        require(snapshot().benchmark.phase==BenchmarkPhase::applying,"optimization never consumes normal setup timeout");
+        stop_benchmark();tick_benchmark();
+        require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==saved,"Stop remains available while optimizing");
+    }else{
+        const auto result=snapshot();
+        require(result.benchmark.phase==BenchmarkPhase::complete && result.desired==saved,"unavailable RIFE skips its tier without destroying ordinary results or restoring a partial winner");
+        const auto path=std::filesystem::u8path(result.benchmark.csv_path);
+        require(read(path.parent_path()/(path.stem().wstring()+L"-details.csv")).find("RIFE setup unavailable / skipped")!=std::string::npos,"RIFE timeout is explicit in CSV");
+    }
+}
+void cancellation(){
+    RuntimeStatus r{};r.process_id=GetCurrentProcessId();r.sessions=1;r.steamvr_runtime=true;r.vdxr_legacy=false;r.rife_max_multiplier=4;
+    const auto saved=snapshot().desired;report(r);require(start_benchmark(false),"start Stop case");stop_benchmark();tick_benchmark();
+    require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==saved,"Stop restores original settings");
+    report(r);require(start_benchmark(false),"start manual edit case");auto edited=snapshot().desired;edited.nr_enabled=!edited.nr_enabled;
+    require(request(edited),"manual settings override");tick_benchmark();
+    require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired.nr_enabled==edited.nr_enabled,"manual edit wins");
+    report(r);require(start_benchmark(false),"start disconnect case");r.sessions=0;report(r);tick_benchmark();
+    require(snapshot().benchmark.phase==BenchmarkPhase::error,"disconnect never applies a partial winner");
+}
+int main(){
     const auto root=std::filesystem::temp_directory_path()/(L"ofxr-adaptive-"+std::to_wstring(GetCurrentProcessId()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",root.c_str());
-    try {
-        policy();std::filesystem::create_directories(root);
-        require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable fixture benchmark");
-        for(bool modern:{false,true})for(bool full:{false,true}) {
-            controller(modern,full,false,3300,90,70);
-            controller(modern,full,false,3300,90,50);
-        }
-        controller(true,false,false,3300,90,90,60,65,false);
-        controller(true,false,false,3300,0,90);
-        controller(true,false,false,3300,90,70,60,65,true,false);
-        for(bool modern:{false,true}) {
-            controller(modern,false,true,3376,90,90);
-            controller(modern,false,true,4100,90,90);
-            controller(modern,false,true,3376,90,90,81,89);
-            controller(modern,false,true,3376,90,90,80,81);
-            controller(modern,false,true,3376,90,85);
-            controller(modern,false,true,2999,90,85);
-            controller(modern,false,true,4100,0,85);
-        }
-        std::cout<<"Adaptive benchmark policy and real controller: 25 suites PASS\n";return 0;
+    try{
+        for(bool modern:{false,true})for(bool full:{false,true})for(bool luke:{false,true})
+            controller(modern,full,luke,70,90,90,90);
+        controller(true,false,false,70,85,90,90,4,true,true);
+        controller(true,true,false,70,85,88,90);
+        controller(true,false,true,70,85,88,90);
+        controller(true,false,false,90,88,90,90);
+        controller(true,false,false,90,90,90,90,4,true,false,true);
+        controller(true,false,false,70,90,90,90,4,false);
+        controller(true,false,false,70,80,90,90,2);
+        controller(true,false,false,70,90,90,90,4,true,false,false,true);
+        setup_edge_cases(false);setup_edge_cases(true);
+        cancellation();std::cout<<"Adaptive RIFE live-controller, stable refresh, optimization, CSV, capability and cancellation PASS\n";return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

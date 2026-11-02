@@ -171,6 +171,7 @@ struct RuntimeStatus {
     bool afw_flat_scene{};
     bool rife_optimizing{}; // asynchronous engine compilation; existing generation can continue
     bool rife_tensorrt{}; // backend used by the latest RIFE inference, independent of desired state
+    unsigned rife_max_multiplier{2}; // actual active session capability, independent of requested engine
     bool rife_execution_active{}; // a fresh, live worker receipt exists (false is not proof of Torch)
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {

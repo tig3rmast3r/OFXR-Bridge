@@ -20,10 +20,11 @@ struct BenchmarkStep {
     int afw{-1},shading{-1};
     int pacing{-1}; // -1 preserves the pre-V614 runtime's global choice.
     int buffer{-1}; // -1 keeps preference; 0=two, 1=three deliveries (private transport only).
+    int rife_multiplier{2},rife_quality{18};
 };
 inline std::vector<BenchmarkStep> legacy_benchmark_plan(bool full,bool luke=false) {
     std::vector<BenchmarkStep> steps;
-    for(const int quality : (luke ? std::vector<int>{0,4,8} : std::vector<int>{-1})) {
+    for(const int quality : (luke ? std::vector<int>{0} : std::vector<int>{-1})) {
         BenchmarkStep off{0,0,0,0,false,false,true,luke?"AFW only":"Disabled"};
         off.pacing=0;if(luke){off.afw=3;off.shading=quality;}steps.push_back(off);
         const auto route=[&](const char* name,int generation,int backend,bool triple,bool fast) {
@@ -46,9 +47,23 @@ inline std::vector<BenchmarkStep> legacy_benchmark_plan(bool full,bool luke=fals
 inline const char* benchmark_pacing_label(int mode) {
     return mode==0 ? "Framework" : mode==1 ? "Director" : "Framework+director";
 }
+inline void benchmark_add_rife(std::vector<BenchmarkStep>& steps,bool luke,bool modern,bool advanced) {
+    for(int multiplier=2;multiplier<=(modern?4:2);++multiplier)
+      for(const int quality:{18,21})
+        for(int pacing=0;pacing<(modern?(advanced?3:2):1);++pacing)
+          for(int buffer=0;buffer<(modern&&!advanced?2:1);++buffer)
+            for(int fast=0;fast<(luke?1:2);++fast) {
+                BenchmarkStep step{4,2,fast,fast,false,false,false,
+                    "RIFE "+std::string(quality==18?"Medium":"High")+" "+std::to_string(multiplier)+"X "+
+                    benchmark_pacing_label(pacing)+(luke?"":fast?" Fast":" Normal")+(buffer?" Buffer":"")};
+                step.pacing=pacing;if(modern&&!advanced)step.buffer=buffer;
+                if(luke){step.afw=3;step.shading=0;}
+                step.rife_multiplier=multiplier;step.rife_quality=quality;steps.push_back(std::move(step));
+            }
+}
 inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool steamvr=true,bool advanced=false) {
     // The session-latched transport selects the new matrix or Legacy VDXR plan.
-    if(!steamvr)return legacy_benchmark_plan(full,luke);
+    if(!steamvr){auto legacy=legacy_benchmark_plan(full,luke);benchmark_add_rife(legacy,luke,false,advanced);return legacy;}
     std::vector<BenchmarkStep> steps;
     const auto route=[&](const char* name,int generation,int backend,bool triple,int quality) {
         for(int pacing=0;pacing<(advanced?3:2);++pacing) {
@@ -65,7 +80,7 @@ inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool 
           }
         }
     };
-    for(const int quality : (luke ? std::vector<int>{0,4,8} : std::vector<int>{-1})) {
+    for(const int quality : (luke ? std::vector<int>{0} : std::vector<int>{-1})) {
         BenchmarkStep off{0,0,0,0,false,false,true,luke ? "AFW only" : "Disabled"};
         off.pacing=0;
         if(!advanced)off.buffer=0; // one reference, never repeat it for buffer/fast/pacing
@@ -77,14 +92,16 @@ inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool 
         route("0.3.0",0,2,false,quality);
         if(full && !luke) {route("Hybrid",3,0,false,quality);route("FSR",1,0,false,quality);route("DLSS-G",2,0,false,quality);}
     }
+    benchmark_add_rife(steps,luke,true,advanced);
     return steps;
 }
 inline bool benchmark_afw_quality_allowed(int shading,std::uint32_t eye_long_side) {
     return shading==0 || (shading==4 && eye_long_side>=3000) || (shading==8 && eye_long_side>=4000);
 }
 inline std::vector<BenchmarkStep> benchmark_execution_plan(bool full,bool luke,bool steamvr,bool advanced,
-    std::uint32_t eye_long_side) {
+    std::uint32_t eye_long_side,unsigned rife_max_multiplier=4) {
     auto steps=benchmark_plan(full,luke,steamvr,advanced);
+    std::erase_if(steps,[&](const auto& step){return step.generation==4 && unsigned(step.rife_multiplier)>rife_max_multiplier;});
     if(luke)std::erase_if(steps,[&](const auto& step) {
         return !benchmark_afw_quality_allowed(step.shading,eye_long_side);
     });
@@ -92,26 +109,19 @@ inline std::vector<BenchmarkStep> benchmark_execution_plan(bool full,bool luke,b
 }
 inline std::vector<BenchmarkStep> benchmark_export_plan(bool full,bool luke,bool steamvr,bool advanced=false) {
     auto steps=benchmark_plan(full,luke,steamvr,advanced);
-    if(luke) {
-        // Execution minimizes AFW resets with whole-quality passes. Export groups
-        // every route/pacing's three qualities without relying on a fixed route count.
-        const auto stride=steps.size()/3;
-        std::vector<BenchmarkStep> ordered;
-        for(std::size_t trial=0;trial<stride;++trial)
-            for(std::size_t quality=0;quality<3;++quality)ordered.push_back(steps[quality*stride+trial]);
-        return ordered;
-    }
     return steps;
 }
 inline Settings benchmark_settings(Settings saved,const BenchmarkStep& step) {
     select_generation(saved,step.generation,step.backend);
     saved.enabled=!step.disabled;
-    saved.motion_vectors=step.generation ? 1 : 0;
+    saved.motion_vectors=step.generation>0 && step.generation<4 ? 1 : 0;
+    if(step.generation==4){saved.rife_model=3;saved.rife_resolution=step.rife_quality;saved.rife_multiplier=step.rife_multiplier;}
     saved.separate_synthesis=step.a;saved.lower_vram=step.b;
     saved.triple_frame_gen=step.triple;saved.prefer_fps=step.prefer;
     if(step.pacing>=0)saved.pacing_mode=step.pacing;
     if(step.buffer>=0)saved.increase_buffer=step.buffer!=0;
-    if(step.afw>=0) {saved.afw_mode=step.afw;saved.afw_shading_rate=step.shading;}
+    if(step.afw>=0)saved.afw_mode=step.afw;
+    if(saved.afw_mode!=0)saved.afw_shading_rate=0; // all suites use reconstruction1x1
     return sanitize(saved);
 }
 inline double benchmark_median(std::vector<double> values) {
@@ -145,7 +155,8 @@ struct BenchmarkScore {
     int shading{};
     std::uint32_t eye_long_side{};
     double display_hz{};
-    bool triple{};
+    bool triple{},rife{};
+    double fps_min{-1};
 };
 inline BenchmarkScore benchmark_score(const BenchmarkSamples& samples,bool complete) {
     // A partial/failed trial, unknown timing or a single sample cannot establish
@@ -158,8 +169,13 @@ inline BenchmarkScore benchmark_score(const BenchmarkSamples& samples,bool compl
     if(!complete || !measured(samples.fps) || !measured(samples.latency))return {};
     const auto fps=std::minmax_element(samples.fps.begin(),samples.fps.end());
     const auto latency=std::minmax_element(samples.latency.begin(),samples.latency.end());
-    return {benchmark_median(samples.fps),benchmark_median(samples.latency),
+    BenchmarkScore result{benchmark_median(samples.fps),benchmark_median(samples.latency),
         *fps.second-*fps.first,*latency.second-*latency.first,true};
+    result.fps_min=*fps.first;return result;
+}
+inline bool benchmark_at_refresh(const BenchmarkScore& score) {
+    return score.valid && score.display_hz>0 && score.fps+1e-3>=score.display_hz &&
+        (score.fps_min<0 || score.fps_min+1e-3>=score.display_hz-1.0);
 }
 inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScore>& scores,bool luke=false) {
     // Anchor tolerances to the global maxima/minima, not pairwise comparisons:
@@ -172,8 +188,8 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         pool.push_back(i);
     }
     // AFW-only is an explicit quality/latency preference, before the ordinary
-    // full-refresh lock. Both qualities must independently reach 90% of Hz.
-    if(luke) {
+    // full-refresh lock. Only1x1 is scheduled; older score metadata stays readable.
+    {
         std::vector<std::size_t> afw;
         for(const auto i:pool)if(scores[i].afw_only && scores[i].display_hz>0 &&
             scores[i].fps+1e-3>=scores[i].display_hz*.9)afw.push_back(i);
@@ -184,7 +200,7 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         }
     }
     const auto at_refresh=[&](const auto& score) {
-        return score.display_hz>0 && score.fps+1e-3>=score.display_hz;
+        return benchmark_at_refresh(score);
     };
     const bool capped_pool=std::any_of(pool.begin(),pool.end(),[&](auto i) {return at_refresh(scores[i]);});
     if(capped_pool)std::erase_if(pool,[&](auto i) {return !at_refresh(scores[i]);});
@@ -225,19 +241,34 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
     std::vector<std::size_t> vectors;
     if(optical_fps>0)for(const auto i:pool)if(scores[i].vectors &&
         (optical_at_refresh ? at_refresh(scores[i]) : optical_fps-scores[i].fps<=3+epsilon) &&
-        scores[i].latency<=optical_latency+12+epsilon)vectors.push_back(i);
+        scores[i].latency<=optical_latency+3+epsilon)vectors.push_back(i);
     if(!vectors.empty()) {pool=std::move(vectors);keep_fps(pool);}
     else pool=std::move(ordinary);
     double lowest=std::numeric_limits<double>::infinity();
     for(const auto i:pool)lowest=std::min(lowest,scores[i].latency);
+    std::erase_if(pool,[&](auto i){return scores[i].latency-lowest>3+epsilon;});
+    const bool rife=std::any_of(pool.begin(),pool.end(),[&](auto i){return scores[i].rife && !scores[i].vectors;});
+    if(rife)std::erase_if(pool,[&](auto i){return !scores[i].rife && !scores[i].vectors;});
     std::optional<std::size_t> best;
     for(const auto i:pool) {
         const auto& score=scores[i];
-        if(score.latency-lowest>2+epsilon)continue;
+        if(score.latency-lowest>3+epsilon)continue;
         const auto order=[](const auto& s) {return std::tuple{s.fps_range,s.latency_range,s.latency,-s.fps};};
         if(!best || order(score)<order(scores[*best]))best=i;
     }
     return best;
+}
+// Cross a multiplier boundary only after every candidate in the prior tier.
+// A single 90FPS median with a deep drop does not suppress the next tier.
+inline void benchmark_prune_rife(std::vector<BenchmarkStep>& plan,std::size_t next,
+    const std::vector<BenchmarkScore>& scores) {
+    if(next==0 || next>=plan.size())return;
+    const auto& upcoming=plan[next];const auto& previous=plan[next-1];
+    if(upcoming.generation!=4 || upcoming.rife_multiplier<=2 ||
+        (previous.generation==4 && previous.rife_multiplier==upcoming.rife_multiplier))return;
+    if(std::none_of(scores.begin(),scores.end(),benchmark_at_refresh))return;
+    const int multiplier=upcoming.rife_multiplier;
+    plan.erase(std::remove_if(plan.begin()+next,plan.end(),[&](const auto& step){return step.generation==4 && step.rife_multiplier>=multiplier;}),plan.end());
 }
 // Skip only after a completed, measured 2X trial of one of the two early OFXR routes.
 inline bool benchmark_2x_sufficient(const Settings& settings,const BenchmarkScore& score) {
