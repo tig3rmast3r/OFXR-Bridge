@@ -233,7 +233,8 @@ enum class InterfaceSurface : unsigned { desktop, headset, meter, status_export 
 void set_interface_visible(InterfaceSurface surface, bool visible) noexcept;
 bool interface_telemetry_requested() noexcept;
 void report_interface_telemetry(InterfaceTelemetry value) noexcept;
-std::string interface_status_text(const Snapshot& value);
+std::string_view interface_reconstruction_text(const Snapshot& value,std::uint64_t now_ms) noexcept;
+std::string interface_status_text(const Snapshot& value,bool include_reconstruction=true);
 std::string_view interface_state_text(const Snapshot& value) noexcept;
 std::string_view interface_vectors_text(const Snapshot& value, std::uint64_t now_ms) noexcept;
 // Global settings are never redirected by the active game.

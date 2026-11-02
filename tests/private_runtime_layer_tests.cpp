@@ -252,6 +252,29 @@ static int panel_metadata_contract() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route=="reconstruction-controls") {
+        xrfg_fixture::ControlProfile profile;
+        for(int engine:{0,2}) {
+            auto controls=xrfg::autonomous::snapshot().desired;
+            controls.luke_osr=engine;controls.afw_mode=3;
+            check(xrfg::autonomous::request(controls),"enable selected reconstruction");
+            xrfg::autonomous::apply_runtime_settings();
+            check(xrfg::embedded::afw_snapshot().desired.mode==3 &&
+                xrfg::embedded::afw_snapshot().desired.osr==engine,"selected engine reaches runtime controls");
+            controls.afw_mode=0;
+            check(xrfg::autonomous::request(controls),"primary Off request");
+            xrfg::autonomous::apply_runtime_settings();
+            const auto actual=xrfg::embedded::afw_snapshot();
+            check(actual.desired.mode==0,"Off reaches the guard shared by both reconstruction engines");
+            check(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(controls)).afw_mode==0,
+                "saved Off remains Off on profile reload");
+            xrfg::autonomous::publish_runtime_status();
+            const auto status=xrfg::autonomous::snapshot();
+            check(!status.runtime.afw_running,"Off cannot report running reconstruction");
+        }
+        std::puts("Primary reconstruction Off reaches shipping runtime controls and persists for OSR/AFW PASS");return 0;
+    }
+
     if(route=="fast-panel-source") {
         auto dispatch=std::make_shared<Dispatch>();auto state=std::make_shared<SessionState>(dispatch);
         state->graphics_binding=SessionGraphicsBinding::d3d12;

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.837.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.838.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2239,4 +2239,8 @@ if(WIN32 AND XRFG_BUILD_TESTS)
  if(TARGET xrfg_private_runtime_layer_tests)
   add_test(NAME xrfg_osr_peer_pose_metadata COMMAND xrfg_private_runtime_layer_tests osr-peer-pose)
  endif()
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
+ add_test(NAME xrfg_reconstruction_controls COMMAND xrfg_private_runtime_layer_tests reconstruction-controls)
 endif()

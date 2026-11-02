@@ -263,9 +263,9 @@ void release_controls() {
     desktop.select_tab("Luke Ross");desktop.draw(true);
     require(snapshot().desired.luke_osr==2 && desktop.rendered_text.find("OSR (OFXR Stereo Reconstruction)")!=std::string::npos,
         "reset selects OSR in the actual desktop Reconstruction combo");
-    desktop.choose("Reconstruction",1,"AFW (legacy)","/Framewarp_");
+    desktop.choose("Reconstruction",2,"AFW","/Framewarp_");
     require(snapshot().desired.luke_osr==0,"second reconstruction choice selects legacy AFW");
-    desktop.choose("Reconstruction",0,"OSR","/Framewarp_");
+    desktop.choose("Reconstruction",1,"OSR","/Framewarp_");
     require(snapshot().desired.luke_osr==2,"first reconstruction choice selects OSR");
     desktop.draw(true);
     require(desktop.rendered_text.find("AFW + OSR")==std::string::npos &&
@@ -409,7 +409,16 @@ void actual_widgets() {
         "INI-only startup sharing is absent from desktop and headset UI");
     auto quality_settings=snapshot().desired;quality_settings.afw_mode=3;quality_settings.luke_osr=0;
     require(request(quality_settings),"select Combined for live quality control");
-    tray.draw();tray.draw();status.afw_shading_rate=0;report_runtime(status);
+    tray.draw();tray.draw();
+    tray.choose("Reconstruction",0,"Off","/Framewarp_");
+    require(snapshot().desired.afw_mode==0 && snapshot().desired.luke_osr==0,"primary Off also stops legacy AFW");
+    tray.choose("Reconstruction",2,"AFW","/Framewarp_");
+    require(snapshot().desired.afw_mode==3 && snapshot().desired.luke_osr==0,"primary AFW restores the legacy engine");
+    tray.choose("Framewarp mode",0,"Alternate eye (for debug)","/Framewarp_");
+    require(snapshot().desired.afw_mode==1,"AFW mode first entry is Alternate eye, not Off");
+    tray.choose("Framewarp mode",2,"Combined","/Framewarp_");
+    require(snapshot().desired.afw_mode==3,"AFW mode third entry is Combined");
+    status.afw_shading_rate=0;report_runtime(status);
     tray.choose("AFW shading rate",1,"2x2 (half per axis)","/Framewarp_");
     require(snapshot().desired.afw_shading_rate==4,"live quality dropdown publishes beta6 2x2 index");
     tray.draw(true);
@@ -418,12 +427,12 @@ void actual_widgets() {
     status.afw_shading_rate=4;report_runtime(status);tray.draw(true);
     require(tray.rendered_text.find("Quality change pending")==std::string::npos,
         "successful active quality update clears pending explanation");
-    tray.choose("Reconstruction",0,"OSR","/Framewarp_");
+    tray.choose("Reconstruction",1,"OSR","/Framewarp_");
     require(snapshot().desired.luke_osr==2,"desktop selects OSR from legacy AFW");
     headset.draw();headset.draw();
-    headset.choose("Reconstruction",1,"AFW (legacy)","/Framewarp_");
+    headset.choose("Reconstruction",2,"AFW","/Framewarp_");
     require(snapshot().desired.luke_osr==0,"headset selects the second legacy AFW entry");
-    headset.choose("Reconstruction",0,"OSR","/Framewarp_");
+    headset.choose("Reconstruction",1,"OSR","/Framewarp_");
     require(snapshot().desired.luke_osr==2,"headset selects the first OSR entry");
     tray.draw();tray.draw(true);
     require(tray.rendered_text.find("AFW shading rate")==std::string::npos &&
@@ -431,12 +440,20 @@ void actual_widgets() {
         tray.rendered_text.find("Depth dilation")==std::string::npos &&
         tray.rendered_text.find("Framewarp mode")!=std::string::npos,
         "Full OSR advanced parameters show only what it uses, Off included");
-    tray.choose("Framewarp mode",1,"Other eye only (for debug)","/Framewarp_");
+    tray.choose("Framewarp mode",0,"Other eye only (for debug)","/Framewarp_");
     require(snapshot().desired.afw_mode==1,"Full OSR Other eye only is the alternate-eye mode");
-    tray.choose("Framewarp mode",2,"On","/Framewarp_");
+    tray.choose("Framewarp mode",1,"On","/Framewarp_");
     require(snapshot().desired.afw_mode==3,"Full OSR On is Combined");
-    tray.choose("Framewarp mode",0,"Off","/Framewarp_");
-    require(snapshot().desired.afw_mode==0,"Full OSR keeps Off");
+    tray.choose("Reconstruction",0,"Off","/Framewarp_");
+    require(snapshot().desired.afw_mode==0,"primary Off disables reconstruction");
+    tray.draw(true);headset.draw(true);
+    require(tray.rendered_text.find("Framewarp mode")==std::string::npos &&
+        headset.rendered_text.find("Framewarp mode")==std::string::npos,
+        "primary Off hides both engines' advanced mode menus");
+    require(snapshot().desired.luke_osr==2,"Off preserves the previous engine without re-enabling it");
+    headset.choose("Reconstruction",1,"OSR","/Framewarp_");
+    require(snapshot().desired.afw_mode==3 && snapshot().desired.luke_osr==2,"primary OSR restores an enabled reconstruction mode");
+
     auto osr_settings=snapshot().desired;osr_settings.afw_mode=3;
     osr_settings.luke_osr=0;require(request(osr_settings),"back to AFW");tray.draw();tray.draw(true);
     const auto content_height=[&](Context& view) {

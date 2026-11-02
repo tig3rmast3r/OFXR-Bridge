@@ -187,16 +187,21 @@ Luke Ross's Legacy AER mode renders one eye per frame, alternating. OFXR
 rebuilds the other eye from the colour, depth and camera of the eye the game
 rendered, so the headset gets a full stereo pair every frame.
 
-**Luke Ross / Reconstruction** has two choices:
+**Reconstruction** has three choices:
 
 | Reconstruction | |
 | --- | --- |
+| **Off** | Disables stereo reconstruction; frame generation and Neural Rendering remain independent. |
 | **OSR** (default) | OFXR's own reconstruction. Less ghosting and a lower GPU cost than AFW. |
-| **AFW (legacy)** | PureDark's AFW provider, with its quality controls (below). |
+| **AFW** | PureDark's AFW provider, with its quality controls (below). |
 
 Changing it applies while the game runs. Profiles from 0.3.1 start on OSR.
+The green status reports **OSR: Off**, **OSR: Luke Ross**, or **OSR: Other**
+from actual runtime activity. Other identifies a compatible mod without a Luke
+Ross marker; it is a valid state. The legacy engine uses the AFW label.
+Off is controlled here, rather than in the advanced Framewarp mode menus.
 
-**Setup:**
+**Luke Ross setup:**
 
 1. Use an up-to-date Luke Ross mod (tested with v2609.18.2 and newer).
 2. In the REAL VR menu, select **Legacy AER**. AER V2 and AER 1/2 don't work
@@ -214,7 +219,7 @@ Changing it applies while the game runs. Profiles from 0.3.1 start on OSR.
 <details>
 <summary>AFW (legacy) quality controls</summary>
 
-When **AFW (legacy)** is selected, use **Advanced parameters / Framewarp mode / Combined** for the normal AFW path.
+When **AFW** is selected, use **Advanced parameters / Framewarp mode / Combined** for the normal AFW path.
 
 - Start with AFW **1x1**. At high resolutions, try **2x2** if AFW costs too much performance. **4x4** is a stronger quality compromise and is generally intended for very high resolutions.
 - **Depth dilation** can reduce ghosting, flicker and shimmering, with less precise object silhouettes.

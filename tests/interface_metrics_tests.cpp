@@ -227,9 +227,9 @@ void wording() {
     Snapshot s{};
     check(interface_status_text(s)=="No active game" && interface_state_text(s)=="Waiting", "disconnected UI");
     s.connected=true;s.runtime.ready=1;s.runtime.applied_revision=s.revision;
-    check(interface_status_text(s)=="OFXR: Waiting | OSR: N/A | Neural Render: Off", "clean non-Luke session reports default OSR not applicable");
+    check(interface_status_text(s)=="OFXR: Waiting | OSR: Off | Neural Render: Off", "clean non-Luke session reports default OSR not applicable");
     s.desired.afw_mode=3;
-    check(interface_status_text(s).find("OSR: Active")==std::string::npos, "Luke selection cannot fake OSR activity");
+    check(interface_status_text(s).find("OSR: Luke Ross")==std::string::npos, "Luke selection cannot fake OSR activity");
     s.runtime.luke_detected=s.runtime.vulkan_detected=true;
     s.runtime.generation_state=GenerationState::invalid_stereo;
     const auto text=interface_status_text(s);
@@ -281,10 +281,10 @@ void wording() {
     check(interface_state_text(s)=="FSR + AFW", "actual AFW is explicit");
     s.desired.nr_enabled=true;s.runtime.nr_running=true;
     check(interface_state_text(s)=="FSR + AFW + Neural", "actual neural processing is explicit");
-    check(interface_status_text(s).find("AFW: Active | Neural Render: Active")!=std::string::npos, "all active effects reported independently");
+    check(interface_status_text(s).find("AFW: Luke Ross | Neural Render: Active")!=std::string::npos, "all active effects reported independently");
     s.desired.luke_osr=1;
     check(interface_state_text(s)=="FSR + OSR + Neural", "retired band fill reports its migrated OSR mode");
-    check(interface_status_text(s).find("OSR: Active")!=std::string::npos &&
+    check(interface_status_text(s).find("OSR: Luke Ross")!=std::string::npos &&
         interface_status_text(s).find("AFW")==std::string::npos, "retired band fill reports OSR without legacy band label");
     s.desired.nr_enabled=false;s.runtime.nr_running=false;
     check(interface_state_text(s)=="FSR + OSR", "migrated OSR label without neural");
@@ -299,16 +299,36 @@ void wording() {
         rife.desired.luke_osr=0;
         check(interface_state_text(rife)=="RIFE + AFW + Neural","explicit AFW legacy stays available beside RIFE");
     }
-    check(interface_status_text(s).find("OSR: Active")!=std::string::npos && interface_status_text(s).find("AFW")==std::string::npos, "Full OSR replaces AFW in the status line");
+    check(interface_status_text(s).find("OSR: Luke Ross")!=std::string::npos && interface_status_text(s).find("AFW")==std::string::npos, "Full OSR replaces AFW in the status line");
     s.desired.nr_enabled=true;s.runtime.nr_running=true;
     check(interface_state_text(s)=="FSR + OSR + Neural", "Full OSR label with neural");
     s.desired.luke_osr=0;s.desired.nr_enabled=true;s.runtime.nr_running=true;
     s.runtime.afw_running=false;s.runtime.nr_running=false;
-    check(interface_status_text(s).find("AFW: Waiting | Neural Render: Waiting")!=std::string::npos, "enabled without output is waiting");
+    check(interface_status_text(s).find("AFW: Off | Neural Render: Waiting")!=std::string::npos, "enabled without output is waiting");
     s.runtime.afw_running=true;s.runtime.nr_running=true;s.runtime.heartbeat_ms=GetTickCount64()-2000;
-    check(interface_status_text(s).find("AFW: Active")==std::string::npos && interface_status_text(s).find("Neural Render: Active")==std::string::npos, "stale activity expires");
+    check(interface_status_text(s).find("AFW: Luke Ross")==std::string::npos && interface_status_text(s).find("Neural Render: Active")==std::string::npos, "stale activity expires");
     s.desired.afw_mode=0;s.desired.nr_enabled=false;
-    check(interface_status_text(s).find("AFW: Off | Neural Render: Off")!=std::string::npos, "switches off override recent activity");
+    check(interface_status_text(s).find("OSR: Off | Neural Render: Off")!=std::string::npos, "switches off override recent activity");
+    {
+        auto other=s;other.desired.afw_mode=3;other.desired.luke_osr=2;
+        other.runtime.luke_detected=false;other.runtime.afw_running=true;
+        other.runtime.afw_flat_scene=false;other.runtime.heartbeat_ms=1000;
+        check(interface_reconstruction_text(other,1001)=="OSR: Other","active reconstruction without Luke is Other");
+        other.runtime.luke_detected=true;
+        check(interface_reconstruction_text(other,1001)=="OSR: Luke Ross","active Luke reconstruction identifies its source");
+        other.desired.afw_mode=0;
+        check(interface_reconstruction_text(other,1001)=="OSR: Off","Off overrides a still-fresh running receipt");
+        other.desired.afw_mode=3;other.runtime.luke_detected=false;
+        check(interface_reconstruction_text(other,3000)=="OSR: Off","expired reconstruction source is Off");
+        other.runtime.afw_flat_scene=true;
+        check(interface_reconstruction_text(other,1001)=="OSR: Off","flat scene is not reconstructed stereo");
+        other.runtime.afw_flat_scene=false;other.desired.luke_osr=0;
+        check(interface_reconstruction_text(other,1001)=="AFW: Other","legacy AFW uses the same honest source classification");
+        check(interface_status_text(other,false).find("AFW:")==std::string::npos,"dedicated green source row is not duplicated in diagnostics");
+        other.desired.enabled=false;other.runtime.applied_revision=other.revision;other.runtime.pending=false;
+        other.runtime.heartbeat_ms=GetTickCount64();
+        check(interface_afw_only_active(other,GetTickCount64()),"actual Other reconstruction can be active without frame generation");
+    }
     s.runtime.generation_mode=0;s.runtime.motion_source=1;s.runtime.generation_state=GenerationState::invalid_guides;
     check(interface_state_text(s)=="Fallback", "actual optical-flow fallback");
     s.runtime.telemetry.updated_ms=GetTickCount64()-2000;

@@ -74,6 +74,7 @@ int main(int argc,char** argv){try{
     const unsigned green=0xff8ee05c, red=0xff6262ff;
     const auto good=rasterize_elliott_meter(active,now,false,false);
     const auto count=[](const auto& p,unsigned color){return std::count(p.begin(),p.end(),color);};
+    const auto count_top=[](const auto& p,unsigned color){return std::count(p.begin(),p.begin()+std::min<std::size_t>(p.size(),1024*206),color);};
     check(count(good,green)>100 && count(good,red)==0,"working OFXR label and counters must be green");
     auto optimizing=active;optimizing.desired.frame_generation=4;
     optimizing.runtime.generation_mode=4;optimizing.runtime.rife_optimizing=true;
@@ -115,12 +116,12 @@ int main(int argc,char** argv){try{
     check(autonomous::interface_state_text(optimization_disconnected)!="Optimizing, please wait" &&
         count(rasterize_elliott_meter(optimization_disconnected,now,false,false),yellow)==0,
         "a disconnected runtime cannot keep an optimization header visible");
-    check(autonomous::interface_status_text(active).find("OSR: N/A")!=std::string::npos,
+    check(autonomous::interface_status_text(active).find("OSR: Off")!=std::string::npos,
         "default OSR outside Luke must be not applicable");
     auto idle=active;idle.runtime.telemetry.generating=false;
     check(count(rasterize_elliott_meter(idle,now,false,false),red)>100,"non-generating meter red");
     auto disabled=active;disabled.desired.enabled=false;
-    check(count(rasterize_elliott_meter(disabled,now,false,false),green)==0,"disabled meter not green");
+    check(count_top(rasterize_elliott_meter(disabled,now,false,false),green)==0,"disabled generation header not green; valid reconstruction state is independent");
     auto neural=active;neural.desired.nr_enabled=true;
     check(count(rasterize_elliott_meter(neural,now,false,false),red)>100,"Neural on but idle red");
     neural.runtime.nr_running=1;
@@ -143,12 +144,19 @@ int main(int argc,char** argv){try{
     afw_only.desired.enabled=true;afw_only.runtime.pacing_mode=autonomous::kAfwOnlyPacingMode;
     check(count(rasterize_elliott_meter(afw_only,now,false,false),red)==0,"startup AFW-only bypass is also green");
     afw_only.runtime.afw_running=false;
-    check(count(rasterize_elliott_meter(afw_only,now,false,false),green)==0,"idle AFW-only never falsely reports green");
+    check(count_top(rasterize_elliott_meter(afw_only,now,false,false),green)==0,"idle AFW-only never falsely reports green");
     afw_only.runtime.afw_running=true;
-    check(count(rasterize_elliott_meter(afw_only,now+2100,false,false),green)==0,"stale AFW-only receipt never reports green");
+    check(count_top(rasterize_elliott_meter(afw_only,now+2100,false,false),green)==0,"stale AFW-only receipt never reports green");
     luke.desired.afw_mode=0;luke.runtime.afw_running=0;
     check(count(rasterize_elliott_meter(luke,now,false,false),red)==0,"AFW off neutral");
-    check(count(rasterize_elliott_meter(active,now+2100,false,false),green)==0,"stale meter not green");
+    check(count_top(rasterize_elliott_meter(active,now+2100,false,false),green)==0,"stale meter not green");
+    for(int source=0;source<3;++source) {
+        auto source_state=active;source_state.desired.afw_mode=source?3:0;source_state.desired.luke_osr=2;
+        source_state.runtime.luke_detected=source==1;source_state.runtime.afw_running=true;
+        const auto frame=rasterize_elliott_meter(source_state,now,false,false);
+        const auto first=frame.begin()+1024*214,last=frame.begin()+1024*236;
+        check(std::count(first,last,green)>10,"Off, Luke Ross and Other source rows are all green");
+    }
     check(rasterize_elliott_meter(s,1000,false,true)!=pixels,"UNORM linear palette conversion");
     check(rasterize_elliott_meter(s,1000,true,false)!=pixels,"BGRA channels supported");
     if(argc>1){auto preview=rasterize_elliott_meter(gpu_sample,1000,false,false,&bench_rows);

@@ -361,11 +361,12 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
         {value(m.cycle_length_ms,current&&m.cycle_valid,false),"Cycle length",metric_tone(m.cycle_valid)},
         {value(m.cycle_estimated_ms,current&&m.cycle_estimated_valid,false),"Cycle minimum",metric_tone(m.cycle_estimated_valid)}};
     const std::string vectors=std::string(autonomous::interface_vectors_text(state,now_ms));
-    const std::string explanation=autonomous::interface_status_text(state);
+    const std::string explanation=autonomous::interface_status_text(state,false);
+    const auto reconstruction=autonomous::interface_reconstruction_text(state,now_ms);
     const auto vector_rows=wrap(vectors,51), status_rows=wrap(explanation,51);
     const auto benchmark=elliott_benchmark_text(state,now_ms);
     const int rows_top=214+(benchmark.empty()?0:28), line_height=22;
-    const int count=std::min<int>(int(vector_rows.size()+status_rows.size()),(h-rows_top-8)/line_height);
+    const int count=std::min<int>(int(vector_rows.size()+status_rows.size()+1),(h-rows_top-8)/line_height);
     const int used=rows_top+count*line_height+8;
     if(used_height)*used_height=unsigned(used);
     Canvas c(w,h,bgra,linear);c.panel(used,16,2);
@@ -401,6 +402,7 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
         c.text(margin,y,label,body,PanelTone::dim);
         for(const auto& text:pieces){if(drawn++>=count)break;c.text(184,y,text,body,PanelTone::normal);y+=line_height;}
     };
+    if(drawn<count){c.text(margin,y,reconstruction,body,PanelTone::good);++drawn;y+=line_height;}
     rows("Vectors:",vector_rows);rows("Status:",status_rows);
     return c.take();
 }

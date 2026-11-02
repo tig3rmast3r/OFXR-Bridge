@@ -92,7 +92,9 @@ void status(const Snapshot& state) {
         ImGui::PopStyleColor();
     }
     ImGui::Text("Vectors: %s", interface_vectors_text(state, now).data());
-    const auto explanation = interface_status_text(state);
+    const auto reconstruction = interface_reconstruction_text(state,now);
+    ImGui::TextColored(ImVec4(.36F,.88F,.56F,1),"%.*s",static_cast<int>(reconstruction.size()),reconstruction.data());
+    const auto explanation = interface_status_text(state,false);
     ImGui::TextWrapped("Status: %s", explanation.c_str());
     ImGui::Separator();
 }
@@ -309,17 +311,25 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
 }
 
 bool framewarp(Settings& draft, const Snapshot& state) {
-    ImGui::TextWrapped("1. In the Luke Ross menu, set the render mode to Legacy AER.");
-    ImGui::TextWrapped("2. Turn off Camera rotation compensation where the Luke Ross menu offers it. With it on, turns in vehicles happen in steps.");
+    ImGui::TextWrapped("For Luke Ross: in the mod menu, set the render mode to Legacy AER.");
+    ImGui::TextWrapped("For Luke Ross: turn off Camera rotation compensation where offered. With it on, turns in vehicles happen in steps.");
     ImGui::Separator();
     bool changed=ImGui::Checkbox("Frame Reconstruction only (AFW or OSR, restart game)",&draft.afw_only);
-    ImGui::TextWrapped("Removes OFXR frame generation from the pipeline: each Luke Ross frame goes straight to the headset, and only the missing eye is reconstructed, by AFW or OSR below. The best choice for latency.");
+    ImGui::TextWrapped("Removes OFXR frame generation from the pipeline: each application frame goes straight to the headset, and only the missing eye is reconstructed, by AFW or OSR below. The best choice for latency.");
     if(state.connected && (state.runtime.pacing_mode==kAfwOnlyPacingMode)!=draft.afw_only)
         ImGui::TextWrapped("Frame Reconstruction only change saved. Restart the game to apply it.");
-    int reconstruction = draft.luke_osr==0 ? 1 : 0;
-    if (ImGui::Combo("Reconstruction", &reconstruction, "OSR\0AFW (legacy)\0")) {
-        draft.luke_osr = reconstruction==0 ? 2 : 0;
+    int reconstruction = draft.afw_mode==0 ? 0 : draft.luke_osr==2 ? 1 : 2;
+    if (ImGui::Combo("Reconstruction", &reconstruction, "Off\0OSR\0AFW\0")) {
+        if(reconstruction==0)draft.afw_mode=0;
+        else {
+            draft.luke_osr=reconstruction==1 ? 2 : 0;
+            if(draft.afw_mode==0)draft.afw_mode=3;
+        }
         changed = true;
+    }
+    if(draft.afw_mode==0) {
+        ImGui::TextWrapped("Stereo reconstruction is off. Frame generation and Neural Rendering remain independent.");
+        return changed;
     }
     ImGui::TextWrapped(draft.luke_osr==2
         ? "OSR (OFXR Stereo Reconstruction): OFXR renders the other eye itself from the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame for what the real eye cannot see. Applies live."
@@ -331,17 +341,17 @@ bool framewarp(Settings& draft, const Snapshot& state) {
         if (full_osr)
             ImGui::TextWrapped("Framewarp mode: Other eye only leaves out this eye's previous frame, for debugging. Debug framewarp tints previous-frame pixels green and inpainted pixels magenta.");
         if (full_osr) {
-            // Full OSR uses the previous frame in Previous frame and Combined
-            // alike: one On entry. Off is the only switch that stops the
-            // reconstruction, so it stays.
-            constexpr int modes[]{0,1,3};
-            int selected=draft.afw_mode==0 ? 0 : draft.afw_mode==1 ? 1 : 2;
-            if (ImGui::Combo("Framewarp mode", &selected, "Off\0Other eye only (for debug)\0On\0")) {
-                draft.afw_mode=modes[selected];changed=true;
+            int selected=draft.afw_mode==1 ? 0 : 1;
+            if (ImGui::Combo("Framewarp mode", &selected, "Other eye only (for debug)\0On\0")) {
+                draft.afw_mode=selected==0 ? 1 : 3;changed=true;
             }
-        } else
-            changed |= ImGui::Combo("Framewarp mode", &draft.afw_mode,
-                "Off\0Alternate eye (for debug)\0Previous frame (for debug)\0Combined\0");
+        } else {
+            int selected=std::clamp(draft.afw_mode-1,0,2);
+            if(ImGui::Combo("Framewarp mode", &selected,
+                "Alternate eye (for debug)\0Previous frame (for debug)\0Combined\0")) {
+                draft.afw_mode=selected+1;changed=true;
+            }
+        }
         if (draft.afw_mode == 3 && !full_osr) {
             constexpr int rates[]{0,4,8};
             int selected=draft.afw_shading_rate==8 ? 2 : draft.afw_shading_rate==4 ? 1 : 0;
@@ -355,7 +365,7 @@ bool framewarp(Settings& draft, const Snapshot& state) {
                 ImGui::TextWrapped("Quality change pending the next successful AFW evaluation. Current index: %d",state.runtime.afw_shading_rate);
         }
         changed |= ImGui::Checkbox("Debug framewarp", &draft.afw_debug);
-        ImGui::TextWrapped("Requires Luke Ross and RealVR.ini. Camera and stereo motion correction is always applied; same-eye history reconstructs the missing camera interval.");
+        ImGui::TextWrapped("Requires compatible source colour, depth and camera data. Luke Ross uses RealVR.ini; other compatible mods are reported as Other.");
         if (!full_osr) {
             if(draft.advanced_mode)changed |= ImGui::Checkbox("Clear before framewarp", &draft.afw_clear_before_warping);
             changed |= ImGui::SliderFloat("Ignore motion", &draft.afw_ignore_motion_threshold, 0, 16, "%.2f");

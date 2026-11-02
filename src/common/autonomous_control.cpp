@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 83701;
+constexpr std::uint32_t kAbi = 83801;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1356,7 +1356,7 @@ bool interface_generation_active(const Snapshot& s) noexcept {
 bool interface_afw_only_active(const Snapshot& s,std::uint64_t now) noexcept {
     const auto& r=s.runtime;
     return s.connected && r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000 &&
-        r.luke_detected && s.desired.afw_mode!=0 && r.afw_running &&
+        s.desired.afw_mode!=0 && r.afw_running &&
         (!s.desired.enabled || r.pacing_mode==kAfwOnlyPacingMode) && !r.pending && r.applied_revision==s.revision;
 }
 std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) noexcept {
@@ -1366,7 +1366,17 @@ std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) no
     if (value.other) return "Unclassified app swapchain: not observed in an eye or auxiliary layer. See handle and dimensions below.";
     return {};
 }
-std::string interface_status_text(const Snapshot& s) {
+std::string_view interface_reconstruction_text(const Snapshot& s,std::uint64_t now_ms) noexcept {
+    const auto& r=s.runtime;
+    if(!s.connected || s.desired.afw_mode==0)return "OSR: Off";
+    const bool osr=normalize_osr_reconstruction(s.desired.luke_osr)==2;
+    const bool active=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000 &&
+        r.afw_running && !r.afw_flat_scene;
+    if(!active)return osr?"OSR: Off":"AFW: Off";
+    if(osr)return r.luke_detected?"OSR: Luke Ross":"OSR: Other";
+    return r.luke_detected?"AFW: Luke Ross":"AFW: Other";
+}
+std::string interface_status_text(const Snapshot& s,bool include_reconstruction) {
     if (!s.connected) return "No active game";
     std::string result;
     const auto add = [&](std::string_view text) {
@@ -1420,10 +1430,7 @@ std::string interface_status_text(const Snapshot& s) {
     const bool runtime_fresh=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
     const auto generator=r.generation_mode==1 ? "FSR" : r.generation_mode==2 ? "DLSS-G" : "OFXR";
     add(std::string(generator)+(s.desired.enabled ? (generating ? ": Active" : ": Waiting") : ": Off"));
-    const char* afw_label=normalize_osr_reconstruction(s.desired.luke_osr)==2 ? "OSR" : "AFW";
-    add(!r.luke_detected ? std::string(afw_label)+": N/A" : s.desired.afw_mode==0 ? std::string(afw_label)+": Off" :
-        runtime_fresh && r.afw_flat_scene ? std::string(afw_label)+": 2D scene (no stereo source)" :
-        runtime_fresh && r.afw_running ? std::string(afw_label)+": Active" : std::string(afw_label)+": Waiting");
+    if(include_reconstruction)add(interface_reconstruction_text(s,now));
     add(!s.desired.nr_enabled ? "Neural Render: Off" : runtime_fresh && r.nr_running ? "Neural Render: Active" : "Neural Render: Waiting");
     return result;
 }
