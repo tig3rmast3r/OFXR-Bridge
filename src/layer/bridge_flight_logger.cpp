@@ -409,7 +409,18 @@ struct BridgeFlightLogger::Impl {
         }
         const bool fsr_description=record.operation>=BridgeFlightOperation::fsr_eye_binding &&
             record.operation<=BridgeFlightOperation::fsr_hudless_pair;
-        const bool benchmark = eye_changed || fsr_description ||
+        const bool pacing_receipt=record.operation==BridgeFlightOperation::presenter_transition &&
+            (record.result==5711 || record.result==5712 || record.result==5715 ||
+             record.result==5716 || record.result==5717 || record.result==5733 ||
+             record.result==5734 || record.result==5741 || record.result==5750 || record.result==5751);
+        const bool rife_timing=record.phase=='E' &&
+            (record.operation==BridgeFlightOperation::rife_pack_wait ||
+             record.operation==BridgeFlightOperation::rife_infer ||
+             record.operation==BridgeFlightOperation::rife_compose_wait ||
+             record.operation==BridgeFlightOperation::rife_worker ||
+             record.operation==BridgeFlightOperation::timing_worker_run ||
+             record.operation==BridgeFlightOperation::timing_publication_complete);
+        const bool benchmark = pacing_receipt || rife_timing || eye_changed || fsr_description ||
             record.operation==BridgeFlightOperation::fsr_recovery ||
             record.operation==BridgeFlightOperation::fsr_context_lifecycle ||
             record.operation == BridgeFlightOperation::benchmark_configuration ||

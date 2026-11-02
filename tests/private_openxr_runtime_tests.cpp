@@ -75,6 +75,7 @@ struct Fixture {
     std::atomic_bool native_should_render{true};
     std::atomic<std::int64_t> prediction_horizon_ns{};
     std::unordered_map<std::uint64_t,unsigned> window_renewals;
+    std::unordered_map<std::uint64_t,std::int64_t> copy_ready_times,native_wait_entries;
     std::vector<std::int64_t> native_windows;
     unsigned expected_views{1};
     unsigned native_image_count{2};
@@ -143,7 +144,7 @@ struct Fixture {
                 return xrfg::PrivatePhysicalClock{physical_origin+n*period,period,1000+static_cast<std::uint64_t>(n)};
             };
         }
-        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t margin){if(stage==10){if(margin)++pending_source_events;++source_ready_events;}if(stage==19)work_margins.push_back(margin);if(stage==11)refill_margins.push_back(margin);if(stage==17)native_margins.push_back(margin);if(stage==18)wait_input_ordinal=seq;if(stage==25)++window_renewals[seq];if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
+        options.trace=[this](int stage,std::uint64_t seq,std::int64_t at,std::int64_t margin){if(stage==5)copy_ready_times[seq]=ns();if(stage==7)native_wait_entries[seq]=at;if(stage==10){if(margin)++pending_source_events;++source_ready_events;}if(stage==19)work_margins.push_back(margin);if(stage==11)refill_margins.push_back(margin);if(stage==17)native_margins.push_back(margin);if(stage==18)wait_input_ordinal=seq;if(stage==25)++window_renewals[seq];if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
         const auto original_trace=options.trace;
         options.trace=[this,original_trace](int stage,std::uint64_t seq,std::int64_t at,std::int64_t margin) {
             original_trace(stage,seq,at,margin);
@@ -1353,6 +1354,31 @@ void director_scope_and_pair_checks(bool d12) {
     check(!f.cycle_waited && !f.cycle_begun,"isolated route changes balance native cycles");
     std::printf("Director-only %s: V819 Framework normal/Buffer, no normal-mode bursts, exact images PASS\n",d12?"D12":"D11");
 }
+void rife_ready_clock_checks(bool d12,bool directed,std::size_t capacity) {
+    native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=true;native_director_only_fixture_mode=true;
+    Fixture f(d12,true,{},false,true,false,capacity,true);f.unblock();f.throttled=false;
+    xr_ok(f.transport->set_director_enabled(directed),"RIFE selected delivery policy");
+    f.transport->set_ready_clock(true);check(f.transport->ready_clock_enabled(),"RIFE ready-clock active");
+    f.prediction_horizon_ns=period*3;f.prediction_age_limit=period+500'000;
+    f.slow_image_wait_ms=20; // exceeds one90Hz interval, like a late RIFE copy
+    const auto chain=f.make_chain();std::vector<unsigned> expected;
+    for(unsigned n=0;n<8;++n){
+        const auto value=35+n*7;expected.push_back(value);f.write(chain,value);f.begin_virtual();
+        xr_ok(f.submit(chain,float(n)),"RIFE ready-clock source retained");f.wait_count(n+1);
+    }
+    xr_ok(f.transport->drain(),"RIFE ready-clock drain");f.transport->stop();
+    check(f.pixels==expected && f.real_ends==8,"RIFE ready-clock preserves every exact GPU image");
+    check(f.discarded_clocks==0,"RIFE preparation must not age and replace each native cycle");
+    for(const auto& [seq,ready]:f.copy_ready_times){
+        check(f.native_wait_entries.contains(seq),"every prepared image has a native cycle receipt");
+        check(f.native_wait_entries.at(seq)>=ready,"RIFE native Wait started before this image copy completed");
+    }
+    check(f.copy_ready_times.size()==8,"all RIFE prepared images checked");
+    check(!f.cycle_waited && !f.cycle_begun,"RIFE stop balances all native cycles");
+    f.transport->set_ready_clock(false);check(!f.transport->ready_clock_enabled(),"ordinary OFXR clock policy restored");
+    std::printf("RIFE ready clock %s %s capacity%zu:8exact outputs, zero age renewals, native Wait after copy PASS\n",
+        d12?"D12":"D11",directed?"Director":"Framework",capacity);
+}
 void director_aged_cycle_checks(bool d12,bool corrected=true) {
     native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=true;native_director_only_fixture_mode=corrected;
     Fixture f(d12,true,{},false,true,false,2);f.unblock();f.throttled=false;
@@ -1441,6 +1467,11 @@ void queue_priority_policy() {
 }
 }
 int main(int argc,char** argv){
+if(argc>1 && std::string_view(argv[1])=="rife-ready-clock"){
+    for(bool d12:{false,true})for(bool directed:{false,true})for(std::size_t capacity:{2u,3u})rife_ready_clock_checks(d12,directed,capacity);
+    return 0;
+}
+
 if(argc>1 && std::string_view(argv[1])=="director-native-buffer"){native_contract_fixture_mode=true;native_director_only_fixture_mode=true;native_adaptive_wait_fixture_mode=false;adaptive_buffer_test(true,true);adaptive_buffer_test(true,false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="director-buffer-capacity"){director_buffer_capacity_checks(false);director_buffer_capacity_checks(true);return 0;}
 if(argc>1 && std::string_view(argv[1])=="director-normal-capacity"){director_normal_capacity_checks(false);director_normal_capacity_checks(true);return 0;}

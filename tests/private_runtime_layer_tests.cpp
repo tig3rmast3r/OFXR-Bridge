@@ -1554,6 +1554,7 @@ int main(int argc,char** argv) {
     if(rife_factor){
         if(rife_luke) {
             const auto generation=find_swapchain(chain)->frame_generation;
+            check(state->private_runtime->ready_clock_enabled(),"shipping RIFE route did not enable prepared native clocks");
             check(generation && generation->afw_temporal_synthesizer && generation->isolated_luke_synthesis &&
                 generation->asynchronous_luke_rife,
                 "RIFE Luke bypassed completed post-AFW history or isolated queue");

@@ -108,6 +108,7 @@ struct PrivateOpenXrRuntime::Impl {
     Options options;
     std::atomic_bool director_enabled{true};
     std::atomic_bool buffered{};
+    std::atomic_bool ready_clock{};
     std::atomic_bool stable_phase{};
     std::uint64_t policy_epoch{}; // under accept_mutex
     std::mutex mutex,accept_mutex,copy_mutex,stop_mutex;
@@ -163,6 +164,7 @@ struct PrivateOpenXrRuntime::Impl {
     HANDLE timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
     HANDLE wait_timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
     explicit Impl(Options input):options(std::move(input)),director_enabled(options.director_enabled),buffered(options.adaptive_buffer && options.capacity==3),stable_phase(options.capacity>=3) {
+        ready_clock=options.native_frame_contract && options.native_wait_for_prepared;
         requested_capacity=options.capacity;
         options.capacity=delivery_capacity(requested_capacity,options.director_enabled);stable_phase=options.capacity>=3;
     }
@@ -522,7 +524,8 @@ struct PrivateOpenXrRuntime::Impl {
             WaitJob job;
             {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping ||
                 (wait_job && (wait_job->accepted_ordinal==0 ||
-                    ((director_enabled.load() || buffered.load())?accepted_packets>=wait_job->accepted_ordinal:!prepared.empty())));});
+                    (ready_clock.load() ? !prepared.empty() :
+                     (director_enabled.load() || buffered.load()) ? accepted_packets>=wait_job->accepted_ordinal : !prepared.empty())));});
              if(stopping)break;job=*wait_job;wait_job.reset();wait_active=true;}
             if(!sleep_until(job.target,1'250'000,true)) {
                 std::scoped_lock lock(mutex);wait_active=false;break;
@@ -741,9 +744,9 @@ struct PrivateOpenXrRuntime::Impl {
             if(XR_FAILED(result) && !stopping)fail(result);
             if(!stopping && !post_wait(0))fail(XR_ERROR_CALL_ORDER_INVALID);
             while(!stopping) {
-                // Start the runtime clock as soon as owned input exists. Image
-                // acquisition/copy/GPU waits run on the independent preparer,
-                // concurrently with WaitFrame and the physical cadence clock.
+                // Ordinary OFXR overlaps native Wait with preparation. RIFE
+                // waits for the prepared FIFO head instead: paired GPU work
+                // must not age a native cycle before its image can be used.
                 {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || pending;});if(stopping)break;}
                 const auto physical=period(prediction.predictedDisplayPeriod);
                 schedule.period(physical);
@@ -809,7 +812,7 @@ struct PrivateOpenXrRuntime::Impl {
                         options.trace(30,packet->sequence,director_buffer.reserve(),refill);
                     bool early{};
                     {std::scoped_lock lock(mutex);
-                     early=stabilization_active && prediction.shouldRender &&
+                     early=!ready_clock.load() && stabilization_active && prediction.shouldRender &&
                          options.native_adaptive_wait_lookahead && refresh_wait_policy.enabled(clock_ns());}
                     // A normal Wait can return immediately after preparation
                     // held the prior clock for an entire pair. Do not drain the
@@ -1257,6 +1260,16 @@ XrResult PrivateOpenXrRuntime::drain() {
     auto& s=*impl_;std::unique_lock lock(s.mutex);
     s.changed.wait(lock,[&]{return s.stopping || (!s.pending && !s.outstanding_reservations);});return s.failure;
 }
+void PrivateOpenXrRuntime::set_ready_clock(bool enabled) noexcept {
+    auto& s=*impl_;
+    {std::scoped_lock lock(s.mutex);
+     enabled=enabled && s.options.native_frame_contract;
+     if(s.ready_clock.exchange(enabled)==enabled)return;
+     s.refresh_wait_policy=PrivateRefreshWaitPolicy{};}
+    s.changed.notify_all();
+    try{s.trace(41,enabled?1:0);}catch(...){}
+}
+bool PrivateOpenXrRuntime::ready_clock_enabled() const noexcept {return impl_->ready_clock.load();}
 XrResult PrivateOpenXrRuntime::set_director_enabled(bool enabled) {
     auto& s=*impl_;std::scoped_lock accept(s.accept_mutex);
     std::unique_lock lock(s.mutex);

@@ -16273,6 +16273,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     // held phase or sole-director framework policy may remain effective OFF.
     state->menu_enabled = SUCCEEDED(result) && control.desired.enabled;
     if(state->private_runtime) {
+        state->private_runtime->set_ready_clock(state->menu_enabled && options.rife_model>=0);
         const auto buffer=state->private_runtime->set_buffer_capacity(control.desired.increase_buffer?3:2,state->menu_enabled,true);
         if(XR_FAILED(buffer)) {result=E_FAIL;state->menu_enabled=false;}
         const auto policy=state->private_runtime->set_director_enabled(
