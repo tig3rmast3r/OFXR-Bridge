@@ -92,6 +92,7 @@ struct Reader {
     LukeOriginBars bar_candidate{};
     unsigned bar_agree{};
     std::uint64_t bar_extent{};
+    std::uint64_t last_used{}; // GetTickCount64 of the last get_reader, under the cache mutex
     ~Reader() { if (event) CloseHandle(event); }
 };
 // Three sleeping helpers plus the caller: bounded CPU parallelism, no frame
@@ -191,9 +192,28 @@ HRESULT get_uploads(ID3D12Device* device, DXGI_FORMAT format, UINT height,
 }
 HRESULT get_reader(ID3D12CommandQueue* queue, std::shared_ptr<Reader>& output) {
     auto& c = cache(); std::scoped_lock lock(c.mutex);
+    const auto now = GetTickCount64();
     for (const auto& candidate : c.readers)
-        if (candidate->queue.Get() == queue) { output = candidate; return S_OK; }
-    if (c.readers.size() >= 8) return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
+        if (candidate->queue.Get() == queue) { candidate->last_used = now; output = candidate; return S_OK; }
+    if (c.readers.size() >= 8) {
+        // Each OpenXR session brings its own queue, and REAL VR recreates the
+        // session on every resolution or DLSS mode change. Retire the least
+        // recently used reader nobody holds whose last copy has completed;
+        // the cache owns its only reference, so no read is in flight.
+        auto victim = c.readers.end();
+        for (auto it = c.readers.begin(); it != c.readers.end(); ++it) {
+            const auto& reader = *it;
+            if (reader.use_count() != 1) continue;
+            const auto completed = reader->fence->GetCompletedValue();
+            if (completed != UINT64_MAX && completed < reader->last_fence) continue;
+            if (victim == c.readers.end() || reader->last_used < (*victim)->last_used) victim = it;
+        }
+        if (victim == c.readers.end()) return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
+        // 1194: origin reader retired; b = its queue, c = ms since its last use.
+        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage, S_OK, 1194,
+            reinterpret_cast<std::uint64_t>((*victim)->queue.Get()), now - (*victim)->last_used);
+        c.readers.erase(victim);
+    }
     if (queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return E_INVALIDARG;
     auto created = std::make_shared<Reader>(); created->queue = queue;
     HRESULT result = queue->GetDevice(IID_PPV_ARGS(created->device.GetAddressOf()));
@@ -207,6 +227,7 @@ HRESULT get_reader(ID3D12CommandQueue* queue, std::shared_ptr<Reader>& output) {
     if (FAILED(result)) return result;
     created->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!created->event) return HRESULT_FROM_WIN32(GetLastError());
+    created->last_used = now;
     c.readers.push_back(created); output = std::move(created);
     return S_OK;
 }
