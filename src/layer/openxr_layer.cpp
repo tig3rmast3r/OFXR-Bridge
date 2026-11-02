@@ -1715,6 +1715,12 @@ unsigned rife_frames(const SessionState& state) noexcept {
     return state.nvidia_options.rife_model>=0 && rife_multiframe_capable(state)
         ? static_cast<unsigned>(std::clamp(state.nvidia_options.rife_multiplier,2,4)):2U;
 }
+// RIFE owns its temporal history independently of the output descriptor.
+// Publish completed B without waiting for the next application source. This
+// changes output retention only; Framework retains its own presentation clock.
+[[nodiscard]] bool independent_synthesis_anchor(const SessionState& state) noexcept {
+    return single_director_pacing(state) || (state.menu_enabled && rife_frames(state)>2);
+}
 // Capacity follows the selected multiplier, even during a disabled/drained control transaction.
 [[nodiscard]] bool extra_output_capacity(const SessionState& state) noexcept {
     if(rife_frames(state)>2)return true;
@@ -9952,11 +9958,11 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                 state->presenter_condition.wait(lock, [&] {
                     return state->presenter_stop_requested || XR_FAILED(state->presenter_failure) ||
                         !state->presenter_submissions.empty() ||
-                        (state->three_slots.releasable(state->director_draining || single_director_pacing(*state)) &&
+                        (state->three_slots.releasable(state->director_draining || independent_synthesis_anchor(*state)) &&
                          state->three_slots.slot(0)->value->frame);
                 });
                 if (state->presenter_stop_requested || XR_FAILED(state->presenter_failure)) break;
-                if (state->three_slots.releasable(state->director_draining || single_director_pacing(*state)) &&
+                if (state->three_slots.releasable(state->director_draining || independent_synthesis_anchor(*state)) &&
                     state->three_slots.slot(0)->value->frame) {
                     selected = state->three_slots.slot(0)->value;
                     state->presenter_inflight_frame = selected->frame;
@@ -10278,7 +10284,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                     if(!repeat_held) {
                         if(XR_SUCCEEDED(result) && djules_deep_active(*state))
                             djules_last_owned=selected->frame;
-                        static_cast<void>(state->three_slots.release_front(state->director_draining || single_director_pacing(*state)));
+                        static_cast<void>(state->three_slots.release_front(state->director_draining || independent_synthesis_anchor(*state)));
                     }
                 } else {
                     borrowed->result = result;
@@ -13343,7 +13349,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 if (job->pair) {
                     // With immediate real delivery there may be no retained A.
                     // Align B beside its S slots, without requiring another input.
-                    if (single_director_pacing(*state) && !state->three_slots.slot(0))
+                    if (independent_synthesis_anchor(*state) && !state->three_slots.slot(0))
                         static_cast<void>(state->three_slots.shift_empty());
                     // A may still be inside downstream EndFrame. Never replace
                     // its descriptor until the director has acknowledged it.
@@ -13381,7 +13387,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                     for(std::size_t i=1;i<state->three_slots.capacity();++i)
                         static_cast<void>(state->three_slots.shift_empty());
                 }
-                if (single_director_pacing(*state)) {
+                if (independent_synthesis_anchor(*state)) {
                     // No additional ready-pair backlog. The endpoint credit is the
                     // only delivery admission; retain this batch until accepted,
                     // not until native EndFrame/display. The app may render ahead.
@@ -14148,14 +14154,14 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         lock.lock();
         if (XR_FAILED(state->presenter_failure)) return state->presenter_failure;
         if (state->presenter_stop_requested) return XR_ERROR_SESSION_NOT_RUNNING;
-        job->pair = single_director_pacing(*state)
+        job->pair = independent_synthesis_anchor(*state)
             ? metadata_pairable && state->director_anchor_sequence != 0
             : !state->three_slots.empty();
         job->triple=djules_triple_director(*state);
         job->quad=job->triple && rife_frames(*state)==4;
         job->current->source_sequence = state->next_source_sequence++;
         job->current->previous_sequence = job->pair
-            ? single_director_pacing(*state) ? state->director_anchor_sequence
+            ? independent_synthesis_anchor(*state) ? state->director_anchor_sequence
                 : state->three_slots.slot(0)->value->source_sequence : 0;
         state->director_anchor_sequence = job->current->source_sequence;
         // One atomic handoff starts generation AND makes A eligible for the

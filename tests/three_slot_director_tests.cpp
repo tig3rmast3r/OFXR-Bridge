@@ -2379,6 +2379,7 @@ void test_rife_layer_multiframe_contract() {
     for(int multiplier:{2,3,4})for(int fast:{0,1}){
         state->nvidia_options.rife_multiplier=multiplier;state->lower_vram=fast;state->separate_synthesis=fast;
         check(rife_multiframe_capable(*state),"native private RIFE capability");
+        check(independent_synthesis_anchor(*state)==(multiplier>2),"RIFE ready real retained until a future source or2X retention changed");
         check(native_frame_multiplier(*state)==multiplier,"RIFE factor lost in layer policy");
         check(multiplier==2 || (native_synthetic_rings(*state)==multiplier-1 && native_current_rings(*state)==2),"RIFE output storage aliases or overallocates");
         if(multiplier>2)check(three_slot_generation_session(state),"RIFE multi missing ordered worker");
@@ -2412,8 +2413,10 @@ void test_rife_layer_multiframe_contract() {
         frame->native_results[0]->generated(frame->native_output) && frame->direct_synthetic_leases.size()==1,"RIFE native receipts or image leases lost");
     state->nvidia_options.rife_model=-1;state->djules_route=false;state->djules_triple_requested=false;
     check(native_frame_multiplier(*state)==2,"RIFE factor leaked to ordinary OFXR");
+    check(!independent_synthesis_anchor(*state),"RIFE detached anchor leaked to ordinary Framework");
     state->nvidia_options.rife_model=3;state->private_runtime.reset();
     check(!rife_multiframe_capable(*state),"legacy interop incorrectly claims RIFE multi support");
+    check(!independent_synthesis_anchor(*state),"legacy/interop real retention changed");
     std::cout<<"RIFE layer:2X/3X/4X clocks, Fast on/off pools and all three delivery receipts PASS\n";
 }
 

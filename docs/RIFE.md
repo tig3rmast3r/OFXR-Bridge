@@ -200,3 +200,24 @@ before GPU work. RIFE multi-output now always samples1/3,2/3 or1/4,1/2,3/4.
 Provider validity checks remain intact. This does not change the selected
 inference resolution, including1/6, full-resolution colour, RIFE2X, other
 engines, physical pacing or buffer counts. V740 first-error capture is retained.
+
+
+V742 releases a completed RIFE3X/4X real B without waiting for another
+application source in Framework mode. RIFE already owns the previous source
+in its synthesizer history; retaining the output descriptor is redundant.
+The detached source-sequence anchor preserves the next interpolation pair
+while the ready S1/S2/[S3]/B batch retires in order. The existing admission
+wait still prevents overlapping writes to owned output images.
+
+No extra private images, XR swapchains, model copies, GPU work or pacing
+queues are added. Director already uses this release policy, so its timing
+is unchanged. RIFE2X, ordinary engines, legacy/interop and AFW are unchanged;
+spatial inference1/6 and the fixed V741 temporal fractions remain intact.
+
+The actual-layer GPU test pauses new source submission midstream and verifies
+that every ready output, including real B, reaches native EndFrame without a
+drain/control command. Resuming verifies temporal order; live2->3->4->3->2
+transitions remain covered. Repeated3736x3424-per-eye4.4/1/6 comparisons with
+a mocked90Hz native consumer reduce source-End-to-native-End median latency
+by about13ms in3X and19ms in4X, with equal output counts and private VRAM.
+Those are component test results; game/headset confirmation remains pending.

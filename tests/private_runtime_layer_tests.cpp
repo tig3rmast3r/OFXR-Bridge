@@ -111,12 +111,20 @@ int main(int argc,char** argv) {
         std::puts("OSR fresh/held terminal metadata, unchanged source/orientation/FOV/time and legacy PASS");return 0;
     }
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
+    const bool rife_tail=route.starts_with("rife-tail");
+    const unsigned rife_tail_factor=route.find("tail3")!=std::string::npos?3:4;
+    const bool rife_latency=route.find("rife-latency")!=std::string::npos;
+    const unsigned rife_latency_factor=route.find("latency3")!=std::string::npos?3:4;
     const bool rife_report=route=="rife-report";
     const bool rife_replay=route=="rife-replay";
     const bool rife_switch=route.starts_with("rife-switch");
+    const bool rife_stress=route.find("stress")!=std::string::npos;
+    const bool rife_large=route.find("headset")!=std::string::npos;
+    const bool rife_buffer3=route.find("buffer3")!=std::string::npos;
+    const unsigned rife_phase_frames=rife_stress?64:12;
     const int rife_pacing=route.ends_with("director")?1:0;
     const bool rife_fast=route.find("fast")!=std::string::npos;
-    const unsigned rife_factor=(rife_report||rife_replay)?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
+    const unsigned rife_factor=rife_tail?rife_tail_factor:rife_latency?rife_latency_factor:(rife_report||rife_replay)?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
     if(rife_factor)route="new";
 
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
@@ -156,7 +164,7 @@ int main(int argc,char** argv) {
     if(benchmark_sequence)route=benchmark_dlssg_sequence?"solo-dlssg3":"solo-djules3";
     const bool off_session_probe=route=="off-pacing-session";if(off_session_probe)route="session";
     framework_session_probe=route=="framework-session";if(framework_session_probe)route="session";
-    const bool measured=route.starts_with("metrics-");if(measured)route=route.substr(8);
+    const bool measured=route.starts_with("metrics-")||rife_latency;if(route.starts_with("metrics-"))route=route.substr(8);
     if(route.starts_with("no-origin-"))route=route.substr(10);
     const bool deep=route.starts_with("deep-");if(deep)route=route.substr(5);
     const bool toggling=route.starts_with("toggle-");if(toggling)route=route.substr(7);
@@ -237,6 +245,7 @@ int main(int argc,char** argv) {
     ComPtr<ID3D12Debug> debug;
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     Fixture f(native12);f.transport->stop();if(route!="memory" && route!="scope" && !framework_session_probe)f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
+    if(rife_latency)f.frame_wait_us=[](unsigned){return 11111;};
     if(rife_factor)f.prediction_horizon_ns=period*3; // cold-model/GPU-load fixture, unchanged physical refresh
 
     f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
@@ -789,7 +798,7 @@ int main(int argc,char** argv) {
     // SDK limited to one generated frame it would instead test an unrelated
     // prefer_fps scheduling change while repeating the same 2X Fast policy.
     const unsigned benchmark_policy_phases=benchmark_dlssg_sequence && !benchmark_dlssg_transition && state->native_dlss_generated_frames<2?6:7;
-    const unsigned input_count=rife_switch?60:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:8;
+    const unsigned input_count=rife_latency?64:rife_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:8;
     if(benchmark_sequence) {
         std::fprintf(stderr,"BENCH policies=%u real_inputs=%u actual_3x_to_2x_transition=%u explicit_prefer_fps_transition_diagnostic=%u memory_sampling=%s\n",
             benchmark_policy_phases,input_count,unsigned(benchmark_policy_phases==7 &&
@@ -798,6 +807,7 @@ int main(int argc,char** argv) {
             completed_frame_memory?"completed-frame-drain":"overlapped-phase-drain");std::fflush(stderr);
     }
     std::vector<std::shared_ptr<xrfg::InterfaceCycle>> measured_cycles;
+    std::vector<std::int64_t> rife_source_ends;
     std::optional<XrTime> rife_replay_time;
     unsigned rife_phase_start{};
     unsigned rife_phase_factor=rife_factor;
@@ -885,6 +895,7 @@ int main(int argc,char** argv) {
             check(xrfg_fixture::request_control(desired),"request route hot handoff");
             ok(apply_embedded_control(state),"apply route hot handoff");check(state->private_runtime==f.transport,"route switch must retain one common distributor");
         }
+        if(rife_latency)std::this_thread::sleep_for(16ms);
         std::fprintf(stderr,"frame %u write (physical=%u)\n",n,f.real_ends.load());
         const auto color=((n-1)%8+1)*20;f.write(chain,color);if(split_eyes)f.write(right,color+7);
         if(panel_test)f.write(panel_chain,30+n);
@@ -911,6 +922,7 @@ int main(int argc,char** argv) {
             if(rife_replay_time)end.displayTime=*rife_replay_time+(n%2?34'935'700:34'294'989);
             rife_replay_time=end.displayTime;
         }
+        if(rife_latency)rife_source_ends.push_back(xrfg::interface_clock_ns());
         if(hfw) std::fprintf(stderr,"HFW before%u active%u worker%u request%u forbidden%u mode%u enabled%u\n",n,
             unsigned(continuous_presenter_active(state)),unsigned(state->three_slot_director),unsigned(state->presenter_start_requested),
             unsigned(presenter_forbidden(*state)),unsigned(state->single_director_requested.load()),unsigned(state->menu_enabled.load()));
@@ -941,6 +953,15 @@ int main(int argc,char** argv) {
         } else {
             const auto submitted=layer_end_frame_impl(state->handle,&end);
             if(!(rife_report && n==6))xr_ok(submitted,"shipping OFXR End handoff");
+        }
+        if(rife_tail && (n==4 || n==8)) {
+            // No drain request, extra source, control change or Director clock:
+            // completed B must reach native End while the producer is stopped.
+            xr_ok(wait_for_synthesis_handoff(state),"RIFE ready batch independent of a future source");
+            const unsigned expected=2+(n-2)*rife_factor;
+            f.wait_count(expected);
+            check(f.real_ends==expected,"RIFE tail repeated or lost an output");
+            std::printf("RIFE_NO_FUTURE factor=%u source=%u outputs=%u PASS\n",rife_factor,n,f.real_ends.load());
         }
         if(rife_report && n==6) {
             check(XR_FAILED(wait_for_synthesis_handoff(state)),"injected impossible4X batch must fail");
@@ -1064,7 +1085,35 @@ int main(int argc,char** argv) {
         if(elapsed+native_entry_sampling_slop<period)std::fprintf(stderr,"handoff interval%lldns required%lldns (native entry sampling5us)\n",elapsed,period);
         check(elapsed+native_entry_sampling_slop>=period,"native callback cadence exceeds5us pre-call sampling uncertainty");
     }
-    if(measured) {
+    if(rife_latency) {
+        std::vector<double> latency,minimum;
+        for(std::size_t i=8;i+4<measured_cycles.size() && i<rife_source_ends.size();++i) {
+            bool required{};xrfg::InterfaceNativeTiming native;
+            if(measured_cycles[i]->native_timing(required,native) && native.returned_ns>=rife_source_ends[i]) {
+                latency.push_back(double(native.returned_ns-rife_source_ends[i])*1e-6);
+                float cycle{};if(measured_cycles[i]->read_minimum_cycle(native.returned_ns,cycle))minimum.push_back(cycle);
+            }
+        }
+        check(latency.size()>=32,"RIFE latency probe lacks same-source native delivery receipts");
+        std::sort(latency.begin(),latency.end());std::sort(minimum.begin(),minimum.end());
+        const auto native_outputs=f.real_ends.load();
+        const auto first_native=std::min(f.handoffs.size()-1,std::size_t(8*rife_factor));
+        const auto last_native=f.handoffs.size()-std::min(f.handoffs.size()-1,std::size_t(4*rife_factor))-1;
+        const double native_fps=double(last_native-first_native)*1e9/double(f.handoffs[last_native]-f.handoffs[first_native]);
+        const auto generation=find_swapchain(chain)->frame_generation;
+        std::uint64_t synthetic_bytes{};unsigned private_images{};
+        for(unsigned i=0;i<generation->synthetic_runtime_rings;++i) {
+            unsigned count{};xr_ok(f.transport->enumerate_images(generation->synthetic[i].handle,0,&count,nullptr),"private VRAM count");
+            std::vector<XrSwapchainImageD3D12KHR> resources(count,{XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+            xr_ok(f.transport->enumerate_images(generation->synthetic[i].handle,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(resources.data())),"private VRAM resources");
+            for(auto& resource:resources){const auto desc=resource.texture->GetDesc();synthetic_bytes+=f.device12->GetResourceAllocationInfo(0,1,&desc).SizeInBytes;}
+            private_images+=count;
+        }
+        std::printf("RIFE_RESOURCE fps=%.4f native_chains=%zu synthetic_images=%u synthetic_MiB=%.4f\n",native_fps,f.chains.size(),private_images,double(synthetic_bytes)/1048576.);
+        std::printf("RIFE_LATENCY factor=%u pacing=%d fast=%u buffer=%u samples=%zu median_ms=%.4f p95_ms=%.4f min_ms=%.4f max_ms=%.4f cycle_ms=%.4f outputs=%u\n",
+            rife_factor,rife_pacing,unsigned(rife_fast),unsigned(rife_buffer3?3:2),latency.size(),latency[latency.size()/2],latency[latency.size()*95/100],latency.front(),latency.back(),minimum.empty()?0:minimum[minimum.size()/2],native_outputs);
+    }
+    if(measured && !rife_latency) {
         // Refresh observations after physical FIFO drain. This is test-only CPU
         // time; no timing policy or sleep is added to the production director.
         std::this_thread::sleep_for(260ms);
