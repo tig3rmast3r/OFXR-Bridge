@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.841.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.842.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2012,6 +2012,22 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/gta-headlock-quality" -DTITLE=GTAVE
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
   set_tests_properties(xrfg_luke_gta_headlock_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1")
+  foreach(headlock 0 1)
+    set(osr_pose_title KCD2)
+    if(headlock)
+      set(osr_pose_title GTAVE)
+    endif()
+    add_test(NAME xrfg_osr_gta_pose_${headlock} COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+        "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/osr-gta-pose-${headlock}" "-DTITLE=${osr_pose_title}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+    if(headlock)
+      set_tests_properties(xrfg_osr_gta_pose_${headlock} PROPERTIES ENVIRONMENT "XRFG_TEST_OSR_HEADLOCK_POSE=1;XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1;XRFG_TEST_GTA_EYE_REFERENCE=1")
+    else()
+      set_tests_properties(xrfg_osr_gta_pose_${headlock} PROPERTIES ENVIRONMENT "XRFG_TEST_OSR_HEADLOCK_POSE=1")
+    endif()
+    set_tests_properties(xrfg_osr_gta_pose_${headlock} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+  endforeach()
   add_test(NAME xrfg_luke_gta_current_scene_quality COMMAND "${CMAKE_COMMAND}"
       "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_current_scene_quality" -DTITLE=GTAVE -DSHADING_RATE=0

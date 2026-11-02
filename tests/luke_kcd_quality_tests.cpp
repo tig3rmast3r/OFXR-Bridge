@@ -231,6 +231,7 @@ int main(int argc,char** argv) {try {
     using namespace quality;
     require(argc>=2 && argc<=4,"provider path argument missing");
     native_peer_camera=GetEnvironmentVariableW(L"XRFG_TEST_GTA_HEADLOCK",nullptr,0)!=0;
+    const bool osr_pose_test=GetEnvironmentVariableW(L"XRFG_TEST_OSR_HEADLOCK_POSE",nullptr,0)!=0;
     current_scene_test=GetEnvironmentVariableW(L"XRFG_TEST_GTA_CURRENT_SCENE",nullptr,0)!=0;
     calibration_recovery_test=GetEnvironmentVariableW(L"XRFG_TEST_GTA_CALIBRATION_RECOVERY",nullptr,0)!=0;
     eye_reference_test=GetEnvironmentVariableW(L"XRFG_TEST_GTA_EYE_REFERENCE",nullptr,0)!=0;
@@ -287,6 +288,7 @@ int main(int argc,char** argv) {try {
     bool all_camera_bits_match=true,all_mode_pixels_match=true;
     std::vector<double> epoch_return_ms;
     for(const auto& initial_scene:scenes) for(unsigned span:{1u,2u}) for(int mode:{1,2,3}) {
+        if(osr_pose_test && (std::string_view(initial_scene.name)!="full" || span!=2 || mode!=3))continue;
         if(consumer_probe && (std::string_view(initial_scene.name)!="full" || span!=2 || mode!=3))continue;
         xrfg::LukeAfwSynthesizer synth;check(synth.initialize(device.Get(),queue.Get(),std::filesystem::path(argv[1])),"full AFW provider initialization");
         std::vector<std::shared_ptr<DlssMotionVectorFrame>> frames;
@@ -418,6 +420,10 @@ int main(int argc,char** argv) {try {
             for(unsigned i=0;i<16;++i)basis_error=std::max(basis_error,double(std::abs(sdk_camera.source_view_to_world.values[i]-current.inverse_view[i])));
             basis_bits_match&=!std::memcmp(sdk_camera.source_view_to_world.values,current.inverse_view.data(),sizeof(current.inverse_view));
             xrfg::embedded::AfwSettings settings{};settings.mode=mode;settings.depth_dilate_mode=0;settings.shading_rate=shading==9 ? (mode==3 ? std::array{0,4,8,0}[(n-3)/4%4] : 0) : shading;
+            // These established quality cases exercise the actual provider.
+            // OSR became the UI default after they were written; select the
+            // intended renderer explicitly rather than silently changing them.
+            settings.osr=osr_pose_test?2:0;
             const unsigned divisor=mode==3 ? (settings.shading_rate==4?2u:settings.shading_rate==8?4u:1u):1u;
             provider.expected_shading_rate=upstream_rates[divisor>1 ? 0 : (mode==3 ? settings.shading_rate : 0)];
             provider.calls=0;provider.valid=true;
@@ -430,9 +436,16 @@ int main(int argc,char** argv) {try {
             provider.expected_gain_x*=float((scene.color_width+divisor-1)/divisor)/float(scene.color_width);
             provider.expected_gain_y*=float((scene.color_height+divisor-1)/divisor)/float(scene.color_height);
             const auto cpu_begin=std::chrono::steady_clock::now();
-            check(synth.synthesize(source.Get(),destination.Get(),*frame,source_view,destination_view,eye,float(baseline),settings,native_peer_camera),"actual full rotated AFW synthesis");
+            std::optional<xrfg::Vec3> reconstructed_position;
+            check(synth.synthesize(source.Get(),destination.Get(),*frame,source_view,destination_view,eye,float(baseline),settings,native_peer_camera,&reconstructed_position),"actual full rotated AFW synthesis");
             if(epoch_transition&&n==12)epoch_return_ms.push_back(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-cpu_begin).count());
             wait();
+            if(osr_pose_test) {
+                require(provider.calls==0,"OSR pose case must use the shipping native renderer");
+                require(reconstructed_position.has_value()!=native_peer_camera,
+                    "headlock must retain the original XR pose; normal OSR must report its reconstructed position");
+                continue;
+            }
             if((eye_reference_test && n>=7)||(calibration_recovery_test && n>=9)) {
                 const auto expected=expected_peer(current,n,scene);
                 const double c=std::cos(expected.angle),s=std::sin(expected.angle);
@@ -488,6 +501,7 @@ int main(int argc,char** argv) {try {
             }
             readback->Unmap(0,nullptr);
         }
+        if(osr_pose_test)continue;
         const double mae=error_sum/double(samples);
         const auto& scene=initial_scene;
         std::cout<<"KCD rotated plane scene="<<scene.name<<" native_span="<<span<<" mode="<<mode<<" RGB_MAE="<<mae
@@ -516,6 +530,11 @@ int main(int argc,char** argv) {try {
         require(message->Severity!=D3D12_MESSAGE_SEVERITY_ERROR&&message->Severity!=D3D12_MESSAGE_SEVERITY_CORRUPTION,"full KCD AFW GPU validation error");
     }
     CloseHandle(event);
+    if(osr_pose_test) {
+        std::cout<<"Shipping OSR both eyes: headlock="<<native_peer_camera
+            <<" original AER pose preserved under lock; ordinary reconstruction receipt retained; GPU validation PASS\n";
+        return 0;
+    }
     if(publication_gap) {
         const unsigned expected_replacements=12+(shading>0 ? 4 : 0);
         require(active_modules.size()==expected_replacements,

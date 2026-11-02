@@ -2904,7 +2904,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                         camera.source_view_to_world.values,camera.destination_view_to_world.values,
                         {x_sign,std::copysign(1.F,guide.camera_view_to_clip[5]),
                             -std::copysign(1.F,guide.camera_view_to_clip[11])},
-                        xr_eye_baseline,game_baseline);
+                        xr_eye_baseline,game_baseline,native_peer_camera);
                 }
             }
             impl_->last_submission_fence = fence_value;

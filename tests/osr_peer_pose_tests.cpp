@@ -19,6 +19,9 @@ int main(int argc,char** argv){try {
     b=a;b[12]+=.1F;b[14]+=.1F; // actual peer camera can use another rig direction
     source.orientation={};peer=osr_peer_position(source,a,b,{1,1,-1},.068F,.136F);
     near(*peer,{.45F,.7F,-.25F});
+    check(!osr_peer_position(source,a,b,{1,1,-1},.068F,.136F,true),
+        "native headlock reference must retain the submitted XR peer pose");
+    near(*osr_peer_position(source,a,b,{1,1,-1},.068F,.136F,false),{.45F,.7F,-.25F});
     check(!osr_peer_position(source,a,b,{1,1,1},0,.136F),"missing baseline never creates a pose");
     a[0]=std::numeric_limits<float>::quiet_NaN();
     check(!osr_peer_position(source,a,b,{1,1,1},.068F,.136F),"invalid render basis refused");

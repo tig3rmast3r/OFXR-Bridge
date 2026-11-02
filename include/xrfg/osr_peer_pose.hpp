@@ -11,7 +11,13 @@ namespace xrfg {
 inline std::optional<Vec3> osr_peer_position(const Pose& source,
     std::span<const float,16> source_view_to_world,
     std::span<const float,16> peer_view_to_world,
-    std::array<float,3> xr_to_view_sign, float xr_baseline,float game_baseline) noexcept {
+    std::array<float,3> xr_to_view_sign, float xr_baseline,float game_baseline,
+    bool native_peer_camera=false) noexcept {
+    // GTA's effective headlock preserves the native peer's camera reference
+    // while advancing gameplay time (V700/V701). That reference displacement
+    // is not a physical XR eye offset. Preserve the original submitted peer
+    // pose, as AFW does, instead of converting the gameplay offset to metres.
+    if(native_peer_camera)return {};
     if(!std::isfinite(xr_baseline) || !std::isfinite(game_baseline) ||
         xr_baseline<=0 || game_baseline<=0)return {};
     const auto& q=source.orientation;
