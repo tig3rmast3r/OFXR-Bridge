@@ -37,7 +37,8 @@ int child(const std::filesystem::path& game,const std::wstring& mode,const std::
     }
     check(a::initialize_game_configuration(game),"initialize game before startup choices");
     const auto first=a::snapshot().desired;
-    if(mode==L"factory")check(first==a::sanitize(a::Settings{}) && !first.nr_second_pass,"reset survives next process launch with second NR pass off");
+    a::Settings factory;factory.advanced_mode=first.advanced_mode;factory=a::sanitize(factory);
+    if(mode==L"factory")check(first==factory && !first.nr_second_pass,"reset survives next process launch without resetting global UI preference");
     else if(mode==L"persisted")check(first.backend==3 && first.nr_second_pass && first.nr_intensity==.625F,
         "same game restores its second-pass choice and shared NR settings on restart");
     else check(first.backend==1 && first.scale==3 && first.afw_only && first.advanced_mode && first.nr_second_pass,
@@ -45,7 +46,8 @@ int child(const std::filesystem::path& game,const std::wstring& mode,const std::
     check(a::configuration_path()==a::game_configuration_path(game),"process bound to own game profile");
     {const auto global=a::global_configuration_path();a::ScopedConfigurationSelection selected(global);
      check(a::configuration_path()==a::game_configuration_path(game),"desktop selection cannot redirect a bound game/headset profile");}
-    check(read(a::configuration_path()).find("[tray]")==std::string::npos && read(a::configuration_path()).find("[benchmark]")==std::string::npos,"global sections excluded from game files");
+    check(read(a::configuration_path()).find("[tray]")==std::string::npos && read(a::configuration_path()).find("[benchmark]")==std::string::npos &&
+        read(a::configuration_path()).find("AdvancedMode")==std::string::npos,"global sections and AdvancedMode excluded from game files");
     if(mode!=L"factory") {auto edit=first;edit.backend=3;edit.nr_intensity=.625F;edit.nr_second_pass=mode!=L"reset";check(a::request(edit),"game edit saved");}
     a::RuntimeStatus report{};report.sessions=report.ready=1;a::report_runtime(report);
     if(mode==L"benchmark") {
@@ -63,7 +65,8 @@ int child(const std::filesystem::path& game,const std::wstring& mode,const std::
     HANDLE go=OpenEventW(SYNCHRONIZE,FALSE,(event+L"-go").c_str());
     check(ready && go,"open child rendezvous");SetEvent(ready);
     check(WaitForSingleObject(go,5000)==WAIT_OBJECT_0,"continue child");
-    if(mode==L"reset")check(a::snapshot().desired==a::sanitize(a::Settings{}),"desktop reset reached game without template inheritance");
+    if(mode==L"reset")check(a::snapshot().desired==factory,"desktop reset reached game without resetting global UI preference");
+    if(mode==L"advanced-flip")check(!a::snapshot().desired.advanced_mode,"global preference update reaches an already bound game process");
     if(mode==L"independent")check(a::snapshot().desired.nr_intensity==.625F && a::snapshot().desired.nr_second_pass,
         "other game's reset did not overwrite this game's NR settings or second-pass choice");
     a::report_runtime({});CloseHandle(ready);CloseHandle(go);return 0;
@@ -123,6 +126,32 @@ int wmain(int argc,wchar_t** argv) {
         std::filesystem::create_directory(a::game_configuration_path(L"Broken.exe"));
         {Child broken(executable,L"Broken.exe",L"failure",suffix+L"-fail");broken.finish();}
         check(read(a::global_configuration_path())==original,"failed profile initialization never alters main");
+        {
+            Child live(executable,L"Live.exe",L"advanced-flip",suffix+L"-advanced");
+            auto live_settings=a::snapshot().desired;live_settings.pacing_mode=2;
+            check(a::request(live_settings),"select an existing advanced game route");
+            const auto live_revision=a::snapshot().revision;
+            const auto global=a::global_configuration_path();
+            {a::ScopedConfigurationSelection selected(global);auto settings=a::snapshot().desired;
+             settings.advanced_mode=false;check(a::request(settings),"change only the global UI policy");}
+            check(!a::snapshot().desired.advanced_mode,"active profile immediately reflects the global preference");
+            check(a::snapshot().desired.pacing_mode==2 && a::snapshot().revision==live_revision,
+                "observing the global UI toggle does not change the running route or game revision");
+            live.finish();
+        }
+        const auto global_after=read(a::global_configuration_path());
+        const auto legacy=a::game_configuration_path(L"Legacy.exe");
+        {std::ofstream file(legacy);file<<"[ofxr]\nAdvancedMode=1\npacing_mode=2\nbackend=2\nmotion_vectors=1\n";}
+        {a::ScopedConfigurationSelection selected(legacy);
+         auto settings=a::snapshot().desired;
+         check(!settings.advanced_mode && settings.pacing_mode==1 && !settings.motion_vectors,
+            "legacy per-game flag cannot override global basic policy before sanitation");
+         auto edit=settings;edit.advanced_mode=true;edit.nr_intensity=.75F;
+         check(a::request(edit) && !a::snapshot().desired.advanced_mode,"game request cannot change global UI preference");
+         check(read(legacy).find("AdvancedMode")==std::string::npos,"saving migrates away the legacy per-game key");
+         check(a::request_changes(settings,edit) && !a::snapshot().desired.advanced_mode,"game delta cannot change global UI preference");
+         check(a::reset_to_defaults() && !a::snapshot().desired.advanced_mode,"game reset preserves global basic policy");}
+        check(read(a::global_configuration_path())==global_after,"all game actions leave the global file byte-identical");
         check(a::parse_settings("[ofxr]\nmotion_vectors=1\n").motion_vectors==0,"basic mode forces optical flow");
         check(a::parse_settings("[ofxr]\nAdvancedMode=1\nmotion_vectors=1\n").motion_vectors==1,"advanced mode preserves native selection");
         check(a::parse_settings("[ofxr]\nframe_generation=1\n").motion_vectors==1,"basic mode retains FSR native guides");

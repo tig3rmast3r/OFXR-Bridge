@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 83001;
+constexpr std::uint32_t kAbi = 83301;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -135,7 +135,16 @@ std::string configuration_text(const std::filesystem::path& path) {
     std::ifstream input(path,std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), {});
 }
-Settings load(const std::filesystem::path& path) { return parse_settings(configuration_text(path)); }
+Settings load(const std::filesystem::path& path) {
+    auto text=configuration_text(path);
+    const auto global=global_configuration_path();
+    if(!same_profile_file(path,global)) {
+        // Override legacy game copies BEFORE sanitizing advanced-only choices.
+        const auto advanced=parse_settings(configuration_text(global)).advanced_mode;
+        text+="\n[ofxr]\nAdvancedMode="+std::to_string(advanced)+"\n";
+    }
+    return parse_settings(text);
+}
 std::string merge_sections(std::string_view old, std::string_view replacement) {
     std::vector<std::string> replaced;
     std::istringstream fresh{std::string(replacement)}; std::string line;
@@ -182,7 +191,8 @@ bool save_sections(const std::filesystem::path& path, std::string_view sections)
 #endif
 }
 bool save(const Shared& shared, const Settings& value) {
-    return save_sections(std::filesystem::path(shared.configuration_file),serialize_settings(value));
+    const std::filesystem::path file(shared.configuration_file);
+    return save_sections(file,serialize_settings(value,same_profile_file(file,global_configuration_path())));
 }
 thread_local const std::filesystem::path* desktop_configuration{};
 std::filesystem::path process_profile;
@@ -245,11 +255,12 @@ Discovery& discovery(){static Discovery value;return value;}
 
 class Channel {
 public:
+    const bool global;
 #ifdef _WIN32
     HANDLE mutex{};
     HANDLE mapping{};
     Shared* data{};
-    explicit Channel(const std::filesystem::path& file) {
+    explicit Channel(const std::filesystem::path& file):global(same_profile_file(file,global_configuration_path())) {
         // Profile identity is part of the mapping name, so fixture profiles
         // and future concurrent candidates cannot modify the user's settings.
         const auto identity=path_identity(file);
@@ -293,7 +304,7 @@ public:
 #else
     std::mutex mutex;
     Shared storage{};
-    explicit Channel(const std::filesystem::path& file) { storage.magic=kMagic;storage.abi=kAbi;storage.bytes=sizeof(Shared);storage.snapshot.desired=load(file);std::wcsncpy(storage.configuration_file,file.wstring().c_str(),32767); }
+    explicit Channel(const std::filesystem::path& file):global(same_profile_file(file,global_configuration_path())) { storage.magic=kMagic;storage.abi=kAbi;storage.bytes=sizeof(Shared);storage.snapshot.desired=load(file);std::wcsncpy(storage.configuration_file,file.wstring().c_str(),32767); }
     Shared* data{&storage};
     bool lock(unsigned) { mutex.lock(); return true; }
     void unlock() { mutex.unlock(); }
@@ -317,6 +328,14 @@ struct Lock {
     ~Lock() { if (acquired) owner.unlock(); }
 };
 Channel& keybind_channel() {static Channel value(global_configuration_path());return value;}
+std::optional<bool> global_advanced_mode(unsigned wait_ms=0) noexcept {
+    thread_local std::optional<bool> cached;
+    try {auto& c=keybind_channel();Lock lock(c,wait_ms);
+        if(lock.acquired)cached=c.data->snapshot.desired.advanced_mode;
+        else if(wait_ms)return {};}
+    catch(...){return {};}
+    return cached;
+}
 } // namespace
 
 KeybindSnapshot keybinds() noexcept {
@@ -508,10 +527,11 @@ Settings parse_settings(std::string_view text) {
     return sanitize(value);
 }
 
-std::string serialize_settings(const Settings& settings) {
+std::string serialize_settings(const Settings& settings,bool include_global_ui) {
     const Settings value = sanitize(settings);
     std::ostringstream output;
-    output << "[ofxr]\nAdvancedMode=" << value.advanced_mode << '\n' << std::setprecision(9);
+    output << "[ofxr]\n" << std::setprecision(9);
+    if(include_global_ui)output<<"AdvancedMode="<<value.advanced_mode<<'\n';
 #define WRITE_FIELD(name) output << #name << '=' << value.name << '\n';
     WRITE_FIELD(increase_buffer) WRITE_FIELD(enabled) WRITE_FIELD(afw_only) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
     WRITE_FIELD(frame_generation) WRITE_FIELD(rife_resolution) WRITE_FIELD(rife_multiplier) WRITE_FIELD(rife_model) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
@@ -670,9 +690,11 @@ bool initialize_game_configuration(const std::filesystem::path& executable) noex
 }
 bool reset_to_defaults() noexcept {
     try {
+        const auto advanced=global_advanced_mode(2000);if(!advanced)return false;
         auto& c=channel();Lock lock(c,2000);if(!lock.acquired)return false;
-        const auto desired=sanitize(Settings{});
-        if(!save_sections(c.data->configuration_file,serialize_settings(desired)+"\n[dlssg]\npreset=1\n"))return false;
+        Settings defaults;defaults.advanced_mode=*advanced;const auto desired=sanitize(defaults);
+        if(!save_sections(c.data->configuration_file,serialize_settings(desired,
+            same_profile_file(c.data->configuration_file,global_configuration_path()))+"\n[dlssg]\npreset=1\n"))return false;
         auto& s=c.data->snapshot;
         if(benchmark_active(s.benchmark)) {s.benchmark.phase=BenchmarkPhase::stopped;std::snprintf(s.benchmark.message,sizeof(s.benchmark.message),"Stopped by Reset to defaults.");}
         s.desired=desired;++s.revision;return true;
@@ -688,7 +710,7 @@ bool initialize_user_configuration() noexcept {
         const auto file=global_configuration_path();
         if(std::filesystem::exists(file))return std::filesystem::is_regular_file(file);
         const auto defaults=sanitize(Settings{});
-        const auto settings=serialize_settings(defaults);
+        const auto settings=serialize_settings(defaults,true);
         if(!save_sections(file,settings+"\n[benchmark]\nenabled=1\n"))return false;
         return true;
     } catch (...) {return false;}
@@ -704,6 +726,8 @@ bool benchmark_enabled() noexcept {
 Snapshot snapshot() noexcept {
     try {
         auto& connection = channel();
+        const bool global=connection.global;
+        const auto advanced=global?std::optional<bool>{}:global_advanced_mode();
         // A frame thread never waits for disk publication from the panel.
         // Retain the last coherent settings while another peer holds the lock.
         thread_local Snapshot last_good{};
@@ -712,6 +736,9 @@ Snapshot snapshot() noexcept {
         Lock lock(connection);
         if (lock.acquired) last_good = connection.data->snapshot;
         Snapshot result = last_good;
+        // Visibility preference only: observing another UI must not silently
+        // reconfigure a running game's rendering settings or revisions.
+        if(advanced)result.desired.advanced_mode=*advanced;
 #ifdef _WIN32
         const auto now = GetTickCount64();
         result.connected = result.runtime.sessions != 0 && result.runtime.process_id != 0 &&
@@ -723,8 +750,10 @@ Snapshot snapshot() noexcept {
 
 bool request(Settings desired) noexcept {
     try {
-        desired = sanitize(desired);
         auto& connection = channel();
+        if(!connection.data)return false;
+        if(!connection.global) {const auto advanced=global_advanced_mode(2000);if(!advanced)return false;desired.advanced_mode=*advanced;}
+        desired = sanitize(desired);
         Lock lock(connection, 2000);
         if (!lock.acquired || !save(*connection.data,desired)) return false;
         if (connection.data->snapshot.desired != desired) {
@@ -777,9 +806,15 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
 bool request_changes(const Settings& base, const Settings& desired) noexcept {
     try {
         auto& connection = channel();
+        if(!connection.data)return false;
+        const bool global=connection.global;
+        const auto advanced=global?std::optional<bool>{}:global_advanced_mode(2000);
+        if(!global && !advanced)return false;
         Lock lock(connection);
         if (!lock.acquired) return false;
-        const auto merged = merge_changes(connection.data->snapshot.desired, base, desired);
+        auto current=connection.data->snapshot.desired,prior=base,edited=desired;
+        if(!global)current.advanced_mode=prior.advanced_mode=edited.advanced_mode=*advanced;
+        const auto merged = merge_changes(current, prior, edited);
         if (merged == connection.data->snapshot.desired) return true;
         if (!save(*connection.data,merged)) return false;
         if(benchmark_active(connection.data->snapshot.benchmark)) {

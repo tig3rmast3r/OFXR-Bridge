@@ -36,7 +36,7 @@ constexpr auto default_generation_profiles() noexcept {
 // No application resource pointers cross this boundary.
 struct Settings {
     bool enabled{true};
-    bool advanced_mode{}; // INI-only AdvancedMode; simplified UI by default
+    bool advanced_mode{}; // Global INI-only AdvancedMode; mirrored into each UI snapshot
     bool afw_only{}; // per-game startup choice, independent of Neural Rendering
     bool increase_buffer{}; // Framework2->3; native SteamVR Director already uses3; Legacy unaffected
     int pacing_mode{1}; // 0 framework, 1 sole director, 2 framework + director
@@ -255,6 +255,6 @@ constexpr int generation_from_ui(int index) noexcept { return index==1 ? 4 : ind
 void select_generation(Settings& value, int generation, int ofxr_engine) noexcept;
 Settings sanitize(Settings value) noexcept;
 Settings parse_settings(std::string_view text);
-std::string serialize_settings(const Settings& value);
+std::string serialize_settings(const Settings& value,bool include_global_ui=false);
 
 } // namespace xrfg::autonomous

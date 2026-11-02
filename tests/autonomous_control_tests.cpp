@@ -90,7 +90,7 @@ void codec() {
     require(xrfg::autonomous::parse_settings("[ofxr]\npacing_mode=2\n").pacing_mode==1,"basic mode replaces hidden legacy combined policy with Director");
     for(int mode=0;mode<3;++mode) {
         auto choice=desired;choice.advanced_mode=true;choice.pacing_mode=mode;
-        require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(choice)).pacing_mode==mode,"three pacing modes persist independently of generator");
+        require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(choice,true)).pacing_mode==mode,"three pacing modes persist with the global advanced policy");
     }
     require(xrfg::autonomous::parse_settings("[ofxr]\nsingle_director=1\n").pacing_mode==1,"V610 ON preserves sole director");
     require(xrfg::autonomous::parse_settings("[ofxr]\nAdvancedMode=1\nsingle_director=0\n").pacing_mode==2,"V610 OFF preserves framework plus director");
@@ -223,7 +223,8 @@ void route_profiles() {
         saved.prefer_fps = !(i % 2);
         saved = sanitize(saved);
     }
-    const auto text = serialize_settings(saved);
+    require(serialize_settings(saved).find("AdvancedMode")==std::string::npos,"game serialization excludes the global UI preference");
+    const auto text = serialize_settings(saved,true);
     auto restored = parse_settings(text);
     require(restored == saved, "all six inactive and active profiles survive serialized restart");
     for (int i = 0; i < 6; ++i) {
