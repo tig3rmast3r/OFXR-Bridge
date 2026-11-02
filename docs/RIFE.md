@@ -171,3 +171,22 @@ repeated captures, invalid destination aliasing, receipts and reconfigure.
 multiplier clocks, Fast on/off pool sizes, per-output delivery indices and
 isolation from ordinary OFXR; the logical queue verifies ordered4X batches.
 No in-game FPS or latency improvement is guaranteed by these laboratory tests.
+
+
+V739 also renews expired native OpenXR cycles in Framework bypass. A slow GPU
+preparation or sparse input can outlive the Wait already in flight. The same
+owned image is retained while Wait/Begin obtains a live cycle; Framework does
+not acquire the director's phase, hold, or delivery pacing. The directed path
+and RIFE model/interpolation code are unchanged. This is a native-cycle
+correctness fix for private Framework delivery, including ordinary engines;
+legacy native delivery is outside this endpoint.
+
+
+V740 is a diagnostic trial for a separate upstream worker stop. With F9
+logging enabled, the first terminal synthesis-worker refusal or exception
+writes `ofxr-worker-failure-pid*.txt` beside the runtime log, plus a frozen
+`.flight.log` copy. Stage, source pair, prepare reason/HRESULT, native result,
+output handles and buffer capacity survive later log wrapping. Normal output,
+models and pacing are unchanged. No failure journal or snapshot is written
+with diagnostics off. V739 native-cycle renewal is retained; the real4X
+worker failure is not declared fixed by this diagnostic build.

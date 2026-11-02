@@ -111,10 +111,11 @@ int main(int argc,char** argv) {
         std::puts("OSR fresh/held terminal metadata, unchanged source/orientation/FOV/time and legacy PASS");return 0;
     }
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
+    const bool rife_report=route=="rife-report";
     const bool rife_switch=route.starts_with("rife-switch");
     const int rife_pacing=route.ends_with("director")?1:0;
     const bool rife_fast=route.find("fast")!=std::string::npos;
-    const unsigned rife_factor=rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
+    const unsigned rife_factor=rife_report?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
     if(rife_factor)route="new";
 
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
@@ -199,7 +200,7 @@ int main(int argc,char** argv) {
     if(force_vdxr_steamvr)check(WritePrivateProfileStringW(L"tray",L"pacing",L"force_vdxr",xrfg::autonomous::global_configuration_path().c_str()),"force VDXR on real SteamVR identity");
     if(pimax_session)check(WritePrivateProfileStringW(L"tray",L"pacing",force_framework_pimax?L"force_steamvr":L"auto",xrfg::autonomous::global_configuration_path().c_str()),"Pimax auto/explicit framework transport preference");
     if(vdxr_probe)check(WritePrivateProfileStringW(L"tray",L"pacing",vdxr_legacy_probe?L"auto":L"force_steamvr",xrfg::autonomous::global_configuration_path().c_str()),"isolated VDXR transport preference");
-    if((benchmark_sequence || rife_factor) && GetEnvironmentVariableW(L"XRFG_BENCH_TRACE",nullptr,0)) {
+    if(rife_report || ((benchmark_sequence || rife_factor) && GetEnvironmentVariableW(L"XRFG_BENCH_TRACE",nullptr,0))) {
         const auto folder=xrfg::autonomous::configuration_path().parent_path()/L"trace";
         std::filesystem::create_directories(folder);
         WritePrivateProfileStringW(L"diagnostics",L"logging_enabled",L"1",(folder/L"ofxr_bridge.ini").c_str());
@@ -811,6 +812,12 @@ int main(int argc,char** argv) {
             check(state->private_runtime==f.transport,"RIFE switch retains private endpoint");
             rife_phase_start=f.real_ends.load();
         }
+        if(rife_report && n==5) {
+            xr_ok(wait_for_synthesis_handoff(state),"fault injection waits for old worker");
+            xr_ok(wait_for_presenter_idle(state),"fault injection drains old generated images");
+            std::scoped_lock lock(state->presenter_mutex);
+            state->three_slots.configure(2); // deliberate impossible4X logical capacity
+        }
         if(hfw_early && n==4) {
             auto app=find_swapchain(chain);check(bool(app),"cold projection owner");
             const auto cold_generation=app->frame_generation;
@@ -923,7 +930,33 @@ int main(int argc,char** argv) {
             f.unblock();
             xr_ok(producer.get(),"shipping End while native End is withheld");
             check(independent,"bridge acceptance returns to game before blocked native End with spare credits");
-        } else xr_ok(layer_end_frame_impl(state->handle,&end),"shipping OFXR End handoff");
+        } else {
+            const auto submitted=layer_end_frame_impl(state->handle,&end);
+            if(!(rife_report && n==6))xr_ok(submitted,"shipping OFXR End handoff");
+        }
+        if(rife_report && n==6) {
+            check(XR_FAILED(wait_for_synthesis_handoff(state)),"injected impossible4X batch must fail");
+            stop_continuous_presenter(state);
+            const auto directory=xrfg::bridge_flight_logger().log_path().parent_path();
+            bool report{};
+            for(const auto& file:std::filesystem::directory_iterator(directory)) {
+                if(!file.path().filename().wstring().starts_with(L"ofxr-worker-failure-"))continue;
+                if(file.path().extension()!=L".txt")continue;
+                std::ifstream stream(file.path());std::string text{std::istreambuf_iterator<char>(stream),{}};
+                std::fprintf(stderr,"WORKER_FAILURE_REPORT\n%s",text.c_str());
+                check(text.find("stage=8")!=std::string::npos && text.find("RIFE4X buffer admission failed")!=std::string::npos,
+                    "cold report retains actual worker stage and exception text");
+                check(std::filesystem::exists(file.path().parent_path()/(file.path().stem().wstring()+L".flight.log")),
+                    "first-error log snapshot survives later circular-log overwrites");report=true;
+            }
+            check(report,"first worker error persisted before logger wrap");
+            f.transport->stop();
+            for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
+            xr_ok(layer_destroy_swapchain_impl(chain),"faulted source cleanup");
+            {std::scoped_lock lock(g_state_mutex);g_sessions.clear();g_swapchains.clear();g_instances.clear();}
+            std::puts("Injected4X worker failure: stage, exception and durable F9 report PASS");
+            return 0;
+        }
         check(xrfg::autonomous::snapshot().runtime.eye_long_side==std::max(image_width,image_height),
             "shipping runtime publishes the actual per-eye projection extent for benchmark quality limits");
         if(sole && !benchmark_sequence && !blocked && !toggling && n==2 && state->three_slot_director) {

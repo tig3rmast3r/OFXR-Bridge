@@ -11993,6 +11993,7 @@ struct PreparedGeneration {
     std::shared_ptr<xrfg::D3D12NativeFrameResult> native_result;
     PreparedGenerationKind kind{PreparedGenerationKind::none};
     GenerationPrepareReason reason{GenerationPrepareReason::exception};
+    HRESULT failure_hresult{S_OK};
     XrSwapchain current_handle{XR_NULL_HANDLE};
     XrSwapchain synthetic_handle{XR_NULL_HANDLE};
     XrSwapchain extra_handle{XR_NULL_HANDLE},third_handle{XR_NULL_HANDLE};
@@ -12743,6 +12744,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 state->session->dispatch, current_image);
 
         if (FAILED(submit_result)) {
+            output.failure_hresult=submit_result;
             // A busy bridge slot or an FSR context waiting for its previous GPU
             // users is ordinary backpressure. A repeated AFW guide is different:
             // pass this application frame through while retaining the last real
@@ -13108,7 +13110,77 @@ void prepare_panel_generation(SessionState& state,const ProjectionSnapshot& snap
     state.panel_generated=std::move(generated);
 }
 
+struct SynthesisFailureAudit {
+    unsigned stage{}, flags{};
+    std::uint64_t source{}, previous{};
+};
+void save_synthesis_failure(const std::shared_ptr<SessionState>& state,
+    const SynthesisFailureAudit& audit,const PreparedProjectionFrame* prepared,
+    const char* message) noexcept {
+    auto& logger=xrfg::bridge_flight_logger();
+    if(!logger.enabled() && !logger.ram_enabled())return;
+    try {
+        std::ostringstream text;
+        text << "OFXR synthesis worker failure\n"
+            << "module_directory=" << current_layer_directory().string() << "\n"
+            << "stage=" << audit.stage << " source=" << audit.source
+            << " previous=" << audit.previous << " job_flags=" << audit.flags
+            << "\nmessage=" << (message?message:"") << "\n";
+        {std::scoped_lock lock(state->presenter_mutex);
+            text << "logical_capacity=" << state->three_slots.capacity()
+                << " presenter_failure=" << state->presenter_failure
+                << " multiplier=" << state->nvidia_options.rife_multiplier
+                << " model=" << state->nvidia_options.rife_model << "\n";}
+        if(state->d3d12_device)text << "device_hresult=" << std::hex
+            << static_cast<unsigned long>(state->d3d12_device->GetDeviceRemovedReason()) << std::dec << "\n";
+        if(prepared) {
+            text << "prepared_kind=" << static_cast<unsigned>(prepared->kind)
+                << " reason=" << static_cast<std::int64_t>(prepared->reason)
+                << " failed_swapchain=" << handle_value(prepared->failed_swapchain) << "\n";
+            for(const auto& resource:prepared->resources) {
+                const auto& g=resource.generation;
+                text << "resource=" << handle_value(resource.application_swapchain)
+                    << " kind=" << static_cast<unsigned>(g.kind) << " reason=" << static_cast<std::int64_t>(g.reason)
+                    << " hresult=" << std::hex << static_cast<unsigned long>(g.failure_hresult) << std::dec
+                    << " current=" << handle_value(g.current_handle) << " synthetic=" << handle_value(g.synthetic_handle)
+                    << " extra=" << handle_value(g.extra_handle) << " third=" << handle_value(g.third_handle)
+                    << " current_slot=" << g.current_slot << " synthetic_slot=" << g.synthetic_slot
+                    << " fence_target=" << g.worker_fence_value;
+                if(g.worker_fence)text << " fence_completed=" << g.worker_fence->GetCompletedValue();
+                if(g.native_result) {
+                    const auto mask=g.native_result->mask.load(std::memory_order_acquire);
+                    text << " native_mask=" << mask;
+                    if(mask!=xrfg::D3D12NativeFrameResult::pending)
+                        text << " native_outputs=" << g.native_result->outputs << " native_skip=" << g.native_result->skip
+                            << " native_detail=" << g.native_result->detail;
+                }
+                text << "\n";
+            }
+        }
+        auto directory=logger.log_path().parent_path();
+        if(directory.empty())directory=current_layer_directory();
+        const auto path=directory/(L"ofxr-worker-failure-pid"+std::to_wstring(GetCurrentProcessId())+
+            L"-"+std::to_wstring(GetTickCount64())+L".txt");
+        const auto file=CreateFileW(path.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(file!=INVALID_HANDLE_VALUE) {
+            const auto bytes=text.str();DWORD written{};
+            WriteFile(file,bytes.data(),static_cast<DWORD>(bytes.size()),&written,nullptr);
+            FlushFileBuffers(file);CloseHandle(file);
+        }
+        logger.event(xrfg::BridgeFlightOperation::generation_prepare,-2,
+            audit.stage,prepared?static_cast<std::uint64_t>(prepared->reason):0,audit.source);
+        // Terminal worker only, outside presenter/GPU locks; preserve the first
+        // failure even when the game keeps producing errors and wraps its log.
+        logger.flush();
+        if(logger.enabled()) {
+            const auto snapshot=path.parent_path()/(path.stem().wstring()+L".flight.log");
+            CopyFileW(logger.log_path().c_str(),snapshot.c_str(),TRUE);
+        }
+    } catch (...) {}
+}
+
 void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept {
+    SynthesisFailureAudit audit;
     try {
         for (;;) {
             std::shared_ptr<SynthesisJob> job;
@@ -13121,6 +13193,8 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 if (state->presenter_stop_requested || XR_FAILED(state->presenter_failure)) break;
                 job = std::move(state->synthesis_job);
             }
+            audit={1,static_cast<unsigned>(job->pair)|(static_cast<unsigned>(job->triple)<<1)|(static_cast<unsigned>(job->quad)<<2),
+                job->current->source_sequence,job->current->previous_sequence};
             const auto worker_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_worker_run,
                 job->current->source_sequence, job->current->previous_sequence);
@@ -13144,7 +13218,9 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 static_cast<std::uint64_t>(prepared.kind));
             if(prepared.kind!=PreparedGenerationKind::none)
                 prepare_panel_generation(*state,job->snapshot,job->panels,prepared,job->fraction,job->extra_fraction,true);
+            audit.stage=2;
             bool success = finish_worker_outputs(state, prepared, job->current->source_sequence);
+            if(success)audit.stage=3;
             const auto auxiliary_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_aux_complete,
                 job->current->source_sequence, job->current->previous_sequence);
@@ -13182,6 +13258,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                     third_destinations.push_back({source,resource.generation.third_handle,resource.generation.synthetics_in_target_camera,resource.panel});
                 }
                 GeneratedFrameEndInfo real_info, synthetic_info;
+                if(success)audit.stage=4;
                 success = success && build_generated_frame_end_info(&job->metadata->info, job->snapshot,
                     false, real_destinations, &real_info);
                 GeneratedFrameEndInfo pending_synthetic,pending_extra,pending_third;
@@ -13192,6 +13269,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 if (success) real = make_presenter_owned_frame(std::move(real_info));
                 success = success && real != nullptr;
                 if (success && job->pair) {
+                    audit.stage=5;
                     success = build_generated_frame_end_info(&job->metadata->info, job->snapshot,
                         true, synthetic_destinations, &synthetic_info, job->synthetic_camera ? &*job->synthetic_camera : nullptr, job->fraction);
                     synthetic_info.pending_outputs=std::move(pending_synthetic.pending_outputs);
@@ -13203,6 +13281,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                     if (success) synthetic = make_presenter_owned_frame(std::move(synthetic_info));
                     success = success && synthetic != nullptr;
                     if(success && job->triple) {
+                        audit.stage=6;
                         GeneratedFrameEndInfo extra_info;
                         success=build_generated_frame_end_info(&job->metadata->info,job->snapshot,true,
                             extra_destinations,&extra_info, job->extra_camera ? &*job->extra_camera : nullptr, job->extra_fraction);
@@ -13215,6 +13294,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                         if(success) extra_synthetic=make_presenter_owned_frame(std::move(extra_info));
                         success=success && extra_synthetic!=nullptr;
                         if(success && job->quad){
+                            audit.stage=7;
                             GeneratedFrameEndInfo third_info;
                             success=build_generated_frame_end_info(&job->metadata->info,job->snapshot,true,
                                 third_destinations,&third_info,job->third_camera?&*job->third_camera:nullptr);
@@ -13241,6 +13321,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 handle_value(prepared.failed_swapchain), static_cast<std::uint64_t>(prepared.kind),
                 job->current->source_sequence);
             if (!success) {
+                save_synthesis_failure(state,audit,&prepared,"worker transaction refused");
                 std::scoped_lock lock(state->presenter_mutex);
                 state->synthesis_busy = false;
                 fail_pending_presenter_submissions_locked(*state, XR_ERROR_RUNTIME_FAILURE);
@@ -13252,6 +13333,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 job->current->source_sequence, job->current->previous_sequence);
             {
                 std::unique_lock lock(state->presenter_mutex);
+                audit.stage=8;
                 job->current->frame = std::move(real);
                 if (job->pair) {
                     // With immediate real delivery there may be no retained A.
@@ -13310,7 +13392,13 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 0, job->current->source_sequence, job->current->previous_sequence);
             state->presenter_condition.notify_all();
         }
+    } catch (const std::exception& error) {
+        save_synthesis_failure(state,audit,nullptr,error.what());
+        std::scoped_lock lock(state->presenter_mutex);
+        state->synthesis_busy = false;
+        fail_pending_presenter_submissions_locked(*state, XR_ERROR_RUNTIME_FAILURE);
     } catch (...) {
+        save_synthesis_failure(state,audit,nullptr,"non-standard exception");
         std::scoped_lock lock(state->presenter_mutex);
         state->synthesis_busy = false;
         fail_pending_presenter_submissions_locked(*state, XR_ERROR_RUNTIME_FAILURE);

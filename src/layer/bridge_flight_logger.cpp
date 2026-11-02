@@ -192,6 +192,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
         operation == BridgeFlightOperation::session_create ||
         operation == BridgeFlightOperation::swapchain_eligibility ||
         (operation == BridgeFlightOperation::synthesis_initialize && result < 0) ||
+        (operation == BridgeFlightOperation::generation_prepare && result < 0) ||
         operation == BridgeFlightOperation::native_dlssg_provider ||
         operation == BridgeFlightOperation::negotiation ||
         (operation == BridgeFlightOperation::d3d11_bridge && result != 4) ||
