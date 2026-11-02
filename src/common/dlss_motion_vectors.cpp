@@ -1895,7 +1895,12 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             if (!chosen || frames.empty() || chosen->publication > released_at ||
                 frames.front()->publication - chosen->publication > kMaximumStereoPublicationGap)
                 return stale();
-            if (other && other != chosen)
+            // Strict stereo identities can select an older snapshot of this
+            // eye while the other raw release watermark selects its newer
+            // snapshot. That does not make two independent streams shared.
+            // Preserve their actual native previous_serial; only a genuinely
+            // single-stream stereo path advances this eye by two serials.
+            if (other && other != chosen && (!identity.strict || candidates.size() == 1))
                 shared_stream = other->stream == chosen->stream;
             // In OFXR-BRIDGE a CPU publication is not a cross-queue receipt.
             // Apply the existing synchronization check to the actual chosen

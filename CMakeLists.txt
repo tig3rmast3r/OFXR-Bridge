@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.811.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.813.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2176,4 +2176,9 @@ endif()
 if(TARGET xrfg_private_openxr_runtime_tests)
     add_test(NAME xrfg_buffer_cold_start_logging_off_gpu COMMAND xrfg_private_openxr_runtime_tests buffer-cold-quiet)
     set_tests_properties(xrfg_buffer_cold_start_logging_off_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
+if(TARGET xrfg_private_openxr_runtime_tests)
+    add_test(NAME xrfg_buffer_release_before_begin_gpu COMMAND xrfg_private_openxr_runtime_tests buffer-release-early)
+    set_tests_properties(xrfg_buffer_release_before_begin_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()

@@ -87,6 +87,7 @@ void fsr_release_identity_test(bool foveated=false, bool hybrid=false) {
         SUCCEEDED(s->d3d12_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list))) &&
         SUCCEEDED(list->Close()) && SUCCEEDED(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence))), "FSR recording context");
     std::uint64_t cursor{};
+    std::vector<std::shared_ptr<const xrfg::DlssMotionVectorFrame>> publications;
     const auto publish=[&](unsigned eye,bool reset=false) {
         check(SUCCEEDED(allocator->Reset()) && SUCCEEDED(list->Reset(allocator.Get(),nullptr)), "FSR producer reset");
         xrfg::DlssMotionVectorPublication p{};p.stream=eye?46411:46422;
@@ -101,7 +102,7 @@ void fsr_release_identity_test(bool foveated=false, bool hybrid=false) {
             p.camera_position={eye?.03F:-.03F,0,0};
             p.camera_right={1,0,0};p.camera_up={0,1,0};p.camera_forward={0,0,1};
         }
-        auto frame=xrfg::publish_dlss_motion_vectors(p);check(bool(frame), "FSR native publication");
+        auto frame=xrfg::publish_dlss_motion_vectors(p);check(bool(frame), "FSR native publication");publications.push_back(frame);
         check(SUCCEEDED(list->Close()), "FSR producer close");ID3D12CommandList* lists[]={list.Get()};
         s->d3d12_queue->ExecuteCommandLists(1,lists);
         xrfg::report_dlss_motion_vector_submission(s->d3d12_queue.Get(),1,lists);
@@ -126,6 +127,10 @@ void fsr_release_identity_test(bool foveated=false, bool hybrid=false) {
                     "FSR foveated camera placement/guide ROI");
             }
             check(g->eyes[0]->jitter_x==(eye?.75F:.25F), "FSR uses this eye's exact jitter snapshot");
+            const auto original=std::find_if(publications.begin(),publications.end(),[&](const auto& native){
+                return native->stream==g->eyes[0]->stream && native->epoch==g->eyes[0]->epoch && native->serial==g->eyes[0]->serial;});
+            check(original!=publications.end() && (*original)->previous_serial==g->eyes[0]->previous_serial,
+                  "two independent eye streams retain their actual previous serial, never shared-stream minus two");
             check(g->eyes[0]->publication<=chains[eye]->release_publication &&
                 g->eyes[0]->producer_fence && g->eyes[0]->producer_fence_value, "FSR keeps exact release/submission ownership");
         }

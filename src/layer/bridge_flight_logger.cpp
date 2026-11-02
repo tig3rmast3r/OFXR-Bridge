@@ -324,6 +324,9 @@ struct BridgeFlightLogger::Impl {
     // render threads. No frame-by-frame events are retained.
     std::array<Record, 128> startup_records{};
     std::size_t startup_count{};
+    // Writer-only identity changes survive verbose flight-log rotation.
+    std::array<std::array<std::uint64_t,2>,2> compact_eye_identity{};
+    std::array<bool,2> compact_eye_known{};
     std::thread writer;
     std::mutex flush_mutex;
     std::condition_variable flush_condition;
@@ -396,7 +399,20 @@ struct BridgeFlightLogger::Impl {
         if (length <= 0 || static_cast<std::size_t>(length) >= line.size()) return;
         // The same asynchronous writer keeps a compact benchmark sidecar.
         // It does not wrap when verbose flight records reach their size limit.
-        const bool benchmark = record.operation == BridgeFlightOperation::benchmark_configuration ||
+        bool eye_changed=false;
+        if(!replayed && record.operation==BridgeFlightOperation::presenter_transition &&
+                record.result==752 && record.a<compact_eye_identity.size()) {
+            const auto eye=static_cast<std::size_t>(record.a);
+            const std::array<std::uint64_t,2> identity{record.b,record.c};
+            eye_changed=!compact_eye_known[eye] || compact_eye_identity[eye]!=identity;
+            compact_eye_known[eye]=true;compact_eye_identity[eye]=identity;
+        }
+        const bool fsr_description=record.operation>=BridgeFlightOperation::fsr_eye_binding &&
+            record.operation<=BridgeFlightOperation::fsr_hudless_pair;
+        const bool benchmark = eye_changed || fsr_description ||
+            record.operation==BridgeFlightOperation::fsr_recovery ||
+            record.operation==BridgeFlightOperation::fsr_context_lifecycle ||
+            record.operation == BridgeFlightOperation::benchmark_configuration ||
             record.operation == BridgeFlightOperation::benchmark_command ||
             record.operation == BridgeFlightOperation::benchmark_rates || record.operation == BridgeFlightOperation::benchmark_cycles ||
             record.operation == BridgeFlightOperation::benchmark_stages ||

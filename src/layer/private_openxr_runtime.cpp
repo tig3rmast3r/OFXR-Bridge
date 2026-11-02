@@ -611,19 +611,45 @@ struct PrivateOpenXrRuntime::Impl {
                 auto clock=take_wait();if(!clock)break;
                 prediction=clock->prediction;result=clock->result;
                 auto wait_enter=clock->entered,wait_leave=clock->returned;
-                const auto begin_enter=clock_ns();
+                std::shared_ptr<Packet> packet;
+                const auto take_prepared=[&] {
+                    std::unique_lock lock(mutex);
+                    changed.wait(lock,[&]{return stopping || !prepared.empty();});
+                    if(stopping)return false;
+                    packet=std::move(prepared.front());prepared.pop_front();return true;
+                };
+                std::int64_t release_enter{},release_leave{};
+                bool released_early=false;
                 if(XR_SUCCEEDED(result)) {
                     waited=true;
+                    if(buffered.load()) {
+                        if(!take_prepared())break;
+                        if(packet->adaptive_buffer) {
+                            // Only this FIFO head is released. The next image
+                            // can now be acquired/copied while native Begin
+                            // blocks; it remains unreleased until its own turn.
+                            release_enter=clock_ns();result=release_prepared(*packet);
+                            release_leave=clock_ns();released_early=XR_SUCCEEDED(result);
+                            if(diagnostic)options.trace(35,packet->sequence,release_enter,release_leave);
+                        }
+                    }
+                }
+                const auto begin_enter=clock_ns();
+                if(XR_SUCCEEDED(result)) {
                     XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
                     result=options.real.begin(options.real.session,&begin);
                     if(XR_SUCCEEDED(result)){waited=false;begun=true;}
                 }
-                if(XR_FAILED(result)){fail(result);break;}
+                if(XR_FAILED(result)) {
+                    // Publish failure before releasing admission: a draining
+                    // producer must not observe successful retirement first.
+                    fail(result);
+                    if(packet){retire(packet);fifo->retire();}
+                    break;
+                }
                 auto begun_at=clock_ns();
                 const auto initial_begin_enter=begin_enter,initial_begin_leave=begun_at;
-                std::shared_ptr<Packet> packet;
-                {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || !prepared.empty();});
-                 if(stopping)break;packet=std::move(prepared.front());prepared.pop_front();}
+                if(!packet && !take_prepared())break;
                 const bool directed=packet->director;
                 if(diagnostic)options.trace(33,packet->sequence,initial_begin_enter,initial_begin_leave);
                 if(packet->policy_epoch!=applied_policy) {
@@ -651,9 +677,9 @@ struct PrivateOpenXrRuntime::Impl {
                 // All copies/fences are complete. Commit only this FIFO head's
                 // real images; a later prepared image remains unreleased until
                 // its turn, so it cannot replace this frame's scene or overlay.
-                const auto release_enter=clock_ns();
-                result=release_prepared(*packet);
-                const auto release_leave=clock_ns();
+                if(!released_early) {
+                    release_enter=clock_ns();result=release_prepared(*packet);release_leave=clock_ns();
+                }
                 if(XR_FAILED(result)){fail(result);retire(packet);fifo->retire();break;}
                 // Do not charge the prepared-FIFO wait to native work. Starting
                 // native entry earlier changes neither producer nor End cadence.

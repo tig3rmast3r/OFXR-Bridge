@@ -70,6 +70,11 @@ void concurrent_records(const fs::path& directory, bool wrap, bool flush) {
             E_INVALIDARG, 0x661D0069ULL, 256, 3);
         logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, 42, 33, 100);
         logger.event(xrfg::BridgeFlightOperation::benchmark_rates, 1, 42, 43, 42);
+        logger.event(xrfg::BridgeFlightOperation::fsr_recovery, -1, 113, 5, 6);
+        logger.event(xrfg::BridgeFlightOperation::fsr_eye_motion, 0, 42, 2, 3);
+        logger.event(xrfg::BridgeFlightOperation::presenter_transition, 752, 0, 70, 1);
+        logger.event(xrfg::BridgeFlightOperation::presenter_transition, 752, 0, 70, 1);
+        logger.event(xrfg::BridgeFlightOperation::presenter_transition, 752, 0, 71, 1);
         logger.flush();
     }
     constexpr unsigned threads = 8;
@@ -149,6 +154,14 @@ void concurrent_records(const fs::path& directory, bool wrap, bool flush) {
         require(benchmark.find("op=benchmark_configuration result=0 dur_us=0 a=42 b=33 c=100") != std::string::npos &&
             benchmark.find("op=benchmark_rates result=1 dur_us=0 a=42 b=43 c=42") != std::string::npos,
             "compact benchmark lost first measurements during verbose rotation");
+        require(benchmark.find("op=fsr_recovery result=-1 dur_us=0 a=113 b=5 c=6")!=std::string::npos &&
+            benchmark.find("op=fsr_eye_motion result=0 dur_us=0 a=42 b=2 c=3")!=std::string::npos,
+            "compact diagnostics lost FSR failure or sampled guide inputs during rotation");
+        const std::string identity="op=presenter_transition result=752 dur_us=0 a=0 b=70 c=1";
+        const auto first=benchmark.find(identity);
+        require(first!=std::string::npos && benchmark.find(identity,first+identity.size())==std::string::npos &&
+            benchmark.find("op=presenter_transition result=752 dur_us=0 a=0 b=71 c=1")!=std::string::npos,
+            "compact eye identities must retain changes without duplicating steady frames");
     }
 }
 
