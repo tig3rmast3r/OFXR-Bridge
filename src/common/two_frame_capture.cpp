@@ -89,7 +89,7 @@ struct Manager {
     std::atomic_bool has_session{};
     std::atomic_uint32_t active_frame{};
     bool pending_start{};
-    bool key_down{};
+    DiagnosticKeyEdge capture_key;
     bool afw_completed_frame{};
     std::uint32_t observed_end_frames{};
     std::thread writer;
@@ -587,12 +587,12 @@ bool two_frame_capture_request_origin_loss() noexcept {
 std::uint32_t two_frame_capture_begin_end_frame() noexcept {
     try {
         auto& state = manager();
+        const auto keys=autonomous::keybinds();
+        const auto chord=keys.bindings[KeybindAction::dump];
+        const bool pressed=state.capture_key.pressed(chord,keybind_matches(chord,physical_key_down),keys.suspended);
         if (!bridge_flight_logger().enabled() && !bridge_flight_logger().ram_enabled() &&
             !state.has_session.load(std::memory_order_relaxed) && !state.active_frame.load(std::memory_order_relaxed)) return 0;
         std::scoped_lock lock(state.mutex);
-        const bool down = (GetAsyncKeyState(kImageCaptureKey) & 0x8000) != 0;
-        const bool pressed = down && !state.key_down;
-        state.key_down = down;
         if (state.session && state.session->write_finished.load() &&
             state.session->safe_to_release.load()) {
             if (state.writer.joinable()) state.writer.join();
@@ -600,7 +600,7 @@ std::uint32_t two_frame_capture_begin_end_frame() noexcept {
             state.has_session.store(false,std::memory_order_relaxed);
         }
         if (!state.session && pressed && (bridge_flight_logger().enabled() || bridge_flight_logger().ram_enabled()) &&
-            !diagnostic_ring_enabled && !(GetAsyncKeyState(VK_CONTROL)&0x8000)) {
+            !diagnostic_ring_enabled) {
             if (state.writer.joinable()) state.writer.join();
             state.session = std::make_shared<Session>();
             state.has_session.store(true,std::memory_order_relaxed);

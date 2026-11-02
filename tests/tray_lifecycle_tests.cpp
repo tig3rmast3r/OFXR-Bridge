@@ -5,6 +5,9 @@
 
 #include <iostream>
 #include <thread>
+#include <functional>
+#include <exception>
+#include "xrfg/diagnostic_hotkeys.hpp"
 
 namespace {
 void require(bool value, const char* message) {
@@ -275,12 +278,20 @@ void queue_preference() {
     require(!set_steamvr_queue_preference(test.state, true, &error) && !test.state.settings.steamvr_separate_queue,
         "failed persistence rolls back the selection");
 }
+#include "tray_keybind_tests.inc"
 } // namespace
 
-int main() {
+int main(int argc,char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="keybind-child") {
+        require(xrfg::autonomous::initialize_game_configuration(L"KeybindChild.exe"),"bind child game profile");
+        const auto keys=xrfg::autonomous::keybinds();
+        for(unsigned i=0;i<5;++i)if(keys.bindings.keys[i]!=xrfg::KeybindChord{6,VK_F17+i})return 1;
+        return 0;
+    }
     Fixture isolated_control;
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",isolated_control.state.local_directory.c_str());
     try {
+        if(argc>1 && std::string_view(argv[1])=="keybinds"){keybind_ui_tests(isolated_control.state);return 0;}
         ownership();
         cross_version_cleanup();
         window_lifecycle();

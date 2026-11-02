@@ -174,7 +174,7 @@ std::string nvidia_input_scale_ini_value(NvidiaInputScale scale) {
 
 LauncherSettings parse_settings(std::string_view text) {
     LauncherSettings settings;
-    bool separation_seen = false;
+    bool separation_seen = false,framegen_hotkey_seen=false;
     std::string section;
     std::size_t offset = 0;
     while (offset <= text.size()) {
@@ -267,7 +267,20 @@ LauncherSettings parse_settings(std::string_view text) {
                     settings.diagnostics = value == "1" ||
                                            lower_ascii(value) == "true";
                 } else if (key == "pause_hotkey") {
-                    settings.pause_hotkey = lower_ascii(value);
+                    if(!framegen_hotkey_seen) {
+                        settings.pause_hotkey=lower_ascii(value);
+                        if(settings.pause_hotkey=="ctrl+alt+f7")settings.pause_hotkey="f7";
+                    }
+                } else if(key=="framegen_hotkey") {
+                    settings.pause_hotkey=lower_ascii(value);framegen_hotkey_seen=true;
+                } else if(key=="interface_hotkey") {
+                    settings.interface_hotkey=lower_ascii(value);
+                } else if(key=="nr_hotkey") {
+                    settings.nr_hotkey=lower_ascii(value);
+                } else if(key=="logging_hotkey") {
+                    settings.logging_hotkey=lower_ascii(value);
+                } else if(key=="dump_hotkey") {
+                    settings.dump_hotkey=lower_ascii(value);
                 }
             }
         }
@@ -305,7 +318,24 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
            "\r\noverlay_position=" + overlay_position_name(settings.overlay_position) +
            "\r\npause_hotkey=" + settings.pause_hotkey +
+           "\r\nframegen_hotkey=" + settings.pause_hotkey +
+           "\r\ninterface_hotkey=" + settings.interface_hotkey +
+           "\r\nnr_hotkey=" + settings.nr_hotkey +
+           "\r\nlogging_hotkey=" + settings.logging_hotkey +
+           "\r\ndump_hotkey=" + settings.dump_hotkey +
            "\r\n";
+}
+
+std::array<std::string*,5> keybind_settings(LauncherSettings& s) {
+    return {&s.interface_hotkey,&s.nr_hotkey,&s.pause_hotkey,&s.logging_hotkey,&s.dump_hotkey};
+}
+Keybinds runtime_keybinds(const LauncherSettings& settings) {
+    auto copy=settings;const auto values=keybind_settings(copy);Keybinds result;
+    for(unsigned i=0;i<values.size();++i){
+        result.keys[i]=parse_hotkey(*values[i]).value_or(Hotkey{});
+        for(unsigned j=0;j<i;++j)if(result.keys[i].key && result.keys[i]==result.keys[j])result.keys[i]={};
+    }
+    return result;
 }
 
 namespace {

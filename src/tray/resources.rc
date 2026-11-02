@@ -4,27 +4,47 @@
 IDI_OFXR_DISARMED ICON "../../OFXR_disarmed.ico"
 IDI_OFXR_ARMED ICON "../../OFXR_armed.ico"
 
-// The key for "Pause frame generation". The box is the system's hotkey
-// control: it shows the keys as they are pressed.
-IDD_PAUSE_KEY DIALOGEX 0, 0, 240, 150
+IDD_KEYBINDS DIALOGEX 0, 0, 364, 239
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "OFXR-BRIDGE 0.3.2 (v827) - Pause / Resume key"
+CAPTION "OFXR-BRIDGE 0.3.2 (v828) - Configure keybinds"
 FONT 9, "Segoe UI"
 BEGIN
-    LTEXT "Press the key or keys you want to use to pause and resume frame generation, for example Ctrl + Alt + F7 or F9 on its own.", -1, 10, 8, 220, 18
-    CONTROL "", IDC_PAUSE_KEY_HOTKEY, "msctls_hotkey32", WS_BORDER | WS_TABSTOP, 10, 32, 220, 14
-    LTEXT "", IDC_PAUSE_KEY_STATUS, 10, 50, 220, 18
-    LTEXT "The game still sees the key press, so choose keys your game and its mods do not use.", -1, 10, 72, 220, 18
-    LTEXT "A key used on its own, without Ctrl, Alt or Shift, stops working in every other program while OFXR is armed.", -1, 10, 94, 220, 18
-    PUSHBUTTON "Default", IDC_PAUSE_KEY_DEFAULT, 10, 126, 46, 14
-    PUSHBUTTON "No key", IDC_PAUSE_KEY_NONE, 60, 126, 46, 14
-    DEFPUSHBUTTON "OK", IDOK, 134, 126, 46, 14
-    PUSHBUTTON "Cancel", IDCANCEL, 184, 126, 46, 14
+    LTEXT "Click Change, then press a key or combination.", -1, 12, 12, 340, 14
+    LTEXT "Open interface", -1, 12, 40, 110, 12
+    LTEXT "", 1100, 129, 40, 104, 12
+    CONTROL "", 1110, "msctls_hotkey32", WS_TABSTOP | WS_BORDER, 126, 36, 108, 18
+    PUSHBUTTON "Change", 1120, 243, 36, 60, 18
+    PUSHBUTTON "Clear", 1130, 310, 36, 42, 18
+    LTEXT "Toggle NR", -1, 12, 65, 110, 12
+    LTEXT "", 1101, 129, 65, 104, 12
+    CONTROL "", 1111, "msctls_hotkey32", WS_TABSTOP | WS_BORDER, 126, 61, 108, 18
+    PUSHBUTTON "Change", 1121, 243, 61, 60, 18
+    PUSHBUTTON "Clear", 1131, 310, 61, 42, 18
+    LTEXT "Toggle framegen", -1, 12, 90, 110, 12
+    LTEXT "", 1102, 129, 90, 104, 12
+    CONTROL "", 1112, "msctls_hotkey32", WS_TABSTOP | WS_BORDER, 126, 86, 108, 18
+    PUSHBUTTON "Change", 1122, 243, 86, 60, 18
+    PUSHBUTTON "Clear", 1132, 310, 86, 42, 18
+    LTEXT "Enable logging", -1, 12, 115, 110, 12
+    LTEXT "", 1103, 129, 115, 104, 12
+    CONTROL "", 1113, "msctls_hotkey32", WS_TABSTOP | WS_BORDER, 126, 111, 108, 18
+    PUSHBUTTON "Change", 1123, 243, 111, 60, 18
+    PUSHBUTTON "Clear", 1133, 310, 111, 42, 18
+    LTEXT "Dump (debug)", -1, 12, 140, 110, 12
+    LTEXT "", 1104, 129, 140, 104, 12
+    CONTROL "", 1114, "msctls_hotkey32", WS_TABSTOP | WS_BORDER, 126, 136, 108, 18
+    PUSHBUTTON "Change", 1124, 243, 136, 60, 18
+    PUSHBUTTON "Clear", 1134, 310, 136, 42, 18
+    LTEXT "Dump requires logging. Shortcuts are paused while configuring.", -1, 12, 164, 340, 14
+    LTEXT "", IDC_KEYBIND_STATUS, 12, 181, 340, 25
+    PUSHBUTTON "Restore defaults", IDC_KEYBIND_DEFAULTS, 12, 213, 88, 18
+    DEFPUSHBUTTON "OK", IDOK, 241, 213, 52, 18
+    PUSHBUTTON "Cancel", IDCANCEL, 300, 213, 52, 18
 END
 
 1 VERSIONINFO
-FILEVERSION 0,3,2,827
-PRODUCTVERSION 0,3,2,827
+FILEVERSION 0,3,2,828
+PRODUCTVERSION 0,3,2,828
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -35,10 +55,10 @@ BEGIN
  BEGIN
   BLOCK "040904b0"
   BEGIN
-   VALUE "FileDescription", "OFXR-BRIDGE 0.3.2 (v827)\0"
+   VALUE "FileDescription", "OFXR-BRIDGE 0.3.2 (v828)\0"
    VALUE "ProductName", "OFXR-BRIDGE\0"
-   VALUE "FileVersion", "0.3.2 (v827)\0"
-   VALUE "ProductVersion", "0.3.2 (v827)\0"
+   VALUE "FileVersion", "0.3.2 (v828)\0"
+   VALUE "ProductVersion", "0.3.2 (v828)\0"
    VALUE "OriginalFilename", "OFXRBridgeTray.exe\0"
   END
  END

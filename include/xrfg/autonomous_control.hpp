@@ -1,4 +1,5 @@
 #pragma once
+#include "xrfg/keybinds.hpp"
 
 #include <array>
 #include <cstdint>
@@ -206,6 +207,10 @@ void report_benchmark_memory(BenchmarkMemory memory) noexcept;
 // Runtime processes and the tray keep the shared mapping open; named-mutex
 // publication prevents tearing and a versioned ABI rejects incompatible peers.
 Snapshot snapshot() noexcept;
+// Tray-global bindings: never redirected by a selected/bound game profile.
+KeybindSnapshot keybinds() noexcept;
+bool publish_keybinds(Keybinds value) noexcept;
+bool suspend_keybinds(bool value) noexcept; // short renewable capture lease
 bool request(Settings desired) noexcept;
 // Publish only fields edited since base, preserving changes from another UI.
 // The shared-mapping mutex acquisition never blocks the end-frame thread.

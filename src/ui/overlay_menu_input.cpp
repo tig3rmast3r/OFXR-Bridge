@@ -1,5 +1,6 @@
 #include "xrfg/overlay_menu_input.hpp"
 #include "xrfg/overlay_menu_input_state.hpp"
+#include "xrfg/autonomous_control.hpp"
 #include "vendor/imgui/imgui.h"
 #include <windows.h>
 #include <windowsx.h>
@@ -244,7 +245,10 @@ void text_locked(State& s,unsigned value) {
 bool key_locked(State& s,unsigned code,bool down) {
     if(code>=256)return false;
     bool changed=s.keyboard.down[code]!=down;
-    bool suppress=s.keyboard.event(code,down,s.open||code==VK_F10);
+    const auto keys=autonomous::keybinds();
+    const auto chord=keys.bindings[KeybindAction::open_interface];
+    const bool shortcut=!keys.suspended && code==chord.key && keybind_matches(chord,[&](unsigned k){return k==code?down:(physical_key(int(k))&0x8000)!=0;});
+    bool suppress=s.keyboard.event(code,down,s.open||shortcut);
     if(s.open&&changed)event_locked(s,{OverlayMenuInputEventKind::key,0,0,code,down});
     return suppress;
 }
@@ -527,7 +531,12 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wp,LPARAM lp) {
             if(code==VK_CONTROL)code=(lp&(1LL<<24))?VK_RCONTROL:VK_LCONTROL;
             if(code==VK_MENU)code=(lp&(1LL<<24))?VK_RMENU:VK_LMENU;
             consume=key_locked(s,code,down);
-            if(code==VK_F10){if(down&&!s.toggle_latched)toggle=true;s.toggle_latched=down;}
+            const auto keys=autonomous::keybinds();const auto chord=keys.bindings[KeybindAction::open_interface];
+            if(code==chord.key){
+                const bool matched=keybind_matches(chord,[&](unsigned k){return k==code?down:(physical_key(int(k))&0x8000)!=0;});
+                if(matched&&!s.toggle_latched&&!keys.suspended)toggle=true;
+                s.toggle_latched=matched;
+            }
             if(code==VK_ESCAPE){if(down&&!s.esc_latched&&active)close=true;s.esc_latched=down;}
         } else if(active&&(message==WM_CHAR||message==WM_UNICHAR)) {
             if(message==WM_UNICHAR&&wp==UNICODE_NOCHAR)return TRUE;
@@ -646,10 +655,11 @@ OverlayMenuInputFrame OverlayMenuInput::poll(unsigned width,unsigned height) {
     {std::scoped_lock lock(s.mutex);control_window=s.capture.window;revision=s.revision;}
     if(control_window&&GetWindowThreadProcessId(control_window,nullptr)==GetCurrentThreadId()&&!window_dispatch_depth)service_capture(control_window,revision);
     if(foreground)attach(foreground);
-    const bool toggle_down=(physical_key(VK_F10)&0x8000)!=0,escape=(physical_key(VK_ESCAPE)&0x8000)!=0;
+    const auto keys=autonomous::keybinds();
+    const bool toggle_down=keybind_matches(keys.bindings[KeybindAction::open_interface],[](unsigned k){return (physical_key(int(k))&0x8000)!=0;}),escape=(physical_key(VK_ESCAPE)&0x8000)!=0;
     bool toggle{},closing{};
     {std::scoped_lock lock(s.mutex);
-        toggle=foreground&&toggle_down&&!s.toggle_latched;s.toggle_latched=toggle_down;
+        toggle=foreground&&!keys.suspended&&toggle_down&&!s.toggle_latched;s.toggle_latched=toggle_down;
         closing=s.open&&escape&&!s.esc_latched;s.esc_latched=escape;
     }
     if(toggle){bool open{};{std::scoped_lock lock(s.mutex);open=s.open;}if(open)request_close();else request_open(owner_);}

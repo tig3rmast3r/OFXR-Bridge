@@ -59,7 +59,7 @@ constexpr COLORREF kPausedColor = RGB(230, 115, 0);
 enum MenuCommand : UINT {
     toggle_arm = 90,
     toggle_pause = 91,
-    change_pause_key = 92,
+    configure_keybinds = 92,
     steamvr_queue_separate = 93,
     steamvr_queue_shared = 94,
     toggle_benchmark_mode = 96,
@@ -505,11 +505,11 @@ void show_balloon(
 void register_pause_hotkey(AppState& state) {
     if (state.pause_hotkey_registered || state.window == nullptr ||
         state.pause_signal == nullptr) return;
-    const auto hotkey = xrfg::standalone::parse_hotkey(state.settings.pause_hotkey);
-    if (!hotkey) return;
+    const auto hotkey = xrfg::standalone::runtime_keybinds(state.settings)[xrfg::KeybindAction::framegen];
+    if (!hotkey.key) return;
     state.pause_hotkey_registered = RegisterHotKey(
-        state.window, kPauseHotkeyId, hotkey->modifiers | MOD_NOREPEAT,
-        hotkey->key) != FALSE;
+        state.window, kPauseHotkeyId, hotkey.modifiers | MOD_NOREPEAT,
+        hotkey.key) != FALSE;
     if (!state.pause_hotkey_registered)
         log_lifecycle(state.local_directory, L"pause-hotkey",
             last_error_message(L"Registering the pause key"));
@@ -632,15 +632,17 @@ void close_pause_signal(AppState& state) {
     return true;
 }
 
-[[nodiscard]] std::wstring pause_key_display(std::string_view setting) {
+[[nodiscard]] std::wstring key_display(std::string_view setting) {
     const std::string name = xrfg::standalone::hotkey_display_name(setting);
     if (name.empty()) return L"none";
     return std::wstring(name.begin(), name.end());
 }
 
-// The dialog's own state: the setting it opened on and the one it closed on.
-struct PauseKeyDialog {
-    std::string setting;
+// The dialog edits a draft; only OK publishes and saves the five bindings.
+struct KeybindDialog {
+    std::array<std::string,5> settings;
+    int capturing{-1};
+    bool updating{};
 };
 
 // The hotkey control's value for a chord, and back. Its modifier flags are
@@ -673,105 +675,102 @@ struct PauseKeyDialog {
     return hotkey;
 }
 
-INT_PTR CALLBACK pause_key_dialog_procedure(
-    HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
-    constexpr int kAvailabilityProbeId = 0x7F01;
-    const HWND box = GetDlgItem(dialog, IDC_PAUSE_KEY_HOTKEY);
-    const auto show = [&](const std::string& setting) {
-        const auto hotkey = xrfg::standalone::parse_hotkey(setting);
-        SendMessageW(box, HKM_SETHOTKEY, hotkey ? hotkey_control_value(*hotkey) : 0, 0);
-    };
-    switch (message) {
-    case WM_INITDIALOG: {
-        SetWindowLongPtrW(dialog, DWLP_USER, lparam);
-        const auto* state = reinterpret_cast<const PauseKeyDialog*>(lparam);
-        // No rules on the box: any key, with or without modifiers, is the
-        // user's to choose. The dialog's text says what a bare key costs.
-        show(state->setting);
-        SetDlgItemTextW(dialog, IDC_PAUSE_KEY_STATUS,
-            (L"Current key binding: " + pause_key_display(state->setting)).c_str());
-        SetForegroundWindow(dialog);
-        SetFocus(box);
-        return FALSE; // the focus is set
-    }
-    case WM_COMMAND:
-        switch (LOWORD(wparam)) {
-        case IDC_PAUSE_KEY_DEFAULT:
-            show(xrfg::standalone::kDefaultPauseHotkey);
-            SetFocus(box);
-            return TRUE;
-        case IDC_PAUSE_KEY_NONE:
-            SendMessageW(box, HKM_SETHOTKEY, 0, 0);
-            SetFocus(box);
-            return TRUE;
-        case IDOK: {
-            auto* state = reinterpret_cast<PauseKeyDialog*>(
-                GetWindowLongPtrW(dialog, DWLP_USER));
-            const WORD value = LOWORD(SendMessageW(box, HKM_GETHOTKEY, 0, 0));
-            if (LOBYTE(value) == 0) {
-                state->setting = "off";
-                EndDialog(dialog, IDOK);
-                return TRUE;
-            }
-            const auto hotkey = hotkey_from_control(value);
-            const auto setting = xrfg::standalone::hotkey_setting(hotkey);
-            if (!setting) {
-                SetDlgItemTextW(dialog, IDC_PAUSE_KEY_STATUS,
-                    L"That key cannot be used. Choose a different one.");
-                SetFocus(box);
-                return TRUE;
-            }
-            // Asked of the system now, while the dialog can still say so:
-            // the tray's own registration is released for as long as this
-            // dialog is open, so a refusal is another program's.
-            if (!RegisterHotKey(dialog, kAvailabilityProbeId,
-                    hotkey.modifiers | MOD_NOREPEAT, hotkey.key)) {
-                SetDlgItemTextW(dialog, IDC_PAUSE_KEY_STATUS,
-                    L"Another program already uses that combination. "
-                    L"Choose a different one.");
-                SetFocus(box);
-                return TRUE;
-            }
-            UnregisterHotKey(dialog, kAvailabilityProbeId);
-            state->setting = *setting;
-            EndDialog(dialog, IDOK);
-            return TRUE;
+constexpr std::array<const wchar_t*,5> kKeybindNames{L"Open interface",L"Toggle NR",L"Toggle framegen",L"Enable logging",L"Dump (debug)"};
+
+void show_keybind_row(HWND dialog,KeybindDialog& state,unsigned row) {
+    ShowWindow(GetDlgItem(dialog,IDC_KEYBIND_CAPTURE+row),SW_HIDE);
+    SetDlgItemTextW(dialog,IDC_KEYBIND_VALUE+row,key_display(state.settings[row]).c_str());
+    ShowWindow(GetDlgItem(dialog,IDC_KEYBIND_VALUE+row),SW_SHOW);
+    SetDlgItemTextW(dialog,IDC_KEYBIND_CHANGE+row,L"Change");
+}
+void begin_keybind_capture(HWND dialog,KeybindDialog& state,unsigned row) {
+    if(state.capturing>=0)show_keybind_row(dialog,state,unsigned(state.capturing));
+    state.capturing=int(row);state.updating=true;
+    const HWND box=GetDlgItem(dialog,IDC_KEYBIND_CAPTURE+row);
+    SendMessageW(box,HKM_SETRULES,0,0);SendMessageW(box,HKM_SETHOTKEY,0,0);
+    state.updating=false;
+    ShowWindow(GetDlgItem(dialog,IDC_KEYBIND_VALUE+row),SW_HIDE);
+    ShowWindow(box,SW_SHOW);SetFocus(box);
+    SetDlgItemTextW(dialog,IDC_KEYBIND_CHANGE+row,L"Listening...");
+    SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,(std::wstring(L"Press a key or combination for ")+kKeybindNames[row]+L".").c_str());
+}
+INT_PTR CALLBACK keybind_dialog_procedure(HWND dialog,UINT message,WPARAM wparam,LPARAM lparam) {
+    auto* state=reinterpret_cast<KeybindDialog*>(GetWindowLongPtrW(dialog,DWLP_USER));
+    switch(message) {
+    case WM_INITDIALOG:
+        state=reinterpret_cast<KeybindDialog*>(lparam);SetWindowLongPtrW(dialog,DWLP_USER,lparam);
+        for(unsigned i=0;i<5;++i)show_keybind_row(dialog,*state,i);
+        xrfg::autonomous::suspend_keybinds(true);SetTimer(dialog,1,500,nullptr);
+        return TRUE;
+    case WM_TIMER:
+        xrfg::autonomous::suspend_keybinds(true);return TRUE;
+    case WM_DESTROY:
+        KillTimer(dialog,1);xrfg::autonomous::suspend_keybinds(false);return TRUE;
+    case WM_COMMAND: {
+        if(!state)return FALSE;
+        const auto id=LOWORD(wparam);
+        if(id>=IDC_KEYBIND_CHANGE && id<IDC_KEYBIND_CHANGE+5) {
+            begin_keybind_capture(dialog,*state,id-IDC_KEYBIND_CHANGE);return TRUE;
         }
-        case IDCANCEL:
-            EndDialog(dialog, IDCANCEL);
-            return TRUE;
-        default:
-            return FALSE;
+        if(id>=IDC_KEYBIND_CLEAR && id<IDC_KEYBIND_CLEAR+5) {
+            if(state->capturing>=0)show_keybind_row(dialog,*state,unsigned(state->capturing));
+            state->capturing=-1;const unsigned row=id-IDC_KEYBIND_CLEAR;
+            state->settings[row]="off";show_keybind_row(dialog,*state,row);return TRUE;
         }
-    default:
+        if(id>=IDC_KEYBIND_CAPTURE && id<IDC_KEYBIND_CAPTURE+5 && HIWORD(wparam)==EN_CHANGE) {
+            const unsigned row=id-IDC_KEYBIND_CAPTURE;
+            if(state->updating || state->capturing!=int(row))return TRUE;
+            const WORD value=LOWORD(SendDlgItemMessageW(dialog,id,HKM_GETHOTKEY,0,0));
+            if(!LOBYTE(value))return TRUE;
+            const auto text=xrfg::standalone::hotkey_setting(hotkey_from_control(value));
+            if(!text){SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,L"That key cannot be used. Choose another one.");return TRUE;}
+            state->settings[row]=*text;state->capturing=-1;show_keybind_row(dialog,*state,row);
+            SetFocus(GetDlgItem(dialog,IDC_KEYBIND_CHANGE+row));
+            SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,L"Binding captured. Click OK to save all changes.");return TRUE;
+        }
+        if(id==IDC_KEYBIND_DEFAULTS) {
+            xrfg::standalone::LauncherSettings defaults;const auto values=xrfg::standalone::keybind_settings(defaults);
+            state->capturing=-1;for(unsigned i=0;i<5;++i){state->settings[i]=*values[i];show_keybind_row(dialog,*state,i);}
+            SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,L"Defaults restored. Click OK to save.");return TRUE;
+        }
+        if(id==IDCANCEL){EndDialog(dialog,IDCANCEL);return TRUE;}
+        if(id==IDOK) {
+            std::array<xrfg::standalone::Hotkey,5> keys{};
+            for(unsigned i=0;i<5;++i) {
+                keys[i]=xrfg::standalone::parse_hotkey(state->settings[i]).value_or(xrfg::standalone::Hotkey{});
+                for(unsigned j=0;j<i;++j)if(keys[i].key && keys[i]==keys[j]) {
+                    SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,(std::wstring(kKeybindNames[i])+L" and "+kKeybindNames[j]+L" use the same binding. Change or clear one.").c_str());return TRUE;
+                }
+            }
+            bool available=true;unsigned failed{};
+            for(unsigned i=0;i<5;++i)if(keys[i].key && !RegisterHotKey(dialog,0x7f01+i,keys[i].modifiers|MOD_NOREPEAT,keys[i].key)){available=false;failed=i;break;}
+            for(unsigned i=0;i<5;++i)UnregisterHotKey(dialog,0x7f01+i);
+            if(!available){SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,(std::wstring(kKeybindNames[failed])+L": another program uses that combination. Choose another one.").c_str());return TRUE;}
+            EndDialog(dialog,IDOK);return TRUE;
+        }
         return FALSE;
     }
-}
-
-// Stores a new key and takes it at once if the bridge is armed.
-void apply_pause_hotkey(AppState& state, const std::string& setting) {
-    unregister_pause_hotkey(state);
-    state.settings.pause_hotkey = setting;
-    save_settings(state);
-    if (state.armed) register_pause_hotkey(state);
-    log_lifecycle(state.local_directory, L"pause-hotkey-changed");
-}
-
-void change_pause_hotkey(AppState& state) {
-    // Released while the dialog is open, or pressing the current chord in
-    // the box would pause the game instead of reaching the box.
-    unregister_pause_hotkey(state);
-    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_HOTKEY_CLASS};
-    InitCommonControlsEx(&controls);
-    PauseKeyDialog dialog{state.settings.pause_hotkey};
-    const INT_PTR answer = DialogBoxParamW(
-        GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_PAUSE_KEY), state.window,
-        pause_key_dialog_procedure, reinterpret_cast<LPARAM>(&dialog));
-    if (answer == IDOK) {
-        apply_pause_hotkey(state, dialog.setting);
-    } else if (state.armed) {
-        register_pause_hotkey(state);
+    default:return FALSE;
     }
+}
+bool apply_keybinds(AppState& state,const std::array<std::string,5>& bindings) {
+    auto updated=state.settings;const auto fields=xrfg::standalone::keybind_settings(updated);
+    for(unsigned i=0;i<5;++i)*fields[i]=bindings[i];
+    if(!xrfg::autonomous::publish_keybinds(xrfg::standalone::runtime_keybinds(updated)))return false;
+    if(!xrfg::autonomous::write_configuration_sections(state.settings_path,xrfg::standalone::serialize_settings(updated))) {
+        xrfg::autonomous::publish_keybinds(xrfg::standalone::runtime_keybinds(state.settings));return false;
+    }
+    state.settings=std::move(updated);log_lifecycle(state.local_directory,L"keybinds-changed");return true;
+}
+void change_keybinds(AppState& state) {
+    unregister_pause_hotkey(state);
+    INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_HOTKEY_CLASS};InitCommonControlsEx(&controls);
+    KeybindDialog dialog;const auto fields=xrfg::standalone::keybind_settings(state.settings);
+    for(unsigned i=0;i<5;++i)dialog.settings[i]=*fields[i];
+    const auto answer=DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_KEYBINDS),state.window,keybind_dialog_procedure,reinterpret_cast<LPARAM>(&dialog));
+    xrfg::autonomous::suspend_keybinds(false);
+    if(answer==IDOK && !apply_keybinds(state,dialog.settings))show_error(state.window,L"Unable to save the keybinds. The previous bindings are still active.");
+    if(state.armed)register_pause_hotkey(state);
 }
 
 void show_context_menu(AppState& state) {
@@ -783,8 +782,7 @@ void show_context_menu(AppState& state) {
         toggle_arm, L"Enable");
     AppendMenuW(menu, MF_STRING | (state.armed ? MF_UNCHECKED : MF_CHECKED),
         toggle_arm, L"Disable");
-    std::wstring binding = L"Pause key: " + pause_key_display(state.settings.pause_hotkey);
-    AppendMenuW(menu, MF_STRING, change_pause_key, binding.c_str());
+    AppendMenuW(menu, MF_STRING, configure_keybinds, L"Configure keybinds...");
     HMENU pacing_menu=CreatePopupMenu();
     if(pacing_menu) {
         using xrfg::standalone::RuntimePacing;
@@ -1022,8 +1020,8 @@ void handle_command(AppState& state, UINT command) {
         }
         write_status(state);
         break;
-    case change_pause_key:
-        change_pause_hotkey(state);
+    case configure_keybinds:
+        change_keybinds(state);
         break;
     case toggle_benchmark_mode: {
         std::wstring error;
@@ -1426,6 +1424,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
         }
         log_lifecycle(state.local_directory, L"startup-cleanup");
         load_settings(state);
+        xrfg::autonomous::publish_keybinds(xrfg::standalone::runtime_keybinds(state.settings));
         save_settings(state);
         const auto preset_target=xrfg::standalone::last_dlssg_game(state.settings_path);
         prepare_crash_debug(state,preset_target);

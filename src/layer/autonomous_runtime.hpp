@@ -19,10 +19,13 @@ namespace xrfg::autonomous {
 inline std::atomic_uint64_t applied_runtime_revision{};
 inline std::atomic_bool r19_camera_enabled{};
 inline void poll_diagnostic_logging_key() {
-    static DiagnosticKeyEdge logging;
-    if (!logging.poll(kLoggingKey)) return;
+    static DiagnosticKeyEdge logging,nr;
+    const bool log_pressed=logging.poll(KeybindAction::logging),nr_pressed=nr.poll(KeybindAction::nr);
+    if(!log_pressed && !nr_pressed)return;
     const auto base = snapshot().desired;
-    auto edited = base; edited.diagnostics = !base.diagnostics;
+    auto edited = base;
+    if(log_pressed)edited.diagnostics=!base.diagnostics;
+    if(nr_pressed)edited.nr_enabled=!base.nr_enabled;
     request_changes(base, edited);
 }
 inline void apply_runtime_settings() {

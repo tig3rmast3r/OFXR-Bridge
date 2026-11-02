@@ -1,4 +1,6 @@
 #include "xrfg/overlay_menu_input.hpp"
+#include "xrfg/autonomous_control.hpp"
+#include <filesystem>
 #include "xrfg/overlay_menu_input_state.hpp"
 #include "imgui.h"
 #include <windows.h>
@@ -148,6 +150,19 @@ void controller_and_imgui() {
         require(input.poll().open&&game_key_down==toggle_before,"F10 opens OFXR and masks its own gesture");
         SendMessageW(window.hwnd,WM_KEYDOWN,VK_F10,0);SendMessageW(window.hwnd,WM_KEYUP,VK_F10,0);
         require(!input.poll().open&&game_key_down==toggle_before,"F10 closes OFXR with balanced gesture ownership");
+        xrfg::Keybinds remapped;remapped.keys[0]={0,VK_F17};
+        require(xrfg::autonomous::publish_keybinds(remapped),"publish live interface remap");
+        const unsigned old_key_before=game_key_down;
+        SendMessageW(window.hwnd,WM_KEYDOWN,VK_F10,0);SendMessageW(window.hwnd,WM_KEYUP,VK_F10,0);
+        require(!input.poll().open&&game_key_down==old_key_before+1,"old interface key returns to game after remapping");
+        SendMessageW(window.hwnd,WM_KEYDOWN,VK_F17,0);SendMessageW(window.hwnd,WM_KEYUP,VK_F17,0);
+        require(input.poll().open,"new interface key opens without restarting input hooks");
+        SendMessageW(window.hwnd,WM_KEYDOWN,VK_F17,0);SendMessageW(window.hwnd,WM_KEYUP,VK_F17,0);
+        require(!input.poll().open,"new interface key closes with balanced ownership");
+        require(xrfg::autonomous::suspend_keybinds(true),"suspend interface while configuring");
+        SendMessageW(window.hwnd,WM_KEYDOWN,VK_F17,0);SendMessageW(window.hwnd,WM_KEYUP,VK_F17,0);
+        require(!input.poll().open,"capture gesture cannot open interface");
+        xrfg::autonomous::suspend_keybinds(false);xrfg::autonomous::publish_keybinds({});
         SendMessageW(window.hwnd,WM_KEYDOWN,'W',0);SendMessageW(window.hwnd,WM_LBUTTONDOWN,0,0);
         unsigned key_up_before=game_key_up,mouse_up_before=game_mouse_up;
         SetCapture(window.hwnd);
@@ -337,4 +352,7 @@ void repeated_input_lifecycle() {
     require(reinterpret_cast<WNDPROC>(GetWindowLongPtrW(window.hwnd,GWLP_WNDPROC))==original,"repeated controller lifecycle restores original WndProc");
 }
 }
-int main(){try{cursor_and_mask();controller_and_imgui();repeated_input_lifecycle();std::cout<<"Overlay menu input "<<checks<<" checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<"Overlay menu input failure: "<<e.what()<<"\n";return 1;}}
+int main(){
+    const auto root=std::filesystem::temp_directory_path()/(L"ofxr-keybind-input-"+std::to_wstring(GetCurrentProcessId()));
+    SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",root.c_str());
+    try{cursor_and_mask();controller_and_imgui();repeated_input_lifecycle();std::cout<<"Overlay menu input "<<checks<<" checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<"Overlay menu input failure: "<<e.what()<<"\n";return 1;}}

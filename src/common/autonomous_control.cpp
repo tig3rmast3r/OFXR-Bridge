@@ -81,7 +81,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 82701;
+constexpr std::uint32_t kAbi = 82801;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -97,6 +97,8 @@ struct Shared {
     Settings benchmark_saved{};
     alignas(8) std::uint64_t benchmark_memory_request{};
     BenchmarkMemory benchmark_memory{};
+    Keybinds keybinds{};
+    std::uint64_t keybind_revision{1},keybind_capture_until{};
 };
 static_assert(std::is_trivially_copyable_v<Shared>);
 
@@ -313,7 +315,40 @@ struct Lock {
     explicit Lock(Channel& value, unsigned milliseconds = 0) : owner(value), acquired(value.lock(milliseconds)) {}
     ~Lock() { if (acquired) owner.unlock(); }
 };
+Channel& keybind_channel() {static Channel value(global_configuration_path());return value;}
 } // namespace
+
+KeybindSnapshot keybinds() noexcept {
+    thread_local KeybindSnapshot cached;
+    try {
+        auto& c=keybind_channel();Lock lock(c);
+        if(lock.acquired){cached.bindings=c.data->keybinds;cached.revision=c.data->keybind_revision;cached.suspended_until_ms=c.data->keybind_capture_until;}
+#ifdef _WIN32
+        cached.suspended=GetTickCount64()<cached.suspended_until_ms;
+#endif
+    } catch(...) {}
+    return cached;
+}
+bool publish_keybinds(Keybinds value) noexcept {
+    try {
+        for(unsigned i=0;i<value.keys.size();++i){
+            const auto k=value.keys[i];if(k.key>=256 || (k.modifiers&~15U))return false;
+            if(k.key)for(unsigned j=0;j<i;++j)if(value.keys[j]==k)return false;
+        }
+        auto& c=keybind_channel();Lock lock(c,1000);if(!lock.acquired)return false;
+        if(c.data->keybinds!=value){c.data->keybinds=value;++c.data->keybind_revision;}
+        return true;
+    } catch(...) {return false;}
+}
+bool suspend_keybinds(bool value) noexcept {
+    try {
+        auto& c=keybind_channel();Lock lock(c,1000);if(!lock.acquired)return false;
+#ifdef _WIN32
+        c.data->keybind_capture_until=value?GetTickCount64()+2000:0;
+#endif
+        return true;
+    } catch(...) {return false;}
+}
 
 Settings sanitize(Settings value) noexcept {
     value.pacing_mode=std::clamp(value.pacing_mode,0,value.advanced_mode?2:1);

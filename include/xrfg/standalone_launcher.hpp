@@ -99,10 +99,11 @@ struct LauncherSettings {
     bool capture_at_end_frame{true};
     bool diagnostics{};
     FpsOverlayPosition overlay_position{FpsOverlayPosition::elliott_bottom};
-    // The system-wide key for "Pause frame generation" while armed, in
-    // parse_hotkey's form. No menu entry; edit tray.ini. Empty, "off" or
-    // anything parse_hotkey refuses means no key.
-    std::string pause_hotkey{"ctrl+alt+f7"}; // kDefaultPauseHotkey
+    // Global Configure keybinds preferences, in parse_hotkey's form. Framegen
+    // retains the armed tray pause/resume registration; the other actions are
+    // read live by the runtime. Empty, "off" or invalid values disable a key.
+    std::string pause_hotkey{"f7"}; // retained member/INI alias for old configurations
+    std::string interface_hotkey{"f10"},nr_hotkey{"f11"},logging_hotkey{"f9"},dump_hotkey{"f8"};
 };
 
 // status.json (docs/STATUS_JSON.md): the tray's state and the running game as
@@ -137,11 +138,7 @@ struct StatusInputs {
 
 // A key chord for RegisterHotKey: `modifiers` in its MOD_ALT (1),
 // MOD_CONTROL (2), MOD_SHIFT (4), MOD_WIN (8) bits and a virtual-key code.
-struct Hotkey {
-    unsigned modifiers{};
-    unsigned key{};
-    bool operator==(const Hotkey&) const = default;
-};
+using Hotkey = xrfg::KeybindChord;
 // "ctrl+alt+f7": '+'-separated, any case, the key last. Modifiers are ctrl,
 // alt, shift and win, and none is required: the choice is the user's. Keys
 // are f1-f24, a letter, a digit, a named key (scrolllock, pause, insert,
@@ -154,7 +151,9 @@ struct Hotkey {
 // The tray.ini spelling of a chord, "ctrl+alt+f7", or nothing for one
 // parse_hotkey would refuse: the inverse of parse_hotkey.
 [[nodiscard]] std::optional<std::string> hotkey_setting(Hotkey hotkey);
-inline constexpr char kDefaultPauseHotkey[] = "ctrl+alt+f7";
+inline constexpr char kDefaultPauseHotkey[] = "f7";
+std::array<std::string*,5> keybind_settings(LauncherSettings& settings);
+Keybinds runtime_keybinds(const LauncherSettings& settings);
 
 [[nodiscard]] std::string backend_ini_value(FlowBackend backend);
 [[nodiscard]] std::string nvidia_preset_ini_value(

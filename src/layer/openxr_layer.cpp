@@ -828,6 +828,7 @@ struct SessionState {
     std::uint64_t diagnostic_app_frame{};
     bool diagnostic_key_down{};
     bool diagnostic_ring_toggle_down{}, diagnostic_ring_save_down{};
+    std::uint64_t diagnostic_keybind_revision{};
     // Serializes each generated synthetic/real frame pair atomically with
     // respect to application frame calls. A successful application wait owns
     // the next admission until its matching begin has been attempted, so a
@@ -16257,8 +16258,9 @@ void record_rolling_runtime_output(const XrFrameEndInfo* info) noexcept {
 void capture_application_metadata(const std::shared_ptr<SessionState>& state, const XrFrameEndInfo* info) noexcept {
     if (!state->frame_capture) return;
     try {
-        const bool down=(GetAsyncKeyState(VK_CONTROL)&0x8000) &&
-            (GetAsyncKeyState(VK_SHIFT)&0x8000) && (GetAsyncKeyState(VK_F10)&0x8000);
+        const auto keys=xrfg::autonomous::keybinds();
+        const xrfg::KeybindChord legacy{MOD_CONTROL|MOD_SHIFT,VK_F10};
+        const bool down=!keys.suspended && !xrfg::keybind_assigned(keys.bindings,legacy) && xrfg::keybind_matches(legacy,xrfg::physical_key_down);
         const bool diagnostics=xrfg::bridge_flight_logger().enabled() || xrfg::bridge_flight_logger().ram_enabled();
         const bool trigger=down&&!state->diagnostic_key_down && diagnostics;
         state->diagnostic_key_down=down;
@@ -16597,11 +16599,16 @@ XrResult layer_end_frame_impl(
     }
     xrfg::autonomous::poll_diagnostic_logging_key();
     if(state->luke_fresh_only && state->frame_capture) {
-        const bool save_down=(GetAsyncKeyState(VK_F8)&0x8000)!=0;
-        const bool toggle_down=save_down && (GetAsyncKeyState(VK_CONTROL)&0x8000)!=0;
+        const auto keys=xrfg::autonomous::keybinds();
+        const auto dump=keys.bindings[xrfg::KeybindAction::dump];
+        auto ring=dump;ring.modifiers|=MOD_CONTROL;
+        const bool save_down=xrfg::keybind_matches(dump,xrfg::physical_key_down);
+        const bool toggle_down=!(dump.modifiers&MOD_CONTROL) && !xrfg::keybind_assigned(keys.bindings,ring) && xrfg::keybind_matches(ring,xrfg::physical_key_down);
+        const bool changed=state->diagnostic_keybind_revision && state->diagnostic_keybind_revision!=keys.revision;
+        state->diagnostic_keybind_revision=keys.revision;
         const bool diagnostics=xrfg::bridge_flight_logger().enabled() || xrfg::bridge_flight_logger().ram_enabled();
-        const bool toggle=diagnostics && toggle_down && !state->diagnostic_ring_toggle_down;
-        const bool save=save_down && !state->diagnostic_ring_save_down && !toggle_down;
+        const bool toggle=diagnostics && !changed && !keys.suspended && toggle_down && !state->diagnostic_ring_toggle_down;
+        const bool save=diagnostics && !changed && !keys.suspended && save_down && !state->diagnostic_ring_save_down && !toggle_down;
         state->diagnostic_ring_toggle_down=toggle_down;state->diagnostic_ring_save_down=save_down;
         if (!diagnostics && state->frame_capture->ring_active()) state->frame_capture->stop_ring();
         if(toggle || state->frame_capture->busy()) {
@@ -17344,9 +17351,9 @@ XrResult layer_end_frame_impl(
     if (state->luke_afw_enabled) {
         // A bare gameplay key must not silently tint AFW's generated frames.
         // The explicit debug chord updates the same profile shown by the UI.
-        const bool f6_down = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 &&
-            (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 &&
-            (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+        const auto debug_keys=xrfg::autonomous::keybinds();
+        const xrfg::KeybindChord debug_chord{MOD_CONTROL|MOD_ALT,VK_F6};
+        const bool f6_down=!debug_keys.suspended && !xrfg::keybind_assigned(debug_keys.bindings,debug_chord) && xrfg::keybind_matches(debug_chord,xrfg::physical_key_down);
         if (f6_down && !state->luke_afw_f6_down) {
             const auto base = xrfg::autonomous::snapshot().desired;
             auto edited = base; edited.afw_debug = !base.afw_debug;

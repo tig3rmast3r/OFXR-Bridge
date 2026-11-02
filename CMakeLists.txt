@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.827.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.828.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -891,7 +891,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             target_link_libraries(xrfg_benchmark_log_tests PRIVATE xrfg_autonomous_control xrfg_bridge_flight_logger)
             target_compile_features(xrfg_benchmark_log_tests PRIVATE cxx_std_20)
             add_test(NAME xrfg_benchmark_log_tests COMMAND xrfg_benchmark_log_tests)
-            add_executable(xrfg_tray_lifecycle_tests tests/tray_lifecycle_tests.cpp)
+            add_executable(xrfg_tray_lifecycle_tests tests/tray_lifecycle_tests.cpp src/tray/resources.rc)
             target_link_libraries(xrfg_tray_lifecycle_tests PRIVATE
                 xrfg_standalone_core comctl32 ole32 shell32 user32)
             target_compile_definitions(xrfg_tray_lifecycle_tests PRIVATE
@@ -901,6 +901,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 target_compile_options(xrfg_tray_lifecycle_tests PRIVATE /W4 /permissive- /EHsc)
             endif()
             add_test(NAME xrfg_tray_lifecycle_tests COMMAND xrfg_tray_lifecycle_tests)
+            add_test(NAME xrfg_configure_keybinds COMMAND xrfg_tray_lifecycle_tests keybinds)
         endif()
     endif()
 
@@ -1743,6 +1744,11 @@ include(cmake/neural_rendering.cmake)
 include(cmake/vulkan_contracts.cmake)
 include(cmake/ingress_contracts.cmake)
 include(cmake/autonomous_ui.cmake)
+if(TARGET xrfg_d3d12_history)
+    # The capture hotkey reads the shared keybinds. Static-library consumers
+    # need this link dependency too, including standalone runtime test harnesses.
+    target_link_libraries(xrfg_d3d12_history PRIVATE xrfg_autonomous_control)
+endif()
 if(TARGET xrfg_streamline_native_interface_tests)
     target_link_libraries(xrfg_streamline_native_interface_tests PRIVATE xrfg_d3d12_history)
 endif()

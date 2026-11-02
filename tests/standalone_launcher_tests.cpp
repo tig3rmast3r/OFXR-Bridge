@@ -200,7 +200,7 @@ int main() {
     using xrfg::standalone::Hotkey;
     using xrfg::standalone::hotkey_display_name;
     using xrfg::standalone::parse_hotkey;
-    if (release_defaults.pause_hotkey != "ctrl+alt+f7" ||
+    if (release_defaults.pause_hotkey != "f7" ||
         parsed.pause_hotkey != "shift+scrolllock" ||
         parse_settings("[tray]\r\npause_hotkey= Ctrl+Alt+F9 \r\n").pause_hotkey != "ctrl+alt+f9" ||
         parse_hotkey("ctrl+alt+f7") != Hotkey{3, 0x76} ||
