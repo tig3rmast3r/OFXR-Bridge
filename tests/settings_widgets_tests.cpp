@@ -1,6 +1,8 @@
 #include "xrfg/settings_widgets.hpp"
 #include "xrfg/benchmark_suite.hpp"
 #include "xrfg/dlssg_profile.hpp"
+#include "xrfg/rife_model_catalog.hpp"
+#include <fstream>
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -235,6 +237,51 @@ void route_multiplier_widgets() {
     tray.choose("OFXR engine", 2, "Nvidia 0.2.13 (medium latency, high compatibility)");
     require(!snapshot().desired.triple_frame_gen, "DJ keeps its own 2X");
 }
+void rife_catalog() {
+    const auto runtime=std::filesystem::temp_directory_path()/(L"OFXR model catalog "+std::to_wstring(GetCurrentProcessId()));
+    const auto weights=runtime/L"models";std::filesystem::create_directories(weights);
+    struct Cleanup {std::filesystem::path path;~Cleanup(){std::error_code error;std::filesystem::remove_all(path,error);}} cleanup{runtime};
+    require(xrfg::available_rife_models(runtime).empty(),"missing weights produce no phantom versions");
+    for(const auto* name:{"flownet_v4.4.pkl","flownet_v4.3.pkl","flownet_v4.25.lite.pkl","flownet_v99.pkl","notes.txt"})
+        std::ofstream(weights/name)<<"catalog fixture";
+    auto models=xrfg::available_rife_models(runtime);
+    require(models.size()==2 && models[0].id==3 && models[0].name=="4.4" && models[1].id==4,
+        "names come from installed compatible weights; retired and unknown networks are not selectable");
+    std::ofstream(weights/"flownet_v4.6.pkl")<<"catalog fixture";
+    models=xrfg::available_rife_models(runtime);
+    require(models.size()==3 && models[0].name=="4.6","a new installed compatible version appears on refresh");
+    std::filesystem::remove(weights/"flownet_v4.4.pkl");
+    require(xrfg::available_rife_models(runtime).size()==2,"removed weights disappear without cached choices");
+    require(xrfg::available_rife_models(L"relative/models").empty(),"no relative folder search");
+}
+
+void rife_widgets() {
+    const auto prior=snapshot().desired;
+    Context tray(ImVec2(674,861),false),headset(ImVec2(1024,768),true);
+    auto rife=snapshot().desired;select_generation(rife,4,2);rife.advanced_mode=false;rife.rife_model=2;
+    require(request(rife),"select basic RIFE with an older saved model");
+    tray.draw();headset.draw();tray.select_tab("Frame generation");headset.select_tab("Frame generation");tray.draw(true);headset.draw(true);
+    require(snapshot().desired.rife_model==3,"basic RIFE uses 4.4");
+    require(tray.rendered_text.find("RIFE model")==std::string::npos && headset.rendered_text.find("RIFE model")==std::string::npos,
+        "basic desktop and headset hide the model selector");
+    auto advanced=snapshot().desired;advanced.advanced_mode=true;
+    require(request(advanced),"enable advanced RIFE models");tray.draw();headset.draw();tray.draw(true);headset.draw(true);
+    require(tray.rendered_text.find("RIFE model")!=std::string::npos && headset.rendered_text.find("RIFE model")!=std::string::npos,
+        "Advanced shows the model selector on desktop and headset");
+    const auto runtime=configuration_path().parent_path()/L"models with spaces";
+    std::filesystem::create_directories(runtime/L"models");
+    std::ofstream(runtime/L"models/flownet_v4.6.pkl")<<"catalog only";
+    require(WritePrivateProfileStringW(L"tray",L"rife_runtime_dir",runtime.c_str(),global_configuration_path().c_str())!=0,
+        "explicit isolated developer model catalog");
+    tray.choose("RIFE model",0,"4.6");
+    require(snapshot().desired.rife_model==2,"actual Advanced dropdown selects the only installed compatible model");
+    advanced=snapshot().desired;advanced.advanced_mode=false;require(request(advanced),"leave Advanced");
+    require(snapshot().desired.rife_model==3,"leaving Advanced restores 4.4 immediately");
+    require(WritePrivateProfileStringW(L"tray",L"rife_runtime_dir",nullptr,global_configuration_path().c_str())!=0,"remove isolated developer override");
+    std::error_code error;std::filesystem::remove_all(runtime,error);
+    require(request(prior),"restore pre-RIFE widget settings");tray.select_tab("Display");
+}
+
 void release_controls() {
     auto simple=Settings{};simple.backend=1;simple.scale=3;simple.nr_second_pass=true;require(request(simple),"seed simple release UI");
     Context desktop({690,900},false);desktop.draw();desktop.draw(true);
@@ -610,7 +657,7 @@ int main(int argc, char** argv) {
         else if (argc == 2 && std::strcmp(argv[1], "--desktop-header") == 0) desktop_header_is_not_a_headset_control();
         else if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--route-multiplier") == 0) route_multiplier_widgets();
-        else { desktop_header_is_not_a_headset_control(); rebase_and_publish(); release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); }
+        else { desktop_header_is_not_a_headset_control(); rebase_and_publish(); rife_catalog();rife_widgets();release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); }
         std::filesystem::remove(configuration_path());
         std::filesystem::remove(profile/L"dlssg-profile-selection.ini");
         std::filesystem::remove(profile);

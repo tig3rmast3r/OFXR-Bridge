@@ -1673,11 +1673,13 @@ private:
 
 // HFW's unique-production filter is an ingress rule. It must not force the
 // completed AFW packet back through inline OFXR publication when a private
-// SteamVR director and an isolated synthesis lane are already available.
+// SteamVR endpoint and an isolated synthesis lane are already available.
+// All RIFE multipliers use that worker; Framework still owns its existing
+// delivery policy. Ordinary OFXR Framework eligibility is unchanged.
 [[nodiscard]] bool fresh_luke_director_worker(const SessionState& state) noexcept {
     return state.luke_fresh_only && !state.afw_only &&
         (single_director_pacing(state) || (state.private_runtime &&
-         state.nvidia_options.rife_model>=0 && state.nvidia_options.rife_multiplier>2)) &&
+         state.nvidia_options.rife_model>=0)) &&
         state.dispatch->steamvr_runtime && state.luke_synthesis_queue &&
         state.optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
         state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr;
@@ -2076,6 +2078,7 @@ struct FrameGenerationSwapchainState {
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> afw_temporal_synthesizer;
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> afw_source_synthesizer;
     bool isolated_luke_synthesis{};
+    bool asynchronous_luke_rife{};
     std::weak_ptr<SessionState> shared_queue_owner;
     ~FrameGenerationSwapchainState() {
         if (auto owner=shared_queue_owner.lock()) --owner->luke_shared_generation_count;
@@ -3886,6 +3889,12 @@ create_d3d11_frame_generation_swapchains(
             isolated_luke = false;
         }
         auto* synthesis_queue = isolated_luke ? session->luke_synthesis_queue.Get() : session->d3d12_queue.Get();
+        auto synthesis_options=session->nvidia_options;
+        // Async RIFE owns a distinct per-eye queue. Keep ingress/AFW on the
+        // capture lane; only immutable post-AFW work may leave the GPU lock.
+        const bool asynchronous_luke_rife=isolated_luke && session->private_runtime &&
+            !session->pipelined_presenter_mode && synthesis_options.rife_model>=0;
+        synthesis_options.rife_async=asynchronous_luke_rife;
         auto synthesizer = std::make_shared<xrfg::D3D12FrameSynthesizer>();
         const xrfg::D3D12OpticalFlowBackend backend =
             session->optical_flow_backend;
@@ -3905,7 +3914,7 @@ create_d3d11_frame_generation_swapchains(
             static_cast<DXGI_FORMAT>(state->create_info.format),
             D3D12_RESOURCE_STATE_COMMON,
             backend,
-            session->nvidia_options,
+            synthesis_options,
             xrfg::bridge_flight_logger().gpu_instrumentation_enabled(),
             session->luke_afw_enabled
                 ? xrfg::D3D12FrameGenerationMode::ofxr
@@ -3939,6 +3948,7 @@ create_d3d11_frame_generation_swapchains(
         generation->synthesizer = std::move(synthesizer);
         generation->d3d11_interop = std::move(interop);
         generation->isolated_luke_synthesis = isolated_luke;
+        generation->asynchronous_luke_rife = asynchronous_luke_rife;
         if (session->luke_afw_enabled && !session->afw_only && !isolated_luke) {
             generation->shared_queue_owner=session;
             ++session->luke_shared_generation_count;
@@ -3979,7 +3989,7 @@ create_d3d11_frame_generation_swapchains(
                     generation->d3d11_interop->synthetic_destination_images(),
                     static_cast<DXGI_FORMAT>(state->create_info.format),
                     D3D12_RESOURCE_STATE_COMMON, backend,
-                    session->nvidia_options,
+                    synthesis_options,
                     xrfg::bridge_flight_logger().gpu_instrumentation_enabled(),
                     xrfg::D3D12FrameGenerationMode::ofxr, true, true)
                 : history_result;
@@ -12382,6 +12392,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             capture = post_afw_input->capture;
             motion_vectors.reset(); // post-AFW OFA consumes owned final color, not AER guides
         }
+        const bool asynchronous_luke_rife=generation && generation->asynchronous_luke_rife && !afw_source;
         if(panel_input && synthesizer)synthesizer->set_flat_panel(true);
         if (!generation || !synthesizer) {
             output.reason = GenerationPrepareReason::missing_generation;
@@ -12615,6 +12626,13 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                     : generation->d3d11_interop->prepare_synthesis(
                         generation->isolated_luke_synthesis && !afw_source);
             }
+            if(SUCCEEDED(submit_result) && asynchronous_luke_rife) {
+                // prepare_synthesis[_targets] placed output reuse protection on
+                // the interop lane. Snapshot that exact boundary into this
+                // eye's async input dependencies, before its job is admitted.
+                submit_result=synthesizer->synchronize_producer_queue(
+                    state->session->luke_synthesis_queue.Get());
+            }
             // Deferring the current copy keeps a full-resolution copy the
             // synthetic never reads off its critical path, but it only works
             // where the copy's destination is read after flush_current_copy.
@@ -12672,7 +12690,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 }
             }
             if (SUCCEEDED(submit_result) && generation->d3d11_interop &&
-                !worker_submission && !defer_d3d11_publication && !late_luke_publication) {
+                !worker_submission && !defer_d3d11_publication && !late_luke_publication &&
+                !asynchronous_luke_rife) {
                 const auto publish_token = xrfg::bridge_flight_logger().begin(
                     xrfg::BridgeFlightOperation::d3d11_publish,
                     handle_value(application_swapchain),
@@ -12736,6 +12755,17 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         // post-AFW consumer must not release S/B to XR until THIS receipt is
         // complete, just as the director's worker does. Wait outside gpu_mutex
         // and the interop mutex; never follow the mutable next-frame cursor.
+        if(SUCCEEDED(submit_result) && asynchronous_luke_rife &&
+            !worker_submission && !defer_d3d11_publication && !late_luke_publication) {
+            // Startup priming has no stereo completion owner. Never signal
+            // publication before an async producer has actually completed.
+            const auto completed=synthesizer->submission_fence(ticket);
+            submit_result=completed ? wait_composition_fence(completed.Get(),ticket.fence_value,
+                kFrameStartSynthesisWaitMilliseconds) : E_UNEXPECTED;
+            if(SUCCEEDED(submit_result))submit_result=generation->d3d11_interop->publish_completed(
+                current_destination_index,request_pair ? std::optional<std::uint32_t>{synthetic_destination_index} : std::nullopt,
+                completed.Get(),ticket.fence_value,&inline_publication);
+        }
         if (SUCCEEDED(submit_result) && inline_publication.fence) {
             const auto publication_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_publication_complete,

@@ -374,7 +374,7 @@ int main(int argc,char** argv) {
         return overlay_admission_test(route.ends_with("measured"));
     if(route=="admission-credit")return admission_credit_test();
     const bool rife_luke=route.starts_with("rife-luke");
-    const unsigned rife_luke_factor=route.find("luke4")!=std::string::npos?4:3;
+    const unsigned rife_luke_factor=route.find("luke4")!=std::string::npos?4:route.find("luke2")!=std::string::npos?2:3;
     const bool rife_tail=route.starts_with("rife-tail");
     const bool rife_overlap=route.starts_with("rife-overlap");
     const bool rife_overlap_retire=rife_overlap && route.find("retire")!=std::string::npos;
@@ -1281,7 +1281,17 @@ int main(int argc,char** argv) {
             std::thread safety([&]{WaitForSingleObject(returned,300);gate->Signal(1);});
             const auto accepted=layer_end_frame_impl(state->handle,&end);
             const bool independent=gate->GetCompletedValue()==0;
+            bool producer_lock_free=true;
+            if(rife_luke && independent) {
+                // While the real GPU input is withheld, wait until the worker
+                // has submitted its transaction. CPU waits must not retain the
+                // session lock needed by capture/OSR for the next game frame.
+                std::this_thread::sleep_for(20ms);
+                producer_lock_free=state->gpu_mutex.try_lock();
+                if(producer_lock_free)state->gpu_mutex.unlock();
+            }
             gate->Signal(1);SetEvent(returned);safety.join();CloseHandle(returned);
+            check(producer_lock_free,"RIFE GPU input wait retained the producer GPU mutex");
             xr_ok(accepted,"HFW accepted next game source");
             check(independent,"HFW game waited for OFXR synthesis/publication completion");
             hfw_gate_proven=true;
@@ -1544,7 +1554,8 @@ int main(int argc,char** argv) {
     if(rife_factor){
         if(rife_luke) {
             const auto generation=find_swapchain(chain)->frame_generation;
-            check(generation && generation->afw_temporal_synthesizer && generation->isolated_luke_synthesis,
+            check(generation && generation->afw_temporal_synthesizer && generation->isolated_luke_synthesis &&
+                generation->asynchronous_luke_rife,
                 "RIFE Luke bypassed completed post-AFW history or isolated queue");
             const auto factor=rife_frames(*state);
             check(generation->synthetic_runtime_rings==(factor>2?factor-1:kSyntheticSlotCount) &&

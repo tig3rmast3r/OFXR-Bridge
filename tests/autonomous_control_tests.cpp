@@ -244,8 +244,12 @@ void route_profiles() {
     require(migrated_rife.scale==5,"RIFE profile seeds1/6 when upgrading an existing profile INI");
     const auto minimal_rife=parse_settings("[ofxr]\nframe_generation=4\n");
     require(minimal_rife.rife_model==3 && minimal_rife.scale==5,"RIFE-only INI defaults to4.4 and1/6");
-    const auto explicit_rife=parse_settings("[ofxr]\nframe_generation=4\nrife_model=2\nscale=3\n");
+    const auto explicit_rife=parse_settings("[ofxr]\nAdvancedMode=1\nframe_generation=4\nrife_model=2\nscale=3\n");
     require(explicit_rife.rife_model==2 && explicit_rife.scale==3,"explicit previous model/resolution remain user choices");
+    require(parse_settings("[ofxr]\nframe_generation=4\nrife_model=2\n").rife_model==3,
+        "basic mode ignores an old model choice and uses 4.4 without needing an open interface");
+    auto basic=explicit_rife;basic.advanced_mode=false;
+    require(sanitize(basic).rife_model==3,"leaving Advanced mode selects 4.4");
     require(minimal_rife.rife_resolution==18,"RIFE resolution defaults to Medium");
     for(int percent:{10,15,18,21,25,30}) {
         auto slider=minimal_rife;slider.rife_resolution=percent;
@@ -255,10 +259,10 @@ void route_profiles() {
     bounded.rife_resolution=99;require(sanitize(bounded).rife_resolution==30,"RIFE Ultra maximum");
     require(parse_settings("[ofxr]\nrife_resolution=23\n").rife_resolution==21,"legacy intermediate maps to nearest preset; equal distance prefers lower");
     require(parse_settings("[ofxr]\nrife_resolution=40\n").rife_resolution==30,"old upper bound migrates to Ultra");
-    auto rife=parse_settings("[ofxr]\nframe_generation=4\nrife_model=2\nmotion_vectors=1\ntriple_frame_gen=1\n");
+    auto rife=parse_settings("[ofxr]\nAdvancedMode=1\nframe_generation=4\nrife_model=2\nmotion_vectors=1\ntriple_frame_gen=1\n");
     require(rife.frame_generation==4 && rife.rife_model==2 && rife.motion_vectors==0 && !rife.triple_frame_gen,"RIFE uses no engine guides and is 2X only");
-    auto rife_roundtrip=parse_settings(serialize_settings(rife));
-    require(rife_roundtrip.rife_model==2 && rife_roundtrip.frame_generation==4,"RIFE model survives per-game INI roundtrip");
+    auto rife_roundtrip=parse_settings(serialize_settings(rife,true));
+    require(rife_roundtrip.rife_model==2 && rife_roundtrip.frame_generation==4,"advanced RIFE model survives configuration roundtrip");
     auto fifth=parse_settings("[ofxr]\nframe_generation=4\nrife_model=3\nscale=4\n");
     require(fifth.rife_model==3 && fifth.scale==4,"RIFE 4.4 and 20 percent survive normalization");
     auto fifth_roundtrip=parse_settings(serialize_settings(fifth));
@@ -271,7 +275,7 @@ void route_profiles() {
     auto multi_copy=parse_settings(serialize_settings(multi));
     require(multi_copy.rife_multiplier==4 && multi_copy.scale==5,"RIFE4X and exact1/6 persist");
     multi.rife_multiplier=8;multi=sanitize(multi);require(multi.rife_multiplier==4,"RIFE multiplier bounded to4X");
-    auto retired=parse_settings("[ofxr]\nframe_generation=4\nrife_model=1\n");
+    auto retired=parse_settings("[ofxr]\nAdvancedMode=1\nframe_generation=4\nrife_model=1\n");
     require(retired.rife_model==2,"retired heavy Lite choice migrates to accepted 4.6");
     auto legacy = parse_settings("[ofxr]\nframe_generation=2\nbackend=3\nmotion_vectors=1\ntriple_frame_gen=1\nlower_vram=1\n");
     require(legacy.triple_frame_gen && legacy.lower_vram, "legacy active DLSS-G preferences retained");

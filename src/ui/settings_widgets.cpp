@@ -5,6 +5,8 @@
 #include "xrfg/dlssg_profile.hpp"
 #include "xrfg/benchmark_suite.hpp"
 #include "imgui.h"
+#include "xrfg/rife_model_catalog.hpp"
+#include "xrfg/rife_runtime_locator.hpp"
 #include <windows.h>
 
 #include <algorithm>
@@ -224,8 +226,28 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
             changed |= ImGui::Checkbox("Bidirectional flow", &draft.backward);
         }
     } else if (draft.frame_generation==4) {
-        int model=draft.rife_model-2;
-        if(ImGui::Combo("RIFE model", &model,"4.6\0" "4.4\0" "4.3\0")){draft.rife_model=model+2;changed=true;}
+        if(draft.advanced_mode) {
+            if(ImGui::BeginCombo("RIFE model",xrfg::rife_model_name(draft.rife_model).c_str())) {
+                // The only automatic location is managed AppData. Honor a
+                // deliberately configured development override, never scan.
+                wchar_t override_path[32768]{};
+                GetPrivateProfileStringW(L"tray",L"rife_runtime_dir",L"",override_path,32768,
+                    global_configuration_path().c_str());
+                const auto root=*override_path ? std::filesystem::path(override_path) : xrfg::managed_rife_runtime();
+                const auto models=xrfg::available_rife_models(root);
+                int model_index=0;
+                for(const auto& model:models) {
+                    ImGui::PushID(model_index++);
+                    if(ImGui::Selectable(model.name.c_str(),draft.rife_model==model.id)) {
+                        draft.rife_model=model.id;changed=true;
+                    }
+                    if(draft.rife_model==model.id)ImGui::SetItemDefaultFocus();
+                    ImGui::PopID();
+                }
+                if(models.empty())ImGui::TextDisabled("No supported model weights installed");
+                ImGui::EndCombo();
+            }
+        } else if(draft.rife_model!=3) {draft.rife_model=3;changed=true;}
         int multiplier=draft.rife_multiplier-2;
         if(ImGui::Combo("RIFE multiplier",&multiplier,"2X\0" "3X\0" "4X\0")){draft.rife_multiplier=multiplier+2;changed=true;}
         int resolution=xrfg::rife_resolution_index(draft.rife_resolution);
@@ -234,7 +256,7 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
             draft.rife_resolution=xrfg::kRifeResolutions[resolution];changed=true;
         }
         ImGui::TextWrapped("3X/4X require the private route. Luke Ross also requires the isolated post-AFW synthesis queue. Additional intermediates increase GPU work and memory use.");
-        ImGui::TextWrapped("Experimental portable Python/CUDA. RIFE 4.4 processes both eyes together, with automatic TensorRT optimization. Motion inference uses the selected quality preset; output stays at full resolution. Requires the shared RIFE runtime.");
+        ImGui::TextWrapped("Experimental portable Python/CUDA. RIFE 4.4 processes both eyes together, with automatic TensorRT optimization. Motion inference uses the selected quality preset; output stays at full resolution. Requires the RIFE runtime installed in AppData.");
     } else if (draft.frame_generation==3) {
         ImGui::TextWrapped("Game motion vectors + FidelityFX optical flow (25% per axis). If game guides are unavailable or rejected, uses FidelityFX optical flow.");
     } else {

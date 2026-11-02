@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 83801;
+constexpr std::uint32_t kAbi = 83901;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -420,6 +420,7 @@ Settings sanitize(Settings value) noexcept {
     value.rife_multiplier=std::clamp(value.rife_multiplier,2,4);
     value.rife_resolution=xrfg::rife_resolution_preset(value.rife_resolution);
     value.rife_model=std::clamp(value.rife_model,2,4); // retired Lite choices migrate to 4.6
+    if(!value.advanced_mode)value.rife_model=3; // Basic mode always uses RIFE 4.4, including saved profiles.
     if(value.frame_generation==4){if(value.scale==1)value.scale=0;value.backend=2;value.motion_vectors=0;value.triple_frame_gen=false;value.backward=false;}
     // Legacy profiles only know the selected route. Keep its explicit values;
     // unseen routes start from their own defaults, never from another menu.

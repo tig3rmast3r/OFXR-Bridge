@@ -59,9 +59,12 @@ developer override is present. No automatic runtime lookup is performed.
 
 ## Models, Quality and multipliers
 
-Models **4.6**, **4.4** and **4.3** are available; **4.4** is the default and is
-the model with optional TensorRT acceleration. An explicitly saved model choice
-is retained. Retired Lite model choices migrate to 4.6.
+Normal mode always uses **4.4**, with optional TensorRT acceleration, and has
+no model dropdown. **Advanced mode** exposes the installed compatible versions
+found in the runtime's `models` folder: **4.6**, **4.4** and **4.3**, when their
+weights are present. The list refreshes when opening the menu. Unknown or retired
+Lite networks are not offered. Turning Advanced mode off immediately returns
+to **4.4**, including for profiles which previously saved another model.
 
 **Quality** offers **Potato**, **Low**, **Medium**, **High**, **Very high** and
 **Ultra**, with **Medium** as the default. It controls the resolution used to
