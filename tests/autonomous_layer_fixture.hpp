@@ -12,10 +12,11 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     s.advanced_mode=true;
     s.pacing_mode=desired.pacing_mode;
     s.increase_buffer=desired.increase_buffer;
+    s.rife_model=desired.rife_model; s.rife_multiplier=desired.rife_multiplier;
     s.enabled=desired.enabled; s.backend=desired.backend; s.preset=desired.preset;
     s.scale=desired.scale; s.backward=desired.backward; s.lower_vram=desired.lower_vram;
     s.separate_synthesis=desired.separate_synthesis;
-    const int canonical_generation=desired.hybrid && desired.frame_generation==0
+    const int canonical_generation=desired.rife_model>=0 ?4:desired.hybrid && desired.frame_generation==0
         ?3:desired.frame_generation;
     s.motion_vectors=desired.motion_vectors; s.frame_generation=canonical_generation;
     s.native_scale=static_cast<int>(desired.native_scale);
@@ -25,7 +26,7 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     xrfg::autonomous::apply_runtime_settings();
     auto effective=desired;
     effective.hybrid=canonical_generation==3;
-    effective.frame_generation=canonical_generation==3?0:canonical_generation;
+    effective.frame_generation=canonical_generation>=3?0:canonical_generation;
     if (effective.frame_generation == 2) effective.backend = 0;
     effective.motion_vectors=xrfg::autonomous::snapshot().desired.motion_vectors;
     const auto actual=xrfg::embedded::snapshot().desired;
@@ -49,6 +50,8 @@ public:
         std::filesystem::create_directories(directory_);
         SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",directory_.c_str());
         auto initial=xrfg::embedded::snapshot().desired;initial.pacing_mode=2;initial.enabled=true;
+        // The fixture owns a fresh profile, not a RIFE choice left beside the test EXE.
+        initial.rife_model=-1;initial.rife_multiplier=2;initial.scale=std::clamp(initial.scale,0,3);
         initial.increase_buffer=false; // independent fixture baseline, not the prior test's saved flag
         if (!request_control(initial))
             throw std::runtime_error("autonomous fixture publication failed");

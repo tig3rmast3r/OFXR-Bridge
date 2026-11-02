@@ -154,7 +154,10 @@ two distinct S destinations and4X three, with both real-image slots retained
 also in Fast mode. The4X logical descriptor buffer holds A/S1/S2/S3/B; it is
 not an additional compositor-pacing queue or a duplicate model allocation.
 Switching multiplier uses the existing drain/reconfigure/output-retirement
-transaction. Disabled FG and AFW-only bypass still ignore a saved multiplier.
+transaction. V738 explicitly promotes3X/4X to the ordered generation worker
+once the initial real prime has closed its XR cycle. It does not wait for the
+inline2X pair heuristic, whose multi-output safety guard refuses that pair.
+This applies both at startup and after a live multiplier change. Disabled FG and AFW-only bypass still ignore a saved multiplier.
 
 Whole-batch GPU timing starts before the first input pack and ends after the
 last native composition. On a healthy-device inference error all outputs fall

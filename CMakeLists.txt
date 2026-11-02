@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.792.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.793.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1242,6 +1242,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(xrfg_pimax_native_session_gpu xrfg_pimax_forced_framework_session_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_private_d11_entry_gate COMMAND xrfg_private_runtime_layer_tests d11-entry-gate)
         set_tests_properties(xrfg_private_d11_entry_gate PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE)
+        if(XRFG_TEST_RIFE_GPU)
+            foreach(rife_case rife2 rife3 rife4 rife-switch rife-switch-director rife-switch-fast rife-switch-fast-director)
+                add_test(NAME xrfg_private_${rife_case}_gpu COMMAND xrfg_private_runtime_layer_tests ${rife_case})
+                set_tests_properties(xrfg_private_${rife_case}_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+            endforeach()
+        endif()
         target_include_directories(xrfg_private_runtime_layer_tests PRIVATE include "${XRFG_OPENXR_SDK_ROOT}/include")
         target_compile_features(xrfg_private_runtime_layer_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_private_runtime_layer_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_PLATFORM_WIN32 OFXR_PROVIDER_API_EXPORTS)

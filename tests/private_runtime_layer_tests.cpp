@@ -111,6 +111,12 @@ int main(int argc,char** argv) {
         std::puts("OSR fresh/held terminal metadata, unchanged source/orientation/FOV/time and legacy PASS");return 0;
     }
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
+    const bool rife_switch=route.starts_with("rife-switch");
+    const int rife_pacing=route.ends_with("director")?1:0;
+    const bool rife_fast=route.find("fast")!=std::string::npos;
+    const unsigned rife_factor=rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
+    if(rife_factor)route="new";
+
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
     if(route=="unbridged-vulkan-session")return unbridged_vulkan_session_test();
     if(route=="panel-metadata")return panel_metadata_contract();
@@ -167,6 +173,17 @@ int main(int argc,char** argv) {
     check(!steady_memory || native12,"steady VRAM mode currently uses the native D12 route fixtures");
     const bool triple=route.ends_with('3');if(triple)route.pop_back();
     xrfg_fixture::ControlProfile profile;
+    if(rife_factor){
+        auto desired=xrfg::autonomous::snapshot().desired;
+        xrfg::autonomous::select_generation(desired,4,2);
+        desired.rife_model=3;desired.rife_multiplier=rife_factor;desired.scale=5;
+        desired.enabled=true;desired.pacing_mode=rife_pacing;
+        desired.lower_vram=rife_fast;desired.separate_synthesis=rife_fast;
+        desired.increase_buffer=false;
+        check(xrfg::autonomous::request(desired),"RIFE production UI request");
+        xrfg::autonomous::apply_runtime_settings();
+    }
+
     if(large_buffer) {
         auto desired=xrfg::autonomous::snapshot().desired;desired.increase_buffer=true;
         check(xrfg::autonomous::request(desired),"saved larger buffer before session");xrfg::autonomous::apply_runtime_settings();
@@ -182,7 +199,7 @@ int main(int argc,char** argv) {
     if(force_vdxr_steamvr)check(WritePrivateProfileStringW(L"tray",L"pacing",L"force_vdxr",xrfg::autonomous::global_configuration_path().c_str()),"force VDXR on real SteamVR identity");
     if(pimax_session)check(WritePrivateProfileStringW(L"tray",L"pacing",force_framework_pimax?L"force_steamvr":L"auto",xrfg::autonomous::global_configuration_path().c_str()),"Pimax auto/explicit framework transport preference");
     if(vdxr_probe)check(WritePrivateProfileStringW(L"tray",L"pacing",vdxr_legacy_probe?L"auto":L"force_steamvr",xrfg::autonomous::global_configuration_path().c_str()),"isolated VDXR transport preference");
-    if(benchmark_sequence && GetEnvironmentVariableW(L"XRFG_BENCH_TRACE",nullptr,0)) {
+    if((benchmark_sequence || rife_factor) && GetEnvironmentVariableW(L"XRFG_BENCH_TRACE",nullptr,0)) {
         const auto folder=xrfg::autonomous::configuration_path().parent_path()/L"trace";
         std::filesystem::create_directories(folder);
         WritePrivateProfileStringW(L"diagnostics",L"logging_enabled",L"1",(folder/L"ofxr_bridge.ini").c_str());
@@ -218,6 +235,8 @@ int main(int argc,char** argv) {
     ComPtr<ID3D12Debug> debug;
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     Fixture f(native12);f.transport->stop();if(route!="memory" && route!="scope" && !framework_session_probe)f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
+    if(rife_factor)f.prediction_horizon_ns=period*3; // cold-model/GPU-load fixture, unchanged physical refresh
+
     f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=!vdxr_probe && !unknown_session && !pimax_session;dispatch->virtual_desktop_runtime=vdxr_probe;
     if(pimax_session){dispatch->runtime_name="Pimax OpenXR";dispatch->inline_unless_pipelined=true;}
@@ -478,6 +497,11 @@ int main(int argc,char** argv) {
     state->nvidia_new_route=route!="ref" && route!="fidelity";state->djules_route=route=="djules";
     state->separate_synthesis=a;state->lower_vram=b;
     state->djules_triple_requested=triple;state->djules_deep_pipeline=triple || deep;
+    if(rife_factor){
+        state->nvidia_options.rife_model=3;state->nvidia_options.rife_multiplier=rife_factor;
+        state->nvidia_options.rife_async=true;state->nvidia_options.input_scale=xrfg::D3D12NvidiaInputScale::sixth;
+    }
+
     if(benchmark_sequence)state->djules_pipeline_switchable=true; // shipping xrCreateSession enables live multiplier polling
     const bool vectors=route=="fsr" || route=="hybrid" || route=="dlssg";
     if(vectors)state->dlss_motion_vectors=true;
@@ -498,6 +522,7 @@ int main(int argc,char** argv) {
     else state->control_revision=xrfg::embedded::snapshot().revision;
     {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;g_instances[dispatch->instance]=dispatch;}
     ok(install_private_runtime(state),"install real SteamVR private dispatch");
+    if(rife_factor){state->control_revision=0;ok(apply_embedded_control(state),"actual RIFE production control after private session installation");}
     if(benchmark_dlssg_sequence) {
         // Manual SessionState fixtures must make the same real SDK capacity
         // query as xrCreateSession. Never grant a synthetic 3X capability.
@@ -762,7 +787,7 @@ int main(int argc,char** argv) {
     // SDK limited to one generated frame it would instead test an unrelated
     // prefer_fps scheduling change while repeating the same 2X Fast policy.
     const unsigned benchmark_policy_phases=benchmark_dlssg_sequence && !benchmark_dlssg_transition && state->native_dlss_generated_frames<2?6:7;
-    const unsigned input_count=benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:8;
+    const unsigned input_count=rife_switch?60:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:8;
     if(benchmark_sequence) {
         std::fprintf(stderr,"BENCH policies=%u real_inputs=%u actual_3x_to_2x_transition=%u explicit_prefer_fps_transition_diagnostic=%u memory_sampling=%s\n",
             benchmark_policy_phases,input_count,unsigned(benchmark_policy_phases==7 &&
@@ -771,8 +796,21 @@ int main(int argc,char** argv) {
             completed_frame_memory?"completed-frame-drain":"overlapped-phase-drain");std::fflush(stderr);
     }
     std::vector<std::shared_ptr<xrfg::InterfaceCycle>> measured_cycles;
+    unsigned rife_phase_start{};
+    unsigned rife_phase_factor=rife_factor;
     bool hfw_gate_proven=false;
     for(unsigned n=1;n<=input_count;++n) {
+        if(rife_switch && (n-1)%12==0) {
+            constexpr unsigned factors[]{2,3,2,4,2};
+            rife_phase_factor=factors[(n-1)/12];
+            auto desired=xrfg::autonomous::snapshot().desired;
+            desired.rife_multiplier=rife_phase_factor;
+            check(xrfg::autonomous::request(desired),"live RIFE multiplier request");
+            xrfg::autonomous::apply_runtime_settings();
+            ok(apply_embedded_control(state),"live RIFE output ownership transition");
+            check(state->private_runtime==f.transport,"RIFE switch retains private endpoint");
+            rife_phase_start=f.real_ends.load();
+        }
         if(hfw_early && n==4) {
             auto app=find_swapchain(chain);check(bool(app),"cold projection owner");
             const auto cold_generation=app->frame_generation;
@@ -936,6 +974,14 @@ int main(int argc,char** argv) {
                     control.lower_vram,control.separate_synthesis,unsigned(control.triple_frame_gen),actual_triple?3U:2U,memory_phase_peaks[phase]);std::fflush(stdout);
             }
         }
+        if(rife_switch && n%12==0) {
+            xr_ok(wait_for_synthesis_handoff(state),"RIFE phase worker complete");
+            if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"RIFE phase presenter drained");
+            xr_ok(f.transport->drain(),"RIFE phase physical output drained");
+            const auto delivered=f.real_ends.load()-rife_phase_start;
+            std::fprintf(stderr,"RIFE_PHASE factor=%u pacing=%d fast=%u inputs=12 delivered=%u\n",rife_phase_factor,rife_pacing,unsigned(rife_fast),delivered);
+            check(delivered>=1+8*rife_phase_factor,"RIFE live phase lost its intermediate outputs");
+        }
     }
     if(hfw && !toggling)check(hfw_gate_proven,"HFW never promoted to actual synthesis worker");
     xr_ok(wait_for_synthesis_handoff(state),"worker complete");
@@ -951,6 +997,11 @@ int main(int argc,char** argv) {
             inner.desired.frame_generation,inner.desired.backend,inner.desired.enabled,inner.revision,
             int(state->frame_generation_mode),state->dlss_motion_vectors,state->control_revision,state->luke_afw_enabled,
             bool(chain_state->last_released_capture),bool(chain_state->last_released_motion_vectors),int(chain_state->generation_refusal),chain_state->generation_eligible_pending,chain_state->generation_refusal_detail);
+    }
+    if(rife_factor){
+        std::fprintf(stderr,"RIFE transport factor=%u outputs=%u state=%u private=%u slotcap=%zu worker=%u\n",
+            rife_factor,f.real_ends.load(),unsigned(state->generation_status.load()),bool(state->private_runtime),state->three_slots.capacity(),state->three_slot_director);
+        check(f.real_ends>=1+5*rife_factor,"RIFE full transport lost one or more intermediate/real outputs");
     }
     check(generated,"actual generator must produce synthetic outputs beyond accepted real inputs");
     if(sole) {

@@ -16382,9 +16382,8 @@ XrResult layer_end_frame_impl(
     // Both promotions hand the presenter its first frame at the top of an
     // xrEndFrame, before the inline second cycle runs, so the handoff never
     // overlaps a frame this thread has already submitted.
-    const bool pipelined_presenter_start_requested =
-        state->pipelined_presenter_start_requested ||
-        state->presenter_start_requested;
+    bool pipelined_presenter_start_requested =
+        state->pipelined_presenter_start_requested || state->presenter_start_requested;
     const bool consume_in_submission_order =
         pipelined_presenter_mode || frame_had_overlapping_wait;
     const bool match_latest_by_submission =
@@ -16447,6 +16446,12 @@ XrResult layer_end_frame_impl(
             S_OK, 126,
             startup_request->stream, startup_request->epoch);
     const HRESULT control_result = apply_embedded_control(state, startup_request.has_value(), end_info);
+    // Multi-output RIFE cannot bootstrap through the inline 2X pair: that
+    // path deliberately refuses extra destinations. Use the newly applied
+    // multiplier and promote after the real prime closes the current XR cycle.
+    if (SUCCEEDED(control_result) && !use_continuous_presenter && state->menu_enabled &&
+        rife_frames(*state)>2 && three_slot_generation_session(state))
+        pipelined_presenter_start_requested=true;
     if (startup_request) {
         state->luke_afw_startup.complete(*startup_request, SUCCEEDED(control_result));
         if (xrfg::bridge_flight_logger().ram_enabled())
