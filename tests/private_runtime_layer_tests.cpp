@@ -475,7 +475,7 @@ int main(int argc,char** argv) {
         if(pimax_session && force_framework_pimax)
             check(created->runtime_acceptance && !created->runtime_acceptance->rate(xrfg::interface_clock_ns()),
                 "Pimax Framework must observe native accepted output without inventing an initial rate");
-        if(!vdxr_legacy_probe)check(created && created->private_runtime && created->private_runtime->buffer_capacity()==(large_buffer?3:2),"session uses default2 or saved3 private deliveries");
+        if(!vdxr_legacy_probe)check(created && created->private_runtime && created->private_runtime->buffer_capacity()==((created->dispatch->steamvr_runtime && created->private_runtime->director_enabled()) || large_buffer?3:2),"session uses Director3 or Framework requested2/3 private deliveries");
         if(vdxr_legacy_probe) {
             check(created && created->vdxr_legacy && !created->private_runtime && !created->private_delivery_queue,
                 "Legacy runtime keeps original native binding without a private director");
@@ -591,7 +591,7 @@ int main(int argc,char** argv) {
                 }
                 check(created->private_runtime==transport && transport->director_enabled()==(mode!=0) &&
                     single_director_pacing(*created)==(mode==1),"every pacing choice applies to the original endpoint");
-                check(transport->buffer_capacity()==(next.increase_buffer?3:2),"buffer applies even before first session start");
+                check(transport->buffer_capacity()==((created->dispatch->steamvr_runtime && mode!=0) || next.increase_buffer?3:2),"capacity applies before session start, preserving Framework2/3 and Director3");
             }
             f.transport=transport;
             if(vdxr_probe) {
@@ -1026,7 +1026,7 @@ int main(int argc,char** argv) {
             xr_ok(wait_for_synthesis_handoff(state),"overlap probe drains the previous compute job");
             xr_ok(wait_for_presenter_idle(state),"overlap probe drains previous upper descriptors");
             xr_ok(f.transport->drain(),"overlap probe starts with both endpoint credits free");
-            check(f.transport->buffer_capacity()==2,"overlap probe uses the normal two endpoint credits");
+            check(f.transport->buffer_capacity()==((state->dispatch->steamvr_runtime && f.transport->director_enabled()) || rife_buffer3?3:2),"overlap probe uses Director3 or Framework selected2/3 credits");
             // X3: hold S1, queue S2, leave B at the upper front. X4: let S1
             // retire, hold S2 and queue S3, leaving the same one-real geometry.
             f.end_entered=false;
@@ -1098,7 +1098,7 @@ int main(int argc,char** argv) {
             auto desired=xrfg::autonomous::snapshot().desired;desired.increase_buffer=n!=5;
             check(xrfg::autonomous::request(desired),"request only larger/smaller private buffer");
             xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(state),"apply buffer without generator reset");
-            check(state->private_runtime==f.transport && f.transport->buffer_capacity()==(desired.increase_buffer?3:2) && f.transport->director_enabled()==directed,"live buffer retains endpoint and pacing policy");
+            check(state->private_runtime==f.transport && f.transport->buffer_capacity()==((state->dispatch->steamvr_runtime && directed) || desired.increase_buffer?3:2) && f.transport->director_enabled()==directed,"live buffer retains endpoint and pacing policy");
             check(find_swapchain(chain)->frame_generation==generation && state->luke_afw_last_evaluated_publication==afw_publication,"buffer-only control discarded engine/AFW history");
             check(state->djules_configuration_epoch.load()==engine_epoch,"buffer-only control reset framework pacing/history epoch");
         }
@@ -1211,10 +1211,12 @@ int main(int argc,char** argv) {
             rife_overlap_b_sequence=state->next_source_sequence-1;
             check(state->presenter_condition.wait_for(lock,5s,[&] {
                 const auto& front=state->three_slots.slot(0);
+                if(f.transport->buffer_capacity()>=3)
+                    return !state->synthesis_busy && XR_SUCCEEDED(state->presenter_failure) && state->three_slots.can_accept_real();
                 return front && !front->synthetic && front->value->frame &&
                     front->value->source_sequence==rife_overlap_b_sequence && state->three_slots.can_accept_real() &&
                     state->presenter_inflight_frame==front->value->frame;
-            }),"native End gate did not leave exactly the completed old real B pending");
+            }),"native End gate did not leave old B completed and the next source admissible");
             lock.unlock();
             // In4X Director S1 may finish and B reach the upper front before
             // S2 enters its later native refresh slot. Do not accidentally
@@ -1263,16 +1265,28 @@ int main(int argc,char** argv) {
                 const auto complete=[&] {
                     const auto& front=state->three_slots.slot(0);
                     const auto& tail=state->three_slots.slot(state->three_slots.capacity()-1);
-                    return front && !front->synthetic && front->value->source_sequence==rife_overlap_b_sequence &&
-                        tail && !tail->synthetic && tail->value->source_sequence==rife_overlap_b_sequence+1 &&
-                        bool(tail->value->frame);
+                    if(f.transport->buffer_capacity()==2)
+                        return front && !front->synthetic && front->value->source_sequence==rife_overlap_b_sequence &&
+                            tail && !tail->synthetic && tail->value->source_sequence==rife_overlap_b_sequence+1 &&
+                            bool(tail->value->frame);
+                    // With three endpoint credits old B itself may already be
+                    // accepted behind the held native synthetic output. Its
+                    // upper descriptor can retire; completed C may shift out
+                    // of the tail while its outputs await those same credits.
+                    // Still require C's actual completed GPU publication while
+                    // the old native batch is held, not merely source capture.
+                    for(std::size_t i=0;i<state->three_slots.capacity();++i) {
+                        const auto& entry=state->three_slots.slot(i);
+                        if(entry && !entry->synthetic && entry->value->source_sequence==rife_overlap_b_sequence+1 && entry->value->frame)return true;
+                    }
+                    return false;
                 };
                 // The production worker need not notify a test observer between
                 // setting C.frame and waiting for B's insertion slot.
                 const auto limit=std::chrono::steady_clock::now()+5s;
                 while(!(computed=complete()) && std::chrono::steady_clock::now()<limit)
                     state->presenter_condition.wait_for(lock,10ms);
-                if(computed)check(!state->three_slots.can_accept_real(),
+                if(computed && f.transport->buffer_capacity()==2)check(!state->three_slots.can_accept_real(),
                     "overlap admitted a second future real source beyond bounded B/C capacity");
             }
             const bool native_still_held=rife_overlap_retire || f.block_end.load();

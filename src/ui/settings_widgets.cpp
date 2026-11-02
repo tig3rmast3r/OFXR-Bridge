@@ -183,7 +183,7 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     ImGui::BeginDisabled(framework_only || (state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode));
     if(ImGui::Checkbox("Increase buffer",&draft.increase_buffer))changed=true;
     ImGui::EndDisabled();
-    if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("SteamVR: builds and retains a small adaptive latency reserve near full refresh to stabilize delivery, in Framework and Director. Uses 3 deliveries in flight instead of 2. Independent of Fast mode. Other private runtimes change capacity only; Legacy and direct Frame Reconstruction only are unaffected. Changes finish queued frames first; no restart needed.");
+    if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("SteamVR Framework: adds an adaptive timing reserve near full refresh and uses 3 deliveries instead of 2. SteamVR Director already uses 3 deliveries in Normal; this checkbox currently keeps the same Director capacity. Independent of Fast mode. Other private runtimes change capacity only; Legacy and direct Frame Reconstruction only are unaffected. Changes apply after queued frames complete.");
     if(state.connected && state.runtime.buffer_capacity)
         ImGui::Text("Active bridge buffer: %u deliveries",state.runtime.buffer_capacity);
     if(state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode) {

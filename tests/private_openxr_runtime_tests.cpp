@@ -1272,6 +1272,35 @@ void director_aged_cycle_checks(bool d12,bool corrected=true) {
     check(!f.cycle_waited && !f.cycle_begun,"aged-cycle recovery balances all real cycles");
     std::printf("Director-only %s: long preparation, future prediction, renewed native cycles and exact GPU images PASS\n",d12?"D12":"D11");
 }
+void director_normal_capacity_checks(bool d12) {
+    native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=true;native_director_only_fixture_mode=true;
+    Fixture f(d12,true,{},false,true,false,2,true);
+    check(f.transport->buffer_capacity()==3,"Director Normal has independent current, prepared and producer credits");
+    auto chain=f.make_chain();std::vector<unsigned> expected;
+    for(unsigned n=1;n<=3;++n){expected.push_back(n*40);f.write(chain,n*40);f.begin_virtual();xr_ok(f.submit(chain,float(n)),"three Normal credits accepted with the first End held");}
+    f.wait_entered();
+    std::atomic_bool attempted{};
+    auto fourth=std::async(std::launch::async,[&]{attempted=true;f.write(chain,160);f.begin_virtual();return f.submit(chain,4);});
+    while(!attempted)std::this_thread::yield();
+    const auto blocked=fourth.wait_for(30ms);
+    f.unblock();check(fourth.wait_for(3s)==std::future_status::ready,"retiring native delivery wakes bounded producer");xr_ok(fourth.get(),"fourth Normal delivery admitted");
+    check(blocked==std::future_status::timeout,"Normal remains bounded to three owned delivery credits");
+    f.wait_count(4);expected.push_back(160);
+    xr_ok(f.transport->drain(),"Normal bounded delivery drain");
+    check(f.pixels==expected,"Normal three credits preserve every exact GPU image in order");
+    xr_ok(f.transport->set_director_enabled(false),"switch Normal to Framework");
+    check(f.transport->buffer_capacity()==2,"Framework recovers its requested two-credit Normal mode");
+    xr_ok(f.transport->set_buffer_capacity(3),"Framework Buffer still selects three");
+    check(f.transport->buffer_capacity()==3,"Framework Buffer retains three credits");
+    xr_ok(f.transport->set_buffer_capacity(2),"Framework Normal restored");
+    xr_ok(f.transport->set_director_enabled(true),"return to Director Normal");
+    check(f.transport->buffer_capacity()==3,"Director minimum is independent of Buffer checkbox");
+    xr_ok(f.transport->set_buffer_capacity(3),"Director Buffer keeps its existing capacity for this first step");
+    xr_ok(f.transport->set_buffer_capacity(2),"Director Normal keeps throughput when Buffer clears");
+    check(f.transport->buffer_capacity()==3,"clearing Buffer must not remove a needed Director credit");
+    f.transport->stop();check(!f.cycle_waited && !f.cycle_begun,"Normal controls leave all native cycles balanced");
+    std::printf("Director Normal %s: three bounded credits, exact GPU images, Framework2/3 restored PASS\n",d12?"D12":"D11");
+}
 void queue_priority_policy() {
     D3D12_COMMAND_QUEUE_DESC original{};original.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;original.NodeMask=1;
     std::vector<int> attempts;
@@ -1293,6 +1322,7 @@ void queue_priority_policy() {
 }
 }
 int main(int argc,char** argv){
+if(argc>1 && std::string_view(argv[1])=="director-normal-capacity"){director_normal_capacity_checks(false);director_normal_capacity_checks(true);return 0;}
 if(argc>1 && std::string_view(argv[1])=="director-scope-pairs"){director_scope_and_pair_checks(false);director_scope_and_pair_checks(true);return 0;}
 if(argc>1 && std::string_view(argv[1])=="director-qualified"){native_director_only_fixture_mode=true;native_refresh_policy_checks();native_adaptive_transitions(false);native_adaptive_transitions(true);return 0;}
 if(argc>1 && std::string_view(argv[1])=="director-aged-cycle"){director_aged_cycle_checks(false);director_aged_cycle_checks(true);return 0;}

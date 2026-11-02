@@ -52,7 +52,7 @@ public:
         ID3D12CommandQueue* producer_queue12{}; // private writes, never future work on queue12
         ID3D11Device* device11{};
         ID3D11DeviceContext* context11{};
-        std::size_t capacity{2};
+        std::size_t capacity{2}; // requested; native SteamVR Director keeps at least3 credits
         std::function<std::int64_t()> physical_period;
         // Cached physical vsync only. Must not call a runtime, lock an observer
         // or wait from the consumer. Empty until the session clock is known.
@@ -102,8 +102,8 @@ public:
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
         std::function<void(std::int64_t)> accepted_output; // optional native End success, never enqueue
         bool director_enabled{true}; // false: ordered native-runtime paced bypass
-        // SteamVR only. Capacity3 enables the VDXR-style adaptive timing reserve
-        // in either pacing policy. Native/Legacy and opt-in other runtimes opt out.
+        // SteamVR only. Framework capacity3 enables its adaptive timing reserve.
+        // Native Director retains the Buffer request separately from its minimum3 credits.
         bool adaptive_buffer{};
         // SteamVR frame consumer: keep raw native timing, no CPU slot grid.
         bool native_frame_contract{};

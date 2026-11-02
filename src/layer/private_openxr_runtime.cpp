@@ -134,6 +134,7 @@ struct PrivateOpenXrRuntime::Impl {
     std::uint64_t accepted_packets{},content_wait_jobs{};
     PrivateRefreshWaitPolicy refresh_wait_policy; // guarded by mutex
     bool stabilization_active{true}; // OFXR ON; independent of capacity, guarded by mutex
+    std::size_t requested_capacity{}; // preserve Framework2/3 selection across Director switches
     std::deque<std::shared_ptr<Packet>> prepared;
     std::atomic_bool stopping{true};
     XrResult failure{XR_SUCCESS};
@@ -161,7 +162,15 @@ struct PrivateOpenXrRuntime::Impl {
     HANDLE fence_event{CreateEventW(nullptr,FALSE,FALSE,nullptr)};
     HANDLE timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
     HANDLE wait_timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
-    explicit Impl(Options input):options(std::move(input)),director_enabled(options.director_enabled),buffered(options.adaptive_buffer && options.capacity==3),stable_phase(options.capacity>=3) {}
+    explicit Impl(Options input):options(std::move(input)),director_enabled(options.director_enabled),buffered(options.adaptive_buffer && options.capacity==3),stable_phase(options.capacity>=3) {
+        requested_capacity=options.capacity;
+        options.capacity=delivery_capacity(requested_capacity,options.director_enabled);stable_phase=options.capacity>=3;
+    }
+    std::size_t delivery_capacity(std::size_t requested,bool directed) const noexcept {
+        // Director needs current delivery + prepared successor + producer credit.
+        // Those are throughput resources, independent of the optional time reserve.
+        return options.native_director_only && directed && requested?std::max(std::size_t{3},requested):requested;
+    }
     ~Impl(){if(fence_event)CloseHandle(fence_event);if(timer)CloseHandle(timer);if(wait_timer)CloseHandle(wait_timer);}
     bool d12() const noexcept {return device12!=nullptr;}
     std::int64_t period(XrDuration fallback) {
@@ -802,7 +811,7 @@ struct PrivateOpenXrRuntime::Impl {
                         // after a whole physical interval, not just when the
                         // far-future display timestamp itself expires.
                         const bool old_cycle=packet->prepared_at-wait_leave>=physical;
-                        if(!old_cycle && (!at || *at>handoff))break;
+                        if(!old_cycle && (!at || *at>handoff+PrivateOutputSchedule::preparation_lead))break;
                         if(diagnostic)options.trace(old_cycle?40:23,packet->sequence,at.value_or(0),handoff);
                         if(renewed && renewed%8==0 && !sleep_until(clock_ns()+physical,1'250'000))break;
                         if(!post_wait(0,false)){result=XR_ERROR_CALL_ORDER_INVALID;break;}
@@ -1226,6 +1235,9 @@ XrResult PrivateOpenXrRuntime::set_director_enabled(bool enabled) {
     const bool shared_native_transport=s.options.native_frame_contract && !s.options.native_director_only;
     if(!shared_native_transport)s.changed.wait(lock,[&]{return s.stopping || !s.pending;});
     if(XR_FAILED(s.failure))return s.failure;
+    const auto capacity=s.delivery_capacity(s.requested_capacity,enabled);
+    if(s.fifo && !s.fifo->set_capacity(capacity))return XR_ERROR_RUNTIME_FAILURE;
+    s.options.capacity=capacity;s.stable_phase=capacity>=3;
     s.director_enabled=enabled;++s.policy_epoch;
     if(s.options.native_director_only)s.refresh_wait_policy=PrivateRefreshWaitPolicy{};
     // Keep any already-owned native Wait; only remove a future CPU deadline.
@@ -1240,15 +1252,16 @@ XrResult PrivateOpenXrRuntime::set_buffer_capacity(std::size_t capacity,bool sta
     auto& s=*impl_;std::scoped_lock accept(s.accept_mutex);
     std::unique_lock lock(s.mutex);
     const bool buffered=s.options.adaptive_buffer && stabilization_active && capacity==3;
+    const auto requested=capacity;capacity=s.delivery_capacity(requested,s.director_enabled.load());
     const bool active_changed=s.options.native_frame_contract &&
         (!s.options.native_director_only || s.director_enabled.load()) && s.stabilization_active!=stabilization_active;
     reset_learning=reset_learning && (s.buffered.load() || buffered);
-    if(s.options.capacity==capacity && s.buffered.load()==buffered && !reset_learning && !active_changed)return s.failure;
+    if(s.options.capacity==capacity && s.requested_capacity==requested && s.buffered.load()==buffered && !reset_learning && !active_changed)return s.failure;
     if(!s.running) {
         if(XR_FAILED(s.failure))return s.failure;
         s.stabilization_active=stabilization_active;
         if(active_changed)s.refresh_wait_policy=PrivateRefreshWaitPolicy{};
-        s.options.capacity=capacity;s.stable_phase=capacity>=3;s.buffered=buffered;++s.policy_epoch;return XR_SUCCESS;
+        s.requested_capacity=requested;s.options.capacity=capacity;s.stable_phase=capacity>=3;s.buffered=buffered;++s.policy_epoch;return XR_SUCCESS;
     }
     // Let the ordinary consumer finish every accepted image. Keep the FIFO
     // object and all GPU resources; only reset future admission and learning.
@@ -1262,7 +1275,7 @@ XrResult PrivateOpenXrRuntime::set_buffer_capacity(std::size_t capacity,bool sta
     if(!s.fifo || !s.fifo->set_capacity(capacity))return XR_ERROR_RUNTIME_FAILURE;
     s.stabilization_active=stabilization_active;
     if(active_changed)s.refresh_wait_policy=PrivateRefreshWaitPolicy{};
-    s.options.capacity=capacity;s.stable_phase=capacity>=3;s.buffered=buffered;++s.policy_epoch;
+    s.requested_capacity=requested;s.options.capacity=capacity;s.stable_phase=capacity>=3;s.buffered=buffered;++s.policy_epoch;
     if(s.wait_job)s.wait_job->target=0;
     lock.unlock();s.changed.notify_all();return XR_SUCCESS;
 }
