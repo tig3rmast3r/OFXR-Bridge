@@ -12960,6 +12960,10 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
 std::vector<PanelSource> panel_sources(const SessionState& state,
     const ProjectionSnapshot& snapshot,std::span<const ProjectionResourceMapping> mappings) {
     std::vector<PanelSource> out;std::vector<XrSwapchain> conflicts;
+    // Fast mode never signals a generated panel image's fence, so the runtime
+    // queue deadlocks on the first panel frame. Until that output path is
+    // fixed, Fast mode keeps panels on their real images (poses still move).
+    if(state.lower_vram>0||state.separate_synthesis>0)return out;
     if(!snapshot.panel_corrections||state.graphics_binding!=SessionGraphicsBinding::d3d12||
         state.d3d11_bridge||state.vulkan_bridge||!state.d3d12_queue)return out;
     for(const auto& panel:snapshot.panels) {
