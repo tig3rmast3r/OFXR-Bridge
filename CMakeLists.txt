@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.839.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.840.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2243,4 +2243,15 @@ endif()
 
 if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
  add_test(NAME xrfg_reconstruction_controls COMMAND xrfg_private_runtime_layer_tests reconstruction-controls)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_d3d12_history)
+ add_executable(xrfg_osr_inpaint_tests tests/osr_inpaint_tests.cpp)
+ target_include_directories(xrfg_osr_inpaint_tests PRIVATE include src/d3d12 "${XRFG_GENERATED_SHADER_DIR}")
+ target_compile_features(xrfg_osr_inpaint_tests PRIVATE cxx_std_20)
+ target_compile_definitions(xrfg_osr_inpaint_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+ target_link_libraries(xrfg_osr_inpaint_tests PRIVATE d3d12 dxgi)
+ add_dependencies(xrfg_osr_inpaint_tests xrfg_d3d12_history)
+ add_test(NAME xrfg_osr_inpaint_gpu COMMAND xrfg_osr_inpaint_tests)
+ set_tests_properties(xrfg_osr_inpaint_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()

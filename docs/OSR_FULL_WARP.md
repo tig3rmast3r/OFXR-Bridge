@@ -233,11 +233,14 @@ the generated eye.
    camera moves and the warp does not hold it where the edge is; dropped,
    the arm's lit rim became a mirrored line, a band around the weapon
    (Cyberpunk, F8 of 2026-11-02 10:06:52).
-4. **Inpaint.** Every pixel that is not a stereo pixel belongs to a band: a
-   run of history, moved and hole pixels along the row between two stereo
-   pixels. The nearer bounding pixel is the occluder; the band is background
-   revealed beside it. History pixels keep the previous frame; moved and hole
-   pixels take the background pixel mirrored across the run's background
+4. **Inpaint.** Stereo pixels and valid same-eye history pass through unchanged.
+   Only moved/rejected and hole pixels form the unresolved run. Its bounds are
+   the first valid pixels on either side, whether stereo or history. The nearer
+   bound is the occluder; the farther bound is the background. The mirror axis
+   lies at the shared edge between the hole and that first valid background
+   texel, so the closest hole samples its immediate neighbour. The scan does not
+   cross a valid green history band to reach the outer stereo edge (V840).
+   Moved and hole pixels take the background pixel mirrored across that
    edge (a 3x3 average only when that pixel is not resolved: a blurred strip
    in a sharp image reads as a band). While strafing, the leading eye's band
    is background no input has seen, since the other eye and this eye's

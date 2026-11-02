@@ -863,7 +863,10 @@ float4 resolved_box(int x, int y, out float weight) {
     return weight > 0.0 ? sum / weight : 0;
 }
 
-bool is_stereo(int x, int y) { return (Resolved.Load(int3(x, y, 0)) & 3u) == TagStereo; }
+bool is_resolved(int x, int y) {
+    const uint tag = Resolved.Load(int3(x, y, 0)) & 3u;
+    return tag == TagStereo || tag == TagHistory;
+}
 
 // Fill a hole from the farthest surface around it, searched in eight
 // directions. The row-wise mirror needs one end of the row to be background;
@@ -903,31 +906,29 @@ float4 background_fill(int2 p, out float weight) {
     return fill;
 }
 
-// Stereo pixels pass through. Every other pixel belongs to a band: a run of
-// history, moved and hole pixels along the row between two stereo pixels. The
-// nearer bounding pixel is the occluder; the band is background revealed
-// beside it. History fills the band with the previous frame of this eye;
-// moved and hole pixels take the background mirrored across the run's
-// background edge. The band is not blended into that edge: the edge pixel is
-// the source eye's anti-aliased silhouette, half object colour, and a 6 px
-// blend painted a copy of every object's edge into its band (an outline
-// standing still, Cyberpunk F8s of 2026-11-01 12:05).
+// Stereo and valid same-eye history pass through. Only holes and rejected
+// history need invention. Bound the unresolved run at the nearest valid pixel,
+// including history: crossing the green history band moved the mirror axis
+// beyond that band and duplicated distant background details into purple holes.
 [numthreads(8, 8, 1)]
 void OsrFullInpaint(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= ColorSize)) return;
     const bool debug = (Flags & 1u) != 0;
     uint r = Resolved.Load(int3(id.xy, 0));
     float4 color = Warped.Load(int3(id.xy, 0));
-    if ((r & 3u) == TagStereo) { Output[id.xy] = color; return; }
+    const uint tag = r & 3u;
+    if (tag == TagStereo || tag == TagHistory) {
+        Output[id.xy] = debug && tag == TagHistory ? tint(color, float3(0, 1, 0), 0.35) : color;
+        return;
+    }
     const int x = int(id.x), y = int(id.y), width = int(ColorSize.x);
     int first = x, last = x;
-    [loop] while (first > 0 && x - first < int(MaxRun) && !is_stereo(first - 1, y)) --first;
-    [loop] while (last < width - 1 && last - x < int(MaxRun) && !is_stereo(last + 1, y)) ++last;
+    [loop] while (first > 0 && x - first < int(MaxRun) && !is_resolved(first - 1, y)) --first;
+    [loop] while (last < width - 1 && last - x < int(MaxRun) && !is_resolved(last + 1, y)) ++last;
     const int left = first - 1, right = last + 1;
     const bool have_left = left >= 0 && x - first < int(MaxRun);
     const bool have_right = right < width && last - x < int(MaxRun);
-    const bool history = (r & 3u) == TagHistory;
-    const bool moved = (r & 3u) == TagMoved;
+    const bool moved = tag == TagMoved;
     float4 fill = 0; float weight = 0;
     if (have_left && have_right) {
         const float zl = asfloat(Resolved.Load(int3(left, y, 0)) & ~3u);
@@ -936,10 +937,12 @@ void OsrFullInpaint(uint3 id : SV_DispatchThreadID) {
         // The row tells which side is background only when its two ends differ.
         const bool clear = max(zl, zr) > min(zl, zr) * EdgeRatio + FarDepth;
         const int edge = occluder_left ? right : left;
-        if (history) { fill = color; weight = 1.0; }
-        else if (!clear) fill = background_fill(int2(x, y), weight);
+        if (!clear) fill = background_fill(int2(x, y), weight);
         else {
-            int xs = 2 * edge - x; // mirror across the background edge
+            // Reflect about the shared edge, halfway between the last hole
+            // texel and its first valid neighbour. The closest hole therefore
+            // starts with that neighbour, not one texel farther away.
+            int xs = 2 * edge - x + (occluder_left ? -1 : 1);
             xs = occluder_left ? max(xs, right) : min(xs, left);
             // The mirrored pixel itself, not a 3x3 average: a blurred strip in
             // an otherwise sharp image reads as a band. While strafing, the
@@ -968,14 +971,12 @@ void OsrFullInpaint(uint3 id : SV_DispatchThreadID) {
             if (weight == 0.0) fill = background_fill(int2(x, y), weight);
             if (weight == 0.0) fill = resolved_box(edge, y, weight);
         }
-    } else if (history) {
-        fill = color; weight = 1.0; // a band open on one side keeps its history
     } else if (have_left || have_right) {
         fill = resolved_box(have_left ? left : right, y, weight);
     }
-    if (weight == 0.0 && !history) fill = background_fill(int2(x, y), weight);
+    if (weight == 0.0) fill = background_fill(int2(x, y), weight);
     if (weight == 0.0) { Output[id.xy] = debug ? float4(1, 0, 1, 1) : float4(0, 0, 0, 1); return; }
     if (debug) fill = moved ? tint(fill, float3(1, 0.5, 0), 0.5)
-        : history ? tint(fill, float3(0, 1, 0), 0.35) : tint(fill, float3(1, 0, 1), 0.5);
+        : tint(fill, float3(1, 0, 1), 0.5);
     Output[id.xy] = fill;
 }
