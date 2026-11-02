@@ -90,6 +90,9 @@ public:
         // and required display-edge+guard coverage (V651). This is bounded to one
         // attempt per packet, separate from expired-cycle recovery. A still-current
         // replacement may retain a shorter horizon; never spin for that preference.
+        // Stage32: diagnostic GPU copy start/end calibrated to QPC ns, b/c.
+        // No extra submission or wait; read after the existing copy fence.
+        // Stage31: buffered intended handoff QPC, c=ready lead at that deadline.
         // Stage27: allocation-only publication mapping; source handle in a,
         // virtual output handle in b and native sink in c (not QPC times).
         // Stage26: source read leases released after completed copy; packet ID,

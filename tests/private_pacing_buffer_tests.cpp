@@ -24,5 +24,14 @@ int main() try {
     xrfg::PrivatePacingBuffer slow;slow.period(p);
     for(int n=0;n<900;++n){const auto wanted=base+n*p;slow.observe(base+n*p*5/4+(n%2)*2'000'000,wanted);}
     need(slow.reserve()==0 && slow.take_refill()==0,"sustained under-refresh throughput bought useless latency");
+    xrfg::PrivatePacingBuffer extra;extra.period(p);
+    std::int64_t total{};
+    for(int n=0;n<4000;++n){const auto wanted=base+n*p;
+        extra.observe(wanted+(n%2?0:std::max(std::int64_t{},10'000'000-total)),wanted);
+        total+=extra.take_refill();}
+    need(total>p*3/4 && total<=p*7/4,"near-full output cannot learn the conditional extra period");
+    xrfg::PrivatePacingBuffer below;below.period(p);
+    for(int n=0;n<1500;++n){const auto wanted=base+n*p*100/97;below.observe(wanted+(n%2)*2'000'000,wanted);}
+    need(below.reserve()==0,"97 percent refresh must not buy extra latency");
     std::cout<<"Legacy learner reuse; bounded one-time refill, retained quiet reserve, slow-input exclusion and refresh reset PASS\n";
 } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

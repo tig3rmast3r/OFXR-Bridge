@@ -17,6 +17,7 @@
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
+#include "xrfg/fsr_guide_geometry.hpp"
 #include "xrfg/luke_guide_eye.hpp"
 #include "xrfg/d3d11_d3d12_interop.hpp"
 #include "xrfg/d3d11_color_identity.hpp"
@@ -11012,16 +11013,18 @@ void refresh_side_by_side_projection_guides(
     }
     int outcome = by_size ? 0 : 2;
     std::shared_ptr<xrfg::DlssMotionVectorSet> placed_set;
-    // Not on the FSR route, which reads whole texels.
-    if (!by_size && release != 0 && !strict_fsr_release_guides(session)) {
+    // FSR admits camera-proven whole-texel placements only.
+    if (!by_size && release != 0) {
         auto placed = xrfg::resolve_view_placed_dlss_guides(
             session.d3d12_queue.Get(), views, {release, release});
         outcome = 1;
-        if (!placed[0] || !placed[1]) {
+        if ((!placed[0] || !placed[1]) && !strict_fsr_release_guides(session)) {
             placed = xrfg::resolve_enlarged_dlss_guides(session.d3d12_queue.Get(), views, release);
             outcome = 3;
         }
-        if (placed[0] && placed[1] && placed[0]->eyes[0] && placed[1]->eyes[0]) {
+        if (placed[0] && placed[1] && placed[0]->eyes[0] && placed[1]->eyes[0] &&
+            (!strict_fsr_release_guides(session) ||
+                (xrfg::fsr_guide_regions(*placed[0]->eyes[0]) && xrfg::fsr_guide_regions(*placed[1]->eyes[0])))) {
             placed_set = std::make_shared<xrfg::DlssMotionVectorSet>();
             placed_set->eye_count = 2;
             for (std::size_t eye = 0; eye < 2; ++eye)
@@ -11137,15 +11140,15 @@ void refresh_release_bound_projection_guides(
         // field at FoveatedRenderingScale of its pixels and an inset - and
         // composites them into the eye images itself. Each eye then takes the
         // stream whose camera (Streamline's constants) covers its field,
-        // placed scaled (0.2's V515). Not on the FSR route, which reads whole
-        // texels. 753 per eye for the first frames and every 512th after: a
+        // placed scaled (0.2's V515). FSR requires exact whole-texel regions.
+        // 753 per eye for the first frames and every 512th after: a
         // the eye << 32 | the stream's low bits, b the vector rectangle placed
         // on the view (x, y, width, height, each in eighths of a texel, 16
         // bits), c the publication. 755 for the first eight frames none fit:
         // a 0, b and c the eyes' fields (four tangents, 4096ths, 16 bits).
         bool by_view = false;
         if (chains[0] && chains[1] && (!resolved[0] || !resolved[1]) &&
-            !strict_fsr_release_guides(session) && releases[0] != 0 && releases[1] != 0 &&
+            releases[0] != 0 && releases[1] != 0 &&
             fovs[0] && fovs[1]) {
             std::array<xrfg::DlssEyeView, 2> views{};
             for (std::size_t eye = 0; eye < views.size(); ++eye) {
@@ -11157,7 +11160,10 @@ void refresh_release_bound_projection_guides(
             }
             auto placed = xrfg::resolve_view_placed_dlss_guides(
                 session.d3d12_queue.Get(), views, {releases[0], releases[1]});
-            if (placed[0] && placed[1]) {
+            if (placed[0] && placed[1] &&
+                (!strict_fsr_release_guides(session) ||
+                    (placed[0]->eyes[0] && placed[1]->eyes[0] &&
+                     xrfg::fsr_guide_regions(*placed[0]->eyes[0]) && xrfg::fsr_guide_regions(*placed[1]->eyes[0])))) {
                 resolved = std::move(placed);
                 by_view = true;
             } else if (session.view_placement_misses++ < 8) {
@@ -16487,6 +16493,8 @@ struct PrivateDepthStrip {
                 return FsrStereoGuideReason::missing_guides;
             if (!eye->depth || !eye->depth_width || !eye->depth_height)
                 return FsrStereoGuideReason::missing_depth;
+            if (!xrfg::fsr_guide_regions(*eye))
+                return FsrStereoGuideReason::invalid_guide_region;
             const auto valid_region = [](ID3D12Resource* resource, std::uint32_t x,
                 std::uint32_t y, std::uint32_t width, std::uint32_t height,
                 std::uint32_t slice) {

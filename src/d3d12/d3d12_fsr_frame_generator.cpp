@@ -477,7 +477,7 @@ struct D3D12FsrFrameGenerator::Impl {
         copy_region(commands, eye.depth.Get(), 0, 0, 0, input.depth, 0,
                     input.depth_rect);
         copy_region(commands, eye.motion.Get(), 0, 0, 0,
-                    input.motion_vectors, 0, input.motion_rect);
+                    input.motion_vectors, input.motion_slice, input.motion_rect);
         std::array<D3D12_RESOURCE_BARRIER, 6> after{
             transition(input.color, D3D12_RESOURCE_STATE_COPY_SOURCE,
                        D3D12_RESOURCE_STATE_COMMON),

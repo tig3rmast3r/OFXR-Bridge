@@ -11,7 +11,7 @@ namespace xrfg {
 class OpticalPacingReserve {
 public:
     std::int64_t observe(std::int64_t returned, std::int64_t intended,
-                         std::int64_t period) noexcept {
+                         std::int64_t period, std::int64_t maximum = 0, int minimum_rate_percent = 94) noexcept {
         if (period < 2'000'000 || period > 50'000'000) return budget_;
         if (period_ != period) { *this = {}; period_ = period; }
         if (!last_) { first_ = last_ = returned; return budget_; }
@@ -33,13 +33,13 @@ public:
         const auto expected = period * static_cast<std::int64_t>(count_);
         // 94–104% of the requested refresh. Sustained GPU/producer starvation
         // cannot be fixed by adding a timing reserve and must not train it.
-        const bool near_full = elapsed > 0 && expected * 100 >= elapsed * 94 &&
+        const bool near_full = elapsed > 0 && expected * 100 >= elapsed * minimum_rate_percent &&
             expected * 100 <= elapsed * 104;
         if (near_full && jitter_ >= 4 && late_ >= 4) {
             std::sort(lateness_.begin(), lateness_.end());
             const auto p90 = lateness_[lateness_.size() * 9 / 10];
             // Lateness is the residual AFTER the already learned advance.
-            const auto wanted = (std::min)(period * 3 / 4, budget_ + p90 + 250'000);
+            const auto wanted = (std::min)(maximum > 0 ? maximum : period * 3 / 4, budget_ + p90 + 250'000);
             // A half-millisecond step limits one noisy window's influence.
             // No automatic decay: backend/refresh/session changes reset it.
             if (wanted > budget_)

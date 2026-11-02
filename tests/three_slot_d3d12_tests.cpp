@@ -570,6 +570,9 @@ int main(int argc,char** argv) {
         if(fsr_test) {
             s->frame_generation_mode=xrfg::D3D12FrameGenerationMode::fsr3;
             dispatch->steamvr_runtime=fsr_queue;
+            // This fixture explicitly requests native SteamVR queue ownership.
+            // The SessionState default is immutable Legacy, not a live-runtime probe.
+            if(fsr_queue)s->vdxr_legacy=false;
         }
         // These publication probes request the ordinary SteamVR transport.
         // SessionState's Legacy default is not a substitute for session routing.
@@ -1402,6 +1405,11 @@ int main(int argc,char** argv) {
                     g->producer_queue=s->d3d12_queue;g->output=left->enumerated_d3d12_images[0];g->output_slice=fsr_packed?0:eye;
                     g->motion_vectors=motion;g->depth=depth;g->output_width=g->depth_width=g->motion_width=256;
                     g->output_height=g->depth_height=g->motion_height=128;g->frame_time_delta_ms=16.6667F;
+                    if(mode=="fsr-foveated" || mode=="fsr-queue-foveated") {
+                        g->motion_width=g->depth_width=64;
+                        g->motion_height=g->depth_height=32;
+                        g->placed=true;g->placed_motion_rect={0,0,64,32};
+                    }
                     if(fsr_packed) {
                         g->output_width=g->depth_width=g->motion_width=128;
                         g->output_x=g->depth_x=g->motion_x=eye*128;

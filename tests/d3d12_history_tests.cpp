@@ -1,3 +1,4 @@
+#include "xrfg/fsr_guide_geometry.hpp"
 #include "xrfg/d3d12_history.hpp"
 #include "xrfg/d3d12_rife.hpp"
 #include <thread>
@@ -3810,6 +3811,26 @@ void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
 // fraction of its pixels and an inset - none the size of an eye image. Each
 // eye takes the stream whose camera covers its field, placed scaled.
 void test_view_placed_dlss_guides(D3D12WarpFixture& fixture) {
+    {
+        xrfg::DlssMotionVectorFrame guide{};
+        guide.placed=true;guide.motion_width=934;guide.motion_height=856;
+        guide.depth_width=1868;guide.depth_height=1712;
+        guide.placed_motion_rect={0,0,934,856};
+        auto regions=xrfg::fsr_guide_regions(guide);
+        require(regions && regions->depth[2]==1868 && regions->motion[3]==856,
+            "FSR must keep independent full-field periphery depth/motion grids");
+        guide.placed_motion_rect={4,8,920,840};
+        regions=xrfg::fsr_guide_regions(guide);
+        require(regions && regions->depth[0]==8 && regions->depth[1]==16 && regions->depth[2]==1840,
+            "FSR integer crop must preserve field correspondence");
+        guide.placed_motion_rect[0]=4.25F;
+        require(!xrfg::fsr_guide_regions(guide),"FSR must not round a fractional field into wrong texels");
+        guide.placed_motion_rect={0,0,935,856};
+        require(!xrfg::fsr_guide_regions(guide),"FSR cannot read outside this eye's motion domain");
+        guide.placed_motion_rect={0,0,934,std::numeric_limits<float>::quiet_NaN()};
+        require(!xrfg::fsr_guide_regions(guide),"FSR nonfinite mapping is invalid");
+    }
+
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
     xrfg::configure_dlss_motion_vector_tracking(true);

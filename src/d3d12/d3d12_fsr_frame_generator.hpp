@@ -39,6 +39,7 @@ struct D3D12FsrEyeInput {
     bool motion_vectors_jittered{};
     bool reset{};
     bool camera_data_valid{};
+    std::uint32_t motion_slice{};
 };
 
 [[nodiscard]] bool fsr_generated_array_description(

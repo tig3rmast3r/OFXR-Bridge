@@ -2528,6 +2528,10 @@ xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
         try { interface_cycle_layer_test();return 0; }
         catch(const std::exception& e) { std::cerr<<e.what()<<"\n";return 1; }
     }
+    if (argc>1 && std::string_view(argv[1])=="fsr-foveated-release") {
+        try { fsr_release_identity_test(true);return 0; }
+        catch(const std::exception& e) { std::cerr<<e.what()<<'\n';return 1; }
+    }
     if (argc>1 && std::string_view(argv[1])=="fsr-release-identity") {
         try { fsr_release_identity_test();return 0; }
         catch(const std::exception& e) { std::cerr<<e.what()<<"\n";return 1; }

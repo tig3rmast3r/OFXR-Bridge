@@ -173,6 +173,10 @@ struct NrPerHandle : NrModelFeature
 
     // The model cannot read and write one resource, so the frame is staged through these.
     ID3D12Resource* colorCopy = nullptr;
+    ID3D12Resource* colorRegion = nullptr; // zero-origin staging for an atlas colour ROI
+    std::array<unsigned,6> inputOrigins{};
+    bool inputOriginsKnown=false;
+    unsigned long long resolvedFrames=0,skippedLayouts=0;
 
     // The frame as the upscaler wrote it. The resolve adds the model's edit to this rather than
     // reconstructing it by inverting the tone curve, which is what turned every light in the frame into
@@ -858,7 +862,7 @@ void ReleaseSurfacesIfFormatChanged(NrPerHandle& nr, DXGI_FORMAT needed)
     ParkSecondPass(nr);
 
     for (ID3D12Resource** r :
-         { &nr.output, &nr.colorCopy, &nr.hdrCopy, &nr.colorSmall, &nr.depthSmall, &nr.motionSmall, &nr.resolveCopy })
+         { &nr.output, &nr.colorCopy, &nr.colorRegion, &nr.hdrCopy, &nr.colorSmall, &nr.depthSmall, &nr.motionSmall, &nr.resolveCopy })
         ParkNrResource(*r);
 
     nr.reset = true;
@@ -951,7 +955,7 @@ bool MatchPrivateNrGuides(NrPerHandle& nr,ID3D12Device* device,ID3D12GraphicsCom
  const auto dd=depth->GetDesc(),md=motion->GetDesc();
  if(!DlssNr::GuideFits(d,dd.Width,dd.Height)||!DlssNr::GuideFits(m,md.Width,md.Height))return false;
  suppliedWidth=m.width;suppliedHeight=m.height;
- if(reduced) {
+ if(reduced || d.x || d.y || m.x || m.y) {
   for(auto resource:{&nr.depthSmall,&nr.motionSmall})if(*resource) {
    const auto desc=(*resource)->GetDesc();if(desc.Width!=workWidth||desc.Height!=workHeight)ParkNrResource(*resource);
   }
@@ -967,7 +971,7 @@ bool MatchPrivateNrGuides(NrPerHandle& nr,ID3D12Device* device,ID3D12GraphicsCom
   Barrier(list,motion,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,L"NR small motion ready");
   restore.list=list;restore.depth=depth;restore.motion=motion;
   suppliedWidth=workWidth;suppliedHeight=workHeight;
- }else if(d.x||d.y||m.x||m.y)return false; // full-size model has no ROI fields
+ }
  scaleX=DlssNr::GuideScale(nr.guideMvScaleX,suppliedWidth,referenceW);
  scaleY=DlssNr::GuideScale(nr.guideMvScaleY,suppliedHeight,referenceH);
  return true;
@@ -1445,38 +1449,42 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     guideWidth = width;
     guideHeight = height;
 
-    // This trial handles separate 2D, zero-origin inputs (including padded allocations). Do not
-    // silently read another eye/region for layouts that need a separate offset-aware integration.
-    bool unsupportedOffset = false;
-    for (const char* key : { NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X,
-                            NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y })
-    {
-        unsigned int offset = 0;
-        if (params->Get(key, &offset) == NVSDK_NGX_Result_Success && offset != 0)
-            unsupportedOffset = true;
+    unsigned int createFlags=0;
+    params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,&createFlags);
+    // Each native DLSS handle owns a view and its own temporal history. Colour,
+    // depth and motion can occupy DIFFERENT regions of shared 2D atlases.
+    const auto origin=[&](const char* key){unsigned v{};params->Get(key,&v);return v;};
+    const unsigned colorX=origin(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X);
+    const unsigned colorY=origin(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y);
+    const auto depthDesc=depth->GetDesc(),motionDesc=motion->GetDesc();
+    const auto separate2D=[](const D3D12_RESOURCE_DESC& d){return
+        d.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.DepthOrArraySize==1 && d.SampleDesc.Count==1;};
+    const unsigned depthX=origin(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X);
+    const unsigned depthY=origin(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y);
+    const unsigned motionX=origin(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X);
+    const unsigned motionY=origin(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y);
+    const bool lowMotion=(createFlags&NVSDK_NGX_DLSS_Feature_Flags_MVLowRes)!=0;
+    const unsigned motionWidth=lowMotion?width:unsigned(srOutput?srOutput->GetDesc().Width:width);
+    const unsigned motionHeight=lowMotion?height:unsigned(srOutput?srOutput->GetDesc().Height:height);
+    const std::array<unsigned,6> origins{colorX,colorY,depthX,depthY,motionX,motionY};
+    if(!nr.inputOriginsKnown || nr.inputOrigins!=origins) {nr.reset=true;nr.inputOrigins=origins;nr.inputOriginsKnown=true;}
+    if(!separate2D(desc) || !separate2D(depthDesc) || !separate2D(motionDesc) ||
+        (desc.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) ||
+        !DlssNr::GuideFits({colorX,colorY,width,height},desc.Width,desc.Height) ||
+        !DlssNr::GuideFits({depthX,depthY,width,height},depthDesc.Width,depthDesc.Height) ||
+        !DlssNr::GuideFits({motionX,motionY,motionWidth,motionHeight},motionDesc.Width,motionDesc.Height)) {
+        ++nr.skippedLayouts;
+        if(NrFlightTrace::Enabled() && (nr.skippedLayouts<=4 || nr.skippedLayouts%128==0))LOG_INFO("NR_VIEW skipped handle={} color={}x{} origin={},{} array={} depth={}x{} origin={},{} array={} motion={}x{} origin={},{} array={}",
+            sourceHandleId,desc.Width,desc.Height,colorX,colorY,desc.DepthOrArraySize,
+            depthDesc.Width,depthDesc.Height,depthX,depthY,depthDesc.DepthOrArraySize,
+            motionDesc.Width,motionDesc.Height,motionX,motionY,motionDesc.DepthOrArraySize);
+        device->Release();return;
     }
-    const auto depthDesc = depth->GetDesc();
-    const auto motionDesc = motion->GetDesc();
-    if (unsupportedOffset || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-        desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1 ||
-        (desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0 ||
-        depthDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-        motionDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-        depthDesc.DepthOrArraySize != 1 || motionDesc.DepthOrArraySize != 1 ||
-        depthDesc.SampleDesc.Count != 1 || motionDesc.SampleDesc.Count != 1 ||
-        !FitsBeforeSr(active, desc.Width, desc.Height) ||
-        !FitsBeforeSr(active, depthDesc.Width, depthDesc.Height) ||
-        !FitsBeforeSr(active, motionDesc.Width, motionDesc.Height))
-    {
-        ReportSkipOnce("OFXR-BRIDGE V449 pre-SR requires valid zero-origin, separate 2D color/depth/motion inputs");
-        device->Release();
-        return;
-    }
+    const bool colorRegion= colorX!=0 || colorY!=0;
+    const bool directTarget=targetSupportsUav && !colorRegion;
 
     // The game states its depth convention in the flags it created its own feature with, so there is no
     // reason to assume one.
-    unsigned int createFlags = 0;
-    params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &createFlags);
     const bool gameSaysInverted = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
     const bool gameSaysHdr = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0;
     // PR #6 uses the SR output's color-space contract; keep this decision independent of inject point.
@@ -1553,6 +1561,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         {
             ParkNrResource(nr.output);
             ParkNrResource(nr.colorCopy);
+            ParkNrResource(nr.colorRegion);
             ParkNrResource(nr.hdrCopy);
             ParkNrResource(nr.colorSmall);
             ParkNrResource(nr.resolveCopy);
@@ -1568,14 +1577,17 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         nr.workHeight = workHeight;
     }
 
+    if(colorRegion && nr.colorRegion==nullptr)
+        nr.colorRegion=CreateScratch(device,desc.Format,width,height);
+
     if (reduced && nr.colorSmall == nullptr)
         nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
 
-    if (!targetSupportsUav && nr.resolveCopy == nullptr)
+    if (!directTarget && nr.resolveCopy == nullptr)
         nr.resolveCopy = CreateScratch(device, desc.Format, width, height);
 
-    if (nr.output == nullptr || nr.colorCopy == nullptr || nr.hdrCopy == nullptr ||
-        (reduced && nr.colorSmall == nullptr) || (!targetSupportsUav && nr.resolveCopy == nullptr))
+    if (nr.output == nullptr || nr.colorCopy == nullptr || nr.hdrCopy == nullptr || (colorRegion && nr.colorRegion==nullptr) ||
+        (reduced && nr.colorSmall == nullptr) || (!directTarget && nr.resolveCopy == nullptr))
     {
         g_runtime.failed = true;
         g_runtime.reason = "OFXR-BRIDGE V449 pre-SR scratch allocation failed";
@@ -1749,11 +1761,26 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     encodeParams.Height = height;
 
     MarkNrRecorded(sourceHandleId, submissionList.Get());
+    ID3D12Resource* encodeSource=target;
+    if(colorRegion) {
+        Barrier(cmdList,target,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE,L"NR colour ROI source");
+        Barrier(cmdList,nr.colorRegion,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_DEST,L"NR colour ROI staging");
+        D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=target;dst.pResource=nr.colorRegion;
+        src.Type=dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        const D3D12_BOX box{colorX,colorY,0,colorX+width,colorY+height,1};
+        cmdList->CopyTextureRegion(&dst,0,0,0,&src,&box);
+        Barrier(cmdList,target,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,L"NR colour ROI source restore");
+        Barrier(cmdList,nr.colorRegion,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,L"NR colour ROI ready");
+        encodeSource=nr.colorRegion;
+    }
     {
         DredScope stage(cmdList, L"OFXR standalone NR pre-SR encode");
-        nr.compose->Dispatch(cmdList, encodeParams, target, nullptr, nullptr, nullptr, nullptr,
+        nr.compose->Dispatch(cmdList, encodeParams, encodeSource, nullptr, nullptr, nullptr, nullptr,
                             nr.colorCopy, nr.hdrCopy);
     }
+
+    if(colorRegion)Barrier(cmdList,nr.colorRegion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"NR colour ROI reusable");
 
     // The transitions double as the wait for the encode's writes.
     Barrier(cmdList, nr.colorCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -1798,7 +1825,9 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     if(!MatchPrivateNrGuides(nr,device,cmdList,params,guideWidth,guideHeight,(unsigned)(srOutput?srOutput->GetDesc().Width:width),(unsigned)(srOutput?srOutput->GetDesc().Height:height),
         workWidth,workHeight,createFlags,reduced,depthIn,motionIn,modelGuideWidth,modelGuideHeight,
         modelScaleX,modelScaleY,matchedGuides)) {
-        g_runtime.reason="the private NR guide regions could not be matched";device->Release();return;
+        g_runtime.reason="the private NR guide regions could not be matched";
+        if(NrFlightTrace::Enabled())LOG_INFO("NR_VIEW guide refusal handle={} render={}x{} work={}x{}",sourceHandleId,guideWidth,guideHeight,workWidth,workHeight);
+        device->Release();return;
     }
 
     NVSDK_NGX_Parameter* const evaluateParams =
@@ -1912,8 +1941,8 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         Barrier(cmdList, finalModelOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"pre-SR-model-output-ready");
 
-        ID3D12Resource* resolveTarget = targetSupportsUav ? target : nr.resolveCopy;
-        if (targetSupportsUav)
+        ID3D12Resource* resolveTarget = directTarget ? target : nr.resolveCopy;
+        if (directTarget)
             Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"pre-SR-resolve-target-write");
         {
@@ -1924,7 +1953,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         Barrier(cmdList, finalModelOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"pre-SR-model-output-restore");
 
-        if (targetSupportsUav)
+        if (directTarget)
         {
             Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"pre-SR-resolve-target-ready");
@@ -1942,13 +1971,18 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
             dst.pResource = target;
             dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
             const D3D12_BOX rect {0, 0, 0, width, height, 1};
-            cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, &rect);
+            cmdList->CopyTextureRegion(&dst, colorX, colorY, 0, &src, &rect);
             Barrier(cmdList, target, D3D12_RESOURCE_STATE_COPY_DEST,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"pre-SR-resolve-copy-target-restore");
             Barrier(cmdList, nr.resolveCopy, D3D12_RESOURCE_STATE_COPY_SOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"pre-SR-resolve-copy-source-restore");
         }
 
+        ++nr.resolvedFrames;
+        if(NrFlightTrace::Enabled() && (nr.resolvedFrames<=4 || nr.resolvedFrames%128==0))
+            LOG_INFO("NR_VIEW resolved handle={} count={} color={}x{} origin={},{} depth_origin={},{} motion_origin={},{} work={}x{} guides={}x{} second={}",
+                sourceHandleId,nr.resolvedFrames,width,height,colorX,colorY,depthX,depthY,motionX,motionY,
+                workWidth,workHeight,modelGuideWidth,modelGuideHeight,cfg.DlssNrSecondPass.value_or_default());
         // Matched capture readbacks are mapped only after their native submissions retire.
         if (g_capture.isActive())
         {
@@ -2422,7 +2456,9 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
     if(!MatchPrivateNrGuides(nr,device,cmdList,params,guideWidth,guideHeight,width,height,
         workWidth,workHeight,createFlags,reduced,depthIn,motionIn,modelGuideWidth,modelGuideHeight,
         modelScaleX,modelScaleY,matchedGuides)) {
-        g_runtime.reason="the private NR guide regions could not be matched";device->Release();return;
+        g_runtime.reason="the private NR guide regions could not be matched";
+        if(NrFlightTrace::Enabled())LOG_INFO("NR_VIEW guide refusal handle={} render={}x{} work={}x{}",sourceHandleId,guideWidth,guideHeight,workWidth,workHeight);
+        device->Release();return;
     }
 
     NVSDK_NGX_Parameter* const evaluateParams =
@@ -2636,7 +2672,7 @@ void ReleaseForHandleLocked(unsigned int sourceHandleId)
     ParkNrEvaluateParams(nr);
     ParkNrCodec(nr.compose);
 
-    for (ID3D12Resource** r : { &nr.output, &nr.colorCopy, &nr.hdrCopy, &nr.colorSmall, &nr.depthSmall, &nr.motionSmall, &nr.resolveCopy,
+    for (ID3D12Resource** r : { &nr.output, &nr.colorCopy, &nr.colorRegion, &nr.hdrCopy, &nr.colorSmall, &nr.depthSmall, &nr.motionSmall, &nr.resolveCopy,
                                 &nr.depthClone, &nr.motionClone })
         ParkNrResource(*r);
 
@@ -2737,7 +2773,7 @@ void Shutdown()
             }
         }
 
-        for (ID3D12Resource* r : { nr.output, nr.colorCopy, nr.hdrCopy, nr.colorSmall, nr.depthSmall, nr.motionSmall, nr.resolveCopy,
+        for (ID3D12Resource* r : { nr.output, nr.colorCopy, nr.colorRegion, nr.hdrCopy, nr.colorSmall, nr.depthSmall, nr.motionSmall, nr.resolveCopy,
                                    nr.depthClone, nr.motionClone })
         {
             if (r != nullptr)

@@ -1,4 +1,5 @@
 #include "nr_host.hpp"
+#include <share.h>
 #include "xrfg/ngx_feature_paths.hpp"
 
 namespace {
@@ -76,7 +77,7 @@ void nr_host::log_text(const char* level,const std::string& message) {
     if(!NrFlightTrace::Enabled())return;
     static FILE* output=[] {
         auto path=Util::DllPath().parent_path()/std::format("ofxr-neural-pid{}.log",GetCurrentProcessId());
-        FILE* stream{};_wfopen_s(&stream,path.c_str(),L"wb");return stream;
+        return _wfsopen(path.c_str(),L"wb",_SH_DENYNO);
     }();
     if(output){fputs(line.c_str(),output);fflush(output);}
 }

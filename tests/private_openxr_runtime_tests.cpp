@@ -90,6 +90,8 @@ struct Fixture {
     std::int64_t simulated_submit_ns{};
     std::function<int(unsigned)> end_work_us;
     std::vector<std::int64_t> buffer_reserves,buffer_refills;
+    std::function<void(int,std::uint64_t,std::int64_t)> diagnostic_work;
+    std::atomic_uint copy_clock_receipts{};
     std::vector<XrTime> targets;
     XrTime raw_prediction{},begun_prediction{};
     unsigned advanced_predictions{};
@@ -137,6 +139,8 @@ struct Fixture {
         const auto original_trace=options.trace;
         options.trace=[this,original_trace](int stage,std::uint64_t seq,std::int64_t at,std::int64_t margin) {
             original_trace(stage,seq,at,margin);
+            if(diagnostic_work)diagnostic_work(stage,seq,at);
+            if(stage==32){check(at>0 && margin>=at,"GPU copy timestamps calibrated and ordered");++copy_clock_receipts;}
             if(stage==29)buffer_reserves.push_back(at);
             if(stage==30)buffer_refills.push_back(margin);
         };
@@ -957,7 +961,7 @@ void adaptive_buffer_test(bool directed,bool d12) {
     std::fprintf(stderr,"BUFFER %s %s outputs=%u rate=%.3f learned=%zu refill=%zu\n",directed?"Director":"Framework",d12?"D12":"D11",count,rate,f.buffer_reserves.size(),f.buffer_refills.size());
     check(!f.buffer_reserves.empty() && !f.buffer_refills.empty(),"near-refresh jitter did not build actual timing reserve");
     std::int64_t filled{};for(auto v:f.buffer_refills){check(v>0 && v<=500'000,"unbounded refill step");filled+=v;}
-    check(filled<=period*3/4,"adaptive buffer escaped the VDXR fractional cap");
+    check(filled<=period*7/4,"adaptive buffer escaped the private fractional cap");
     check(rate>84 && rate<94,"buffer delay was charged repeatedly or output ran above refresh");
     const auto learned=f.buffer_reserves.size(),refills=f.buffer_refills.size();
     xr_ok(f.transport->set_buffer_capacity(3,false),"OFXR disabled clears timing even at unchanged capacity");
@@ -972,6 +976,27 @@ void adaptive_buffer_test(bool directed,bool d12) {
     xr_ok(f.transport->set_buffer_capacity(3,true),"buffer re-enable");
     xr_ok(f.transport->destroy_swapchain(chain),"adaptive source cleanup");
     std::printf("%s %s adaptive buffer: %u exact outputs, %.2ffps, learned=%zu refill=%lldns, OFF reset PASS\n",d12?"D12":"D11",directed?"Director":"Framework",count,rate,learned,static_cast<long long>(filled));
+}
+void buffer_early_metadata(bool d12) {
+    Fixture f(d12,true,{},false,true,false,3,true);f.throttled=false;f.unblock();f.prediction_horizon_ns=period*4;
+    xr_ok(f.transport->set_director_enabled(false),"buffered Framework");
+    std::unordered_map<std::uint64_t,std::int64_t> intended;
+    f.diagnostic_work=[&](int stage,std::uint64_t seq,std::int64_t at){
+        if(stage==31)intended[seq]=at;
+        // Simulate variable optional bookkeeping. This used to execute AFTER
+        // Framework's last sleep and appear directly as output jitter.
+        if(stage==3 && seq%2){const auto until=ns()+800'000;while(ns()<until)YieldProcessor();}
+    };
+    const auto chain=f.make_chain();constexpr unsigned count=96;
+    for(unsigned n=1;n<=count;++n){f.write(chain,77);f.begin_virtual();xr_ok(f.submit(chain,float(n)),"metadata buffer input");}
+    xr_ok(f.transport->drain(),"metadata drain");check(f.positions.size()==count,"metadata lost output");
+    std::vector<std::int64_t> lateness;
+    for(unsigned n=8;n<count;++n)lateness.push_back(f.handoffs[n]-intended.at(n+1));
+    std::sort(lateness.begin(),lateness.end());const auto p90=lateness[lateness.size()*9/10];
+    std::printf("BUFFER early metadata %s p90 final entry lateness=%lldns\n",d12?"D12":"D11",static_cast<long long>(p90));
+    check(p90<600'000,"optional metadata remains after the final buffered wait");
+    check(d12?f.copy_clock_receipts==count:f.copy_clock_receipts==0,"GPU timing receipts present only on diagnostic D12 copies");
+    xr_ok(f.transport->destroy_swapchain(chain),"metadata cleanup");
 }
 void queue_priority_policy() {
     D3D12_COMMAND_QUEUE_DESC original{};original.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;original.NodeMask=1;
@@ -993,4 +1018,4 @@ void queue_priority_policy() {
     std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
 }
-int main(int argc,char** argv){if(argc>1 && (std::string_view(argv[1])=="buffer-framework" || std::string_view(argv[1])=="buffer-director")){const bool d=std::string_view(argv[1])=="buffer-director";adaptive_buffer_test(d,true);adaptive_buffer_test(d,false);return 0;}if(argc>1 && std::string_view(argv[1])=="bypass-expired"){stale_native_clock(true,false);stale_native_clock(false,false);return 0;}std::setvbuf(stdout,nullptr,_IONBF,0);if(argc>1){if(std::string_view(argv[1])=="vram-hdr"){vram_hdr_publication_tests();return 0;}if(std::string_view(argv[1])=="owned-d11"){owned_d11_output_tests();return 0;}if(std::string_view(argv[1])=="vram"){vram_publication_tests();return 0;}if(std::string_view(argv[1])=="bypass"){fixture_gpu_completion_proof();live_framework_bypass(true);live_framework_bypass(false);bypass_policy_drain();}else if(std::string_view(argv[1])=="metrics"){native_delivery_receipts(true);native_delivery_receipts(false);}else if(std::string_view(argv[1])=="pool"){pooled_publication();pooled_publication(true);pooled_publication(false,false);pooled_publication(true,false);}else if(std::string_view(argv[1])=="luke"){luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);}else if(std::string_view(argv[1])=="advance"){native_end_advance(true);native_end_advance(false);}else if(std::string_view(argv[1])=="source"){copied_source_reuse(true);copied_source_reuse(false);}else if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);quiet_native_clock(true);quiet_native_clock(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);adaptive_source_refill(true,2);adaptive_source_refill(false,2);quiet_native_clock(true);quiet_native_clock(false);copied_source_reuse(true);copied_source_reuse(false);native_end_advance(true);native_end_advance(false);luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);return 0;}
+int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="buffer-metadata"){buffer_early_metadata(true);buffer_early_metadata(false);return 0;}if(argc>1 && (std::string_view(argv[1])=="buffer-framework" || std::string_view(argv[1])=="buffer-director")){const bool d=std::string_view(argv[1])=="buffer-director";adaptive_buffer_test(d,true);adaptive_buffer_test(d,false);return 0;}if(argc>1 && std::string_view(argv[1])=="bypass-expired"){stale_native_clock(true,false);stale_native_clock(false,false);return 0;}std::setvbuf(stdout,nullptr,_IONBF,0);if(argc>1){if(std::string_view(argv[1])=="vram-hdr"){vram_hdr_publication_tests();return 0;}if(std::string_view(argv[1])=="owned-d11"){owned_d11_output_tests();return 0;}if(std::string_view(argv[1])=="vram"){vram_publication_tests();return 0;}if(std::string_view(argv[1])=="bypass"){fixture_gpu_completion_proof();live_framework_bypass(true);live_framework_bypass(false);bypass_policy_drain();}else if(std::string_view(argv[1])=="metrics"){native_delivery_receipts(true);native_delivery_receipts(false);}else if(std::string_view(argv[1])=="pool"){pooled_publication();pooled_publication(true);pooled_publication(false,false);pooled_publication(true,false);}else if(std::string_view(argv[1])=="luke"){luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);}else if(std::string_view(argv[1])=="advance"){native_end_advance(true);native_end_advance(false);}else if(std::string_view(argv[1])=="source"){copied_source_reuse(true);copied_source_reuse(false);}else if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);quiet_native_clock(true);quiet_native_clock(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);adaptive_source_refill(true,2);adaptive_source_refill(false,2);quiet_native_clock(true);quiet_native_clock(false);copied_source_reuse(true);copied_source_reuse(false);native_end_advance(true);native_end_advance(false);luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);return 0;}

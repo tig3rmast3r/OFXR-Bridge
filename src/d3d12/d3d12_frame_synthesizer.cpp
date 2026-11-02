@@ -1,6 +1,7 @@
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/d3d12_rife.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
+#include "xrfg/fsr_guide_geometry.hpp"
 #include "xrfg/d3d12_guide_composer.hpp"
 #include "xrfg/fsr_frame_generation.hpp"
 #include "xrfg/gpu_flight_diagnostics.hpp"
@@ -3836,6 +3837,12 @@ struct D3D12FrameSynthesizer::Impl {
             D3D12ImageRect motion_rect{
                 guide.motion_x, guide.motion_y,
                 guide.motion_width, guide.motion_height};
+            if (guide.placed) {
+                const auto regions = fsr_guide_regions(guide);
+                if (!regions) return kD3D12FrameSynthesisStaleGuides;
+                depth_rect = {regions->depth[0], regions->depth[1], regions->depth[2], regions->depth[3]};
+                motion_rect = {regions->motion[0], regions->motion[1], regions->motion[2], regions->motion[3]};
+            }
             if (allow_luke_guide_device_alias && !cinema_projection) {
                 // Luke's final AER eye is 3063x3344 while the pre-AER DLSS
                 // depth and motion guides are square. FSR assumes render and
@@ -3863,7 +3870,7 @@ struct D3D12FrameSynthesizer::Impl {
                 guide.frame_time_delta_ms,
                 guide.camera_near,
                 guide.camera_far,
-                guide.camera_data_valid
+                guide.camera_data_valid && !guide.placed
                     ? guide.camera_fov_vertical
                     : std::abs(current_source.views[view_index].fov.angle_up -
                                current_source.views[view_index].fov.angle_down),
@@ -3881,6 +3888,7 @@ struct D3D12FrameSynthesizer::Impl {
                 guide.reset,
                 guide.camera_data_valid,
             };
+            inputs[view_index].motion_slice = guide.motion_slice;
             midpoint_views[view_index] = current_source.views[view_index];
             midpoint_views[view_index].image_rect = color_rect;
             midpoint_views[view_index].pose = interpolate_pose(

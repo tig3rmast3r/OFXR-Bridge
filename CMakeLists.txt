@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.809.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.810.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2144,4 +2144,19 @@ if(XRFG_BUILD_TESTS AND TARGET xrfg_private_openxr_runtime_tests)
             set_tests_properties(xrfg_private_${rife_case}_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         endforeach()
     endif()
+endif()
+
+if(TARGET xrfg_private_openxr_runtime_tests)
+    add_test(NAME xrfg_buffer_early_metadata_gpu COMMAND xrfg_private_openxr_runtime_tests buffer-metadata)
+    set_tests_properties(xrfg_buffer_early_metadata_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
+if(TARGET xrfg_three_slot_director_tests)
+    add_test(NAME xrfg_fsr_foveated_release COMMAND xrfg_three_slot_director_tests fsr-foveated-release)
+    set_tests_properties(xrfg_fsr_foveated_release PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+endif()
+if(TARGET xrfg_three_slot_d3d12_tests AND EXISTS "${XRFG_FSR_RUNTIME}")
+    add_test(NAME xrfg_fsr_foveated_inline_gpu COMMAND xrfg_three_slot_d3d12_tests fsr-foveated)
+    add_test(NAME xrfg_fsr_foveated_queue_gpu COMMAND xrfg_three_slot_d3d12_tests fsr-queue-foveated)
+    set_tests_properties(xrfg_fsr_foveated_inline_gpu xrfg_fsr_foveated_queue_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 endif()

@@ -1,6 +1,6 @@
 // Actual layer release + guide refresh with owned WARP snapshots. No fake
 // resolver or generator is substituted. First discovery deliberately is RIGHT.
-void fsr_release_identity_test() {
+void fsr_release_identity_test(bool foveated=false) {
     using Microsoft::WRL::ComPtr;
     const auto original_settings = xrfg::embedded::snapshot().desired;
     auto s = session(); s->presenter_active = false;
@@ -35,11 +35,18 @@ void fsr_release_identity_test() {
     s->dispatch->release_swapchain_image = [](XrSwapchain,const XrSwapchainImageReleaseInfo*) -> XrResult {return XR_SUCCESS;};
     for (unsigned eye=0;eye<2;++eye) {
         XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-        info.width=info.height=32;info.arraySize=info.faceCount=info.mipCount=info.sampleCount=1;
+        info.width=info.height=foveated?128:32;info.arraySize=info.faceCount=info.mipCount=info.sampleCount=1;
         info.format=DXGI_FORMAT_R8G8B8A8_UNORM;
         auto chain=std::make_shared<SwapchainState>(s,info);
         chain->handle=reinterpret_cast<XrSwapchain>(std::uintptr_t(0x4640+eye));
-        chain->enumerated_d3d12_images.push_back(texture()); chain->enumerated_image_count=1;
+        if(foveated) {
+            auto desc=texture()->GetDesc();desc.Width=desc.Height=128;
+            D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+            ComPtr<ID3D12Resource> color;
+            check(SUCCEEDED(s->d3d12_device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,
+                &desc,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&color))),"foveated XR color");
+            chain->enumerated_d3d12_images.push_back(color);
+        } else chain->enumerated_d3d12_images.push_back(texture()); chain->enumerated_image_count=1;
         chain->d3d12_history=std::make_shared<xrfg::D3D12SwapchainHistory>();
         ID3D12Resource* image=chain->enumerated_d3d12_images[0].Get();
         check(SUCCEEDED(chain->d3d12_history->initialize(s->d3d12_device.Get(),s->d3d12_queue.Get(),
@@ -62,7 +69,9 @@ void fsr_release_identity_test() {
     ProjectionSnapshot projection;projection.layers.resize(1);projection.layers[0].views.resize(2);
     for(unsigned eye=0;eye<2;++eye) {
         auto& v=projection.layers[0].views[eye];v.pose.orientation.w=1;
-        v.subImage.swapchain=chains[eye]->handle;v.subImage.imageRect.extent={32,32};
+        v.subImage.swapchain=chains[eye]->handle;
+        const int extent=foveated?128:32;v.subImage.imageRect.extent={extent,extent};
+        if(foveated)v.fov={-.785398163F,.785398163F,.785398163F,-.785398163F};
     }
     auto mappings=build_projection_resource_mappings(projection);
     check(mappings.ready(), "FSR stereo mappings");note_projection_eyes(projection,mappings);
@@ -80,6 +89,12 @@ void fsr_release_identity_test() {
         p.producer_queue=s->d3d12_queue.Get();p.producer_command_list=list.Get();
         p.resource_state=p.depth_resource_state=D3D12_RESOURCE_STATE_COMMON;
         p.jitter_x=eye?.75F:.25F;p.jitter_y=.5F;p.reset=reset;
+        if(foveated) {
+            p.camera_data_valid=p.camera_matrices_valid=true;
+            p.camera_view_to_clip={1,0,0,0, 0,1,0,0, 0,0,1.001F,1, 0,0,-.1001F,0};
+            p.camera_position={eye?.03F:-.03F,0,0};
+            p.camera_right={1,0,0};p.camera_up={0,1,0};p.camera_forward={0,0,1};
+        }
         auto frame=xrfg::publish_dlss_motion_vectors(p);check(bool(frame), "FSR native publication");
         check(SUCCEEDED(list->Close()), "FSR producer close");ID3D12CommandList* lists[]={list.Get()};
         s->d3d12_queue->ExecuteCommandLists(1,lists);
@@ -94,22 +109,27 @@ void fsr_release_identity_test() {
         check(XR_SUCCEEDED(layer_release_swapchain_image_impl(chain->handle,&info)), "actual FSR release");
         check(chain->last_released_capture.has_value(), "FSR color captured at release");
     };
-    const auto refresh=[&] {refresh_release_bound_projection_guides(*s,ProjectionSnapshot{},mappings);};
+    const auto refresh=[&] {refresh_release_bound_projection_guides(*s,projection,mappings);};
     const auto verify=[&] {
         for(unsigned eye=0;eye<2;++eye) {
             auto g=chains[eye]->last_released_motion_vectors;
             check(g && g->eye_count==1 && g->eyes[0]->stream==(eye?46411:46422), "FSR never follows discovery order");
+            if(foveated) {
+                check(g->eyes[0]->placed && g->eyes[0]->output_width==128 &&
+                    g->eyes[0]->motion_width==32 && xrfg::fsr_guide_regions(*g->eyes[0]),
+                    "FSR foveated camera placement/guide ROI");
+            }
             check(g->eyes[0]->jitter_x==(eye?.75F:.25F), "FSR uses this eye's exact jitter snapshot");
             check(g->eyes[0]->publication<=chains[eye]->release_publication &&
                 g->eyes[0]->producer_fence && g->eyes[0]->producer_fence_value, "FSR keeps exact release/submission ownership");
         }
     };
     publish(1);publish(0);release(0);release(1);refresh();
-    check(!chains[0]->last_released_motion_vectors && !chains[1]->last_released_motion_vectors,
+    if(!foveated)check(!chains[0]->last_released_motion_vectors && !chains[1]->last_released_motion_vectors,
         "ambiguous both-before-release startup must bypass");
     // The old path has a concrete wrong-eye result on the same snapshots.
     auto legacy=xrfg::resolve_dlss_motion_vectors(chains[0]->enumerated_d3d12_images[0].Get(),s->d3d12_queue.Get(),0);
-    check(legacy && legacy->eyes[0]->stream==46411, "baseline reproduces right guides assigned to left");
+    if(!foveated)check(legacy && legacy->eyes[0]->stream==46411, "baseline reproduces right guides assigned to left");
     publish(1);release(1);publish(0);release(0);refresh();verify();
     publish(1);publish(0);release(0);release(1);refresh();verify();
     const auto left_identity=chains[0]->fsr_eye_identity;
@@ -132,7 +152,10 @@ void fsr_release_identity_test() {
     publish(1);release(1);publish(0);release(0);refresh();verify();
     publish(1);publish(0);release(0);release(1);refresh();verify();
     publish(1);publish(0,true);release(0);release(1);refresh();
-    check(!chains[0]->last_released_motion_vectors, "reset epoch cannot reuse learned eye identity");
+    if(!foveated)check(!chains[0]->last_released_motion_vectors, "reset epoch cannot reuse learned eye identity");
+    else check(chains[0]->last_released_motion_vectors &&
+        chains[0]->last_released_motion_vectors->eyes[0]->epoch!=left_identity.epoch,
+        "camera-proven reset must retain the new epoch rather than old history");
     publish(1);release(1);publish(0);release(0);refresh();verify();
     std::swap(projection.layers[0].views[0].subImage,projection.layers[0].views[1].subImage);
     mappings=build_projection_resource_mappings(projection);note_projection_eyes(projection,mappings);

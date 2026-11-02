@@ -145,6 +145,11 @@ struct PrivateOpenXrRuntime::Impl {
     ComPtr<ID3D12CommandQueue> queue12;
     ComPtr<ID3D12CommandQueue> producer_queue12;
     ComPtr<ID3D12Fence> ready12,copy12;
+    // Diagnostic-only timestamps on the existing copy list, read after its
+    // existing fence. No extra submission/wait or change to queue ownership.
+    ComPtr<ID3D12QueryHeap> copy_clock_heap;
+    ComPtr<ID3D12Resource> copy_clock_readback;
+    bool copy_clock_attempted{};
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> list;
     ComPtr<ID3D11Device5> device11;
@@ -179,6 +184,33 @@ struct PrivateOpenXrRuntime::Impl {
             if(waited!=WAIT_OBJECT_0 && waited!=WAIT_TIMEOUT)return E_FAIL;
         }
         return fence->GetCompletedValue()==UINT64_MAX?DXGI_ERROR_DEVICE_REMOVED:S_OK;
+    }
+    bool copy_clock_available() {
+        if(copy_clock_attempted)return copy_clock_heap && copy_clock_readback;
+        copy_clock_attempted=true;
+        D3D12_QUERY_HEAP_DESC q{};q.Type=D3D12_QUERY_HEAP_TYPE_TIMESTAMP;q.Count=2;
+        if(FAILED(device12->CreateQueryHeap(&q,IID_PPV_ARGS(&copy_clock_heap))))return false;
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;d.Width=16;
+        d.Height=d.DepthOrArraySize=d.MipLevels=d.SampleDesc.Count=1;d.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        return SUCCEEDED(device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,
+            D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&copy_clock_readback)));
+    }
+    void report_copy_clock(std::uint64_t sequence) {
+        UINT64 gpu{},cpu{},frequency{};
+        if(FAILED(queue12->GetTimestampFrequency(&frequency)) || !frequency ||
+            FAILED(queue12->GetClockCalibration(&gpu,&cpu)))return;
+        void* mapped{};D3D12_RANGE read{0,16},written{};
+        if(FAILED(copy_clock_readback->Map(0,&read,&mapped)))return;
+        const auto* stamps=static_cast<const UINT64*>(mapped);
+        const auto first=stamps[0],last=stamps[1];copy_clock_readback->Unmap(0,&written);
+        LARGE_INTEGER qpc{};QueryPerformanceFrequency(&qpc);
+        const auto convert=[&](UINT64 value){return static_cast<std::int64_t>(
+            static_cast<long double>(cpu)*1e9L/qpc.QuadPart+
+            (static_cast<long double>(value)-gpu)*1e9L/frequency);};
+        // Calibrated QPC start/end separates queue delay and CPU wakeup from
+        // the actual GPU timeline. Elapsed GPU timestamps can include preemption.
+        if(last>=first)options.trace(32,sequence,convert(first),convert(last));
     }
     bool sleep_until(std::int64_t target,std::int64_t fine_window,bool native_clock=false) {
         const auto selected_timer=native_clock?wait_timer:timer;
@@ -369,6 +401,8 @@ struct PrivateOpenXrRuntime::Impl {
             HRESULT copied=S_OK;
             if(d12()) {
                 copied=allocator->Reset();if(SUCCEEDED(copied))copied=list->Reset(allocator.Get(),nullptr);
+                const bool measure=diagnostic && copy_clock_available();
+                if(SUCCEEDED(copied) && measure)list->EndQuery(copy_clock_heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,0);
                 for(auto& target:targets) {
                     if(FAILED(copied))break;
                     auto owner=target->chain.lock();if(!owner){copied=E_INVALIDARG;break;}
@@ -382,10 +416,15 @@ struct PrivateOpenXrRuntime::Impl {
                     list->ResourceBarrier(2,barriers);list->CopyResource(endpoint.real12[target->index].Get(),image.d12.Get());
                     for(auto& b:barriers)std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(2,barriers);
                 }
+                if(SUCCEEDED(copied) && measure) {
+                    list->EndQuery(copy_clock_heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,1);
+                    list->ResolveQueryData(copy_clock_heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,0,2,copy_clock_readback.Get(),0);
+                }
                 if(SUCCEEDED(copied))copied=list->Close();
                 if(SUCCEEDED(copied)){ID3D12CommandList* lists[]={list.Get()};queue12->ExecuteCommandLists(1,lists);copied=queue12->Signal(copy12.Get(),copy_serial+1);if(SUCCEEDED(copied))++copy_serial;}
                 if(diagnostic)trace(13,packet.sequence);
                 if(SUCCEEDED(copied))copied=await(copy12.Get(),copy_serial,false);
+                if(SUCCEEDED(copied) && measure)report_copy_clock(packet.sequence);
             } else {
                 for(auto& target:targets) {
                     auto owner=target->chain.lock();if(!owner){copied=E_INVALIDARG;break;}
@@ -709,7 +748,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // The runtime still supplies every real prediction/Begin.
                     if(packet->adaptive_buffer) {
                         deadline=ticks(framework_clock.claim(point(clock_ns()-framework_shift),std::chrono::nanoseconds(physical)))+framework_shift;
-                        if(!sleep_until(deadline,std::min<std::int64_t>(1'250'000,physical/8))) {
+                        if(!sleep_until(std::max(std::int64_t{},deadline-1'250'000),std::min<std::int64_t>(1'250'000,physical/8))) {
                             retire(packet);fifo->retire();break;
                         }
                     }
@@ -720,7 +759,7 @@ struct PrivateOpenXrRuntime::Impl {
                     unsigned renewed{};
                     while(!stopping && prediction.shouldRender) {
                         const auto at=prediction_qpc(prediction);
-                        if(!at || *at>clock_ns()+PrivateOutputSchedule::preparation_lead)break;
+                        if(!at || *at>std::max(clock_ns(),deadline)+PrivateOutputSchedule::preparation_lead)break;
                         if(diagnostic)options.trace(23,packet->sequence,*at,clock_ns());
                         if(renewed && renewed%8==0 && !sleep_until(clock_ns()+physical,1'250'000))break;
                         if(!post_wait(0,false)){result=XR_ERROR_CALL_ORDER_INVALID;break;}
@@ -745,6 +784,8 @@ struct PrivateOpenXrRuntime::Impl {
                         options.trace(24,packet->sequence,prediction_qpc(prediction).value_or(0),renewed);
                     }
                 }
+                if(diagnostic && packet->adaptive_buffer)
+                    options.trace(31,packet->sequence,deadline,deadline-packet->prepared_at);
                 // Wait for the next cycle may overlap this frame's handoff.
                 // Begin/End remain exclusively serialized on this consumer;
                 // the worker needs accepted owned input before entering Wait,
@@ -785,7 +826,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // Include the edge guard in this final spin window. A
                     // second tiny timer wait for that2us tail would reintroduce
                     // scheduler jitter instead of preserving the early wakeup.
-                    if(directed && !sleep_until(deadline+2'000,PrivateOutputSchedule::preparation_lead+2'000)) {
+                    if((directed || packet->adaptive_buffer) && !sleep_until(deadline+2'000,packet->adaptive_buffer?1'252'000:PrivateOutputSchedule::preparation_lead+2'000)) {
                         retire(packet);fifo->retire();break;
                     }
                     const auto at_end=clock_ns();
