@@ -1900,7 +1900,8 @@ void log_benchmark_configuration(SessionState& state) noexcept {
         (std::uint64_t(xrfg::standalone::process_dlssg_preset()) << 17) |
         (std::uint64_t(std::max(0,xrfg::embedded::afw_snapshot().active_shading_rate)) << 20) |
         (s.pacing_mode==1 ? 1ULL << 40 : 0ULL) | (std::uint64_t(s.pacing_mode)<<42) | (single_director_pacing(state) ? 1ULL << 41 : 0ULL) |
-        (state.private_runtime ? (1ULL<<45) | (state.private_runtime->buffer_capacity()==3 ? 1ULL<<44:0ULL):0ULL) |
+        (state.private_runtime ? (1ULL<<45) | (state.private_runtime->buffer_capacity()>=3 ? 1ULL<<44:0ULL):0ULL) |
+        (s.increase_buffer ? 1ULL<<46:0ULL) |
         (xrfg::autonomous::benchmark_active(control.benchmark) ? (1ULL<<24) | (std::uint64_t(control.benchmark.index)<<25) : 0ULL);
     logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, control.revision, bits,
         std::uint64_t(s.preset) | (std::uint64_t(s.scale) << 8) | (std::uint64_t(s.native_scale) << 16));

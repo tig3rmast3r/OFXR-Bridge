@@ -169,7 +169,9 @@ struct PrivateOpenXrRuntime::Impl {
     std::size_t delivery_capacity(std::size_t requested,bool directed) const noexcept {
         // Director needs current delivery + prepared successor + producer credit.
         // Those are throughput resources, independent of the optional time reserve.
-        return options.native_director_only && directed && requested?std::max(std::size_t{3},requested):requested;
+        if(options.native_director_only && directed && requested)
+            return options.adaptive_buffer && requested==3?4:std::max(std::size_t{3},requested);
+        return requested;
     }
     ~Impl(){if(fence_event)CloseHandle(fence_event);if(timer)CloseHandle(timer);if(wait_timer)CloseHandle(wait_timer);}
     bool d12() const noexcept {return device12!=nullptr;}
@@ -696,6 +698,9 @@ struct PrivateOpenXrRuntime::Impl {
             PrivateOutputSchedule schedule;
             PrivatePhysicalSchedule slots;
             PrivatePacingBuffer buffer;
+            PrivatePacingBuffer director_buffer;
+            std::uint64_t director_buffer_epoch{};
+            std::int64_t director_buffer_target{},director_buffer_period{};
             TwoOutputSchedule framework_clock;
             std::int64_t framework_shift{},buffer_period{},last_buffer_target{};
             using BufferClock=TwoOutputSchedule::Clock;
@@ -793,6 +798,15 @@ struct PrivateOpenXrRuntime::Impl {
                 if(options.native_director_only && directed) {
                     // Director-only native policy. The V819 Framework branch
                     // below remains the reference, including its Buffer clock.
+                    if(packet->policy_epoch!=director_buffer_epoch || director_buffer_period!=physical) {
+                        director_buffer={};director_buffer_target=0;
+                        director_buffer_epoch=packet->policy_epoch;
+                        director_buffer_period=physical;
+                    }
+                    director_buffer.period(physical);
+                    const auto refill=packet->adaptive_buffer?director_buffer.take_refill():0;
+                    if(diagnostic && refill)
+                        options.trace(30,packet->sequence,director_buffer.reserve(),refill);
                     bool early{};
                     {std::scoped_lock lock(mutex);
                      early=stabilization_active && prediction.shouldRender &&
@@ -800,7 +814,10 @@ struct PrivateOpenXrRuntime::Impl {
                     // A normal Wait can return immediately after preparation
                     // held the prior clock for an entire pair. Do not drain the
                     // two ready images into SteamVR a millisecond apart.
-                    const auto deadline=early?clock_ns():std::max(clock_ns(),last_handoff+physical);
+                    // Refill only the newly learned increment. The ordinary
+                    // handoff chain/FIFO retains that margin; do not charge the
+                    // historical reserve to every already-ready output.
+                    const auto deadline=(early?clock_ns():std::max(clock_ns(),last_handoff+physical))+refill;
                     unsigned renewed{};
                     while(!stopping && prediction.shouldRender) {
                         const auto at=prediction_qpc(prediction);
@@ -833,6 +850,7 @@ struct PrivateOpenXrRuntime::Impl {
                         options.trace(24,packet->sequence,prediction_qpc(prediction).value_or(0),renewed);
                         options.trace(38,packet->sequence,early?1:0,early?1:0);
                         options.trace(39,packet->sequence,deadline,std::max(std::int64_t{},deadline-clock_ns()));
+                        if(packet->adaptive_buffer)options.trace(31,packet->sequence,deadline,deadline-packet->prepared_at);
                     }
                     // Qualified full refresh may overlap one future Wait. In
                     // normal mode post only after End. Neither changes images.
@@ -845,6 +863,17 @@ struct PrivateOpenXrRuntime::Impl {
                     if(options.trace)options.trace(3,packet->sequence,end.displayTime,prediction.predictedDisplayTime);
                     if(!sleep_until(deadline,1'250'000)){retire(packet);fifo->retire();break;}
                     const auto entered=clock_ns();result=options.real.end(options.real.session,&end);const auto returned=clock_ns();begun=false;
+                    if(packet->adaptive_buffer && result==XR_SUCCESS && end.layerCount) {
+                        auto late=std::max(std::int64_t{},returned-deadline);
+                        if(director_buffer_target && !refill)
+                            late=std::max(late,std::max(packet->prepared_at,
+                                begun_at+PrivateRuntimeBudget::presentation_margin)-(director_buffer_target+physical));
+                        // The same near-refresh learner as Framework/VDXR;
+                        // never learn the intentional refill as new jitter.
+                        const auto added=refill?0:director_buffer.observe(returned,returned-late);
+                        director_buffer_target=deadline;
+                        if(diagnostic && added)options.trace(29,packet->sequence,director_buffer.reserve(),added);
+                    }
                     if(packet->delivery)packet->delivery->completed(result==XR_SUCCESS && end.layerCount,
                         entered,returned,prediction_qpc(prediction).value_or(0),packet->prepared_at);
                     if(options.accepted_output && result==XR_SUCCESS && end.layerCount)options.accepted_output(returned);

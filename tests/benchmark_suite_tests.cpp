@@ -14,7 +14,7 @@ void check(bool condition,const char* text) {if(!condition)throw std::runtime_er
 // Mock the private endpoint's applied capacity alongside the existing applied revision.
 void report_test_runtime(RuntimeStatus& runtime) {
     const auto desired=snapshot().desired;
-    runtime.buffer_capacity=runtime.vdxr_legacy ? 0 : (runtime.steamvr_runtime && desired.enabled && desired.pacing_mode!=0) || desired.increase_buffer ? 3 : 2;
+    runtime.buffer_capacity=runtime.vdxr_legacy ? 0 : runtime.steamvr_runtime && desired.enabled && desired.pacing_mode!=0 ? (desired.increase_buffer?4:3) : desired.increase_buffer?3:2;
     report_runtime(runtime);
 }
 #include "buffer_benchmark_plan_tests.inc"

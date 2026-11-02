@@ -103,7 +103,7 @@ public:
         std::function<void(std::int64_t)> accepted_output; // optional native End success, never enqueue
         bool director_enabled{true}; // false: ordered native-runtime paced bypass
         // SteamVR only. Framework capacity3 enables its adaptive timing reserve.
-        // Native Director retains the Buffer request separately from its minimum3 credits.
+        // Native Director: Normal3, Buffer4, with the same near-refresh reserve learner.
         bool adaptive_buffer{};
         // SteamVR frame consumer: keep raw native timing, no CPU slot grid.
         bool native_frame_contract{};

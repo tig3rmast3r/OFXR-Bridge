@@ -975,6 +975,12 @@ void adaptive_buffer_test(bool directed,bool d12) {
     f.prediction_horizon_ns=period*4;
     xr_ok(f.transport->set_director_enabled(directed),"adaptive buffer pacing selection");
     f.end_work_us=[](unsigned n){return n%2?2000:0;};
+    std::unordered_map<std::uint64_t,std::int64_t> native_targets,native_refills;
+    std::int64_t refilled_total{};
+    if(native_director_only_fixture_mode && directed)f.diagnostic_work=[&](int stage,std::uint64_t seq,std::int64_t at){
+        if(stage==30){native_refills[seq]=at-refilled_total;refilled_total=at;}
+        if(stage==39)native_targets[seq]=at;
+    };
     const auto chain=f.make_chain();
     const unsigned count=224;
     for(unsigned n=1;n<=count;++n) {
@@ -991,6 +997,13 @@ void adaptive_buffer_test(bool directed,bool d12) {
     check(!f.buffer_reserves.empty() && !f.buffer_refills.empty(),"near-refresh jitter did not build actual timing reserve");
     std::int64_t filled{};for(auto v:f.buffer_refills){check(v>0 && v<=500'000,"unbounded refill step");filled+=v;}
     check(filled<=period*7/4,"adaptive buffer escaped the private fractional cap");
+    for(const auto& [seq,increment]:native_refills) {
+        check(seq>1 && seq<=count && increment>0,"native refill has an owned output and positive increment");
+        check(native_targets.at(seq)>=f.handoffs[seq-2]+period+increment-100'000,
+            "native refill did not add real time beyond the previous handoff plus one period");
+        check(f.handoffs[seq-1]>=native_targets.at(seq)-100'000,
+            "native handoff ignored the learned refill deadline");
+    }
     check(rate>84 && rate<94,"buffer delay was charged repeatedly or output ran above refresh");
     const auto learned=f.buffer_reserves.size(),refills=f.buffer_refills.size();
     xr_ok(f.transport->set_buffer_capacity(3,false),"OFXR disabled clears timing even at unchanged capacity");
@@ -1295,11 +1308,33 @@ void director_normal_capacity_checks(bool d12) {
     xr_ok(f.transport->set_buffer_capacity(2),"Framework Normal restored");
     xr_ok(f.transport->set_director_enabled(true),"return to Director Normal");
     check(f.transport->buffer_capacity()==3,"Director minimum is independent of Buffer checkbox");
-    xr_ok(f.transport->set_buffer_capacity(3),"Director Buffer keeps its existing capacity for this first step");
+    xr_ok(f.transport->set_buffer_capacity(3),"Director Buffer enables the extra reserve credit");
+    check(f.transport->buffer_capacity()==4,"Director Buffer adds a fourth independent delivery credit");
     xr_ok(f.transport->set_buffer_capacity(2),"Director Normal keeps throughput when Buffer clears");
     check(f.transport->buffer_capacity()==3,"clearing Buffer must not remove a needed Director credit");
     f.transport->stop();check(!f.cycle_waited && !f.cycle_begun,"Normal controls leave all native cycles balanced");
     std::printf("Director Normal %s: three bounded credits, exact GPU images, Framework2/3 restored PASS\n",d12?"D12":"D11");
+}
+void director_buffer_capacity_checks(bool d12) {
+    native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=true;native_director_only_fixture_mode=true;
+    Fixture f(d12,true,{},false,true,false,3,true);
+    check(f.transport->buffer_capacity()==4,"Director Buffer owns one more credit than Normal");
+    auto chain=f.make_chain();std::vector<unsigned> expected;
+    for(unsigned n=1;n<=4;++n){expected.push_back(n*40);f.write(chain,n*40);f.begin_virtual();xr_ok(f.submit(chain,float(n)),"four Buffer credits while native End held");}
+    f.wait_entered();
+    std::atomic_bool attempted{};
+    auto fifth=std::async(std::launch::async,[&]{attempted=true;f.write(chain,200);f.begin_virtual();return f.submit(chain,5);});
+    while(!attempted)std::this_thread::yield();
+    const auto blocked=fifth.wait_for(30ms);f.unblock();
+    check(fifth.wait_for(3s)==std::future_status::ready,"retiring one Buffer delivery wakes producer");
+    xr_ok(fifth.get(),"fifth Buffer delivery admitted");
+    check(blocked==std::future_status::timeout,"Buffer is bounded to four owned outputs");
+    f.wait_count(5);xr_ok(f.transport->drain(),"Buffer four-credit drain");expected.push_back(200);
+    check(f.pixels==expected,"four Buffer credits preserve exact independent GPU images");
+    xr_ok(f.transport->set_buffer_capacity(2),"Buffer off restores Normal");
+    check(f.transport->buffer_capacity()==3,"Buffer off keeps Normal three credits");
+    f.transport->stop();check(!f.cycle_waited && !f.cycle_begun,"Buffer leaves native calls balanced");
+    std::printf("Director Buffer %s: four bounded credits, fifth blocks, exact ordered images PASS\n",d12?"D12":"D11");
 }
 void queue_priority_policy() {
     D3D12_COMMAND_QUEUE_DESC original{};original.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;original.NodeMask=1;
@@ -1322,6 +1357,8 @@ void queue_priority_policy() {
 }
 }
 int main(int argc,char** argv){
+if(argc>1 && std::string_view(argv[1])=="director-native-buffer"){native_contract_fixture_mode=true;native_director_only_fixture_mode=true;native_adaptive_wait_fixture_mode=false;adaptive_buffer_test(true,true);adaptive_buffer_test(true,false);return 0;}
+if(argc>1 && std::string_view(argv[1])=="director-buffer-capacity"){director_buffer_capacity_checks(false);director_buffer_capacity_checks(true);return 0;}
 if(argc>1 && std::string_view(argv[1])=="director-normal-capacity"){director_normal_capacity_checks(false);director_normal_capacity_checks(true);return 0;}
 if(argc>1 && std::string_view(argv[1])=="director-scope-pairs"){director_scope_and_pair_checks(false);director_scope_and_pair_checks(true);return 0;}
 if(argc>1 && std::string_view(argv[1])=="director-qualified"){native_director_only_fixture_mode=true;native_refresh_policy_checks();native_adaptive_transitions(false);native_adaptive_transitions(true);return 0;}

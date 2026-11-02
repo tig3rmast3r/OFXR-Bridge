@@ -9,7 +9,7 @@ void require(bool ok,const char* text) {if(!ok)throw std::runtime_error(text);}
 void report(RuntimeStatus& r) {
     const auto s=snapshot();r.applied_revision=s.revision;r.pacing_mode=s.desired.pacing_mode;
     r.afw_shading_rate=s.desired.afw_shading_rate;
-    r.buffer_capacity=r.vdxr_legacy?0:s.desired.increase_buffer?3:2;report_runtime(r);
+    r.buffer_capacity=r.vdxr_legacy?0:r.steamvr_runtime && s.desired.enabled && s.desired.pacing_mode!=0 ? (s.desired.increase_buffer?4:3) : s.desired.increase_buffer?3:2;report_runtime(r);
 }
 void policy() {
     for(bool modern:{false,true})for(bool full:{false,true}) {

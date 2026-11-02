@@ -81,7 +81,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 82601;
+constexpr std::uint32_t kAbi = 82701;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1048,7 +1048,8 @@ void tick_benchmark(std::uint64_t now) noexcept {
                     s.runtime.afw_shading_rate!=s.desired.afw_shading_rate;
                 const bool pacing_pending=rec.steamvr && s.runtime.pacing_mode!=static_cast<unsigned>(s.desired.pacing_mode);
                 const bool buffer_pending=rec.steamvr && !b.advanced &&
-                    s.runtime.buffer_capacity!=static_cast<unsigned>((s.desired.enabled && s.desired.pacing_mode!=0) || s.desired.increase_buffer?3:2);
+                    s.runtime.buffer_capacity!=static_cast<unsigned>(s.desired.enabled && s.desired.pacing_mode!=0
+                        ? (s.desired.increase_buffer?4:3):s.desired.increase_buffer?3:2);
                 if(s.runtime.applied_revision!=b.revision || s.runtime.pending || quality_pending || pacing_pending || buffer_pending) {
                     if(now>=b.requested_ms+30000)
                         suite_restore(shared,BenchmarkPhase::error,"Settings not applied within 30 seconds; stopped.",now);
