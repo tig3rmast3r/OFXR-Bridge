@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.796.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.797.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -866,6 +866,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr/ofxr_bridge.ini")
 
         if(XRFG_BUILD_TESTS)
+            add_executable(xrfg_rife_runtime_locator_tests tests/rife_runtime_locator_tests.cpp)
+            target_include_directories(xrfg_rife_runtime_locator_tests PRIVATE include)
+            target_compile_features(xrfg_rife_runtime_locator_tests PRIVATE cxx_std_20)
+            add_test(NAME xrfg_rife_runtime_locator_tests COMMAND xrfg_rife_runtime_locator_tests)
             add_executable(xrfg_standalone_launcher_tests
                 tests/standalone_launcher_tests.cpp)
             target_link_libraries(xrfg_standalone_launcher_tests PRIVATE

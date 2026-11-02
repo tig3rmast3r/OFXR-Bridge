@@ -26,7 +26,7 @@ struct GenerationPreferences {
 constexpr std::size_t kGenerationProfileCount = 8; // four OFXR engines, FSR, DLSS-G, Hybrid, RIFE
 constexpr auto default_generation_profiles() noexcept {
     std::array<GenerationPreferences,kGenerationProfileCount> profiles{};
-    profiles[7].scale=3;
+    profiles[7].scale=5;
     return profiles;
 }
 
@@ -41,7 +41,7 @@ struct Settings {
     int backend{2}; // 0 FidelityFX, 1 NVIDIA reference, 2 NVIDIA new, 3 NVIDIA djules
     int motion_vectors{}; // 0 optical flow, 1 native game guides
     int rife_multiplier{2}; // experimental RIFE 2X/3X/4X
-    int rife_model{2}; // 2 4.6, 3 4.4, 4 4.3; retired Lite IDs0/1 map to2
+    int rife_model{3}; // 2 4.6, 3 4.4, 4 4.3; retired Lite IDs0/1 map to2
     int frame_generation{}; // 0 OFXR, 1 FSR 3, 2 native DLSS Frame Generation, 3 Hybrid, 4 RIFE
     int hybrid_backend{}; // legacy profile key; Hybrid fallback is always FidelityFX
     int preset{1}; // 0 slow, 1 medium, 2 fast

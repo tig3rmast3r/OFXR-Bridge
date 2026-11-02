@@ -219,7 +219,7 @@ void route_profiles() {
     }
     Settings fresh_rife;
     select_generation(fresh_rife,4,2);fresh_rife=sanitize(fresh_rife);
-    require(fresh_rife.scale==3 && fresh_rife.rife_model==2,"new RIFE profile defaults to 4.6 motion-only quarter resolution");
+    require(fresh_rife.scale==5 && fresh_rife.rife_model==3,"new RIFE profile defaults to4.4 exact1/6 motion inference");
     auto migrated_rife=parse_settings("[ofxr]\nframe_generation=0\n[route.ofxr_new]\nscale=2\n");
     select_generation(migrated_rife,4,2);migrated_rife=sanitize(migrated_rife);
     require(migrated_rife.scale==3,"RIFE profile seeds quarter resolution when upgrading an existing profile INI");

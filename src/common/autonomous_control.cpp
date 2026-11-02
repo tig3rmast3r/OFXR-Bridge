@@ -80,7 +80,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 79601;
+constexpr std::uint32_t kAbi = 79701;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -363,7 +363,7 @@ Settings sanitize(Settings value) noexcept {
     // unseen routes start from their own defaults, never from another menu.
     if (!value.profiles_initialized) {
         value.generation_profiles = {};
-        value.generation_profiles[7].scale=3; // RIFE's motion-only trial starts at 25%.
+        value.generation_profiles[7].scale=5; // RIFE defaults to exact1/6 motion inference.
     }
     value.profiles_initialized = true;
     value.generation_profiles[selected_profile(value)] = active_preferences(value);
@@ -391,7 +391,7 @@ Settings parse_settings(std::string_view text) {
     Settings value;
     int section = -2; // -1 ofxr, 0..5 generation profile, -2 ignored
     std::array<bool, kGenerationProfileCount> profile_seen{}, separation_seen{};
-    bool flat_separation_seen{},pacing_seen{};
+    bool flat_separation_seen{},pacing_seen{},flat_scale_seen{};
     int legacy_single_director=-1;
     std::istringstream input{std::string(text)};
     std::string line;
@@ -427,6 +427,7 @@ Settings parse_settings(std::string_view text) {
         }
         if(key=="separate_synthesis") flat_separation_seen=true;
         if(key=="pacing_mode") pacing_seen=true;
+        if(key=="scale") flat_scale_seen=true;
         if(key=="AdvancedMode")value.advanced_mode=number!=0;
         if(key=="single_director") legacy_single_director=number!=0;
 #define READ_FIELD(name) if (key == #name) value.name = static_cast<decltype(value.name)>(number);
@@ -449,6 +450,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(luke_shared_swapchains)
 #undef READ_FIELD
     }
+    if(value.frame_generation==4 && !flat_scale_seen)value.scale=value.generation_profiles[7].scale;
     if(!pacing_seen && legacy_single_director>=0)value.pacing_mode=legacy_single_director?1:2;
     if(!flat_separation_seen) value.separate_synthesis=value.lower_vram;
     value.lower_vram = value.lower_vram > 0 || value.separate_synthesis > 0;
