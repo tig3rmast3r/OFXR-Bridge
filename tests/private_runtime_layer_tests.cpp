@@ -1338,8 +1338,15 @@ int main(int argc,char** argv) {
             if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"RIFE phase presenter drained");
             xr_ok(f.transport->drain(),"RIFE phase physical output drained");
             const auto delivered=f.real_ends.load()-rife_phase_start;
-            std::fprintf(stderr,"RIFE_PHASE factor=%u pacing=%d fast=%u inputs=12 delivered=%u\n",rife_phase_factor,rife_pacing,unsigned(rife_fast),delivered);
-            check(delivered>=1+8*rife_phase_factor,"RIFE live phase lost its intermediate outputs");
+            std::fprintf(stderr,"RIFE_PHASE factor=%u pacing=%d fast=%u inputs=%u delivered=%u\n",rife_phase_factor,rife_pacing,unsigned(rife_fast),rife_phase_frames,delivered);
+            check(delivered>=1+(rife_phase_frames-4)*rife_phase_factor,"RIFE live phase lost its intermediate outputs");
+            if(panel_test) {
+                const auto panels=find_swapchain(panel_chain)->frame_generation;
+                check(panels && panels->synthetic_runtime_rings==source_synthetic_rings(*state,true),
+                    "panel bank count did not follow live RIFE multiplier");
+                check(panels->panel_batch_width==(rife_phase_factor>2?rife_phase_factor-1:1),
+                    "panel batch stride did not follow live RIFE multiplier");
+            }
         }
     }
     if(hfw && !toggling)check(hfw_gate_proven,"HFW never promoted to actual synthesis worker");

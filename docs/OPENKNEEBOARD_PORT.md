@@ -34,3 +34,25 @@ locally. Full application/headset acceptance remains pending.
 Stationary panel poses retain passthrough descriptor ownership. Known panel
 sources retain auxiliary capture from their first armed frame, avoiding an
 unnecessary unsafe-composition bypass at startup.
+
+V819 is based on sealed V813, excluding diagnostic V814-V818 ancestry. The
+panel engine explicitly disables RIFE and retains FidelityFX independently of
+the eye generator. RIFE 4X's third panel output uses the same generic optical
+composition loop, with its own .75 metadata fraction and output ownership.
+No shared Python, model, engine cache or provider bytes are modified.
+
+
+With RIFE selected, panels use one independent normal-priority D3D12 queue.
+This prevents panel reacquisition waits from parking the queue that RIFE's
+deferred eye batch still needs to finalize. Existing producer/history fences
+and output publication fences retain ownership. No CPU drain, additional XR
+swapchain policy or pacing change is introduced. Without panels this queue is
+never allocated; non-RIFE eye routes retain their existing queue arrangement.
+
+RIFE 3X/4X panel outputs retain two bounded banks of synthetic destinations,
+matching the two retained real sources. Only panel textures receive these banks;
+eye allocation and endpoint credit/cadence are unchanged. Each bank's descriptor
+leases prevent reuse until its physical readers have retired. Known panel sources
+retain auxiliary capture from their first armed frame, avoiding an unnecessary
+unsafe-composition bypass at startup. Stationary panel poses retain passthrough
+ownership; moving poses alone receive an interpolated descriptor.

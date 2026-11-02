@@ -6330,7 +6330,7 @@ struct D3D12FrameSynthesizer::Impl {
                 extra_synthetic->interpolation_fraction <= 0.05F ||
                 extra_synthetic->interpolation_fraction >= 0.95F) return E_INVALIDARG;
             if(extra_synthetic->third_destination_index!=UINT32_MAX){
-                if(!rife || extra_synthetic->third_destination_index>=synthetic_destinations.size() ||
+                if((!rife && !flat_panel) || extra_synthetic->third_destination_index>=synthetic_destinations.size() ||
                     extra_synthetic->third_destination_index==synthetic_destination_index ||
                     extra_synthetic->third_destination_index==extra_synthetic->destination_index ||
                     !std::isfinite(extra_synthetic->third_fraction) || extra_synthetic->third_fraction<=extra_synthetic->interpolation_fraction ||

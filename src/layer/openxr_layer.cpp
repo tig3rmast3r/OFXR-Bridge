@@ -743,6 +743,7 @@ enum class GenerationQuarantineReason : std::int64_t {
 struct CompositionImageSlot;
 
 struct SessionState {
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> panel_synthesis_queue;
     std::vector<std::pair<XrSwapchain,XrTime>> panel_generated;
     bool uevr_application{}; // captured once at session creation, never inferred from game name
     bool steamvr_separate_queue{true}; // immutable session preference, tray-only
@@ -1755,6 +1756,10 @@ unsigned rife_frames(const SessionState& state) noexcept {
     const bool private_triple=state.private_runtime && extra_output_capacity(state);
     return reduced_native_outputs(state) && !private_triple ? 1U : 2U;
 }
+[[nodiscard]] unsigned source_synthetic_rings(const SessionState& state,bool panel) noexcept {
+    return panel && state.nvidia_options.rife_model>=0 && rife_frames(state)>2
+        ? 2U*(rife_frames(state)-1) : native_synthetic_rings(state);
+}
 [[nodiscard]] unsigned native_current_rings(const SessionState& state) noexcept {
     // The framework may retain A while B is prepared. 3X must keep both even
     // with Fast selected; one B handle would alias an owned source descriptor.
@@ -2032,10 +2037,13 @@ struct DirectSyntheticLease {}; // descriptor ownership only; never a private co
 struct DirectOutputPublication;
 
 struct FrameGenerationSwapchainState {
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> panel_queue;
     bool staged_outputs{};
     std::uint32_t current_runtime_rings{2}, synthetic_runtime_rings{2};
     std::uint32_t current_runtime_images_per_ring{}, synthetic_runtime_images_per_ring{};
     std::uint32_t staging_stride{1};
+    // RIFE panels retain one complete synthetic bank per admitted real source.
+    std::uint32_t panel_batch_width{1};
     std::array<std::shared_ptr<DjulesOutputStaging>,2> current_staging;
     std::array<std::shared_ptr<DjulesOutputStaging>,4> synthetic_staging;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> current_runtime_images, synthetic_runtime_images;
@@ -2049,11 +2057,11 @@ struct FrameGenerationSwapchainState {
     // slot s image i is s * current_images_per_slot + i.
     std::uint32_t current_images_per_slot{};
     std::size_t current_slot{};
-    std::array<PrivateSwapchainState, 4> synthetic{};
+    std::array<PrivateSwapchainState, 6> synthetic{};
     bool direct_extra_outputs{};
-    std::array<std::shared_ptr<DirectSyntheticLease>,3> direct_synthetic_leases;
+    std::array<std::shared_ptr<DirectSyntheticLease>,6> direct_synthetic_leases;
     std::array<std::atomic_bool,kCurrentSlotCount+1> current_publication_busy{};
-    std::array<std::atomic_bool,4> synthetic_publication_busy{};
+    std::array<std::atomic_bool,6> synthetic_publication_busy{};
     std::uint32_t synthetic_images_per_slot{};
     std::size_t synthetic_slot{};
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
@@ -3248,7 +3256,7 @@ void destroy_frame_generation_swapchains(
             return;
         }
         std::array<PrivateSwapchainState*,
-                   kCurrentSlotCount + 1 + 4> owned{};
+                   kCurrentSlotCount + 1 + 6> owned{};
         for (std::size_t slot = 0; slot < generation->synthetic.size(); ++slot) {
             owned[slot] = &generation->synthetic[slot];
         }
@@ -3391,7 +3399,7 @@ struct CreatedPrivateSwapchain {
 }
 
 struct CreatedCurrentRing {
-    std::array<CreatedPrivateSwapchain, 4> slots{};
+    std::array<CreatedPrivateSwapchain, 6> slots{};
     // Every slot's destination images end to end, in slot order, which is the
     // flat addressing both the synthesizer and the D3D11 interop expect.
     std::vector<ID3D12Resource*> d3d12_resources;
@@ -3530,7 +3538,9 @@ create_d3d12_frame_generation_swapchains(
         // Two runtime S handles serve both 2X and 3X. Direct 3X retains each
         // descriptor through physical submission before the next pair reuses it.
         generation->current_runtime_rings = output_slots;
-        generation->synthetic_runtime_rings = native_synthetic_rings(*state->session);
+        generation->synthetic_runtime_rings = source_synthetic_rings(*state->session,state->panel_source);
+        if(state->panel_source && state->session->nvidia_options.rife_model>=0 && rife_frames(*state->session)>2)
+            generation->panel_batch_width=rife_frames(*state->session)-1;
         generation->direct_extra_outputs = !generation->staged_outputs && extra_output_capacity(*state->session);
         if(generation->direct_extra_outputs)
             for(auto& lease:generation->direct_synthetic_leases) lease=std::make_shared<DirectSyntheticLease>();
@@ -3597,6 +3607,22 @@ create_d3d12_frame_generation_swapchains(
                 return nullptr;
             }
         }
+        // RIFE finalizes a deferred batch on the eye synthesis queue. A
+        // panel must not insert a wait there for runtime reacquisition behind
+        // that unfinished batch: it would block the batch's own finalizer.
+        // Use one independent panel queue for that session, with the ordinary
+        // producer/history and output completion fences. No CPU drain or new
+        // XR pacing owner is introduced.
+        if(state->panel_source && state->session->nvidia_options.rife_model>=0) {
+            if(!state->session->panel_synthesis_queue) {
+                D3D12_COMMAND_QUEUE_DESC description{};description.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+                const auto made=state->session->d3d12_device->CreateCommandQueue(&description,
+                    IID_PPV_ARGS(&state->session->panel_synthesis_queue));
+                if(FAILED(made)){destroy_current_ring(dispatch,&synthetic);destroy_current_ring(dispatch,&current);return nullptr;}
+                state->session->panel_synthesis_queue->SetName(L"OFXR independent panel synthesis");
+            }
+            generation->panel_queue=state->session->panel_synthesis_queue;
+        }
         auto synthesizer = std::make_shared<xrfg::D3D12FrameSynthesizer>();
         const xrfg::D3D12OpticalFlowBackend backend =
             state->panel_source ? xrfg::D3D12OpticalFlowBackend::fidelity_fx : state->session->optical_flow_backend;
@@ -3604,6 +3630,7 @@ create_d3d12_frame_generation_swapchains(
         if(state->panel_source) {
             options.input_scale=xrfg::D3D12NvidiaInputScale::full;
             options.hybrid=false;
+            options.rife_model=-1;
         }
         const auto initialize_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::synthesis_initialize,
@@ -3616,7 +3643,7 @@ create_d3d12_frame_generation_swapchains(
         generator_options.rife_async=generator_options.rife_model>=0 && async_rife_queue(*state->session);
         const HRESULT gpu_result = synthesizer->initialize(
             state->session->d3d12_device.Get(),
-            state->session->d3d12_synthesis_queue
+            generation->panel_queue ? generation->panel_queue.Get() : state->session->d3d12_synthesis_queue
                 ? state->session->d3d12_synthesis_queue.Get()
                 : state->session->d3d12_queue.Get(),
             state->d3d12_history,
@@ -3646,7 +3673,7 @@ create_d3d12_frame_generation_swapchains(
             // synthesis lists already starts and ends at this state, and a
             // resource in COMMON is implicitly promoted on first use, so a
             // runtime that wants it as a render target still gets one.
-            (generation->staged_outputs || state->session->d3d12_synthesis_queue)
+            (generation->staged_outputs || generation->panel_queue || state->session->d3d12_synthesis_queue)
                 ? D3D12_RESOURCE_STATE_COMMON
                 : D3D12_RESOURCE_STATE_RENDER_TARGET,
             backend,
@@ -12108,19 +12135,20 @@ void attach_djules_outputs(PreparedProjectionFrame& prepared,
         auto& output=resource.generation;
         auto* panel_synthetic=resource.panel&&output.kind!=PreparedGenerationKind::pair?nullptr:synthetic;
         auto* panel_extra=resource.panel&&(output.kind!=PreparedGenerationKind::pair||!output.extra_handle)?nullptr:extra;
+        auto* panel_third=resource.panel&&(output.kind!=PreparedGenerationKind::pair||!output.third_handle)?nullptr:third;
         if(output.native_result) {
             real.native_results.push_back(output.native_result);
             if(panel_synthetic) panel_synthetic->native_results.push_back(output.native_result);
             if(panel_extra) { panel_extra->native_results.push_back(output.native_result); panel_extra->native_output=1; }
-            if(third){third->native_results.push_back(output.native_result);third->native_output=2;}
+            if(panel_third){panel_third->native_results.push_back(output.native_result);panel_third->native_output=2;}
         }
         if (output.reference_fence) {
             real.reference_readiness.push_back({output.reference_fence, output.reference_current_value, output.reference_requires_application_release,output.reference_inputs});
             if (panel_synthetic) panel_synthetic->reference_readiness.push_back({output.reference_fence, output.reference_synthetic_value, output.reference_requires_application_release,output.reference_inputs});
             if (panel_extra) panel_extra->reference_readiness.push_back({output.reference_fence, output.reference_synthetic_value, output.reference_requires_application_release,output.reference_inputs});
         }
-        if(third && output.reference_fence)third->reference_readiness.push_back({output.reference_fence,output.reference_synthetic_value,output.reference_requires_application_release,output.reference_inputs});
-        if(third && output.direct_third_lease)third->direct_synthetic_leases.push_back(output.direct_third_lease);
+        if(panel_third && output.reference_fence)panel_third->reference_readiness.push_back({output.reference_fence,output.reference_synthetic_value,output.reference_requires_application_release,output.reference_inputs});
+        if(panel_third && output.direct_third_lease)panel_third->direct_synthetic_leases.push_back(output.direct_third_lease);
         if(output.direct_current_publication) real.direct_publications.push_back(output.direct_current_publication);
         if(panel_synthetic && output.direct_synthetic_publication) panel_synthetic->direct_publications.push_back(output.direct_synthetic_publication);
         if(panel_synthetic && output.direct_synthetic_lease)
@@ -12137,7 +12165,7 @@ void attach_djules_outputs(PreparedProjectionFrame& prepared,
             static_cast<std::uint32_t>(output.synthetic_slot % generation->synthetic_runtime_rings)});
         if(panel_extra) panel_extra->pending_outputs.push_back({generation,generation->synthetic_staging[output.synthetic_slot*generation->staging_stride+1],
             output.synthesizer,output.staging_ticket,true,
-            static_cast<std::uint32_t>((output.synthetic_slot + (generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings)});
+            static_cast<std::uint32_t>((output.synthetic_slot + (generation->panel_batch_width==1 && generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings)});
     }
 }
 
@@ -12275,7 +12303,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     std::span<const xrfg::D3D12ReprojectionView> synthetic_views = {},
     std::span<const xrfg::D3D12ReprojectionView> extra_views = {},
     float third_fraction=.75F, std::span<const xrfg::D3D12ReprojectionView> third_views={},
-    const PanelInput* panel_input = nullptr) noexcept {
+    const PanelInput* panel_input=nullptr) noexcept {
     PreparedGeneration output{};
     try {
         // AFW's frozen source is transport, never a temporal OFXR prime.
@@ -12406,14 +12434,15 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 (state->session->presenter_active || !state->session->private_runtime ||
                  !comparison_delivery_runtime(*state->session));
         };
-        auto& extra_image = generation->synthetic[(synthetic_slot + (generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings];
+        auto& extra_image = generation->synthetic[(synthetic_slot + (generation->panel_batch_width==1 && generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings];
         auto& third_image=generation->synthetic[(synthetic_slot+2)%generation->synthetic_runtime_rings];
         if(request_extra && !generation->staged_outputs) {
+            const auto lease_base=generation->panel_batch_width>1?synthetic_runtime_slot:0;
             std::unique_lock lock(state->session->presenter_mutex);
             state->session->presenter_condition.wait(lock,[&] {
-                return (generation->direct_synthetic_leases[0].use_count()==1 &&
-                    generation->direct_synthetic_leases[1].use_count()==1 &&
-                    (!request_third || generation->direct_synthetic_leases[2].use_count()==1)) ||
+                return (generation->direct_synthetic_leases[lease_base].use_count()==1 &&
+                    generation->direct_synthetic_leases[lease_base+1].use_count()==1 &&
+                    (!request_third || generation->direct_synthetic_leases[lease_base+2].use_count()==1)) ||
                     publication_stopping() || XR_FAILED(state->session->presenter_failure);
             });
             if(publication_stopping() || XR_FAILED(state->session->presenter_failure)) {
@@ -12437,7 +12466,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 output.reason=GenerationPrepareReason::synthesis_busy; return output;
             }
             lock.unlock();
-            auto* queue=state->session->d3d12_synthesis_queue ? state->session->d3d12_synthesis_queue.Get()
+            auto* queue=generation->panel_queue ? generation->panel_queue.Get() : state->session->d3d12_synthesis_queue ? state->session->d3d12_synthesis_queue.Get()
                 : state->session->d3d12_queue.Get();
             for(const auto& stage:{generation->current_staging[current_slot],
                     request_pair ? generation->synthetic_staging[synthetic_slot*generation->staging_stride] : nullptr,
@@ -12517,7 +12546,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             release_private_image(state->session.get(),state->session->dispatch,current_image);
             output.reason=GenerationPrepareReason::synthetic_private_acquire_failed;return output;
         }
-        if (!generation->staged_outputs && state->session->d3d12_synthesis_queue) {
+        if (!generation->staged_outputs && (generation->panel_queue || state->session->d3d12_synthesis_queue)) {
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
             static_cast<void>(
                 synthesizer->synchronize_producer_queue(
@@ -12781,7 +12810,9 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             output.reason = GenerationPrepareReason::ready;
             generation->current_slot = (current_slot + 1) % kCurrentSlotCount;
             if (request_pair)
-                generation->synthetic_slot = (synthetic_slot + 1) % kSyntheticSlotCount;
+                generation->synthetic_slot = generation->panel_batch_width>1
+                    ? (synthetic_slot+generation->panel_batch_width)%generation->synthetic_runtime_rings
+                    : (synthetic_slot + 1) % kSyntheticSlotCount;
             return output;
         }
         if(output.direct_current_publication) output.direct_current_publication->ticket=ticket;
@@ -12826,6 +12857,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         output.current_handle = current_image.handle;
         output.synthetic_handle = synthetic_image.handle;
         output.extra_handle = request_extra ? extra_image.handle : XR_NULL_HANDLE;
+        output.third_handle = request_third ? third_image.handle : XR_NULL_HANDLE;
         output.publication_deferred = defer_d3d11_publication;
         output.current_destination_index = current_destination_index;
         if (current_released && synthetic_released) {
@@ -12837,7 +12869,9 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             // Only a pair defers its current copy; a prime submits it inline.
             if (request_pair) {
                 generation->synthetic_slot =
-                    (synthetic_slot + 1) % kSyntheticSlotCount;
+                    generation->panel_batch_width>1
+                    ? (synthetic_slot+generation->panel_batch_width)%generation->synthetic_runtime_rings
+                    : (synthetic_slot + 1) % kSyntheticSlotCount;
                 output.synthesizer = synthesizer;
             }
             output.kind = request_pair ? PreparedGenerationKind::pair
@@ -13086,94 +13120,6 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     return success;
 }
 
-// Upstream V509/V511, adapted to immutable captures and all current sinks.
-std::vector<PanelSource> panel_sources(const SessionState& state,
-    const ProjectionSnapshot& snapshot,std::span<const ProjectionResourceMapping> mappings) {
-    std::vector<PanelSource> out;std::vector<XrSwapchain> conflicts;
-    // Fast mode never signals a generated panel image's fence, so the runtime
-    // queue deadlocks on the first panel frame. Until that output path is
-    // fixed, Fast mode keeps panels on their real images (poses still move).
-    if(state.lower_vram>0||state.separate_synthesis>0)return out;
-    if(!snapshot.panel_corrections||state.graphics_binding!=SessionGraphicsBinding::d3d12||
-        state.d3d11_bridge||state.vulkan_bridge||!state.d3d12_queue)return out;
-    for(const auto& panel:snapshot.panels) {
-        if(std::any_of(mappings.begin(),mappings.end(),[&](const auto& m){return m.application_swapchain==panel.swapchain;}))continue;
-        const auto chain=find_swapchain(panel.swapchain);
-        if(!chain||chain->session.get()!=&state||panel.slice>=chain->create_info.arraySize)continue;
-        // Extended layers remain passthrough; never discard their next chain.
-        const auto found=std::find_if(out.begin(),out.end(),[&](const auto& p){return p.swapchain==panel.swapchain;});
-        if(found!=out.end()) {
-            if(found->slice!=panel.slice)conflicts.push_back(panel.swapchain);
-        } else out.push_back({panel.swapchain,panel.slice});
-    }
-    std::erase_if(out,[&](const auto& p){return std::find(conflicts.begin(),conflicts.end(),p.swapchain)!=conflicts.end();});
-    if(out.size()>2)out.resize(2);
-    return out;
-}
-bool panel_generation_pending(std::span<const PanelSource> panels) {
-    for(const auto& p:panels)if(const auto chain=find_swapchain(p.swapchain)) {
-        std::scoped_lock lock(chain->mutex);
-        if(!chain->panel_source||(!chain->frame_generation&&chain->generation_eligible_pending&&!chain->generation_declined))return true;
-    }
-    return false;
-}
-void arm_panel_generation(const std::shared_ptr<SessionState>& state,std::span<const PanelSource> panels) {
-    for(const auto& p:panels)if(const auto chain=find_swapchain(p.swapchain)) {
-        // Only known non-projection sources enter here, after the triggering
-        // frame has gone downstream and the preceding presenter is drained.
-        bool replace_existing{};
-        {std::scoped_lock lock(chain->mutex);replace_existing=!chain->panel_source&&bool(chain->frame_generation);chain->panel_source=true;chain->composition_referenced=true;}
-        if(replace_existing) {
-            destroy_frame_generation_swapchains(chain);
-            chain->generation_eligible_pending=true;
-        }
-        chain->projection_history_needed.store(true,std::memory_order_release);
-        static_cast<void>(ensure_frame_generation(chain));
-        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
-            761,chain->frame_generation?1:0,handle_value(p.swapchain));
-    }
-}
-std::vector<std::shared_ptr<PanelInput>> freeze_panel_inputs(const SessionState& state,
-    const ProjectionSnapshot& snapshot,std::span<const ProjectionResourceMapping> mappings) {
-    std::vector<std::shared_ptr<PanelInput>> out;
-    for(const auto& p:panel_sources(state,snapshot,mappings))if(const auto chain=find_swapchain(p.swapchain)) {
-        std::scoped_lock call_lock(chain->call_mutex);
-        auto input=std::make_shared<PanelInput>();input->source=p;
-        {std::scoped_lock lock(chain->mutex);
-            if(!chain->panel_source||!chain->frame_generation||!chain->d3d12_history||!chain->last_released_capture)continue;
-            input->generation=chain->frame_generation;input->history=chain->d3d12_history;
-            input->capture=*chain->last_released_capture;}
-        if(FAILED(input->history->acquire_consumer(input->capture,&input->lease,
-            &input->image,&input->producer)))continue;
-        input->pinned=true;out.push_back(std::move(input));
-    }
-    return out;
-}
-void prepare_panel_generation(SessionState& state,const ProjectionSnapshot& snapshot,
-    std::span<const std::shared_ptr<PanelInput>> inputs,PreparedProjectionFrame& prepared,
-    float fraction,float extra_fraction,bool worker) {
-    std::vector<std::pair<XrSwapchain,XrTime>> generated;
-    for(const auto& input:inputs)if(const auto chain=find_swapchain(input->source.swapchain)) {
-        const auto before=std::find_if(state.panel_generated.begin(),state.panel_generated.end(),
-            [&](const auto& p){return p.first==input->source.swapchain;});
-        const bool pair=prepared.kind==PreparedGenerationKind::pair&&before!=state.panel_generated.end()&&
-            before->second==snapshot.previous_panel_time&&snapshot.previous_panel_time!=0;
-        xrfg::D3D12ReprojectionView view{};
-        view.fov={-.785398f,.785398f,.785398f,-.785398f};
-        view.image_rect={0,0,chain->create_info.width,chain->create_info.height};view.array_slice=input->source.slice;
-        const xrfg::D3D12PresentationTransform identity{};
-        auto result=prepare_frame_generation(input->source.swapchain,pair,std::span(&view,1),fraction,
-            worker,&identity,false,nullptr,nullptr,extra_fraction,{},{},.75F,{},input.get());
-        if(result.kind==PreparedGenerationKind::none)continue;
-        if(result.kind!=PreparedGenerationKind::pair) {
-            result.synthetic_handle=XR_NULL_HANDLE;result.extra_handle=XR_NULL_HANDLE;
-        }
-        generated.emplace_back(input->source.swapchain,snapshot.display_time);
-        prepared.resources.push_back({input->source.swapchain,std::move(result),true});
-    }
-    state.panel_generated=std::move(generated);
-}
-
 struct SynthesisFailureAudit {
     unsigned stage{}, flags{};
     std::uint64_t source{}, previous{};
@@ -13243,6 +13189,94 @@ void save_synthesis_failure(const std::shared_ptr<SessionState>& state,
     } catch (...) {}
 }
 
+// Upstream V509/V511, adapted to immutable captures and all current sinks.
+std::vector<PanelSource> panel_sources(const SessionState& state,
+    const ProjectionSnapshot& snapshot,std::span<const ProjectionResourceMapping> mappings) {
+    std::vector<PanelSource> out;std::vector<XrSwapchain> conflicts;
+    // Fast mode never signals a generated panel image's fence, so the runtime
+    // queue deadlocks on the first panel frame. Until that output path is
+    // fixed, Fast mode keeps panels on their real images (poses still move).
+    if(state.lower_vram>0||state.separate_synthesis>0)return out;
+    if(!snapshot.panel_corrections||state.graphics_binding!=SessionGraphicsBinding::d3d12||
+        state.d3d11_bridge||state.vulkan_bridge||!state.d3d12_queue)return out;
+    for(const auto& panel:snapshot.panels) {
+        if(std::any_of(mappings.begin(),mappings.end(),[&](const auto& m){return m.application_swapchain==panel.swapchain;}))continue;
+        const auto chain=find_swapchain(panel.swapchain);
+        if(!chain||chain->session.get()!=&state||panel.slice>=chain->create_info.arraySize)continue;
+        // Extended layers remain passthrough; never discard their next chain.
+        const auto found=std::find_if(out.begin(),out.end(),[&](const auto& p){return p.swapchain==panel.swapchain;});
+        if(found!=out.end()) {
+            if(found->slice!=panel.slice)conflicts.push_back(panel.swapchain);
+        } else out.push_back({panel.swapchain,panel.slice});
+    }
+    std::erase_if(out,[&](const auto& p){return std::find(conflicts.begin(),conflicts.end(),p.swapchain)!=conflicts.end();});
+    if(out.size()>2)out.resize(2);
+    return out;
+}
+bool panel_generation_pending(std::span<const PanelSource> panels) {
+    for(const auto& p:panels)if(const auto chain=find_swapchain(p.swapchain)) {
+        std::scoped_lock lock(chain->mutex);
+        if(!chain->panel_source||(!chain->frame_generation&&chain->generation_eligible_pending&&!chain->generation_declined))return true;
+    }
+    return false;
+}
+void arm_panel_generation(const std::shared_ptr<SessionState>& state,std::span<const PanelSource> panels) {
+    for(const auto& p:panels)if(const auto chain=find_swapchain(p.swapchain)) {
+        // Only known non-projection sources enter here, after the triggering
+        // frame has gone downstream and the preceding presenter is drained.
+        bool replace_existing{};
+        {std::scoped_lock lock(chain->mutex);replace_existing=!chain->panel_source&&bool(chain->frame_generation);chain->panel_source=true;chain->composition_referenced=true;}
+        if(replace_existing) {
+            destroy_frame_generation_swapchains(chain);
+            chain->generation_eligible_pending=true;
+        }
+        chain->projection_history_needed.store(true,std::memory_order_release);
+        static_cast<void>(ensure_frame_generation(chain));
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+            761,chain->frame_generation?1:0,handle_value(p.swapchain));
+    }
+}
+std::vector<std::shared_ptr<PanelInput>> freeze_panel_inputs(const SessionState& state,
+    const ProjectionSnapshot& snapshot,std::span<const ProjectionResourceMapping> mappings) {
+    std::vector<std::shared_ptr<PanelInput>> out;
+    for(const auto& p:panel_sources(state,snapshot,mappings))if(const auto chain=find_swapchain(p.swapchain)) {
+        std::scoped_lock call_lock(chain->call_mutex);
+        auto input=std::make_shared<PanelInput>();input->source=p;
+        {std::scoped_lock lock(chain->mutex);
+            if(!chain->panel_source||!chain->frame_generation||!chain->d3d12_history||!chain->last_released_capture)continue;
+            input->generation=chain->frame_generation;input->history=chain->d3d12_history;
+            input->capture=*chain->last_released_capture;}
+        if(FAILED(input->history->acquire_consumer(input->capture,&input->lease,
+            &input->image,&input->producer)))continue;
+        input->pinned=true;out.push_back(std::move(input));
+    }
+    return out;
+}
+void prepare_panel_generation(SessionState& state,const ProjectionSnapshot& snapshot,
+    std::span<const std::shared_ptr<PanelInput>> inputs,PreparedProjectionFrame& prepared,
+    float fraction,float extra_fraction,bool worker,float third_fraction=.75f) {
+    std::vector<std::pair<XrSwapchain,XrTime>> generated;
+    for(const auto& input:inputs)if(const auto chain=find_swapchain(input->source.swapchain)) {
+        const auto before=std::find_if(state.panel_generated.begin(),state.panel_generated.end(),
+            [&](const auto& p){return p.first==input->source.swapchain;});
+        const bool pair=prepared.kind==PreparedGenerationKind::pair&&before!=state.panel_generated.end()&&
+            before->second==snapshot.previous_panel_time&&snapshot.previous_panel_time!=0;
+        xrfg::D3D12ReprojectionView view{};
+        view.fov={-.785398f,.785398f,.785398f,-.785398f};
+        view.image_rect={0,0,chain->create_info.width,chain->create_info.height};view.array_slice=input->source.slice;
+        const xrfg::D3D12PresentationTransform identity{};
+        auto result=prepare_frame_generation(input->source.swapchain,pair,std::span(&view,1),fraction,
+            worker,&identity,false,nullptr,nullptr,extra_fraction,{},{},third_fraction,{},input.get());
+        if(result.kind==PreparedGenerationKind::none)continue;
+        if(result.kind!=PreparedGenerationKind::pair) {
+            result.synthetic_handle=XR_NULL_HANDLE;result.extra_handle=XR_NULL_HANDLE;result.third_handle=XR_NULL_HANDLE;
+        }
+        generated.emplace_back(input->source.swapchain,snapshot.display_time);
+        prepared.resources.push_back({input->source.swapchain,std::move(result),true});
+    }
+    state.panel_generated=std::move(generated);
+}
+
 void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept {
     SynthesisFailureAudit audit;
     try {
@@ -13280,9 +13314,9 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 prepared.kind == PreparedGenerationKind::none ? -1 : 0,
                 job->current->source_sequence, job->current->previous_sequence,
                 static_cast<std::uint64_t>(prepared.kind));
-            if(prepared.kind!=PreparedGenerationKind::none)
-                prepare_panel_generation(*state,job->snapshot,job->panels,prepared,job->fraction,job->extra_fraction,true);
             audit.stage=2;
+            if(prepared.kind!=PreparedGenerationKind::none)
+                prepare_panel_generation(*state,job->snapshot,job->panels,prepared,job->fraction,job->extra_fraction,true,job->third_fraction);
             bool success = finish_worker_outputs(state, prepared, job->current->source_sequence);
             if(success)audit.stage=3;
             const auto auxiliary_token = xrfg::bridge_flight_logger().begin(
@@ -13361,7 +13395,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                             audit.stage=7;
                             GeneratedFrameEndInfo third_info;
                             success=build_generated_frame_end_info(&job->metadata->info,job->snapshot,true,
-                                third_destinations,&third_info,job->third_camera?&*job->third_camera:nullptr);
+                                third_destinations,&third_info,job->third_camera?&*job->third_camera:nullptr,job->third_fraction);
                             third_info.pending_outputs=std::move(pending_third.pending_outputs);
                             third_info.native_results=std::move(pending_third.native_results);
                             third_info.direct_synthetic_leases=std::move(pending_third.direct_synthetic_leases);
@@ -15678,7 +15712,7 @@ HRESULT reconcile_multiplier_outputs(const std::shared_ptr<SessionState>& state)
         const auto ready=generation->synthesizer->wait_for_idle();
         if(FAILED(ready)) return ready;
         if((generation->staged_outputs && generation->staging_stride!=(extra?2U:1U)) ||
-            generation->synthetic_runtime_rings!=native_synthetic_rings(*state) ||
+            generation->synthetic_runtime_rings!=source_synthetic_rings(*state,chain->panel_source) ||
             generation->current_runtime_rings!=native_current_rings(*state) ||
             state->frame_generation_mode==xrfg::D3D12FrameGenerationMode::native_dlss) {
             lock.unlock();
@@ -15995,7 +16029,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             ((state->graphics_binding == SessionGraphicsBinding::d3d12 &&
             (chain->frame_generation->staged_outputs != staged_native_outputs(*state) ||
              chain->frame_generation->current_runtime_rings != native_current_rings(*state) ||
-             chain->frame_generation->synthetic_runtime_rings != native_synthetic_rings(*state) ||
+             chain->frame_generation->synthetic_runtime_rings != source_synthetic_rings(*state,chain->panel_source) ||
              chain->frame_generation->direct_extra_outputs != (!staged_native_outputs(*state) && extra_output_capacity(*state)) ||
              chain->frame_generation->staging_stride != (staged_native_outputs(*state) && extra_output_capacity(*state) ? 2U : 1U))) ||
              (state->graphics_binding == SessionGraphicsBinding::d3d11 &&
@@ -17519,6 +17553,7 @@ XrResult layer_end_frame_impl(
         resource_mappings.mappings.data(),
         resource_mappings.mappings.size());
     const auto extra_fraction=synthetic_interpolation_fraction(state,previous_snapshot,current_snapshot,1);
+    const auto third_fraction=synthetic_interpolation_fraction(state,previous_snapshot,current_snapshot,2);
     const bool r19_camera=xrfg::autonomous::r19_camera_enabled.load(std::memory_order_acquire);
     const auto synthetic_camera=previous_snapshot && r19_camera ? synthetic_camera_snapshot(*previous_snapshot,current_snapshot,interpolation_fraction) : std::nullopt;
     const auto extra_camera=previous_snapshot && r19_camera ? synthetic_camera_snapshot(*previous_snapshot,current_snapshot,extra_fraction) : std::nullopt;
@@ -17536,7 +17571,7 @@ XrResult layer_end_frame_impl(
               extra_fraction, synthetic_camera ? &*synthetic_camera : nullptr, extra_camera ? &*extra_camera : nullptr);
     if(prepared.kind!=PreparedGenerationKind::none) {
         const auto panel_inputs=freeze_panel_inputs(*state,current_snapshot,mapping_span);
-        prepare_panel_generation(*state,current_snapshot,panel_inputs,prepared,interpolation_fraction,extra_fraction,false);
+        prepare_panel_generation(*state,current_snapshot,panel_inputs,prepared,interpolation_fraction,extra_fraction,false,third_fraction);
     }
     state->generation_status = prepared.kind == PreparedGenerationKind::pair
         ? xrfg::autonomous::GenerationState::ready : prepared.kind == PreparedGenerationKind::prime

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.813.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.819.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2182,3 +2182,13 @@ if(TARGET xrfg_private_openxr_runtime_tests)
     add_test(NAME xrfg_buffer_release_before_begin_gpu COMMAND xrfg_private_openxr_runtime_tests buffer-release-early)
     set_tests_properties(xrfg_buffer_release_before_begin_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()
+
+
+
+if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER AND XRFG_TEST_RIFE_RUNTIME)
+  foreach(route rife2 rife3 rife4 rife-overlap3-director rife-overlap4-director rife-switch rife-switch-director)
+    add_test(NAME xrfg_private_panels_${route}_gpu COMMAND xrfg_private_runtime_layer_tests panels-${route})
+    set_tests_properties(xrfg_private_panels_${route}_gpu PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+  endforeach()
+endif()
+
