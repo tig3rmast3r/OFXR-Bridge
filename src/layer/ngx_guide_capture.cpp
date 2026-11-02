@@ -650,11 +650,65 @@ public:
         NVSDK_NGX_Result result) noexcept {
         auto* owner=current_;if(!owner)return;
         try {
-            if(owner->native_claims_++||owner->rejected_||!owner->frame_||!feature.creation_observed||
-                feature.creation_source_identity!=owner->creator_.identity||feature.type!=owner->creator_.type||
-                list!=owner->list_||device!=owner->device_||NVSDK_NGX_FAILED(result)||
-                !get<ID3D12Resource*>(parameters,NVSDK_NGX_Parameter_MotionVectors)||
-                !get<ID3D12Resource*>(parameters,NVSDK_NGX_Parameter_Depth)) {owner->reject(8);return;}
+            // Reason 8 tests every condition so its record names the ones that
+            // failed: bit 0 earlier native claim, 1 already rejected, 2 no frame,
+            // 3 creation unseen, 4 creator identity, 5 feature type, 6 command
+            // list, 7 device, 8 DLSS result, 9 motion vectors, 10 depth;
+            // bits 16+ the native claims before this one.
+            const unsigned claims=owner->native_claims_++;
+            unsigned mismatch=(claims?1U:0U)|(owner->rejected_?2U:0U)|(!owner->frame_?4U:0U)|
+                (!feature.creation_observed?8U:0U)|
+                (feature.creation_source_identity!=owner->creator_.identity?0x10U:0U)|
+                (feature.type!=owner->creator_.type?0x20U:0U)|(list!=owner->list_?0x40U:0U)|
+                (device!=owner->device_?0x80U:0U)|(NVSDK_NGX_FAILED(result)?0x100U:0U)|
+                (!get<ID3D12Resource*>(parameters,NVSDK_NGX_Parameter_MotionVectors)?0x200U:0U)|
+                (!get<ID3D12Resource*>(parameters,NVSDK_NGX_Parameter_Depth)?0x400U:0U);
+            // REAL VR can keep a second SR feature of the same shape and run
+            // the other eye's evaluation on it under the game's public call
+            // (one per eye, each with its own history). When the creator is
+            // the only difference and that feature is the public one's exact
+            // twin, the evaluation is still this call's own.
+            const auto& creator=owner->creator_;
+            if(mismatch==0x10U&&feature.flags_known&&creator.flags_known&&feature.flags==creator.flags&&
+                feature.width&&feature.height&&feature.out_width&&feature.out_height&&
+                feature.width==creator.width&&feature.height==creator.height&&
+                feature.out_width==creator.out_width&&feature.out_height==creator.out_height) {
+                mismatch=0;
+                // 1252: twin accepted, the first 8 then one a second;
+                // b = this creator << 32 | the scope's, c = this identity.
+                static std::atomic_uint twins{};
+                static std::atomic_uint64_t next_twin{};
+                const auto now=GetTickCount64();
+                auto due=next_twin.load(std::memory_order_relaxed);
+                if(twins.fetch_add(1,std::memory_order_relaxed)<8||
+                    (now>=due&&next_twin.compare_exchange_strong(due,now+1000,std::memory_order_relaxed)))
+                    bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,S_OK,1252,
+                        (std::uint64_t(feature.creation_source_identity)<<32)|creator.identity,feature.identity);
+            }
+            if(mismatch) {
+                // The first 32, then one a second: 1195 b = this creator << 32 |
+                // the scope's, c = this type << 48 | the scope's << 32 | DLSS
+                // result; 1193 this command list and the scope's; 1251 devices.
+                static std::atomic_uint reports{};
+                static std::atomic_uint64_t next_report{};
+                const auto now=GetTickCount64();
+                auto due=next_report.load(std::memory_order_relaxed);
+                if(reports.fetch_add(1,std::memory_order_relaxed)<32||
+                    (now>=due&&next_report.compare_exchange_strong(due,now+1000,std::memory_order_relaxed))) {
+                    const auto mask=static_cast<std::int64_t>(mismatch|(std::min(claims,0xffffU)<<16));
+                    auto& logger=bridge_flight_logger();
+                    logger.event(BridgeFlightOperation::luke_afw_stage,mask,1195,
+                        (std::uint64_t(feature.creation_source_identity)<<32)|owner->creator_.identity,
+                        (std::uint64_t(static_cast<std::uint16_t>(feature.type))<<48)|
+                        (std::uint64_t(static_cast<std::uint16_t>(owner->creator_.type))<<32)|
+                        static_cast<std::uint32_t>(result));
+                    logger.event(BridgeFlightOperation::luke_afw_stage,mask,1193,
+                        reinterpret_cast<std::uint64_t>(list),reinterpret_cast<std::uint64_t>(owner->list_));
+                    logger.event(BridgeFlightOperation::luke_afw_stage,mask,1251,
+                        reinterpret_cast<std::uint64_t>(device),reinterpret_cast<std::uint64_t>(owner->device_));
+                }
+                owner->reject(8);return;
+            }
             auto output=native(get<ID3D12Resource*>(parameters,NVSDK_NGX_Parameter_Output));
             auto cmd=native(command);ComPtr<ID3D12Device> actual,canonical;
             if(!output||!cmd||FAILED(output->GetDevice(IID_PPV_ARGS(&actual)))||
