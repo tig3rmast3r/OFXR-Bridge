@@ -36,7 +36,12 @@ void status(const Snapshot& state) {
     ImGui::SameLine();
     ImGui::SetCursorPosX(header_x+(header_width-vram_width)*.5F);
     ImGui::TextUnformatted(vram.c_str());
-    if(ImGui::IsItemHovered())ImGui::SetTooltip("Last existing sample: game-process dedicated VRAM / DXGI budget. No extra memory queries.");
+    if(ImGui::IsItemHovered()){
+        const auto& m=state.runtime.video_memory;
+        ImGui::SetTooltip("Dedicated VRAM / DXGI budget. Game: %.0f MiB; RIFE worker: %.0f MiB%s.\nPyTorch reserved (included in worker): %.0f MiB. Shared imports counted once.",
+            m.game_bytes/1048576.0,m.rife_private_bytes/1048576.0,
+            m.rife_active&&!m.rife_valid?" (sample pending)":"",m.rife_reserved_bytes/1048576.0);
+    }
     const auto value = [](const char* label, float number, bool valid, bool rate,
                           const char* tip, bool late = false) {
         ImGui::TableNextColumn();

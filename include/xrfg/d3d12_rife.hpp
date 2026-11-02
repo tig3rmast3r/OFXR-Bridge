@@ -2,6 +2,13 @@
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 
 namespace xrfg {
+struct RifeMemoryStatus {
+    std::uint64_t updated_ms{}, private_bytes{}, reserved_bytes{};
+    std::uint32_t process_id{};
+    bool active{}, valid{};
+};
+// Nonblocking cached telemetry; requests are serviced by the next inference.
+RifeMemoryStatus rife_memory_for_adapter(LUID adapter,bool request) noexcept;
 // Experimental portable-Python generator. Owns no XR objects or pacing policy.
 // The caller queues both producer receipts before generate(). The only CPU
 // synchronization is with this worker's exact GPU transactions, never a game tail.

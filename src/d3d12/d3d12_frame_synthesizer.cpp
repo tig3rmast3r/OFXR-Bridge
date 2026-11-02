@@ -49,6 +49,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <deque>
+#include <condition_variable>
+#include <thread>
 
 namespace xrfg {
 namespace {
@@ -919,6 +922,9 @@ struct D3D12FrameSynthesizer::Impl {
         std::shared_ptr<const DlssMotionVectorSet> guide_composer_inputs;
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> command_list;
+        ComPtr<ID3D12CommandAllocator> rife_fallback_allocator;
+        ComPtr<ID3D12GraphicsCommandList> rife_fallback_list;
+        std::shared_ptr<D3D12NativeFrameResult> rife_result;
         ComPtr<ID3D12CommandAllocator> synthesis_allocator;
         ComPtr<ID3D12GraphicsCommandList> synthesis_command_list;
         // The bit-exact copy of B into the current output. Recorded apart from
@@ -979,6 +985,22 @@ struct D3D12FrameSynthesizer::Impl {
         std::array<std::array<float,4>,2> ar{},br{};
         UINT count{};bool pending{};
     } rife_pair;
+    struct RifeWork {
+        RifePair pair;
+        D3D12SynthesisInputs inputs;
+        std::array<ComPtr<ID3D12Resource>,2> sources;
+        ComPtr<ID3D12GraphicsCommandList> commands,copy,fallback;
+        std::shared_ptr<D3D12NativeFrameResult> result;
+        std::uint64_t value{},serial{};
+        UINT timing_base{};
+        float fraction{.5F};
+    };
+    std::mutex rife_work_mutex;
+    std::condition_variable rife_work_changed;
+    std::deque<RifeWork> rife_work;
+    std::thread rife_thread;
+    bool rife_stopping{};
+    std::atomic<HRESULT> rife_error{S_OK};
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
     std::shared_ptr<D3D12SwapchainHistory> history;
@@ -1144,6 +1166,7 @@ struct D3D12FrameSynthesizer::Impl {
     bool nvidia_gpu_timing_enabled{};
     bool allow_luke_guide_device_alias{};
     ~Impl() {
+        stop_rife_work(); // queued CPU work must drain before the GPU tail proof
         // Nothing outside this object waits on the synthesis queue. Its work
         // writes into the slot command allocators and reads the history
         // slots, so releasing them with submissions still in flight is a
@@ -2114,6 +2137,13 @@ struct D3D12FrameSynthesizer::Impl {
             if (FAILED(result)) {
                 return result;
             }
+            if(nvidia_options.rife_model>=0 && nvidia_options.rife_async){
+                result=device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(slot.rife_fallback_allocator.GetAddressOf()));
+                if(FAILED(result))return result;
+                result=device->CreateCommandList(node_mask,D3D12_COMMAND_LIST_TYPE_DIRECT,slot.rife_fallback_allocator.Get(),nullptr,IID_PPV_ARGS(slot.rife_fallback_list.GetAddressOf()));
+                if(FAILED(result))return result;
+                result=slot.rife_fallback_list->Close();if(FAILED(result))return result;
+            }
             if (backend == D3D12OpticalFlowBackend::nvidia &&
                 generation_mode == D3D12FrameGenerationMode::ofxr && !flow_resources_deferred && nvidia_options.rife_model<0) {
                 result = device->CreateCommandAllocator(
@@ -2672,6 +2702,7 @@ struct D3D12FrameSynthesizer::Impl {
                 scales[std::clamp(static_cast<int>(nvidia_options.input_scale),0,3)]);
             if(FAILED(result))return result;
         }
+        if(rife && nvidia_options.rife_async)rife_thread=std::thread([this]{run_rife_work();});
         synthesis_enabled = true;
         return S_OK;
     }
@@ -4213,7 +4244,7 @@ struct D3D12FrameSynthesizer::Impl {
         }
         result = slot.command_list->Reset(slot.allocator.Get(), nullptr);
         if (SUCCEEDED(result) && nvidia_gpu_timing_enabled &&
-            nvidia_timestamp_heap) {
+            nvidia_timestamp_heap && !rife) {
             // First mark on the list both backends record into, so the span
             // starts where the GPU starts this pair's work.
             slot.command_list->EndQuery(
@@ -4236,6 +4267,13 @@ struct D3D12FrameSynthesizer::Impl {
         if (FAILED(result)) {
             synthesis_enabled = false;
             return result;
+        }
+        if(slot.rife_fallback_list){
+            result=slot.rife_fallback_allocator->Reset();if(FAILED(result))return result;
+            result=slot.rife_fallback_list->Reset(slot.rife_fallback_allocator.Get(),nullptr);
+            if(FAILED(result))return result;
+            // Lists not used by prime/repeat still need a closed recording.
+            result=slot.rife_fallback_list->Close();if(FAILED(result))return result;
         }
         if (slot.synthesis_command_list) {
             result = slot.synthesis_allocator->Reset();
@@ -4881,6 +4919,17 @@ struct D3D12FrameSynthesizer::Impl {
             slot.current_copy_command_list->ResourceBarrier(2,before.data());slot.current_copy_command_list->CopyResource(destination,source);
             const std::array after{transition_barrier(source,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON),transition_barrier(destination,D3D12_RESOURCE_STATE_COPY_DEST,release_state)};
             slot.current_copy_command_list->ResourceBarrier(2,after.data());
+            if(nvidia_options.rife_async){
+                auto status=slot.rife_fallback_list->Reset(slot.rife_fallback_allocator.Get(),nullptr);
+                if(FAILED(status))return status;
+                std::swap(slot.command_list,slot.rife_fallback_list);
+                status=record_repeated_pair(slot,current_source,
+                    {current_source.views.data(),current_source.view_count},target_views,
+                    synthetic_destination_index,current_destination_index,debug_marker);
+                std::swap(slot.command_list,slot.rife_fallback_list);
+                if(FAILED(status))return status;
+                status=slot.rife_fallback_list->Close();if(FAILED(status))return status;
+            }
             rife_pair.pending=true;*used_game_motion=true; // direct submission, no OFA dispatch
             return S_OK;
         }
@@ -5492,6 +5541,88 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
+    void stop_rife_work() noexcept {
+        {std::scoped_lock lock(rife_work_mutex);rife_stopping=true;}
+        rife_work_changed.notify_all();
+        if(rife_thread.joinable())rife_thread.join();
+    }
+    void run_rife_work() noexcept {
+        for(;;){
+            RifeWork job;
+            {
+                std::unique_lock lock(rife_work_mutex);
+                rife_work_changed.wait(lock,[&]{return rife_stopping || !rife_work.empty();});
+                if(rife_work.empty()){if(rife_stopping)return;continue;}
+                job=std::move(rife_work.front());rife_work.pop_front();
+            }
+            const auto token=bridge_flight_logger().begin(BridgeFlightOperation::rife_worker,job.serial,job.value);
+            HRESULT result=S_OK;
+            for(const auto& input:job.inputs.dependencies){
+                if(input.fence && input.value && SUCCEEDED(result))result=queue->Wait(input.fence.Get(),input.value);
+            }
+            if(SUCCEEDED(result) && job.pair.pending){
+                result=rife_error.load(std::memory_order_acquire);
+                if(SUCCEEDED(result)){
+                    auto& p=job.pair;const auto count=p.count;
+                    result=rife->generate(p.a.Get(),p.b.Get(),p.out.Get(),
+                        {p.av.data(),count},{p.bv.data(),count},{p.tv.data(),count},
+                        {p.ar.data(),count},{p.br.data(),count},release_state,job.fraction,
+                        {nvidia_gpu_timing_enabled?nvidia_timestamp_heap.Get():nullptr,nvidia_timestamp_readback.Get(),job.timing_base});
+                }
+            }
+            const auto generated=result;
+            if(FAILED(result)){
+                rife_error.store(result,std::memory_order_release);
+                job.result->skip=5;job.result->detail=static_cast<UINT>(result);
+            }
+            // A healthy-queue worker refusal still transports a correct real
+            // image. Its pre-recorded fallback reprojects B into S's camera;
+            // it is explicitly not counted as new synthetic content.
+            if(SUCCEEDED(device->GetDeviceRemovedReason())){
+                auto* selected=FAILED(result)&&job.fallback?job.fallback.Get():job.commands.Get();
+                ID3D12CommandList* lists[]{selected};queue->ExecuteCommandLists(1,lists);
+                two_frame_capture_submission(queue.Get(),1,lists);
+                if(job.copy){ID3D12CommandList* copies[]{job.copy.Get()};queue->ExecuteCommandLists(1,copies);}
+                job.result->mask.store(SUCCEEDED(generated)?1U:0U,std::memory_order_release);
+                result=queue->Signal(fence.Get(),job.value);
+                if(FAILED(result))rife_error.store(result,std::memory_order_release);
+            }else{
+                result=device->GetDeviceRemovedReason();rife_error.store(result,std::memory_order_release);
+                job.result->mask.store(0,std::memory_order_release);
+            }
+            bridge_flight_logger().end(token,BridgeFlightOperation::rife_worker,
+                FAILED(generated)?generated:result,job.serial,job.value);
+        }
+    }
+    HRESULT queue_rife_work(WorkSlot& slot,RollingSource* next,bool copy,
+        std::uint64_t* output_value) noexcept {
+        try{
+            const auto failure=rife_error.load(std::memory_order_acquire);
+            if(FAILED(failure))return failure;
+            RifeWork job;job.pair=std::move(rife_pair);rife_pair={};
+            const auto& first=previous.active()?previous:*next;
+            job.inputs=submission_inputs(first,previous.active()&&next->active()?next:nullptr);
+            job.sources={previous.resource,next->resource};
+            job.commands=slot.command_list;
+            if(copy)job.copy=slot.current_copy_command_list;
+            if(job.pair.pending)job.fallback=slot.rife_fallback_list;
+            job.result=std::make_shared<D3D12NativeFrameResult>();job.result->outputs=1;
+            job.value=next_fence_value;job.serial=next->active()?next->ticket.serial:previous.ticket.serial;
+            job.fraction=synthetic_fraction;job.timing_base=slot.timing_query_base;
+            std::unique_lock lock(rife_work_mutex);
+            if(rife_stopping)return E_ABORT;
+            if(rife_work.size()>=work_slots.size())return HRESULT_FROM_WIN32(ERROR_BUSY);
+            auto result=job.result;const bool timed=job.pair.pending;
+            rife_work.push_back(std::move(job));
+            const auto value=next_fence_value++;
+            slot.rife_result=std::move(result);slot.fence_value=value;
+            slot.timing_pending=nvidia_gpu_timing_enabled && timed;
+            last_synthetic_fence_value=value;last_submitted_fence_value=value;*output_value=value;
+            lock.unlock();rife_work_changed.notify_one();
+            return S_OK;
+        }catch(...){return E_FAIL;}
+    }
+
     // Submits the recorded work. The current output's copy is closed either
     // way, but with defer_current_copy it is held back for flush_current_copy
     // to submit once the synthetic frame has reached the runtime. Two fence
@@ -5514,7 +5645,8 @@ struct D3D12FrameSynthesizer::Impl {
             return E_FAIL;
         }
 
-        if(rife && rife_pair.pending){
+        const bool rife_generated=rife_pair.pending;
+        if(rife && !nvidia_options.rife_async && rife_pair.pending){
             rife_pair.pending=false;
             auto& p=rife_pair;const auto count=p.count;
             const auto generated=rife->generate(p.a.Get(),p.b.Get(),p.out.Get(),
@@ -5575,6 +5707,7 @@ struct D3D12FrameSynthesizer::Impl {
             synthesis_enabled = false;
             return result;
         }
+        if(rife && nvidia_options.rife_async)return queue_rife_work(slot,newly_acquired,true,output_fence_value);
         ID3D12CommandList* lists[] = {slot.command_list.Get()};
         queue->ExecuteCommandLists(1, lists);
         two_frame_capture_submission(queue.Get(), 1, lists);
@@ -5617,7 +5750,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.fence_value = value;
         // Both backends now write timestamps, so both must mark the slot as
         // having a resolve waiting to be read back.
-        slot.timing_pending = nvidia_gpu_timing_enabled;
+        slot.timing_pending = nvidia_gpu_timing_enabled && (!rife || rife_generated);
         last_submitted_fence_value = value;
         *output_fence_value = value;
         return S_OK;
@@ -5945,17 +6078,23 @@ struct D3D12FrameSynthesizer::Impl {
             cancel_next();
             return E_FAIL;
         }
-        result = queue->Wait(next.producer_fence.Get(), current.fence_value);
+        result = rife && nvidia_options.rife_async ? S_OK : queue->Wait(next.producer_fence.Get(), current.fence_value);
         if (FAILED(result)) {
             cancel_next();
             return result;
         }
 
+        std::uint64_t fence_value=0;
+        if(rife && nvidia_options.rife_async){
+            result=queue_rife_work(slot,&next,false,&fence_value);
+            slot.timing_pending=false;
+            if(FAILED(result)){cancel_next();return result;}
+        }else{
         ID3D12CommandList* lists[]{slot.command_list.Get()};
         queue->ExecuteCommandLists(1, lists);
         two_frame_capture_submission(queue.Get(), 1, lists);
         completion_unknown = true;
-        const std::uint64_t fence_value = next_fence_value++;
+        fence_value = next_fence_value++;
         result = queue->Signal(fence.Get(), fence_value);
         if (FAILED(result)) {
             // GPU access was submitted: retain the lease rather than cancel
@@ -5968,6 +6107,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.fence_value = fence_value;
         last_submitted_fence_value = fence_value;
         last_synthetic_fence_value = fence_value;
+        }
         current_destinations[current_destination_index].fence_value = fence_value;
         next_work_slot = (work_slot_index + 1U) %
             static_cast<std::uint32_t>(work_slots.size());
@@ -6088,7 +6228,7 @@ struct D3D12FrameSynthesizer::Impl {
             cancel_next();
             return result;
         }
-        result = queue->Wait(next.producer_fence.Get(), current.fence_value);
+        result = rife && nvidia_options.rife_async ? S_OK : queue->Wait(next.producer_fence.Get(), current.fence_value);
         if (FAILED(result)) {
             cancel_next();
             return result;
@@ -6287,7 +6427,7 @@ struct D3D12FrameSynthesizer::Impl {
         // shared-resource routes flush first and retain the complete-
         // submission fence gate.
         const bool independent_nvidia_pair =
-            backend == D3D12OpticalFlowBackend::nvidia && !defer_current_copy;
+            backend == D3D12OpticalFlowBackend::nvidia && (!defer_current_copy || nvidia_options.rife_async);
         if (independent_nvidia_pair && pending_copy_slot != kNoPendingCopy) {
             return HRESULT_FROM_WIN32(ERROR_BUSY);
         }
@@ -6384,6 +6524,7 @@ struct D3D12FrameSynthesizer::Impl {
                 output_ticket->native_result=std::move(receipt);
                 bridge_flight_logger().event(BridgeFlightOperation::native_dlssg_record,1,0,20,0);
             }
+            if(rife && nvidia_options.rife_async)output_ticket->native_result=slot.rife_result;
             output_ticket->previous_serial = current.serial;
             output_ticket->current_serial = current.serial;
             output_ticket->fence_value = fence_value;
@@ -6502,7 +6643,7 @@ struct D3D12FrameSynthesizer::Impl {
             }
             return result;
         }
-        result = queue->Wait(
+        result = rife && nvidia_options.rife_async ? S_OK : queue->Wait(
             previous.producer_fence.Get(),
             previous.ticket.fence_value);
         if (FAILED(result)) {
@@ -6514,7 +6655,7 @@ struct D3D12FrameSynthesizer::Impl {
             cancel_next();
             return result;
         }
-        result = queue->Wait(next.producer_fence.Get(), current.fence_value);
+        result = rife && nvidia_options.rife_async ? S_OK : queue->Wait(next.producer_fence.Get(), current.fence_value);
         if (FAILED(result)) {
             if (generation_mode == D3D12FrameGenerationMode::fsr3) {
                 bridge_flight_logger().event(
@@ -6577,6 +6718,7 @@ struct D3D12FrameSynthesizer::Impl {
             static_cast<std::uint32_t>(work_slots.size());
 
         if (native_dlss) output_ticket->native_result = native_dlss->last_result();
+        if(rife && nvidia_options.rife_async)output_ticket->native_result=slot.rife_result;
         output_ticket->previous_serial = previous_serial;
         output_ticket->current_serial = current.serial;
         output_ticket->fence_value = fence_value;
@@ -7095,7 +7237,7 @@ HRESULT D3D12FrameSynthesizer::synchronize_producer_queue(
             return signal_result;
         }
         ++impl_->next_acquire_fence_value;
-        return impl_->queue->Wait(impl_->acquire_fence.Get(), value);
+        return impl_->rife && impl_->nvidia_options.rife_async ? S_OK : impl_->queue->Wait(impl_->acquire_fence.Get(), value);
     } catch (...) {
         return E_FAIL;
     }
@@ -7123,7 +7265,7 @@ HRESULT D3D12FrameSynthesizer::synchronize_consumer_queue(
         // Same queue on both sides means the submission is already ordered;
         // the wait would be redundant rather than wrong.
         if (queue == impl_->queue.Get()) {
-            return S_FALSE;
+            return impl_->rife && impl_->nvidia_options.rife_async ? E_INVALIDARG : S_FALSE;
         }
         return queue->Wait(impl_->fence.Get(), value);
     } catch (...) {

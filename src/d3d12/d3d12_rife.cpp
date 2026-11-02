@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <charconv>
 
 namespace xrfg { namespace {
 using Microsoft::WRL::ComPtr;
@@ -36,7 +37,17 @@ class Worker {
     Handle process_,input_,output_,job_;
     std::mutex mutex_;
     std::string line_;
-    bool live_{};
+    std::atomic<bool> live_{};
+    std::atomic<std::uint64_t> memory_until_{};
+    std::mutex memory_mutex_;
+    RifeMemoryStatus memory_{};
+    static bool number(const std::string& text,const char* key,std::uint64_t& out) noexcept {
+        auto at=text.find(key);if(at==std::string::npos)return false;
+        at=text.find(':',at);if(at==std::string::npos)return false;
+        ++at;while(at<text.size() && text[at]==' ')++at;
+        const auto parsed=std::from_chars(text.data()+at,text.data()+text.size(),out);
+        return parsed.ec==std::errc{};
+    }
     std::string read(DWORD timeout) {
         const auto deadline=GetTickCount64()+timeout;
         for(;;){
@@ -129,15 +140,36 @@ public:
         try{if(read(60000).find("\"protocol\": 2")==std::string::npos)throw E_FAIL;live_=true;}catch(...){stop();throw;}
     }
     ~Worker(){stop();}
+    bool alive() const noexcept {return live_.load(std::memory_order_acquire);}
+    RifeMemoryStatus memory(bool request) noexcept {
+        const auto now=GetTickCount64();
+        if(request)memory_until_.store(now+2000,std::memory_order_relaxed);
+        std::unique_lock lock(memory_mutex_,std::try_to_lock);
+        RifeMemoryStatus result;
+        if(lock.owns_lock())result=memory_;
+        result.active=alive();
+        result.valid=result.active && result.valid && now-result.updated_ms<5000;
+        return result;
+    }
     HANDLE process()const{return process_.value;}
     HRESULT request(const std::string& message) noexcept {
         std::scoped_lock lock(mutex_);
         if(!live_)return E_FAIL;
         try{
-            auto text=message+"\n";DWORD written{};
+            auto text=message;
+            if(GetTickCount64()<memory_until_.load(std::memory_order_relaxed) && text.find("\"op\":\"infer\"")!=std::string::npos){
+                std::scoped_lock sample(memory_mutex_);
+                if(GetTickCount64()-memory_.updated_ms>=1000){text.pop_back();text+=",\"memory\":true}";}
+            }
+            text+="\n";DWORD written{};
             if(!WriteFile(input_.value,text.data(),static_cast<DWORD>(text.size()),&written,nullptr)||written!=text.size())throw E_FAIL;
             const auto reply=read(30000); // first model graph warm-up may take seconds
             if(reply.find("\"ok\": true")==std::string::npos)throw E_FAIL;
+            std::uint64_t usage{},reserved{};
+            if(number(reply,"\"vram_private\"",usage) && number(reply,"\"torch_reserved\"",reserved)){
+                std::scoped_lock sample(memory_mutex_);
+                memory_={GetTickCount64(),usage,reserved,GetProcessId(process_.value),true,true};
+            }
             return S_OK;
         }catch(HRESULT hr){stop();return hr;}catch(...){stop();return E_FAIL;}
     }
@@ -146,7 +178,7 @@ std::mutex registry_mutex;
 std::map<std::uint64_t,std::weak_ptr<Worker>> workers;
 std::shared_ptr<Worker> worker_for(std::uint64_t luid){
     std::scoped_lock lock(registry_mutex);auto worker=workers[luid].lock();
-    if(!worker){worker=std::make_shared<Worker>();workers[luid]=worker;}return worker;
+    if(!worker || !worker->alive()){worker=std::make_shared<Worker>();workers[luid]=worker;}return worker;
 }
 std::atomic_uint64_t identifiers{1};
 D3D12_RESOURCE_BARRIER barrier(ID3D12Resource* resource,D3D12_RESOURCE_STATES from,D3D12_RESOURCE_STATES to){
@@ -162,6 +194,16 @@ std::array<float,4> tangents(const D3D12FieldOfView& f){return {std::tan(f.angle
 D3D12ImageRect rect_of(const D3D12ReprojectionView& view,const D3D12_RESOURCE_DESC& d){
     return view.image_rect.width&&view.image_rect.height?view.image_rect:D3D12ImageRect{0,0,static_cast<UINT>(d.Width),d.Height};
 }
+}
+RifeMemoryStatus rife_memory_for_adapter(LUID adapter,bool request) noexcept {
+    try{
+        std::unique_lock lock(registry_mutex,std::try_to_lock);
+        if(!lock.owns_lock())return {0,0,0,0,true,false};
+        std::uint64_t key{};std::memcpy(&key,&adapter,sizeof(key));
+        const auto found=workers.find(key);if(found==workers.end())return {};
+        auto worker=found->second.lock();lock.unlock();
+        return worker?worker->memory(request):RifeMemoryStatus{};
+    }catch(...){return {};}
 }
 struct D3D12Rife::Impl{
     ComPtr<ID3D12Device> device;ComPtr<ID3D12CommandQueue> queue;

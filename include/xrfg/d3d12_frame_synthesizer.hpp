@@ -180,6 +180,7 @@ struct D3D12NvidiaOpticalFlowOptions {
     std::uint32_t native_scale{100};
     bool hybrid{}; // explicit optional Hybrid route only
     int rife_model{-1}; // experimental Python/CUDA generator, no OFA/engine guides
+    bool rife_async{}; // dedicated producer/consumer queues only; owned FIFO work
 };
 
 // The fraction submit_pair actually generates at for the one it is given:

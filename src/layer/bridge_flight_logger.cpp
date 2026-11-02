@@ -85,6 +85,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
         return "private_swapchain_release";
     case BridgeFlightOperation::synthesis_initialize: return "synthesis_initialize";
     case BridgeFlightOperation::synthesis_prime: return "synthesis_prime";
+    case BridgeFlightOperation::rife_worker: return "rife_worker";
+    case BridgeFlightOperation::rife_memory: return "rife_memory";
     case BridgeFlightOperation::synthesis_pair: return "synthesis_pair";
     case BridgeFlightOperation::downstream_first_end_frame:
         return "downstream_first_end_frame";

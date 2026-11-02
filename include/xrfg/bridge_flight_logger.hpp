@@ -17,7 +17,8 @@ inline std::filesystem::path benchmark_log_path(const std::filesystem::path& fli
 }
 
 enum class BridgeFlightOperation : std::uint32_t {
-    logger,
+    rife_worker = 10000, rife_memory,
+    logger = 0,
     negotiation,
     instance_create,
     instance_destroy,

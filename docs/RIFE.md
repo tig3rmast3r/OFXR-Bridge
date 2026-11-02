@@ -1,4 +1,4 @@
-# Experimental RIFE route (v733)
+# Experimental RIFE route (v735)
 
 The Frame generation menu includes RIFE between OFXR and Hybrid. Model choices
 are 4.25 Lite, 4.16 Lite and 4.6. The initial trial selects 4.6 with 25% motion
@@ -75,5 +75,28 @@ The GPU test also verifies stereo isolation, unchanged real frames, actual
 temporal interpolation, and native one-pixel texture detail beyond the motion
 grid. No game/headset quality or performance result is implied by these tests.
 
-The current game-process VRAM meter may omit memory allocated by the separate
-Python worker. Compare total GPU memory as well when evaluating this trial.
+## Asynchronous native D3D12 submission
+
+On a private native D3D12 endpoint with a separate synthesis queue, the bridge
+freezes input resources, camera metadata and producer dependencies into a bounded
+FIFO. The caller receives a pending ticket immediately; a CPU worker runs input
+preparation, serial CUDA inference and native composition. The ordinary GPU
+completion fence still guards delivery, source retirement and output reuse.
+A full buffer applies backpressure. Shared-queue, legacy and D3D11/Vulkan interop
+paths retain synchronous submission. No framework/director pacing is changed.
+On healthy-device inference failure, the pending transaction transports a valid
+real image and a current-image reprojection with a non-generated receipt; it does
+not signal completion for work that never ran. Shutdown drains queued jobs first.
+
+## VRAM accounting
+
+The percentage and benchmark memory include game-process DXGI local usage plus
+the shared Python worker's private DXGI local usage on the same adapter. Worker
+usage includes CUDA context/model/cache overhead, not just PyTorch tensors.
+The worker measures the budget charge of imported D3D12 buffers at configuration
+and subtracts that charge because those allocations are already in the game.
+PyTorch reserved memory is a subset shown in the tooltip, never added twice.
+One cached worker sample serves all generators on that adapter, at most once per
+second while UI/log/benchmark telemetry requests it. Unknown worker usage is N/A,
+not a misleading game-only total. This is committed dedicated usage against the
+DXGI budget, not an end-to-end GPU residency or compositor memory measurement.

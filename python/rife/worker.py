@@ -13,6 +13,7 @@ import sys
 import torch
 import torch.nn.functional as F
 from cuda.bindings import driver as cu
+from gpu_memory import GpuMemory
 
 ROOT = Path(sys.executable).resolve().parent.parent
 MODELS = (("4.25.lite", "4_25_lite"), ("4.16.lite", "4_16_lite"), ("4.6", "4_6"))
@@ -92,6 +93,8 @@ class Runner:
         self.grids = {}
         self.graph_state = None
         self.device = None
+        self.memory = None
+        self.import_charges = {}
         torch.set_num_threads(1)
         torch.backends.cudnn.benchmark = False  # no per-frame search stalls
 
@@ -106,6 +109,15 @@ class Runner:
                 self.device = index
                 torch.cuda.set_device(index)
                 torch.cuda.init()
+                # Materialize the context before measuring imported-buffer
+                # charges, so its private overhead is never subtracted.
+                probe = torch.empty(1, device=index)
+                probe.fill_(0)
+                torch.cuda.synchronize()
+                try:
+                    self.memory = GpuMemory(luid)
+                except (OSError, RuntimeError):
+                    self.memory = None
                 return
         raise RuntimeError("No CUDA device matches the OpenXR D3D12 adapter LUID")
 
@@ -160,11 +172,14 @@ class Runner:
             ident = request["id"]
             self.release(ident)
             buffers = []
+            before = self.memory.usage() if self.memory else None
             try:
                 for index, desc in enumerate(request["buffers"]):
                     shape = (request["eyes"], 5 if index == 2 else 3, request["height"], request["width"])
                     buffers.append(SharedBuffer(desc[0], desc[1], shape, self.device))
                 self.configs[ident] = buffers
+                after = self.memory.usage() if self.memory else None
+                self.import_charges[ident] = max(0, after-before) if before is not None and after is not None else 0
             except Exception:
                 for buffer in buffers:
                     buffer.close()
@@ -181,6 +196,11 @@ class Runner:
             # The reply is a completion receipt. D3D12 never waits an output
             # semaphore that a failed or terminated worker might not signal.
             torch.cuda.current_stream().synchronize()
+            if request.get("memory") and self.memory:
+                usage = self.memory.usage()
+                if usage is not None:
+                    return {"vram_private": max(0, usage-sum(self.import_charges.values())),
+                            "torch_reserved": torch.cuda.memory_reserved(self.device)}
             return {}
         raise ValueError("Unknown worker operation")
 
@@ -214,6 +234,7 @@ class Runner:
 
     def release(self, ident):
         buffers = self.configs.pop(ident, [])
+        self.import_charges.pop(ident, None)
         if buffers:
             torch.cuda.synchronize()
             for buffer in buffers:

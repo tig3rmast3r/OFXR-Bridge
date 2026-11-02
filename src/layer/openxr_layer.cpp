@@ -3,6 +3,7 @@
 #define XR_USE_GRAPHICS_API_VULKAN
 #include "xrfg/vulkan_session_bridge.hpp"
 #include "xrfg/d3d11_bridge.hpp"
+#include "xrfg/d3d12_rife.hpp"
 #include "xrfg/d3d11_dlss_guides.hpp"
 #include "xrfg/d3d12_history.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
@@ -1402,6 +1403,15 @@ private:
                                : state.d3d12_queue.Get();
 }
 
+// Async RIFE owns GPU submissions only when no final consumer can enqueue
+// a wait ahead of its producer on the same queue. Legacy/interop stay inline.
+bool async_rife_queue(const SessionState& state) noexcept {
+    return state.private_runtime && !state.d3d11_bridge && !state.vulkan_bridge &&
+        !state.luke_afw_enabled && state.d3d12_synthesis_queue &&
+        state.d3d12_synthesis_queue.Get()!=runtime_queue(state) &&
+        state.d3d12_synthesis_queue.Get()!=state.d3d12_queue.Get();
+}
+
 // The application has released one of its images: mark where its queue
 // stands, for the join before a downstream xrEndFrame that names it. See
 // SessionState::binding_queue. Nothing waits here.
@@ -2192,7 +2202,7 @@ void log_video_memory(
     std::uint64_t subject,
     xrfg::autonomous::BenchmarkMemory* memory = nullptr) noexcept {
     try {
-        if (!memory && !xrfg::bridge_flight_logger().enabled()) {
+        if (!memory && !xrfg::bridge_flight_logger().enabled() && !xrfg::autonomous::interface_telemetry_requested()) {
             return;
         }
         Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter;
@@ -2238,16 +2248,24 @@ void log_video_memory(
                 0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
             return;
         }
-        // Publish this existing read only; no UI-specific query or new poll.
-        xrfg::autonomous::report_video_memory({GetTickCount64(),local.CurrentUsage,local.Budget});
+        DXGI_ADAPTER_DESC description{};
+        xrfg::RifeMemoryStatus rife_memory;
+        if(SUCCEEDED(adapter->GetDesc(&description)))
+            rife_memory=xrfg::rife_memory_for_adapter(description.AdapterLuid,true);
+        const auto total=local.CurrentUsage+(rife_memory.valid?rife_memory.private_bytes:0);
+        xrfg::autonomous::report_video_memory({GetTickCount64(),total,local.Budget,
+            local.CurrentUsage,rife_memory.private_bytes,rife_memory.reserved_bytes,
+            rife_memory.process_id,rife_memory.active,rife_memory.valid});
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::rife_memory,
+            rife_memory.valid?1:0,local.CurrentUsage,rife_memory.private_bytes,rife_memory.reserved_bytes);
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::vram_usage,
             static_cast<std::int64_t>(stage),
-            local.CurrentUsage,
+            total,
             local.Budget,
             subject);
         if(memory) {
-            memory->vram_valid=true; memory->vram_bytes=local.CurrentUsage;
+            memory->vram_valid=!rife_memory.active || rife_memory.valid; memory->vram_bytes=total;
             DXGI_QUERY_VIDEO_MEMORY_INFO shared{};
             if(SUCCEEDED(adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&shared))) {
                 memory->shared_gpu_valid=true;memory->shared_gpu_bytes=shared.CurrentUsage;
@@ -3529,6 +3547,8 @@ create_d3d12_frame_generation_swapchains(
                 state->create_info.height,
             optical_flow_configuration_code(
                 backend, options));
+        auto generator_options=options;
+        generator_options.rife_async=generator_options.rife_model>=0 && async_rife_queue(*state->session);
         const HRESULT gpu_result = synthesizer->initialize(
             state->session->d3d12_device.Get(),
             state->session->d3d12_synthesis_queue
@@ -3565,7 +3585,7 @@ create_d3d12_frame_generation_swapchains(
                 ? D3D12_RESOURCE_STATE_COMMON
                 : D3D12_RESOURCE_STATE_RENDER_TARGET,
             backend,
-            options,
+            generator_options,
             xrfg::bridge_flight_logger().gpu_instrumentation_enabled(),
             state->panel_source ? xrfg::D3D12FrameGenerationMode::ofxr : state->session->frame_generation_mode,
             (state->session->graphics_binding_capabilities & 8ULL) != 0, state->session->afw_only);
@@ -8630,7 +8650,7 @@ std::span<const std::shared_ptr<xrfg::D3D12NativeFrameResult>> native_frame_resu
         : std::span<const std::shared_ptr<xrfg::D3D12NativeFrameResult>>{};
 }
 void report_native_frame_content(SessionState* state, const GeneratedFrameEndInfo* frame) noexcept {
-    if (!state || state->frame_generation_mode!=xrfg::D3D12FrameGenerationMode::native_dlss ||
+    if (!state || (state->frame_generation_mode!=xrfg::D3D12FrameGenerationMode::native_dlss && state->nvidia_options.rife_model<0) ||
         !frame || frame->native_results.empty()) return;
     using GS=xrfg::autonomous::GenerationState;
     auto status=GS::ready;
@@ -15519,13 +15539,14 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
         nvidia_new_route, xrfg::flow_encoding_for_route(nvidia_new_route), nvidia_new_route, control.desired.native_scale};
     options.rife_model=control.desired.rife_model;
+    options.rife_async=options.rife_model>=0 && async_rife_queue(*state);
     if(hybrid_ready) {
         options.hybrid=true; options.input_scale=xrfg::D3D12NvidiaInputScale::quarter;
         backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;
     }
     const int effective_separation = effective_memory_control(*state,control.desired.separate_synthesis);
     const int effective_reduction = effective_memory_control(*state,control.desired.lower_vram);
-    const bool changed = options.rife_model!=state->nvidia_options.rife_model || options.hybrid!=state->nvidia_options.hybrid ||
+    const bool changed = options.rife_async!=state->nvidia_options.rife_async || options.rife_model!=state->nvidia_options.rife_model || options.hybrid!=state->nvidia_options.hybrid ||
         control.desired.hybrid!=state->hybrid_requested || force_startup_rendezvous || state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||
         options.input_scale != state->nvidia_options.input_scale ||
@@ -15994,7 +16015,8 @@ void log_projection_view_rects(
 
 
 void log_video_memory_periodically(SessionState& state) noexcept {
-    if (!xrfg::bridge_flight_logger().enabled()) {
+    const bool visible=xrfg::autonomous::interface_telemetry_requested();
+    if (!xrfg::bridge_flight_logger().enabled() && !visible) {
         return;
     }
     const auto now = std::chrono::steady_clock::now();
@@ -16007,7 +16029,7 @@ void log_video_memory_periodically(SessionState& state) noexcept {
         state.video_memory_first_poll = now;
     }
     state.video_memory_poll_at = now +
-        (now - state.video_memory_first_poll < std::chrono::seconds(60)
+        (visible || now - state.video_memory_first_poll < std::chrono::seconds(60)
              ? std::chrono::seconds(1)
              : std::chrono::seconds(5));
     log_video_memory(state, VideoMemoryStage::periodic, 0);

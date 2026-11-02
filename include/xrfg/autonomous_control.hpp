@@ -120,6 +120,9 @@ std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) no
 // Last existing DXGI read in the game process. UI never queries the adapter.
 struct VideoMemoryStatus {
     std::uint64_t updated_ms{}, used_bytes{}, budget_bytes{};
+    std::uint64_t game_bytes{}, rife_private_bytes{}, rife_reserved_bytes{};
+    std::uint32_t rife_process_id{};
+    bool rife_active{}, rife_valid{};
 };
 inline constexpr int kAfwOnlyPacingMode=3; // native AFW terminal delivery, no OFXR transport
 struct RuntimeStatus {

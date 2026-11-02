@@ -80,7 +80,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 78901;
+constexpr std::uint32_t kAbi = 79001;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1103,7 +1103,7 @@ void report_video_memory(VideoMemoryStatus value) noexcept {
 }
 std::string interface_vram_text(const Snapshot& value) {
     const auto& memory=value.runtime.video_memory;
-    if(!value.connected || !memory.updated_ms || !memory.budget_bytes)return "VRAM N/A";
+    if(!value.connected || !memory.updated_ms || !memory.budget_bytes || (memory.rife_active && !memory.rife_valid))return "VRAM N/A";
     char text[48]{};
     std::snprintf(text,sizeof(text),"VRAM %.0f%%",100.*double(memory.used_bytes)/double(memory.budget_bytes));
     return text;

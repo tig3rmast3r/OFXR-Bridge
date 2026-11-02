@@ -255,6 +255,16 @@ void route_profiles() {
 
 int wmain(int count, wchar_t** arguments) {
     try {
+        {
+            xrfg::autonomous::Snapshot sample;sample.connected=true;
+            sample.runtime.video_memory={1,60,100,40,20,10,123,true,true};
+            require(xrfg::autonomous::interface_vram_text(sample)=="VRAM 60%","VRAM includes worker once, not its Torch subset twice");
+            sample.runtime.video_memory.rife_valid=false;
+            require(xrfg::autonomous::interface_vram_text(sample)=="VRAM N/A","unknown active worker memory cannot masquerade as a complete total");
+            sample.runtime.video_memory.rife_active=false;
+            require(xrfg::autonomous::interface_vram_text(sample)=="VRAM 60%","ordinary routes retain existing meter");
+        }
+
         if (count == 2 && (std::wstring_view(arguments[1]) == L"--child" ||
             std::wstring_view(arguments[1]) == L"--restart")) {
             const auto state = xrfg::autonomous::snapshot();

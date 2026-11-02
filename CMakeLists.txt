@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.789.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.790.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1595,7 +1595,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_compile_features(xrfg_d3d12_history_tests PRIVATE cxx_std_20)
         if(XRFG_TEST_RIFE_GPU)
             add_test(NAME xrfg_rife_stereo_gpu COMMAND xrfg_d3d12_history_tests rife)
-            set_tests_properties(xrfg_rife_stereo_gpu PROPERTIES TIMEOUT 240 RUN_SERIAL TRUE)
+            add_test(NAME xrfg_rife_async_gpu COMMAND xrfg_d3d12_history_tests rife-async)
+            set_tests_properties(xrfg_rife_stereo_gpu xrfg_rife_async_gpu PROPERTIES TIMEOUT 240 RUN_SERIAL TRUE)
         endif()
         if(MSVC)
             target_compile_options(xrfg_d3d12_history_tests PRIVATE
