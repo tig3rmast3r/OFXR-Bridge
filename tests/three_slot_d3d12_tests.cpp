@@ -28,6 +28,7 @@ bool correct = true;
 bool alternating_eyes{};
 bool promotion_test{};
 bool fsr_test{}, fsr_missing{}, fsr_packed{};
+bool fsr_foveated{};
 bool fsr_queue{}, fsr_queue_slow{};
 bool fsr_queue_switch{};
 bool fsr_stereo_guard{};
@@ -303,9 +304,22 @@ XrResult XRAPI_CALL fake_end_impl(XrSession,const XrFrameEndInfo* end) {
                 ? D3D12_RESOURCE_STATE_COMMON
                 : D3D12_RESOURCE_STATE_RENDER_TARGET);
         const unsigned expected=i==2 ? 55 : static_cast<unsigned>(q->pose.position.y);
-        if((p&255)!=expected || ((p>>8)&255)!=60*i)
+        // Panel optical flow may select either endpoint; changing a uniform
+        // marker's intensity has no required linear-blend result. Check the
+        // exact source pair instead, independently of the interpolated pose.
+        // Sixteen-byte separation rejects frames outside A..B and poison.
+        const bool generated_panel=fsr_foveated && synthetic && i==1;
+        const unsigned lower=generated_panel?(frame_id-1)*16:expected;
+        const unsigned upper=generated_panel?frame_id*16:expected;
+        const bool hud_match=(p&255)>=lower && (p&255)<=upper;
+        if(!hud_match || ((p>>8)&255)!=60*i)
             std::cerr<<"HUD mismatch frame="<<frame_id<<" layer="<<i<<" expected="<<expected<<" pixel="<<std::hex<<p<<std::dec<<'\n';
-        correct &= (p&255)==expected && ((p>>8)&255)==60*i;
+        correct &= hud_match && ((p>>8)&255)==60*i;
+        if(fsr_foveated && i==1) {
+            const float pose=16.f*(float(frame_id)-(synthetic?.5f:0.f));
+            require(std::abs(q->pose.position.y-pose)<.001f,
+                "FSR panel pose must independently match the real/midpoint frame");
+        }
     }
     submissions.emplace_back(frame_id,synthetic);
     // Real EndFrame promotion: the synthetic has been consumed, but its
@@ -492,6 +506,7 @@ int main(int argc,char** argv) {
         s->djules_triple_requested=triple_core||triple_inline;
         if(triple_inline) { dispatch->virtual_desktop_runtime=false; dispatch->inline_unless_pipelined=true; }
         fsr_test=argc>1 && std::string_view(argv[1]).starts_with("fsr-");
+        fsr_foveated=mode=="fsr-foveated" || mode=="fsr-queue-foveated";
         legacy_queue=argc>1 && std::string_view(argv[1]).starts_with("legacy-queue");
         legacy_early_current=argc>1 && std::string_view(argv[1])=="legacy-queue-early-b";
         midpoint_cadence=argc>1 && std::string_view(argv[1])=="midpoint-cadence";
@@ -1331,6 +1346,27 @@ int main(int argc,char** argv) {
         s->last_inline_frame_state.predictedDisplayTime=runtime_time;s->last_inline_frame_state.shouldRender=XR_TRUE;s->last_inline_frame_state_valid=true;
         if(fsr_test) require(!three_slot_generation_session(s),
             "FSR was admitted to the three-slot director");
+        if(fsr_foveated) {
+            // These fixtures count projection-guide startup, not the one-off
+            // discovery of the independent panels added after V811. Arm the
+            // actual panel resources before the first counted release, so the
+            // strict eight-real/seven-synthetic and queue-owner oracles remain.
+            // source() skips intercepted enumeration for auxiliary images;
+            // supply its ordinary mutable-image history/admission here. The
+            // static panel keeps its existing immutable-image passthrough.
+            dynamic->d3d12_history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+            ID3D12Resource* panel_images[]={dynamic->enumerated_d3d12_images[0].Get()};
+            hr(dynamic->d3d12_history->initialize(s->d3d12_device.Get(),s->d3d12_queue.Get(),
+                panel_images,D3D12_RESOURCE_STATE_RENDER_TARGET),"FSR fixture panel history");
+            dynamic->generation_eligible_pending=true;
+            const std::array<PanelSource,2> panels{{{dynamic->handle,0},{fixed->handle,1}}};
+            arm_panel_generation(s,panels);
+            require(!panel_generation_pending(panels),"FSR fixture panel arming");
+            require(dynamic->panel_source && dynamic->frame_generation && dynamic->d3d12_history &&
+                fixed->panel_source && !fixed->frame_generation,"FSR fixture panel resources");
+            require(waits==0 && begins==0 && ends==0 && submissions.empty(),
+                "FSR fixture panel arming opened a runtime frame");
+        }
         if(mode!="steamvr-djules-restart" && !promotion_test && !fsr_test && !legacy_queue && !triple_inline && !transport_inline && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia) {
             require(start_continuous_presenter(s,nullptr,false),"promotion");
             if(s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia)
@@ -1405,7 +1441,7 @@ int main(int argc,char** argv) {
                     g->producer_queue=s->d3d12_queue;g->output=left->enumerated_d3d12_images[0];g->output_slice=fsr_packed?0:eye;
                     g->motion_vectors=motion;g->depth=depth;g->output_width=g->depth_width=g->motion_width=256;
                     g->output_height=g->depth_height=g->motion_height=128;g->frame_time_delta_ms=16.6667F;
-                    if(mode=="fsr-foveated" || mode=="fsr-queue-foveated") {
+                    if(fsr_foveated) {
                         g->motion_width=g->depth_width=64;
                         g->motion_height=g->depth_height=32;
                         g->placed=true;g->placed_motion_rect={0,0,64,32};
@@ -1429,7 +1465,8 @@ int main(int argc,char** argv) {
             // Inline submissions borrow the application's released auxiliary
             // image until synchronous End; only asynchronous consumers require
             // an independently retained release capture.
-            fill(dynamic->enumerated_d3d12_images[0].Get(),n,60);release(dynamic,mode!="steamvr-djules-restart" && !busy_frame && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia && !triple_inline && !transport_inline && (!legacy_queue || n>1));
+            fill(dynamic->enumerated_d3d12_images[0].Get(),fsr_foveated?n*16:n,60);release(dynamic,mode!="steamvr-djules-restart" && !busy_frame && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia && !triple_inline && !transport_inline && (!legacy_queue || n>1));
+            if(fsr_foveated) require(dynamic->last_released_capture.has_value(),"FSR fixture panel release capture");
             if(n==1){fill(fixed->enumerated_d3d12_images[0].Get(),55,120);release(fixed,mode!="steamvr-djules-restart" && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia && !triple_inline && !transport_inline && !legacy_queue);}
             if(busy_frame) fill(fixed->enumerated_d3d12_images[0].Get(),55,120);
             XrFrameState prediction{XR_TYPE_FRAME_STATE};
@@ -1476,7 +1513,7 @@ int main(int argc,char** argv) {
             projection.viewCount=2;projection.views=views.data();
             if(fsr_stereo_guard && n==10) projection.viewCount=1;
             std::array<XrCompositionLayerQuad,2> quads;
-            for(unsigned i=0;i<2;++i){auto& v=quads[i];v={XR_TYPE_COMPOSITION_LAYER_QUAD};v.pose.orientation.w=1;v.pose.position.y=float(n);
+            for(unsigned i=0;i<2;++i){auto& v=quads[i];v={XR_TYPE_COMPOSITION_LAYER_QUAD};v.pose.orientation.w=1;v.pose.position.y=float(fsr_foveated && i==0?n*16:n);
                 v.subImage.swapchain=i?fixed->handle:dynamic->handle;v.subImage.imageArrayIndex=i;v.subImage.imageRect.extent={256,128};}
             const XrCompositionLayerBaseHeader* layers[]={reinterpret_cast<XrCompositionLayerBaseHeader*>(&projection),
                 reinterpret_cast<XrCompositionLayerBaseHeader*>(&quads[0]),reinterpret_cast<XrCompositionLayerBaseHeader*>(&quads[1])};

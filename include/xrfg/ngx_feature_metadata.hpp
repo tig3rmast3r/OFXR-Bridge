@@ -12,6 +12,16 @@ struct NgxFeatureMetadata {
     bool creation_observed{};
     std::uint32_t creation_source_identity{};
 };
+// V772 admits an exact SR twin only when the creator is the sole failed
+// scope condition. Keep every list/device/type/result/guide check in the mask.
+template<class Feature, class Creator>
+constexpr bool ngx_creator_only_twin(unsigned mismatch, const Feature& feature,
+    const Creator& creator) noexcept {
+    return mismatch == 0x10U && feature.flags_known && creator.flags_known && feature.flags == creator.flags &&
+        feature.width && feature.height && feature.out_width && feature.out_height &&
+        feature.width == creator.width && feature.height == creator.height &&
+        feature.out_width == creator.out_width && feature.out_height == creator.out_height;
+}
 // Match the accepted OptiScaler publisher: feature display dimensions win.
 // Evaluate maps can retain intermediate or even inverted creation-only keys.
 // Only an actual creation receipt supplies a display contract; otherwise use

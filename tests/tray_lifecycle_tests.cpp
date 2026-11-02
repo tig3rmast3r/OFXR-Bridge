@@ -279,6 +279,7 @@ void queue_preference() {
         "failed persistence rolls back the selection");
 }
 #include "tray_keybind_tests.inc"
+#include "tray_rife_setup_tests.inc"
 } // namespace
 
 int main(int argc,char** argv) {
@@ -292,6 +293,7 @@ int main(int argc,char** argv) {
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",isolated_control.state.local_directory.c_str());
     try {
         if(argc>1 && std::string_view(argv[1])=="keybinds"){keybind_ui_tests(isolated_control.state);return 0;}
+        if(argc>1 && std::string_view(argv[1])=="rife-setup"){rife_setup_ui_tests();return 0;}
         ownership();
         cross_version_cleanup();
         window_lifecycle();

@@ -36,15 +36,6 @@ void codec() {
         passive.motion && !passive.depth && passive.last_seen_ms!=0,
         "passive observation distinguishes motion from depth without activating guide capture");
     xrfg::autonomous::Settings desired;
-    require(desired.luke_osr==2 && xrfg::autonomous::parse_settings("").luke_osr==2,
-        "factory and missing profile reconstruction default to OSR");
-    for(int saved:{0,1,2}) {
-        const auto restored=xrfg::autonomous::parse_settings("[ofxr]\nluke_osr="+std::to_string(saved)+"\n");
-        const int expected=saved==0?0:2;
-        require(restored.luke_osr==expected,"preserve legacy AFW and migrate retired band fill to OSR");
-        require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(restored)).luke_osr==expected,
-            "reconstruction migration stays stable after profile save/reload");
-    }
     require(!desired.nr_second_pass,"second Neural Rendering pass defaults off");
     require(!xrfg::autonomous::parse_settings("[ofxr]\nnr_enabled=1\n").nr_second_pass,
         "existing profiles retain one Neural Rendering pass");
@@ -62,6 +53,15 @@ void codec() {
     require(merged_nr.nr_second_pass && !merged_nr.enabled && merged_nr.afw_mode==1 &&
         merged_nr.nr_working_scale==.5F && merged_nr.nr_preset==2,
         "second-pass delta preserves concurrent OFXR, AFW and shared NR parameter edits");
+    require(desired.luke_osr==2 && xrfg::autonomous::parse_settings("").luke_osr==2,
+        "factory and missing profile reconstruction default to OSR");
+    for(int saved:{0,1,2}) {
+        const auto restored=xrfg::autonomous::parse_settings("[ofxr]\nluke_osr="+std::to_string(saved)+"\n");
+        const int expected=saved==0?0:2;
+        require(restored.luke_osr==expected,"preserve legacy AFW and migrate retired band fill to OSR");
+        require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(restored)).luke_osr==expected,
+            "reconstruction migration stays stable after profile save/reload");
+    }
     require(desired.benchmark_auto_pick,"automatic benchmark choice defaults on");
     require(!desired.status_json,"status export defaults off");
     auto exported=desired;exported.status_json=true;

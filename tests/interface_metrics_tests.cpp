@@ -290,6 +290,15 @@ void wording() {
     check(interface_state_text(s)=="FSR + OSR", "migrated OSR label without neural");
     s.desired.luke_osr=2;
     check(interface_state_text(s)=="FSR + OSR", "Full OSR replaces AFW in the mode label");
+    {
+        auto rife=s;rife.runtime.generation_mode=4;rife.desired.frame_generation=4;
+        check(interface_state_text(rife)=="RIFE + OSR" && interface_generation_active(rife),
+            "RIFE retains its own row while the nightly OSR renderer is active");
+        rife.desired.nr_enabled=rife.runtime.nr_running=true;
+        check(interface_state_text(rife)=="RIFE + OSR + Neural","RIFE OSR and NR are reported independently");
+        rife.desired.luke_osr=0;
+        check(interface_state_text(rife)=="RIFE + AFW + Neural","explicit AFW legacy stays available beside RIFE");
+    }
     check(interface_status_text(s).find("OSR: Active")!=std::string::npos && interface_status_text(s).find("AFW")==std::string::npos, "Full OSR replaces AFW in the status line");
     s.desired.nr_enabled=true;s.runtime.nr_running=true;
     check(interface_state_text(s)=="FSR + OSR + Neural", "Full OSR label with neural");

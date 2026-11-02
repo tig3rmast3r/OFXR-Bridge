@@ -3,8 +3,19 @@
 #include <fstream>
 #include <string>
 #include <string_view>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace xrfg {
+inline std::filesystem::path managed_rife_runtime() {
+#ifdef _WIN32
+    wchar_t value[32768]{};
+    const auto size=GetEnvironmentVariableW(L"LOCALAPPDATA",value,32768);
+    if(size && size<32768)return std::filesystem::path(value)/L"ofxr-bridge/RIFE/runtime";
+#endif
+    return {};
+}
 inline bool valid_rife_runtime(const std::filesystem::path& path) {
     std::error_code error;
     return path.is_absolute() &&
@@ -12,6 +23,8 @@ inline bool valid_rife_runtime(const std::filesystem::path& path) {
         std::filesystem::is_regular_file(path/L"app/worker.py",error);
 }
 inline std::filesystem::path find_rife_runtime(std::filesystem::path directory) {
+    const auto managed=managed_rife_runtime();
+    if(!managed.empty() && valid_rife_runtime(managed))return managed;
     if(directory.empty())return {};
     directory=std::filesystem::absolute(directory);
     const auto package=directory;

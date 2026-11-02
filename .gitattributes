@@ -7,3 +7,6 @@ licenses/*.txt whitespace=-blank-at-eof
 
 # Preserve the imported NVIDIA SDK declaration bytes and their notices.
 include/xrfg/native_ingress/streamline1/*.h -text
+
+# Keep the vendor RTF license consistent across Windows checkouts.
+licenses/MSVC_CRT_LICENSE.rtf text eol=crlf

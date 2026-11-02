@@ -252,6 +252,33 @@ static int panel_metadata_contract() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route=="fast-panel-source") {
+        auto dispatch=std::make_shared<Dispatch>();auto state=std::make_shared<SessionState>(dispatch);
+        state->graphics_binding=SessionGraphicsBinding::d3d12;
+        Microsoft::WRL::ComPtr<ID3D12Device> device;
+        check(SUCCEEDED(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device))),"panel device");
+        D3D12_COMMAND_QUEUE_DESC desc{};
+        check(SUCCEEDED(device->CreateCommandQueue(&desc,IID_PPV_ARGS(&state->d3d12_queue))),"panel queue");
+        XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};create.arraySize=1;
+        auto chain=std::make_shared<SwapchainState>(state,create);chain->handle=reinterpret_cast<XrSwapchain>(991);
+        {std::scoped_lock lock(g_state_mutex);g_swapchains[chain->handle]=chain;}
+        XrCompositionLayerProjectionView view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};view.pose.orientation.w=1;view.fov={-.7F,.7F,.7F,-.7F};
+        view.subImage.swapchain=reinterpret_cast<XrSwapchain>(990);view.subImage.imageRect.extent={4,4};
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=1;projection.views=&view;
+        XrCompositionLayerQuad panel{XR_TYPE_COMPOSITION_LAYER_QUAD};panel.space=projection.space;panel.pose.orientation.w=1;panel.size={1,1};
+        panel.subImage.swapchain=chain->handle;panel.subImage.imageRect.extent={4,4};
+        const XrCompositionLayerBaseHeader* layers[]={reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),reinterpret_cast<const XrCompositionLayerBaseHeader*>(&panel)};
+        XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.layerCount=2;end.layers=layers;
+        ProjectionSnapshot snapshot;check(capture_projection_snapshot(&end,&snapshot),"panel snapshot");snapshot.panel_corrections=true;
+        check(panel_sources(*state,snapshot,{}).size()==1,"normal mode must retain panel generation");
+        for(auto flags:{std::pair{1,0},std::pair{0,1},std::pair{1,1}}) {
+            state->lower_vram=flags.first;state->separate_synthesis=flags.second;
+            check(panel_sources(*state,snapshot,{}).empty(),"Fast must not acquire an unsignalled generated panel image");
+        }
+        {std::scoped_lock lock(g_state_mutex);g_swapchains.erase(chain->handle);}
+        check(!chain->panel_source && !chain->frame_generation,"selection test created hidden panel work");
+        std::puts("Fast panel source exclusion and unchanged normal admission PASS");return 0;
+    }
     if(route=="osr-peer-pose") {
         std::array<XrCompositionLayerProjectionView,2> views{};
         for(unsigned i=0;i<2;++i) {
@@ -352,8 +379,8 @@ int main(int argc,char** argv) {
     if(steady_benchmark)route="benchmark-sequence";
     else if(steady_memory)route=route.substr(12);
     constexpr unsigned memory_phase_frames=16;
-    const UINT image_width=steady_memory?(argc>2?UINT(std::stoul(argv[2])):2048):256;
-    const UINT image_height=steady_memory?image_width:128;
+    const UINT image_width=rife_large?3736:steady_memory?(argc>2?UINT(std::stoul(argv[2])):2048):256;
+    const UINT image_height=rife_large?3424:steady_memory?image_width:128;
     check(!steady_memory || (image_width>=128 && image_width<=4096),"steady VRAM per-eye extent 128..4096");
     const bool hfw=route.starts_with("hfw-");if(hfw)route=route.substr(4);
     const bool hfw_early=hfw && route.starts_with("early-");if(hfw_early)route=route.substr(6);
@@ -406,7 +433,7 @@ int main(int argc,char** argv) {
         desired.rife_model=3;desired.rife_multiplier=rife_factor;desired.scale=5;
         desired.enabled=true;desired.pacing_mode=rife_pacing;
         desired.lower_vram=rife_fast;desired.separate_synthesis=rife_fast;
-        desired.increase_buffer=false;
+        desired.increase_buffer=rife_buffer3;
         check(xrfg::autonomous::request(desired),"RIFE production UI request");
         xrfg::autonomous::apply_runtime_settings();
     }
@@ -1439,7 +1466,7 @@ int main(int argc,char** argv) {
                     control.lower_vram,control.separate_synthesis,unsigned(control.triple_frame_gen),actual_triple?3U:2U,memory_phase_peaks[phase]);std::fflush(stdout);
             }
         }
-        if(rife_switch && n%12==0) {
+        if(rife_switch && n%rife_phase_frames==0) {
             xr_ok(wait_for_synthesis_handoff(state),"RIFE phase worker complete");
             if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"RIFE phase presenter drained");
             xr_ok(f.transport->drain(),"RIFE phase physical output drained");

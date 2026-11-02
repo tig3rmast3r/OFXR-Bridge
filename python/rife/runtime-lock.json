@@ -232,5 +232,12 @@
         "format": "tensorrt-wrapper-sdist"
       }
     ]
+  },
+  "upstream_source": {
+    "path": "downloads/vs-rife-3488617283db7c428a83ba4a19382285da698b6a.zip",
+    "url": "https://codeload.github.com/HolyWu/vs-rife/zip/3488617283db7c428a83ba4a19382285da698b6a",
+    "sha256": "b32fe98ea3ce3a8db3a3020514df99d9696344e431038d2ae7c0c622214a4259",
+    "bytes": 75139,
+    "directory": "vs-rife-3488617283db7c428a83ba4a19382285da698b6a"
   }
 }

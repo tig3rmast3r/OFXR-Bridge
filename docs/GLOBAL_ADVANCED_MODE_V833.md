@@ -1,6 +1,5 @@
 # V833: Advanced mode is a global UI preference
 
-Based on V832 `e5563007e74da25dd632bb07ee034fe560f46169`.
 The authoritative setting remains `[ofxr] AdvancedMode` in the main
 `ofxr-bridge.ini`. It is not stored in game profiles.
 
@@ -32,13 +31,11 @@ Frame-thread reads use a nonblocking shared-memory read and last coherent
 value, not disk polling. File reads occur when loading a channel/profile.
 AdvancedMode remains an INI-only option; manually editing the main INI follows
 the existing matching game/tray restart workflow, not a new live file watcher.
-The existing global value is preserved; no user INI/profile was edited by the
-agent while preparing this build.
+The existing global value is preserved.
 
 ## Focused verification
 
-All five Release shipping targets built. Three relevant CPU/UI checks passed
-in1.25 seconds:
+Focused CPU/UI regression checks cover:
 
 - `xrfg_game_profiles`: two-process game isolation, profile inheritance/reset,
   no AdvancedMode in new/saved game files, conflicting legacy values ignored,
@@ -51,19 +48,10 @@ in1.25 seconds:
 - `xrfg_settings_widgets_tests`: actual shared desktop/headset controls and
   basic/advanced configuration behavior remain functional.
 
-Both initial and final selected runs passed; the final refinement ensures that
-snapshot reads change visibility only, without silently sanitizing a live route.
-No GPU workload, game/headset scene or broad pacing/inference suite was run.
+Snapshot reads change visibility only, without silently sanitizing a live route.
 
-## Delivery
+## Scope
 
-V833/control83301, private local folder and ZIP, no install or publication.
-Close the old game and tray before using matching V833 binaries. The OSR peer
-position correction of V832 is retained. Rendering/OSR shaders, camera metadata
-implementation, R19, pacing, NR, RIFE and keybind implementation sources are
-unchanged from V832.
-
-Evidence: `.local/diagnostics/global-advanced-v833/`, with focused test logs,
-source audit, matching PDB, exact source archive, incremental bundle and package
-hashes. Shared models/runtime, engine caches and archive/private Git pointers
-remain unchanged.
+This change affects UI preference persistence and visibility. It does not change
+rendering, camera metadata, pacing, NR, RIFE or keybind behavior. Use matching
+tray and layer binaries, and restart an already running game/tray after updating.

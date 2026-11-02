@@ -1181,14 +1181,40 @@ void native_adaptive_transitions(bool d12) {
     native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=true;
     Fixture f(d12,true,{},false,true,false,2);f.unblock();f.throttled=false;
     std::vector<std::pair<unsigned,bool>> policies;
-    f.diagnostic_work=[&](int stage,uint64_t seq,int64_t value){if(stage==38)policies.emplace_back(unsigned(seq),value!=0);};
+    std::vector<std::pair<unsigned,std::int64_t>> accepted;
+    policies.reserve(2048);accepted.reserve(2048);
+    std::atomic_bool observed_first_on{},observed_off_again{},observed_second_on{};
+    f.diagnostic_work=[&](int stage,uint64_t seq,int64_t value){
+        if(stage==1)accepted.emplace_back(unsigned(seq),value);
+        if(stage==38) {
+            const bool on=value!=0;policies.emplace_back(unsigned(seq),on);
+            if(seq<=210 && on)observed_first_on.store(true,std::memory_order_release);
+            if(seq>=211 && seq<=230 && !on && observed_first_on.load(std::memory_order_relaxed))
+                observed_off_again.store(true,std::memory_order_release);
+            if(seq>=241 && on && observed_off_again.load(std::memory_order_relaxed))
+                observed_second_on.store(true,std::memory_order_release);
+        }
+    };
     auto chain=f.make_chain();std::vector<unsigned> expected;
     HANDLE source_timer=CreateWaitableTimerExW(nullptr,nullptr,0x2,TIMER_ALL_ACCESS);
     check(source_timer!=nullptr,"high resolution source timer");
-    for(unsigned n=0;n<440;++n) {
+    std::int64_t source_deadline{},second_fast_deadline{};
+    bool second_fast_timeout{};
+    for(unsigned n=0;;++n) {
+        if(n==240)second_fast_deadline=ns()+6'000'000'000;
+        if(n>=240 && ns()>=second_fast_deadline){second_fast_timeout=true;break;}
+        if(n>=440 && observed_off_again.load(std::memory_order_acquire) &&
+            observed_second_on.load(std::memory_order_acquire))break;
         const bool fast=(n>=20 && n<220) || n>=240;
-        LARGE_INTEGER due{};due.QuadPart=fast?-60'000:-160'000;
-        check(SetWaitableTimer(source_timer,&due,0,nullptr,nullptr,FALSE) && WaitForSingleObject(source_timer,1000)==WAIT_OBJECT_0,"source cadence timer");
+        // Model periodic source arrivals, not a fresh sleep after GPU proof
+        // and admission work. Each control/cadence phase starts a new timeline;
+        // bounded transport ownership still regulates a producer that is late.
+        if(n==0 || n==20 || n==210 || n==220 || n==230 || n==240)source_deadline=ns();
+        source_deadline+=fast?6'000'000:16'000'000;
+        if(const auto remaining=source_deadline-ns();remaining>0) {
+            LARGE_INTEGER due{};due.QuadPart=-(remaining+99)/100;
+            check(SetWaitableTimer(source_timer,&due,0,nullptr,nullptr,FALSE) && WaitForSingleObject(source_timer,1000)==WAIT_OBJECT_0,"source cadence timer");
+        }
         if(n==210)xr_ok(f.transport->set_buffer_capacity(3,false),"disable OFXR during native lookahead");
         if(n==230)xr_ok(f.transport->set_buffer_capacity(2),"shrink during native normal policy");
         const auto value=40+(n%20)*7;expected.push_back(value);f.write(chain,value);
@@ -1198,15 +1224,73 @@ void native_adaptive_transitions(bool d12) {
         // Source-image leases and bounded admission still prevent reuse.
         if(!native_director_only_fixture_mode)f.wait_count(n+1);
     }
-    f.wait_count(440);
+    f.wait_count(static_cast<unsigned>(expected.size()));
     CloseHandle(source_timer);
     xr_ok(f.transport->drain(),"adaptive transition drain");f.transport->stop();
-    check(f.pixels==expected && f.real_ends==440,"adaptive policy preserves every exact input image across transitions");
+    check(f.pixels==expected && f.real_ends==expected.size(),"adaptive policy preserves every exact input image across transitions");
     check(!f.cycle_waited && !f.cycle_begun,"adaptive stop balances an outstanding future Wait");
     bool first_on=false,off_again=false,second_on=false;
     for(const auto& [seq,on]:policies){if(seq<=20)check(!on,"slow startup remains native normal");
         if(seq>=211 && seq<=230)check(!on,"OFXR OFF must disable early Wait even with full source cadence");
         if(on)first_on=true;if(first_on && !on)off_again=true;if(off_again && on)second_on=true;}
+    std::printf("Adaptive native %s receipts: first_on=%d off_again=%d second_on=%d policies=%zu exact_ends=%u\n",
+                d12?"D12":"D11",first_on,off_again,second_on,policies.size(),f.real_ends.load());
+    struct Phase {const char* name;unsigned first,last;};
+    const std::array phases{Phase{"slow-start",1,20},Phase{"first-fast",21,210},
+        Phase{"disabled-fast",211,220},Phase{"disabled-slow",221,230},
+        Phase{"reenabled-slow",231,240},Phase{"second-fast",241,static_cast<unsigned>(expected.size())}};
+    for(const auto& phase:phases) {
+        unsigned on_count{},off_count{},first_on_seq{},last_on_seq{};
+        for(const auto& [seq,on]:policies)if(seq>=phase.first && seq<=phase.last) {
+            if(on){++on_count;if(!first_on_seq)first_on_seq=seq;last_on_seq=seq;}else ++off_count;
+        }
+        std::printf("  phase=%s seq=%u..%u on=%u off=%u first_on=%u last_on=%u\n",
+                    phase.name,phase.first,phase.last,on_count,off_count,first_on_seq,last_on_seq);
+        unsigned interval_count{},windows{},bad_mean{},bad_median{},idle_gaps{};
+        std::int64_t minimum{},maximum{},sum{},worst_mean{},worst_median{},eligible_since{},longest_eligible{};
+        for(std::size_t i=1;i<accepted.size();++i) {
+            const auto [seq,at]=accepted[i];
+            if(seq<phase.first || seq>phase.last)continue;
+            const auto interval=at-accepted[i-1].second;
+            if(!interval_count || interval<minimum)minimum=interval;
+            maximum=std::max(maximum,interval);sum+=interval;++interval_count;
+            if(interval>period*2)++idle_gaps;
+            if(i<16)continue;
+            std::array<std::int64_t,16> samples{};std::int64_t window_sum{};bool idle{};
+            for(std::size_t j=0;j<samples.size();++j) {
+                samples[j]=accepted[i-j].second-accepted[i-j-1].second;
+                window_sum+=samples[j];idle=idle || samples[j]>period*2;
+            }
+            std::sort(samples.begin(),samples.end());
+            const auto median=samples[7]+(samples[8]-samples[7])/2;
+            const bool mean_ok=window_sum*99<=period*16*100;
+            const bool median_ok=median>0 && median*(1'000'000'000-period)<1'000'000'000*period;
+            ++windows;if(!mean_ok)++bad_mean;if(!median_ok)++bad_median;
+            worst_mean=std::max(worst_mean,window_sum/16);worst_median=std::max(worst_median,median);
+            if(!mean_ok || !median_ok || idle)eligible_since=0;
+            else {
+                if(!eligible_since)eligible_since=at;
+                longest_eligible=std::max(longest_eligible,at-eligible_since);
+            }
+        }
+        std::printf("    stage1 cadence intervals=%u min/mean/max=%.6f/%.6f/%.6fms windows16=%u bad_mean99=%u bad_median=%u idle_gaps=%u worst_mean16=%.6fms worst_median16=%.6fms longest_eligible=%.6fms\n",
+                    interval_count,minimum/1e6,interval_count?sum/(1e6*interval_count):0.0,maximum/1e6,
+                    windows,bad_mean,bad_median,idle_gaps,worst_mean/1e6,worst_median/1e6,longest_eligible/1e6);
+    }
+    if(!first_on || !off_again || !second_on || second_fast_timeout) {
+        std::printf("  stage38 %s policies:",d12?"D12":"D11");
+        for(std::size_t i=0;i<policies.size();++i) {
+            if(i%20==0)std::printf("\n   ");
+            std::printf(" %u:%u",policies[i].first,unsigned(policies[i].second));
+        }
+        std::printf("\n");
+        for(const auto& [seq,at]:accepted)
+            std::printf("  stage1 QPC %s seq=%u at=%lld\n",d12?"D12":"D11",seq,static_cast<long long>(at));
+    }
+    std::printf("  second-fast bounded timeout=%d inputs=%zu minimum=440\n",second_fast_timeout,expected.size());
+    std::fflush(stdout);
+    check(expected.size()>=440,"adaptive transitions must retain at least the original 440 exact inputs");
+    check(!second_fast_timeout,"second fast phase must requalify within six seconds");
     check(first_on && off_again && second_on,"adaptive transport must execute normal/early/normal/early transitions");
     std::printf("Adaptive native %s transitions, capacity changes, exact GPU pixels and balanced cycles PASS\n",d12?"D12":"D11");
 }

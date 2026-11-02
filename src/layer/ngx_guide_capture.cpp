@@ -669,10 +669,7 @@ public:
             // the only difference and that feature is the public one's exact
             // twin, the evaluation is still this call's own.
             const auto& creator=owner->creator_;
-            if(mismatch==0x10U&&feature.flags_known&&creator.flags_known&&feature.flags==creator.flags&&
-                feature.width&&feature.height&&feature.out_width&&feature.out_height&&
-                feature.width==creator.width&&feature.height==creator.height&&
-                feature.out_width==creator.out_width&&feature.out_height==creator.out_height) {
+            if(ngx_creator_only_twin(mismatch,feature,creator)) {
                 mismatch=0;
                 // 1252: twin accepted, the first 8 then one a second;
                 // b = this creator << 32 | the scope's, c = this identity.

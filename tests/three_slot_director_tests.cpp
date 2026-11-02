@@ -2366,7 +2366,6 @@ void gta_flat_scene_test() {
     {std::scoped_lock lock(g_state_mutex);g_swapchains.erase(handle);g_swapchains.erase(other_handle);}
     std::cout<<"GTA flat scene: full application BOTH-eye quad despite erased CRC, no staging read or fake FPS; normal status resumes PASS\n";
 }
-#include "quarantine_history_recovery_test.inc"
 
 void test_rife_layer_multiframe_contract() {
     auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
@@ -2420,12 +2419,12 @@ void test_rife_layer_multiframe_contract() {
     std::cout<<"RIFE layer:2X/3X/4X clocks, Fast on/off pools and all three delivery receipts PASS\n";
 }
 
+#include "quarantine_history_recovery_test.inc"
 int main(int argc, char** argv) {
     if(argc>1 && std::string_view(argv[1])=="quarantine-history-recovery") {
         try {quarantine_history_recovery_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
     }
-
     if(argc>1 && std::string_view(argv[1])=="rife-layer-multi") {
         try {test_rife_layer_multiframe_contract();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

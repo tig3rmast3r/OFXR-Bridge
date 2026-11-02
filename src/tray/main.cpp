@@ -1,6 +1,7 @@
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/standalone_launcher.hpp"
 #include "xrfg/rife_runtime_locator.hpp"
+#include "xrfg/rife_setup.hpp"
 #include "xrfg/autonomous_control.hpp"
 #include "xrfg/desktop_profiles.hpp"
 #include "xrfg/autonomous_ui.hpp"
@@ -15,6 +16,7 @@
 #include <shlobj.h>
 
 #include <array>
+#include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -45,6 +47,7 @@ constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
 constexpr UINT_PTR kBenchmarkTimer = 558;
+constexpr UINT_PTR kRifeSetupTimer = 836;
 constexpr int kPauseHotkeyId = 1;
 constexpr UINT kArmPollMilliseconds = 250;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
@@ -60,6 +63,7 @@ enum MenuCommand : UINT {
     toggle_arm = 90,
     toggle_pause = 91,
     configure_keybinds = 92,
+    check_rife = 95,
     steamvr_queue_separate = 93,
     steamvr_queue_shared = 94,
     toggle_benchmark_mode = 96,
@@ -103,6 +107,12 @@ struct AppState {
     bool armed{};
     bool status_export_active{};
     std::wstring crash_debug_status;
+    struct RifeOperation {
+        HANDLE process{};
+        bool installing{};
+        ULONGLONG started{};
+        std::filesystem::path result_path, console_log;
+    } rife;
 };
 
 [[nodiscard]] std::wstring last_error_message(std::wstring_view action) {
@@ -773,6 +783,157 @@ void change_keybinds(AppState& state) {
     if(state.armed)register_pause_hotkey(state);
 }
 
+struct RifeInstallDialog {
+    std::filesystem::path destination;
+    std::wstring reason;
+};
+INT_PTR CALLBACK rife_install_dialog_procedure(HWND dialog,UINT message,WPARAM wparam,LPARAM lparam) {
+    if(message==WM_INITDIALOG) {
+        auto* state=reinterpret_cast<RifeInstallDialog*>(lparam);
+        SetWindowLongPtrW(dialog,DWLP_USER,lparam);
+        SetDlgItemTextW(dialog,IDC_RIFE_REASON,state->reason.c_str());
+        SetDlgItemTextW(dialog,IDC_RIFE_DESTINATION,state->destination.c_str());
+        CheckRadioButton(dialog,IDC_RIFE_NVIDIA,IDC_RIFE_AMD,IDC_RIFE_NVIDIA);
+        EnableWindow(GetDlgItem(dialog,IDC_RIFE_AMD),FALSE);
+        return TRUE;
+    }
+    if(message==WM_COMMAND) {
+        const auto id=LOWORD(wparam);
+        if(id==IDOK) {
+            if(IsDlgButtonChecked(dialog,IDC_RIFE_NVIDIA)!=BST_CHECKED)return TRUE;
+            EndDialog(dialog,IDOK);return TRUE;
+        }
+        if(id==IDCANCEL){EndDialog(dialog,IDCANCEL);return TRUE;}
+    }
+    if(message==WM_CLOSE){EndDialog(dialog,IDCANCEL);return TRUE;}
+    return FALSE;
+}
+
+void close_rife_process(AppState& state) {
+    if(state.rife.process)CloseHandle(state.rife.process);
+    state.rife.process=nullptr;
+    if(state.window)KillTimer(state.window,kRifeSetupTimer);
+}
+
+// Desktop subprocess only: the window thread never waits for Python, CUDA,
+// downloads or installation. Check output is retained even on helper startup
+// errors; the install has its own visible console and backend log.
+bool begin_rife_operation(AppState& state,bool installing,std::wstring* error) {
+    if(state.rife.process){if(error)*error=L"A RIFE operation is already running.";return false;}
+    HANDLE output{},input{};
+    STARTUPINFOEXW startup{};startup.StartupInfo.cb=sizeof(STARTUPINFOW);
+    std::vector<std::byte> attributes;bool attribute_initialized=false;
+    PROCESS_INFORMATION process{};
+    const auto cleanup=[&]{
+        if(attribute_initialized){DeleteProcThreadAttributeList(startup.lpAttributeList);attribute_initialized=false;}
+        if(output&&output!=INVALID_HANDLE_VALUE)CloseHandle(output);output=nullptr;
+        if(input&&input!=INVALID_HANDLE_VALUE)CloseHandle(input);input=nullptr;
+        if(process.hThread){CloseHandle(process.hThread);process.hThread=nullptr;}
+        if(process.hProcess){CloseHandle(process.hProcess);process.hProcess=nullptr;}
+    };
+    try {
+        const auto script=state.executable_directory/L"tools/Setup-RifeRuntime.ps1";
+        if(!std::filesystem::is_regular_file(script))throw std::runtime_error("Missing tools/Setup-RifeRuntime.ps1. Extract the complete OFXR archive first.");
+        const auto root=state.local_directory/L"RIFE/runtime";
+        const auto status=state.local_directory/L"RIFE/status";
+        std::filesystem::create_directories(status);
+        static std::atomic_uint request{};
+        const auto name=(installing?L"install-":L"check-")+std::to_wstring(GetCurrentProcessId())+L"-"+
+            std::to_wstring(GetTickCount64())+L"-"+std::to_wstring(++request);
+        const auto result=status/(name+L".json");
+        const auto console=status/(name+L".console.log");
+        std::array<wchar_t,32768> system{};
+        if(!GetSystemDirectoryW(system.data(),static_cast<UINT>(system.size())))throw std::runtime_error("Cannot locate Windows PowerShell.");
+        const auto powershell=std::filesystem::path(system.data())/L"WindowsPowerShell/v1.0/powershell.exe";
+        auto command=xrfg::rife_setup::command_line(powershell,script,root,result,!installing);
+        DWORD flags=xrfg::rife_setup::process_flags(installing);
+        startup.StartupInfo.dwFlags=STARTF_USESHOWWINDOW;startup.StartupInfo.wShowWindow=installing?SW_SHOWNORMAL:SW_HIDE;
+        if(!installing) {
+            SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};
+            output=CreateFileW(console.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_DELETE,&security,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+            input=CreateFileW(L"NUL",GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,&security,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+            if(output==INVALID_HANDLE_VALUE||input==INVALID_HANDLE_VALUE)throw std::runtime_error("Cannot create the RIFE check log.");
+            SIZE_T bytes{};InitializeProcThreadAttributeList(nullptr,1,0,&bytes);attributes.resize(bytes);
+            startup.lpAttributeList=reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
+            if(!InitializeProcThreadAttributeList(startup.lpAttributeList,1,0,&bytes))throw std::runtime_error("Cannot prepare RIFE check handles.");
+            attribute_initialized=true;HANDLE handles[]{output,input};
+            if(!UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,handles,sizeof(handles),nullptr,nullptr))
+                throw std::runtime_error("Cannot isolate RIFE check handles.");
+            startup.StartupInfo.cb=sizeof(startup);startup.StartupInfo.dwFlags|=STARTF_USESTDHANDLES;
+            startup.StartupInfo.hStdOutput=startup.StartupInfo.hStdError=output;startup.StartupInfo.hStdInput=input;
+            flags|=EXTENDED_STARTUPINFO_PRESENT;
+        }
+        if(!CreateProcessW(powershell.c_str(),command.data(),nullptr,nullptr,installing?FALSE:TRUE,flags,nullptr,
+            state.executable_directory.c_str(),&startup.StartupInfo,&process)) {
+            const auto message=last_error_message(L"Starting the RIFE helper");cleanup();if(error)*error=message;return false;
+        }
+        state.rife={process.hProcess,installing,GetTickCount64(),result,installing?std::filesystem::path{}:console};
+        process.hProcess=nullptr;cleanup();
+        if(state.window)SetTimer(state.window,kRifeSetupTimer,250,nullptr);
+        return true;
+    } catch(const std::exception& e) {
+        cleanup();if(error)*error=xrfg::rife_setup::utf8_to_wide(e.what());return false;
+    }
+}
+
+struct RifeCompletion {
+    bool installing{};
+    std::optional<xrfg::rife_setup::Result> result;
+    std::wstring error;
+    std::filesystem::path fallback_log;
+};
+std::optional<RifeCompletion> collect_rife_completion(AppState& state) {
+    if(!state.rife.process)return {};
+    const auto waited=WaitForSingleObject(state.rife.process,0);
+    const bool timeout=GetTickCount64()-state.rife.started>=xrfg::rife_setup::operation_timeout(state.rife.installing);
+    if(waited==WAIT_TIMEOUT&&!timeout)return {};
+    RifeCompletion completion;completion.installing=state.rife.installing;
+    completion.fallback_log=state.rife.console_log.empty()?state.rife.result_path.parent_path().parent_path():state.rife.console_log;
+    DWORD exit_code=1;
+    if(waited!=WAIT_OBJECT_0) {
+        completion.error=timeout?L"The RIFE operation timed out. It will not be restarted automatically.":L"Unable to read the RIFE helper status.";
+    } else if(!GetExitCodeProcess(state.rife.process,&exit_code)) {
+        completion.error=L"Unable to read the RIFE helper exit code.";
+    } else {
+        try {
+            std::ifstream file(state.rife.result_path,std::ios::binary);
+            std::array<char,64*1024+1> bytes{};file.read(bytes.data(),static_cast<std::streamsize>(bytes.size()));
+            completion.result=xrfg::rife_setup::parse_result(std::string_view(bytes.data(),static_cast<std::size_t>(file.gcount())),exit_code);
+        } catch(...) {}
+        if(!completion.result)completion.error=L"The RIFE helper did not return a valid result. No installation was started.";
+    }
+    // Closing the tray or its monitor never kills an accepted visible install.
+    // Hidden health checks have their own bounded backend child cleanup.
+    close_rife_process(state);return completion;
+}
+void report_rife_completion(AppState& state,const RifeCompletion& completion) {
+    if(!completion.result) {
+        show_error(state.window,completion.error+L"\r\n\r\nDiagnostics: "+completion.fallback_log.wstring());return;
+    }
+    const auto& result=*completion.result;
+    std::wstring text=result.message;
+    if(!result.root.empty())text+=L"\r\n\r\nLocation: "+result.root.wstring();
+    const auto& log=result.log_path.empty()?completion.fallback_log:result.log_path;
+    if(!log.empty())text+=L"\r\n\r\nLog: "+log.wstring();
+    if(result.status==xrfg::rife_setup::Status::ready) {
+        if(text.empty())text=L"RIFE is ready.";
+        MessageBoxW(state.window,text.c_str(),L"Check RIFE",MB_OK|MB_ICONINFORMATION);return;
+    }
+    if(!completion.installing&&xrfg::rife_setup::offers_install(result.status)) {
+        RifeInstallDialog dialog{state.local_directory/L"RIFE/runtime",result.message};
+        const auto answer=DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_RIFE_INSTALL),state.window,
+            rife_install_dialog_procedure,reinterpret_cast<LPARAM>(&dialog));
+        if(answer==IDOK) {
+            std::wstring error;if(!begin_rife_operation(state,true,&error))show_error(state.window,error);
+        }
+        return;
+    }
+    MessageBoxW(state.window,text.c_str(),L"Check RIFE",MB_OK|MB_ICONWARNING);
+}
+void poll_rife_operation(AppState& state) {
+    if(auto completion=collect_rife_completion(state))report_rife_completion(state,*completion);
+}
+
 void show_context_menu(AppState& state) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
@@ -783,6 +944,8 @@ void show_context_menu(AppState& state) {
     AppendMenuW(menu, MF_STRING | (state.armed ? MF_UNCHECKED : MF_CHECKED),
         toggle_arm, L"Disable");
     AppendMenuW(menu, MF_STRING, configure_keybinds, L"Configure keybinds...");
+    AppendMenuW(menu,MF_STRING | (state.rife.process?MF_GRAYED:0),check_rife,
+        state.rife.process?(state.rife.installing?L"RIFE installation running...":L"Checking RIFE..."):L"Check RIFE...");
     HMENU pacing_menu=CreatePopupMenu();
     if(pacing_menu) {
         using xrfg::standalone::RuntimePacing;
@@ -1023,6 +1186,11 @@ void handle_command(AppState& state, UINT command) {
     case configure_keybinds:
         change_keybinds(state);
         break;
+    case check_rife: {
+        std::wstring error;
+        if(!begin_rife_operation(state,false,&error))show_error(state.window,error);
+        break;
+    }
     case toggle_benchmark_mode: {
         std::wstring error;
         if(!set_benchmark_preference(state.settings_path,!xrfg::autonomous::benchmark_enabled(),&error))
@@ -1176,6 +1344,7 @@ LRESULT CALLBACK window_procedure(
         }
         return 0;
     case WM_TIMER:
+        if(wparam==kRifeSetupTimer){poll_rife_operation(*state);return 0;}
         if(wparam==kBenchmarkTimer) {
             // Desktop controller only; no disk/profile work on the game's frame thread.
             static unsigned remembered_game{};
@@ -1248,6 +1417,7 @@ LRESULT CALLBACK window_procedure(
         }
         return 0;
     case WM_DESTROY: {
+        close_rife_process(*state);
         KillTimer(window,kBenchmarkTimer);
         xrfg::autonomous::stop_benchmark();xrfg::autonomous::tick_benchmark();
         xrfg::autonomous::close_settings_window();

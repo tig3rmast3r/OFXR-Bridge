@@ -44,3 +44,11 @@ DLSS-G per-game NVIDIA profile selection is adapted from elliotttate/OFXR-Bridge
 release 36, b8048568c574f3a89847c18a4a0cd6d5aec22c39, under LGPL-3.0-or-later.
 Only public NVAPI DRS profile read/write controls are imported; no upstream
 pacing, shader, scheduler or model binary changes are included.
+
+## Portable RIFE Microsoft runtime
+
+The NVIDIA RIFE installer package includes the app-local Microsoft.VC143.CRT
+14.44.35112 files identified by SHA256 in the RIFE runtime lock. The original
+Microsoft license terms from that redistributable accompany them in
+[MSVC_CRT_LICENSE.rtf](MSVC_CRT_LICENSE.rtf). These files are installed only
+inside the per-user portable Python runtime.

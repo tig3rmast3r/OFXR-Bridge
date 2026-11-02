@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "base_commit": "3488617283db7c428a83ba4a19382285da698b6a",
+  "files": {
+    "check_runtime.py": "bc0d18313f62c6f99a82f0ec571417964f461c6852f643004e3cf22356509348",
+    "fused_warp.py": "b6258511179005b8c89c08f8a57e0c8db256851e23bb3c3262f0d048b3e63c0d",
+    "gpu_memory.py": "04b98e0beefb49c3b6ee51f5ff0d7a77c4379b4a5a6bb99c61326cd6ebdfde95",
+    "LICENSE": "aea942caf766b16e6ef0b26e033fa92c0dea3124f6f7ad4a18ca1fb43e010d40",
+    "models/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "models/IFNet_HDv3_v4_16_lite.py": "3a8cf5810d4ec355f5984f44fe14157cbbf5b75c313d5dbd2bb018d0f2cbcdc8",
+    "models/IFNet_HDv3_v4_25_lite.py": "05d27834a5ef3befc2077c0ddc1a8199e81e0f88517182042eaced327a357aab",
+    "models/IFNet_HDv3_v4_3.py": "4cd6f7fe63b679c42a8391daf332eaf1fa037c5a4c8b491a1a27d224bc7fbc71",
+    "models/IFNet_HDv3_v4_4.py": "4cd6f7fe63b679c42a8391daf332eaf1fa037c5a4c8b491a1a27d224bc7fbc71",
+    "models/IFNet_HDv3_v4_6.py": "ebdc4dc1075e3fa38d5eb12e657086f14ab9eab56974cfa9c359f218b7133865",
+    "models/warplayer.py": "f17b5aea73676c059b4c155852217c954d5b4eb19cc08eff40b43edd6055ab73",
+    "runtime-lock.json": "871d5332c92dceea69a43da4a0068570a606c1b3a3bbae4d39de861317871bcc",
+    "runtime_lease.py": "47ad91c078b61f1caf5669bb1990e04946f1601e1bae62da1034edf47a42e12a",
+    "trt_backend.py": "734ef5966482ab24a015cc2a67e3da441091f8cb210bfd1076268b03287d0d83",
+    "trt_cache.py": "2c37e955a529e5937e09e773c457944f520def27541af950012bf8a99fff2458",
+    "trt_compile.py": "fedab7e49d2294ad2724c7f33aea0a11b7cee5d7125a58f70027e21f0b144549",
+    "worker.py": "615d40a50ace8ca200e334f7d2f5a3dcb83cc9b12bcd8999ad5d7caa466a5cb5"
+  }
+}

@@ -1,7 +1,8 @@
 # V813: unlock buffered preparation and preserve each eye's temporal guide chain
 
-NR is visually accepted by the owner on V811. Its four-view array-guide handling
-is retained unchanged. Pacing and FSR/Hybrid quality were rejected on that trial.
+This change allows the next buffered image to prepare during native BeginFrame
+and preserves each eye's native temporal guide chain. Four-view NR array-guide
+handling is retained.
 
 ## Buffered preparation
 
@@ -24,7 +25,7 @@ earlier content End cannot be overwritten. The actual pixel/pose order, native
 Begin/End serialization, source ownership and admission retirement are retained.
 Failure is published before retiring the newly popped packet. Unbuffered order,
 Legacy VDXR, scheduling clocks, latency caps and phase policy are unchanged.
-The V811 extra copy queue remains removed, as in V812. Stage 35 / flight 5745
+The existing publication queue is retained. Stage 35 / flight 5745
 records early release entry and return alongside the existing Begin trace.
 
 A GPU fixture holds native Begin while submitting another image. With the same
@@ -32,7 +33,7 @@ test object linked against V812's runtime library, the next copy stays blocked
 and the test fails. V813 prepares it during Begin, while still blocking a reused
 physical index. Framework/Director, Buffer OFF, stop during Begin, Begin failure
 and restart with fresh pixels/poses are covered. This demonstrates removal of
-the OFXR gate; stable SteamVR headset pacing still requires the owner's trial.
+the OFXR gate, rather than a guarantee of stable SteamVR headset pacing.
 
 ## FSR and Hybrid guide continuity
 
@@ -55,21 +56,9 @@ identities now also survive in the compact diagnostic sidecar when the verbose
 flight file rotates. Deduplication occurs on the existing writer thread; no new
 GPU capture, render-thread lock or per-frame diagnostic generation is added.
 
-## Scope and trial
+## Verification limits
 
-The broad focused suite initially passed 67 of 69 cases. The native-runtime and
-Framework Djules 3X cases hit an expired-prediction assertion, then both passed
-their isolated diagnostic follow-ups with unchanged runtime code and assertions.
-All raw failed and follow-up JUnit receipts are retained in the package evidence;
-the initial failures are not relabeled as passes. Native timing remains an
-intermittent validation limit. Both new defect regressions and the actual FSR
-provider cases pass. This does not establish stable headset pacing.
-
-V813 is based on local V812 in the 800/RIFE lane. Worker/models/provider bytes and
-the single shared runtime stay unchanged. Public V759 remains the frozen 0.3.2
-candidate. Source, symbols, regression receipts and old/new proofs are retained
-in `.local/diagnostics/buffer-release-before-begin-v813/` in the RIFE laboratory.
-No installation, profile edit or publication is automatic.
-
-Owner trial: restart with V813 and compare Buffer OFF/ON with NR OFF, then inspect
-FSR and Hybrid foveated quality. NR does not need another correctness trial.
+Focused regressions cover the early-release ownership gate, reused physical
+indices, shutdown/failure recovery, independent guide chains and actual FSR
+provider dispatch. These checks do not establish stable headset pacing or
+resolve all FSR/Hybrid foveated image-quality problems.

@@ -32,6 +32,27 @@ struct EvaluationMap {
 }
 int main() {
     try {
+        {
+            xrfg::NgxFeatureMetadata a{}, b{};
+            a.width=b.width=1280; a.height=b.height=720;
+            a.out_width=b.out_width=2560; a.out_height=b.out_height=1440;
+            require(xrfg::ngx_creator_only_twin(0x10,a,b),"exact GTA creator-only twin rejected");
+            for(unsigned bit=0;bit<11;++bit) if(bit!=4)
+                require(!xrfg::ngx_creator_only_twin(0x10|(1u<<bit),a,b),"additional scope mismatch admitted as twin");
+            for(unsigned field=0;field<6;++field) {
+                auto changed=b;
+                if(field==0)changed.flags_known=false;
+                if(field==1)++changed.flags;
+                if(field==2)++changed.width;
+                if(field==3)++changed.height;
+                if(field==4)++changed.out_width;
+                if(field==5)++changed.out_height;
+                require(!xrfg::ngx_creator_only_twin(0x10,a,changed),"non-identical flags or dimensions admitted");
+                require(!xrfg::ngx_creator_only_twin(0x10,changed,a),"asymmetric non-identical twin admitted");
+            }
+            a.width=b.width=0;
+            require(!xrfg::ngx_creator_only_twin(0x10,a,b),"unknown dimensions admitted");
+        }
         EvaluationMap map; xrfg::NgxFeatureMetadata metadata;
         map.dimensions_present=true;
         require(xrfg::ngx_display_dimension(3776,&map,NVSDK_NGX_Parameter_OutWidth,4096,true)==3776&&

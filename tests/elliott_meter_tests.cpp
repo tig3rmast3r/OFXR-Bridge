@@ -115,8 +115,8 @@ int main(int argc,char** argv){try{
     check(autonomous::interface_state_text(optimization_disconnected)!="Optimizing, please wait" &&
         count(rasterize_elliott_meter(optimization_disconnected,now,false,false),yellow)==0,
         "a disconnected runtime cannot keep an optimization header visible");
-    check(autonomous::interface_status_text(active).find("AFW: N/A")!=std::string::npos,
-        "AFW outside Luke must be not applicable");
+    check(autonomous::interface_status_text(active).find("OSR: N/A")!=std::string::npos,
+        "default OSR outside Luke must be not applicable");
     auto idle=active;idle.runtime.telemetry.generating=false;
     check(count(rasterize_elliott_meter(idle,now,false,false),red)>100,"non-generating meter red");
     auto disabled=active;disabled.desired.enabled=false;
@@ -129,13 +129,17 @@ int main(int argc,char** argv){try{
     check(count(rasterize_elliott_meter(luke,now,false,false),red)>100,"requested Luke AFW idle red");
     luke.runtime.afw_running=1;
     check(count(rasterize_elliott_meter(luke,now,false,false),red)==0,"active Luke AFW green");
-    auto afw_only=luke;afw_only.desired.enabled=false;
+    auto afw_only=luke;afw_only.desired.enabled=false;afw_only.desired.luke_osr=0;
     afw_only.runtime.telemetry.generating=false;afw_only.runtime.generation_state=autonomous::GenerationState::paused;
     afw_only.runtime.provider_error=5; // a disabled OFXR failure is irrelevant to AFW
     check(autonomous::interface_state_text(afw_only)=="AFW" &&
         !autonomous::interface_generation_active(afw_only),"AFW-only label identifies actual work without claiming OFXR generation");
     check(count(rasterize_elliott_meter(afw_only,now,false,false),green)>100 &&
         count(rasterize_elliott_meter(afw_only,now,false,false),red)==0,"AFW alone is green even when OFXR is disabled/paused");
+    auto osr_only=afw_only;osr_only.desired.luke_osr=2;
+    check(autonomous::interface_state_text(osr_only)=="OSR" && !autonomous::interface_generation_active(osr_only) &&
+        count(rasterize_elliott_meter(osr_only,now,false,false),green)>100,
+        "OSR-only reconstruction is active without claiming OFXR frame generation");
     afw_only.desired.enabled=true;afw_only.runtime.pacing_mode=autonomous::kAfwOnlyPacingMode;
     check(count(rasterize_elliott_meter(afw_only,now,false,false),red)==0,"startup AFW-only bypass is also green");
     afw_only.runtime.afw_running=false;

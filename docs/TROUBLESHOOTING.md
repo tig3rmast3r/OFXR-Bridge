@@ -41,7 +41,7 @@ overlay that follows the controller, or off.
 | No overlay or counter at all | OFXR is not loaded in the game | [A](#a-ofxr-is-not-loaded) |
 | Numbers in **red**, or a **red** corner counter | OFXR is loaded but not generating frames | [B](#b-ofxr-is-loaded-but-not-generating), or [C](#c-luke-ross-games) in a Luke Ross game |
 | Numbers in **green**, or a **green** or **blue** corner counter | OFXR is working (blue: Luke Ross reconstruction is producing the frames) | [D](#d-ofxr-works-but-it-does-not-feel-better) |
-| **Paused** in the top right corner | Frame generation is paused | Press the pause key again (**Ctrl + Alt + F7** unless you changed it; the tray menu shows it), or tick **Enable frame generation** in Settings |
+| **Paused** in the top right corner | Frame generation is paused | Press the pause key again (**F7** unless you changed it; the tray menu shows it), or tick **Enable frame generation** in Settings |
 
 The information overlay says what OFXR is doing:
 
@@ -84,7 +84,7 @@ Find the words shown after **Status:** on the information overlay.
 | **FSR provider missing** | A file is missing from the `ofxr` folder. Extract the complete archive again. |
 | **Swapchain allocation refused**, **Overlay swapchain limit reached** | SteamVR ran out of OpenXR swapchains. Turn off OpenXR overlays you don't need (OpenKneeboard, toolkits) and, in UEVR, depth submission. In Luke Ross games, the **Luke Ross** tab shows the swapchain details. |
 | **Vulkan game-vector capture suspended** | In this Vulkan game, OFXR cannot use the game's vectors at the moment. Use **OFXR** or **Hybrid**, which fall back to optical flow; FSR 3.1 and DLSS-G show real frames only. |
-| **Paused** | See [Step 1](#step-1-is-ofxr-running-in-your-game). If it pauses and resumes by itself, your game or a mod uses the same key: choose another with **Pause key** in the tray menu. |
+| **Paused** | See [Step 1](#step-1-is-ofxr-running-in-your-game). If it pauses and resumes by itself, your game or a mod uses the same key: choose another with **Configure keybinds...** in the tray menu. |
 | Anything else | [Send a log](#still-stuck-send-a-log). |
 
 ## C. Luke Ross games

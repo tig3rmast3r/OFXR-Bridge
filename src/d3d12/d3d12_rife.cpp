@@ -1,6 +1,7 @@
 #include "xrfg/d3d12_rife.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/rife_runtime_locator.hpp"
+#include "xrfg/rife_runtime_lease.hpp"
 #include "rife_pack_shader.hpp"
 #include "rife_vertex_shader.hpp"
 #include "rife_unpack_shader.hpp"
@@ -44,6 +45,7 @@ std::filesystem::path runtime_path() {
     throw HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
 }
 class Worker {
+    RifeRuntimeReadLease runtime_lease_;
     Handle process_,input_,output_,job_;
     std::mutex mutex_;
     std::string line_;
@@ -96,6 +98,7 @@ class Worker {
 public:
     Worker(){
         auto root=runtime_path();
+        if(!runtime_lease_.acquire(root))throw HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION);
         SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};
         Handle child_input,child_output;
         HANDLE parent_write{};

@@ -1,16 +1,9 @@
 # V830: live VRAM/GPU telemetry and RIFE Quality presets
 
-Based on V829 `15a6ba588c7d68210ffbe33e8370273e3e72a0e3`. All its fixes,
-V828 configurable keys, and the V827 pacing implementation are retained.
-
 ## VRAM refresh
 
-The user's V829 MSFS minilog is
-`ofxr-bridge-flight-20261101-231757-790-pid12308-1.log` (5,366,451 bytes).
-It contains no `vram_usage` or `rife_memory` events. Source inspection found
-`log_video_memory_periodically` defined but never called. Allocation-time
-samples alone cannot keep the interface updated or continuously request the
-separate RIFE worker's private memory.
+Allocation-time samples alone cannot keep the interface updated or continuously
+request the separate RIFE worker's private memory.
 
 The existing periodic sampler is now called from the runtime report scope at
 the end of each application frame, including the worker handoff paths. Its
@@ -37,7 +30,7 @@ This includes the game, RIFE worker and compositor rather than just one PID.
 Concurrent engines are not added together. Values are bounded to 0..100;
 an actual idle sample is valid zero, while missing/failed/stale data remain N/A.
 Samples expire after three seconds and survive ordinary runtime heartbeats.
-Version/control ABI are 830/83001, so use a matching tray and restarted game.
+Use matching tray and layer binaries, and restart the game after updating.
 
 Microsoft's definitions and APIs:
 
@@ -70,13 +63,12 @@ was changed and no existing engine cache was removed.
 
 ## Focused verification
 
-Release shipping targets built. Exactly six selected tests passed in 5.77s:
+Focused regression checks cover:
 
 - `xrfg_standalone_launcher_tests`: generated runtime configuration uses the new default.
 - `xrfg_gpu_usage_tests`: adapter filtering, per-engine aggregation, measured idle,
   unavailable/stale values, uppercase Windows LUID, and a real read-only PDH
-  interval. The final live read was 17.7356%; maximum observed cached request
-  duration was 14 microseconds (a sample, not a timing guarantee).
+  interval.
 - `xrfg_gpu_telemetry_widgets`: desktop/headset labels, stale display, all six
   actual Quality selections, and synchronization between the two interfaces.
 - `xrfg_autonomous_control_tests`: preset defaults/migration/persistence and
@@ -89,15 +81,5 @@ Release shipping targets built. Exactly six selected tests passed in 5.77s:
   38,473,728 bytes game usage. Total is game plus private once. All 64 native
   timing receipts remained readable.
 
-The first GPU counter test failed because the initial LUID comparison was
-case-sensitive and Windows emits uppercase hexadecimal digits. That failure
-and the correction's passing output are retained. An initial build command used
-an incorrect forwarder target name; the corrected shipping target build passed.
-The Elliott raster was also exported and visually inspected for header overlap.
-No game/headset scenes, broad RIFE matrix, or pacing benchmark was run.
-
-Evidence is in `.local/diagnostics/gpu-telemetry-v830/`, including the sealed
-user log hashes, initial/final tests, full output, preview, source audit, PDB,
-source archive and incremental Git bundle. Private local delivery only; no
-installation, runtime registration or publication. Further in-game RIFE and
-pacing validation remains with the owner.
+These checks validate telemetry and preset behavior. They do not establish game
+performance, headset pacing or RIFE image quality.

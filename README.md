@@ -19,6 +19,12 @@ Download it from [GitHub Releases](https://github.com/tig3rmast3r/OFXR-Bridge/re
 
 What changed in this version: see the [release notes](https://github.com/tig3rmast3r/OFXR-Bridge/releases).
 
+**On nightly:** experimental NVIDIA **RIFE** frame generation is also available,
+with models 4.6, 4.4 and 4.3, a Quality selector and optional TensorRT acceleration
+for 4.4. Use **Check RIFE...** in the tray to set up its pinned per-user runtime.
+See the [RIFE guide](docs/RIFE.md). The stable release remains a separate download;
+a nightly or self-compiled build must be signed separately for anti-cheat use.
+
 Not working, or not feeling smoother? See the [troubleshooting guide](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/docs/TROUBLESHOOTING.md).
 
 > [!WARNING]
@@ -40,6 +46,8 @@ Not working, or not feeling smoother? See the [troubleshooting guide](https://gi
 > - **Hybrid, FSR 3.1, DLSS-G and Luke Ross OSR/AFW:** the game must run
 >   **DLSS** Super Resolution or Ray Reconstruction (OFXR takes its guides from it).
 > - **DLSS-G:** an RTX 40 or 50-series card.
+> - **RIFE (nightly):** an NVIDIA CUDA-compatible GPU and driver, plus its
+>   separate runtime. RIFE itself does not need game motion vectors or depth.
 > - The [Microsoft Visual C++ Redistributable x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
 
 ## Features
@@ -48,6 +56,8 @@ Not working, or not feeling smoother? See the [troubleshooting guide](https://gi
 
 - Optical flow: **NVIDIA** (Fast, Medium, Slow) at 100%, 75%, 50% or 25%
   resolution, or **AMD FidelityFX**.
+- **RIFE (nightly)**: neural frame interpolation on NVIDIA CUDA, with optional
+  TensorRT acceleration for model 4.4.
 - **Hybrid**: FidelityFX flow combined with the game's own motion vectors.
 - **FSR 3.1** and **DLSS** Frame Generation, fed with the game's DLSS guides.
 - **3X** frame generation on the OFXR 0.2.14 route.
@@ -63,7 +73,7 @@ Not working, or not feeling smoother? See the [troubleshooting guide](https://gi
 
 - D3D12, D3D11 and Vulkan games, through VDXR or SteamVR.
 - UEVR, REFramework mods, OpenComposite and Cheeky Foveated DLSS.
-- **Star Citizen**: OFXR's files are signed, so Easy Anti-Cheat lets it load.
+- **Star Citizen**: the official signed release can load through Easy Anti-Cheat.
 - **OpenKneeboard** and other OpenXR panels are interpolated with the game.
 
 **Tray and overlay**
@@ -91,6 +101,21 @@ resolution sets the cost of motion estimation, not the output resolution.
 For DLSS 5 Neural Rendering, place your own `nvngx_dlssnr.dll` model in the
 `ofxr` folder. It is not included, and nothing else needs it. Don't confuse it
 with the included `nvngx.dll_dlssnr.dll` forwarder.
+
+### RIFE on nightly
+
+Choose **Check RIFE...** in the tray. If the runtime is missing or needs repair,
+confirm the NVIDIA installation; a PowerShell window shows progress without
+requiring further input. It installs under
+**`%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`**, using about **8 GB** installed
+and requiring at least **14 GB free** for download and staging. GPU optimization
+caches need additional space. AMD Radeon (RDNA) is shown disabled for future support.
+
+Start with **RIFE 4.4**, **Medium** Quality and **2X**. Experimental 3X/4X are
+available on the native D3D12 route and compatible Luke Ross routes after
+OSR/AFW reconstruction. Other legacy/shared/interop routes retain 2X support.
+See the [RIFE guide](docs/RIFE.md) for supported paths, compilation, caches and
+troubleshooting. Installing RIFE does not change the default OFXR engine.
 
 ### For the best results
 
@@ -231,8 +256,8 @@ This applies to OpenXR panel layers. HUD elements already drawn into a game's ey
 
 ## Star Citizen
 
-OFXR's own files (the tray, the OpenXR and Vulkan layers, and the NGX
-forwarders) are digitally signed, so Easy Anti-Cheat lets OFXR load in Star
+The official release's OFXR files (the tray, the OpenXR and Vulkan layers,
+and the NGX forwarders) are digitally signed, so Easy Anti-Cheat lets OFXR load in Star
 Citizen. Tested with SteamVR and VDXR: optical flow, Hybrid and DLSS-G work.
 Enable the tray before starting the game.
 
@@ -293,6 +318,7 @@ first**: it is often the setting that makes the biggest difference.
 | OFXR 0.2.1 | Latency-oriented route; performance can vary substantially by configuration. |
 | OFXR 0.2.14 | Djules-based route, including a 3X option. |
 | OFXR 0.3.0 | Default NVIDIA route; compare its performance and latency in each game. |
+| RIFE (nightly) | NVIDIA CUDA neural interpolation; model 4.4 has optional TensorRT acceleration. |
 | Hybrid | Combines FidelityFX with captured motion vectors. |
 | FSR 3.1 | FSR frame generation using the captured guides. |
 | DLSS-G | NVIDIA frame generation; requires compatible hardware and can have a higher cost. |
@@ -366,7 +392,7 @@ simulator at its target frame rate. File format:
 
 ## What the tray changes on your PC
 
-When you select **Enable**, the tray prepares a versioned runtime cache under **`%LOCALAPPDATA%\ofxr-bridge\RuntimeLayer`** and registers the bridge's OpenXR implicit-layer manifest for the current Windows user. It also manages its Vulkan layer registration when that support is enabled. The OpenXR loader loads the bridge DLL into participating game processes. Your active OpenXR runtime is unchanged. OFXR's own files are digitally signed (see [Star Citizen](#star-citizen)).
+When you select **Enable**, the tray prepares a versioned runtime cache under **`%LOCALAPPDATA%\ofxr-bridge\RuntimeLayer`** and registers the bridge's OpenXR implicit-layer manifest for the current Windows user. It also manages its Vulkan layer registration when that support is enabled. The OpenXR loader loads the bridge DLL into participating game processes. Your active OpenXR runtime is unchanged. The official release's OFXR files are digitally signed (see [Star Citizen](#star-citizen)).
 
 The standalone bridge does not replace game files. The optional Assetto Corsa add-on has its own installation procedure and does modify the documented game/CSP files.
 
@@ -417,13 +443,12 @@ Diagnostic logs are independent of game/mod logging. They record bridge activity
 
 See the [Windows build instructions](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/docs/BUILDING.md).
 
+For the nightly RIFE runtime and complete release packaging, also see
+[Building and packaging RIFE](docs/BUILDING_RIFE.md).
+
 ## License
 
 The combined standalone distribution is licensed under [GPL-3.0](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/LICENSE). Original components and third-party libraries retain their respective notices and licenses; proprietary providers have their own terms. See [attribution and third-party notices](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/licenses/ATTRIBUTION.md).
-
-## Experimental RIFE (v737)
-
-This laboratory build adds an optional portable Python/CUDA RIFE route with native-resolution colour composition. See [RIFE setup and limitations](docs/RIFE.md). The large shared runtime is kept separately from the build ZIP.
 
 ## Credits
 
