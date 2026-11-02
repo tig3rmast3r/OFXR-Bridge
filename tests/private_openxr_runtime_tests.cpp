@@ -1,4 +1,5 @@
 #include "xrfg/private_openxr_runtime.hpp"
+#include "xrfg/private_refresh_wait_policy.hpp"
 #include "xrfg/interface_metrics.hpp"
 #include "xrfg/private_delivery_queue.hpp"
 #include "xrfg/d3d11_d3d12_interop.hpp"
@@ -27,6 +28,8 @@ void xr_ok(XrResult result,const char* message){if(XR_FAILED(result))std::fprint
 std::int64_t ns(){LARGE_INTEGER q{},f{};QueryPerformanceCounter(&q);QueryPerformanceFrequency(&f);return q.QuadPart/f.QuadPart*1'000'000'000LL+q.QuadPart%f.QuadPart*1'000'000'000LL/f.QuadPart;}
 std::int64_t period=11'111'111;
 constexpr std::int64_t epoch=1'000'000'000'000LL;
+bool native_contract_fixture_mode{},native_adaptive_wait_fixture_mode{};
+bool native_director_only_fixture_mode{};
 struct Chain {
     std::vector<ComPtr<ID3D12Resource>> d12;
     std::vector<ComPtr<ID3D11Texture2D>> d11;
@@ -55,6 +58,7 @@ struct Fixture {
     std::condition_variable changed;
     std::atomic_bool block_end{true},end_entered{},fail_end{};
     std::atomic_uint real_acquires{},real_waits{},real_begins{},real_ends{};
+    std::atomic<std::int64_t> native_wait_tick_ns{}; // layer fixture's throttling runtime
     bool cycle_waited{},cycle_begun{};
     unsigned successful_waits{};
     std::atomic_bool throttled{true};
@@ -128,6 +132,9 @@ struct Fixture {
         options.d11_release_readiness=release_readiness;
         options.physical_period=[]{return period;};options.capacity=capacity;
         options.adaptive_buffer=adaptive_buffer;
+        options.native_frame_contract=native_contract_fixture_mode;
+        options.native_adaptive_wait_lookahead=native_adaptive_wait_fixture_mode;
+        options.native_director_only=native_director_only_fixture_mode;
         if(physical_clock) {
             physical_origin=ns();
             options.physical_clock=[this]() -> std::optional<xrfg::PrivatePhysicalClock> {
@@ -1096,6 +1103,175 @@ void buffer_cold_start_logging_off(bool directed) {
     std::printf("D12 %s Buffer ON before first frame, diagnostics OFF, restart PASS\n",
                 directed?"Director":"Framework");
 }
+void native_contract_sparse_reference(bool d12) {
+    Fixture f(d12,true,{},true);f.unblock();f.throttled=false;
+    const auto caller=GetCurrentThreadId();const auto chain=f.make_chain();
+    std::vector<unsigned> expected;
+    const unsigned count=6;
+    for(unsigned n=0;n<count;++n) {
+        if(n==2 || n==4){std::this_thread::sleep_for(65ms);f.stale_next_clock=true;}
+        const auto value=60+(n%20)*7;expected.push_back(value);f.write(chain,value);
+        f.begin_virtual();xr_ok(f.submit(chain,float(n)),"native-contract sparse output");
+        f.wait_count(n+1);
+    }
+    xr_ok(f.transport->drain(),"native-contract sparse drain");f.transport->stop();
+    check(f.discarded_clocks>=2,"sparse reference must renew expired native cycles");
+    check(f.pixels==expected && f.real_ends==count,"reference retains every exact FIFO image");
+    check((f.wait_thread==f.delivery_thread) && f.delivery_thread!=caller,
+          "configured Wait ownership and serialized frame consumer stay independent of production");
+    check(!f.cycle_waited && !f.cycle_begun,"reference stop balances native cycles");
+    check(f.real_begins==f.real_ends+f.empty_ends+f.discarded_clocks,
+          "reference Begin has exactly one End or explicit discard");
+    xr_ok(f.transport->destroy_swapchain(chain),"reference sparse cleanup");
+    std::printf("Native-contract %s sparse exact pixels, cycle renewal and independent consumer PASS\n",d12?"D12":"D11");
+}
+void native_contract_reference_checks() {
+    native_contract_fixture_mode=true;
+    native_contract_sparse_reference(true);native_contract_sparse_reference(false);
+    native_renewal_failure();nonrenderable_native_clock();
+    copied_source_reuse(true);copied_source_reuse(false);
+    buffer_early_release_cancel(true,false);buffer_early_release_cancel(true,true);
+    buffer_cold_start_logging_off(true);
+}
+void native_refresh_policy_checks() {
+    xrfg::PrivateRefreshWaitPolicy p;
+    int64_t t=1'000'000'000;
+    p.observe(t,period);
+    for(int n=0;n<32;++n){t+=period*9/7;p.observe(t,period);check(!p.enabled(t),"70fps cannot arm90Hz lookahead");}
+    const auto qualify=[&] {
+        for(int n=0;n<16;++n){t+=period;p.observe(t,period);check(!p.enabled(t),"full median window alone cannot arm");}
+        for(int n=0;n<90;++n){t+=period;p.observe(t,period);check(!p.enabled(t),"entry must wait at least one continuous second");}
+        t+=period;p.observe(t,period);check(p.enabled(t),"one full second of qualified cadence arms lookahead");
+    };
+    qualify();
+    for(int n=0;n<32;++n){t+=period+(n%2?500'000:-500'000);p.observe(t,period);check(p.enabled(t),"paired jitter retains active full-rate policy");}
+    t+=period*9/7;p.observe(t,period);check(!p.enabled(t),"70fps disarms immediately, not after the entry second");
+    qualify();
+    t+=period*3;check(!p.enabled(t),"source pause disarms without another accepted image");
+    for(int n=0;n<160;++n){t+=period*90/89;p.observe(t,period);check(!p.enabled(t),"89fps cannot sustain entry qualification");}
+    t+=period;p.observe(t,0);check(!p.enabled(t),"unknown refresh cannot qualify");
+    for(int n=0;n<160;++n){t+=period;p.observe(t,8'333'333);check(!p.enabled(t),"90fps cannot arm120Hz lookahead");}
+    xrfg::PrivateRefreshWaitPolicy edge;
+    const auto base=t+period*4,below=period*90/89;
+    for(int n=0;n<240;++n){const auto at=base+n*below+(n%17==0?-500'000:0);edge.observe(at,period);check(!edge.enabled(at),"89fps plus observation jitter must not pulse early mode");}
+    xrfg::PrivateRefreshWaitPolicy recovery;
+    t+=period*1000;recovery.observe(t,period);
+    for(int phase=0;phase<2;++phase){
+        for(int n=0;n<80;++n){t+=period;recovery.observe(t,period);check(!recovery.enabled(t),"sub-second recovery cannot arm");}
+        for(int n=0;n<16;++n){t+=period*9/7;recovery.observe(t,period);check(!recovery.enabled(t),"slow gap resets, short recoveries cannot accumulate");}
+    }
+    xrfg::PrivateRefreshWaitPolicy missed;
+    for(int n=0;n<1000;++n){t+=n%90==0?period*2:period;missed.observe(t,period);check(!missed.enabled(t),"a90fps median cannot hide periodic missed production slots");}
+    std::puts("Qualified native Wait: median/window plus1s entry, immediate mean/idle exit, no accumulated recovery and periodic-miss checks PASS");
+}
+void native_adaptive_transitions(bool d12) {
+    native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=true;
+    Fixture f(d12,true,{},false,true,false,2);f.unblock();f.throttled=false;
+    std::vector<std::pair<unsigned,bool>> policies;
+    f.diagnostic_work=[&](int stage,uint64_t seq,int64_t value){if(stage==38)policies.emplace_back(unsigned(seq),value!=0);};
+    auto chain=f.make_chain();std::vector<unsigned> expected;
+    HANDLE source_timer=CreateWaitableTimerExW(nullptr,nullptr,0x2,TIMER_ALL_ACCESS);
+    check(source_timer!=nullptr,"high resolution source timer");
+    for(unsigned n=0;n<440;++n) {
+        const bool fast=(n>=20 && n<220) || n>=240;
+        LARGE_INTEGER due{};due.QuadPart=fast?-60'000:-160'000;
+        check(SetWaitableTimer(source_timer,&due,0,nullptr,nullptr,FALSE) && WaitForSingleObject(source_timer,1000)==WAIT_OBJECT_0,"source cadence timer");
+        if(n==210)xr_ok(f.transport->set_buffer_capacity(3,false),"disable OFXR during native lookahead");
+        if(n==230)xr_ok(f.transport->set_buffer_capacity(2),"shrink during native normal policy");
+        const auto value=40+(n%20)*7;expected.push_back(value);f.write(chain,value);
+        f.begin_virtual();xr_ok(f.submit(chain,float(n)),"adaptive transition output");
+        // Production Director regulates handoffs. Keep the producer independent
+        // instead of measuring a serial source+native-readback loop as90fps.
+        // Source-image leases and bounded admission still prevent reuse.
+        if(!native_director_only_fixture_mode)f.wait_count(n+1);
+    }
+    f.wait_count(440);
+    CloseHandle(source_timer);
+    xr_ok(f.transport->drain(),"adaptive transition drain");f.transport->stop();
+    check(f.pixels==expected && f.real_ends==440,"adaptive policy preserves every exact input image across transitions");
+    check(!f.cycle_waited && !f.cycle_begun,"adaptive stop balances an outstanding future Wait");
+    bool first_on=false,off_again=false,second_on=false;
+    for(const auto& [seq,on]:policies){if(seq<=20)check(!on,"slow startup remains native normal");
+        if(seq>=211 && seq<=230)check(!on,"OFXR OFF must disable early Wait even with full source cadence");
+        if(on)first_on=true;if(first_on && !on)off_again=true;if(off_again && on)second_on=true;}
+    check(first_on && off_again && second_on,"adaptive transport must execute normal/early/normal/early transitions");
+    std::printf("Adaptive native %s transitions, capacity changes, exact GPU pixels and balanced cycles PASS\n",d12?"D12":"D11");
+}
+void native_controls(bool d12) {
+    native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=true;
+    Fixture f(d12,true,{},false,true,false,2,true);f.unblock();auto chain=f.make_chain();
+    std::vector<unsigned> expected;
+    for(unsigned n=0;n<24;++n) {
+        if(n==8){xr_ok(f.transport->set_director_enabled(false),"switch to framework");xr_ok(f.transport->set_buffer_capacity(3),"grow future admission");}
+        if(n==16){xr_ok(f.transport->set_buffer_capacity(2),"shrink future admission");xr_ok(f.transport->set_director_enabled(true),"switch to director");}
+        const auto value=35+n*7;expected.push_back(value);f.write(chain,value);f.begin_virtual();
+        xr_ok(f.submit(chain,float(n)),"submit across policy/capacity changes");f.wait_count(n+1);
+    }
+    xr_ok(f.transport->drain(),"control-change drain");f.transport->stop();
+    check(f.pixels==expected && f.real_ends==24,"control changes retain every exact owned image");
+    check(f.transport->buffer_capacity()==2 && f.transport->director_enabled(),"final controls match requested mode");
+    check(!f.cycle_waited && !f.cycle_begun,"control changes leave no native cycle open");
+    std::printf("Native lookahead %s control/capacity changes and exact pixels PASS\n",d12?"D12":"D11");
+}
+void native_nondraining_controls(bool adaptive=true) {
+    native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=adaptive;
+    Fixture f(true,true,{},false,true,false,2,true);auto chain=f.make_chain();f.write(chain,83);
+    f.begin_virtual();xr_ok(f.submit(chain,1),"own frame while native End is held");f.wait_entered();
+    std::promise<void> entered;auto signal=entered.get_future();
+    auto update=std::async(std::launch::async,[&]{entered.set_value();
+        auto r=f.transport->set_director_enabled(false);if(XR_SUCCEEDED(r))r=f.transport->set_buffer_capacity(3);return r;});
+    signal.wait();const bool returned=update.wait_for(50ms)==std::future_status::ready;
+    f.unblock();check(update.wait_for(2s)==std::future_status::ready,"control update eventually completes");
+    xr_ok(update.get(),"future policy/admission changes");f.wait_count(1);xr_ok(f.transport->drain(),"control update drain");f.transport->stop();
+    check(f.pixels==std::vector<unsigned>{83},"control update cannot discard or replace in-flight image");
+    check(!f.cycle_waited && !f.cycle_begun,"control update balances native cycles");
+    check(returned,"shared native transport controls must not drain accepted frames and create a producer pause");
+    std::puts("Shared native transport: mode/buffer update returns with owned End held, exact pixels PASS");
+}
+void director_scope_and_pair_checks(bool d12) {
+    native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=true;native_director_only_fixture_mode=true;
+    Fixture f(d12,true,{},false,true,false,2,true);f.unblock();f.throttled=false;
+    std::vector<unsigned> native,framework,expected;
+    f.diagnostic_work=[&](int stage,uint64_t seq,int64_t) {
+        if(stage==38)native.push_back(unsigned(seq));
+        if(stage==28)framework.push_back(unsigned(seq));
+    };
+    const auto chain=f.make_chain();
+    for(unsigned n=0;n<48;++n) {
+        if(n==12)xr_ok(f.transport->set_director_enabled(false),"restore V819 Framework live");
+        if(n==20)xr_ok(f.transport->set_buffer_capacity(3),"V819 Framework Buffer");
+        if(n==28)xr_ok(f.transport->set_buffer_capacity(2),"V819 Framework normal");
+        if(n==36)xr_ok(f.transport->set_director_enabled(true),"return to isolated Director");
+        const auto value=35+n*3;expected.push_back(value);f.write(chain,value);f.begin_virtual();
+        xr_ok(f.submit(chain,float(n)),"paired output through isolated routes");f.wait_count(n+1);
+    }
+    xr_ok(f.transport->drain(),"isolated route drain");f.transport->stop();
+    check(f.pixels==expected && f.real_ends==48,"route changes retain all exact GPU images");
+    check(native.size()==24 && framework.size()==24,"native Wait policy only on Director; Framework uses V819 branch");
+    for(unsigned n=1;n<48;++n) {
+        const bool same_director=(n<12 || n>36);
+        if(same_director)check(f.handoffs[n]-f.handoffs[n-1]>=period-20'000,
+            "normal Director must not burst a ready pair into one physical refresh");
+    }
+    check(!f.cycle_waited && !f.cycle_begun,"isolated route changes balance native cycles");
+    std::printf("Director-only %s: V819 Framework normal/Buffer, no normal-mode bursts, exact images PASS\n",d12?"D12":"D11");
+}
+void director_aged_cycle_checks(bool d12,bool corrected=true) {
+    native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=true;native_director_only_fixture_mode=corrected;
+    Fixture f(d12,true,{},false,true,false,2);f.unblock();f.throttled=false;
+    f.prediction_horizon_ns=period*3;f.prediction_age_limit=period+500'000;
+    f.slow_image_wait_ms=20;
+    const auto chain=f.make_chain();std::vector<unsigned> expected;
+    for(unsigned n=0;n<8;++n) {
+        const auto value=35+n*7;expected.push_back(value);f.write(chain,value);f.begin_virtual();
+        xr_ok(f.submit(chain,float(n)),"aged native cycle keeps its exact image");f.wait_count(n+1);
+    }
+    xr_ok(f.transport->drain(),"aged native cycle drain");f.transport->stop();
+    check(f.pixels==expected && f.real_ends==8,"renewing aged native cycles cannot discard accepted frames");
+    check(f.discarded_clocks>=8,"long GPU preparation renews a cycle even with future display prediction");
+    check(!f.cycle_waited && !f.cycle_begun,"aged-cycle recovery balances all real cycles");
+    std::printf("Director-only %s: long preparation, future prediction, renewed native cycles and exact GPU images PASS\n",d12?"D12":"D11");
+}
 void queue_priority_policy() {
     D3D12_COMMAND_QUEUE_DESC original{};original.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;original.NodeMask=1;
     std::vector<int> attempts;
@@ -1116,4 +1292,13 @@ void queue_priority_policy() {
     std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
 }
-int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="buffer-release-early"){for(bool d:{false,true}){for(bool enabled:{false,true})for(bool alias:{false,true})buffer_release_before_begin(d,enabled,alias);buffer_early_release_cancel(d,false);buffer_early_release_cancel(d,true);}return 0;}if(argc>1 && std::string_view(argv[1])=="buffer-cold-quiet"){buffer_cold_start_logging_off(false);buffer_cold_start_logging_off(true);return 0;}if(argc>1 && std::string_view(argv[1])=="buffer-metadata"){buffer_early_metadata(true);buffer_early_metadata(false);return 0;}if(argc>1 && (std::string_view(argv[1])=="buffer-framework" || std::string_view(argv[1])=="buffer-director")){const bool d=std::string_view(argv[1])=="buffer-director";adaptive_buffer_test(d,true);adaptive_buffer_test(d,false);return 0;}if(argc>1 && std::string_view(argv[1])=="bypass-expired"){stale_native_clock(true,false);stale_native_clock(false,false);return 0;}std::setvbuf(stdout,nullptr,_IONBF,0);if(argc>1){if(std::string_view(argv[1])=="vram-hdr"){vram_hdr_publication_tests();return 0;}if(std::string_view(argv[1])=="owned-d11"){owned_d11_output_tests();return 0;}if(std::string_view(argv[1])=="vram"){vram_publication_tests();return 0;}if(std::string_view(argv[1])=="bypass"){fixture_gpu_completion_proof();live_framework_bypass(true);live_framework_bypass(false);bypass_policy_drain();}else if(std::string_view(argv[1])=="metrics"){native_delivery_receipts(true);native_delivery_receipts(false);}else if(std::string_view(argv[1])=="pool"){pooled_publication();pooled_publication(true);pooled_publication(false,false);pooled_publication(true,false);}else if(std::string_view(argv[1])=="luke"){luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);}else if(std::string_view(argv[1])=="advance"){native_end_advance(true);native_end_advance(false);}else if(std::string_view(argv[1])=="source"){copied_source_reuse(true);copied_source_reuse(false);}else if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);quiet_native_clock(true);quiet_native_clock(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);adaptive_source_refill(true,2);adaptive_source_refill(false,2);quiet_native_clock(true);quiet_native_clock(false);copied_source_reuse(true);copied_source_reuse(false);native_end_advance(true);native_end_advance(false);luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);return 0;}
+int main(int argc,char** argv){
+if(argc>1 && std::string_view(argv[1])=="director-scope-pairs"){director_scope_and_pair_checks(false);director_scope_and_pair_checks(true);return 0;}
+if(argc>1 && std::string_view(argv[1])=="director-qualified"){native_director_only_fixture_mode=true;native_refresh_policy_checks();native_adaptive_transitions(false);native_adaptive_transitions(true);return 0;}
+if(argc>1 && std::string_view(argv[1])=="director-aged-cycle"){director_aged_cycle_checks(false);director_aged_cycle_checks(true);return 0;}
+if(argc>1 && std::string_view(argv[1])=="director-aged-cycle-control"){director_aged_cycle_checks(false,false);return 0;}
+if(argc>1 && std::string_view(argv[1])=="native-contract"){native_contract_reference_checks();return 0;}
+if(argc>1 && std::string_view(argv[1])=="native-adaptive-wait"){native_refresh_policy_checks();native_adaptive_transitions(false);native_adaptive_transitions(true);return 0;}
+if(argc>1 && std::string_view(argv[1])=="native-controls"){native_controls(false);native_controls(true);return 0;}
+if(argc>1 && std::string_view(argv[1])=="native-nondraining-controls"){native_nondraining_controls(false);native_nondraining_controls(true);return 0;}
+if(argc>1 && std::string_view(argv[1])=="buffer-release-early"){for(bool d:{false,true}){for(bool enabled:{false,true})for(bool alias:{false,true})buffer_release_before_begin(d,enabled,alias);buffer_early_release_cancel(d,false);buffer_early_release_cancel(d,true);}return 0;}if(argc>1 && std::string_view(argv[1])=="buffer-cold-quiet"){buffer_cold_start_logging_off(false);buffer_cold_start_logging_off(true);return 0;}if(argc>1 && std::string_view(argv[1])=="buffer-metadata"){buffer_early_metadata(true);buffer_early_metadata(false);return 0;}if(argc>1 && (std::string_view(argv[1])=="buffer-framework" || std::string_view(argv[1])=="buffer-director")){const bool d=std::string_view(argv[1])=="buffer-director";adaptive_buffer_test(d,true);adaptive_buffer_test(d,false);return 0;}if(argc>1 && std::string_view(argv[1])=="bypass-expired"){stale_native_clock(true,false);stale_native_clock(false,false);return 0;}std::setvbuf(stdout,nullptr,_IONBF,0);if(argc>1){if(std::string_view(argv[1])=="vram-hdr"){vram_hdr_publication_tests();return 0;}if(std::string_view(argv[1])=="owned-d11"){owned_d11_output_tests();return 0;}if(std::string_view(argv[1])=="vram"){vram_publication_tests();return 0;}if(std::string_view(argv[1])=="bypass"){fixture_gpu_completion_proof();live_framework_bypass(true);live_framework_bypass(false);bypass_policy_drain();}else if(std::string_view(argv[1])=="metrics"){native_delivery_receipts(true);native_delivery_receipts(false);}else if(std::string_view(argv[1])=="pool"){pooled_publication();pooled_publication(true);pooled_publication(false,false);pooled_publication(true,false);}else if(std::string_view(argv[1])=="luke"){luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);}else if(std::string_view(argv[1])=="advance"){native_end_advance(true);native_end_advance(false);}else if(std::string_view(argv[1])=="source"){copied_source_reuse(true);copied_source_reuse(false);}else if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);quiet_native_clock(true);quiet_native_clock(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);adaptive_source_refill(true,2);adaptive_source_refill(false,2);quiet_native_clock(true);quiet_native_clock(false);copied_source_reuse(true);copied_source_reuse(false);native_end_advance(true);native_end_advance(false);luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);return 0;}

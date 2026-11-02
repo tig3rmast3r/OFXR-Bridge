@@ -105,6 +105,13 @@ public:
         // SteamVR only. Capacity3 enables the VDXR-style adaptive timing reserve
         // in either pacing policy. Native/Legacy and opt-in other runtimes opt out.
         bool adaptive_buffer{};
+        // SteamVR frame consumer: keep raw native timing, no CPU slot grid.
+        bool native_frame_contract{};
+        // One qualified future Wait at physical refresh; normal below it.
+        bool native_adaptive_wait_lookahead{};
+        // Production SteamVR trial: native policy is Director-only. Framework
+        // retains the V819 consumer, including its original Buffer behaviour.
+        bool native_director_only{};
         // Luke D11/SteamVR only. Freeze image readiness at Release, not after
         // newer game commands at End. Admission/work budget is selected separately.
         bool d11_release_readiness{};

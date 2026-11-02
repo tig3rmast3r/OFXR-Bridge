@@ -13,6 +13,35 @@
 #include "steamvr_vram_budget_test.inc"
 #include "auxiliary_slot_selection_test.inc"
 
+// Model the native timing owner used by the shipping SteamVR endpoint. The old
+// fixture's instantaneous Wait only tested a consumer that imposed its own CPU
+// floor. xrWaitFrame normally throttles; retain explicit fault/latency models.
+static XrResult XRAPI_CALL paced_steamvr_fixture_wait(
+    XrSession session,const XrFrameWaitInfo* info,XrFrameState* output) {
+    auto& f=*current;
+    const auto previous=f.native_wait_tick_ns.load();
+    if(previous && !f.frame_wait_us && !f.slow_frame_wait_ms) {
+        const auto target=previous+period;
+        while(ns()<target) {
+            const auto left=target-ns();
+            if(left>150'000) {
+                LARGE_INTEGER due{};due.QuadPart=-std::max<std::int64_t>(1,(left-100'000)/100);
+                check(SetWaitableTimer(f.frame_wait_timer,&due,0,nullptr,nullptr,FALSE) &&
+                    WaitForSingleObject(f.frame_wait_timer,1000)==WAIT_OBJECT_0,"native Wait throttle timer");
+            } else YieldProcessor();
+        }
+    }
+    XrTime prior{};{std::scoped_lock lock(f.protocol);prior=f.raw_prediction;}
+    const auto result=Fixture::wait(session,info,output);
+    if(XR_SUCCEEDED(result)) {
+        std::scoped_lock lock(f.protocol);
+        f.raw_prediction=std::max(f.raw_prediction,prior+period);
+        output->predictedDisplayTime=f.raw_prediction;
+        f.native_wait_tick_ns=ns();
+    }
+    return result;
+}
+
 static bool framework_session_probe{},vdxr_legacy_probe{};
 static int admission_credit_test() {
     {
@@ -417,7 +446,10 @@ int main(int argc,char** argv) {
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=!vdxr_probe && !unknown_session && !pimax_session;dispatch->virtual_desktop_runtime=vdxr_probe;
     if(pimax_session){dispatch->runtime_name="Pimax OpenXR";dispatch->inline_unless_pipelined=true;}
     if(measured)dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult{*out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;};
-    dispatch->wait_frame=Fixture::wait;dispatch->begin_frame=Fixture::begin;dispatch->end_frame=Fixture::end;
+    // Deliberately unthrottled fault model for OFF: detects a client-added
+    // cadence floor independently of any legitimate runtime throttling.
+    dispatch->wait_frame=dispatch->steamvr_runtime && !off_session_probe?paced_steamvr_fixture_wait:Fixture::wait;
+    dispatch->begin_frame=Fixture::begin;dispatch->end_frame=Fixture::end;
     if(rife_overlap)dispatch->end_frame=rife_overlap_native_end;
     dispatch->create_swapchain=Fixture::create;dispatch->destroy_swapchain=Fixture::destroy;dispatch->enumerate_swapchain_images=Fixture::enumerate;
     dispatch->acquire_swapchain_image=Fixture::acquire;dispatch->wait_swapchain_image=Fixture::wait_image;dispatch->release_swapchain_image=Fixture::release;dispatch->convert_time_to_qpc=Fixture::to_qpc;
@@ -1397,6 +1429,18 @@ int main(int argc,char** argv) {
         check(!f.pixels.empty() && f.pixels.back()==((input_count-1)%8+1)*20,"last real retains its own pixels through bridge/drain");
     }
     check(f.director_policies.size()==f.handoffs.size(),"native handoffs record their effective delivery policy");
+    if(state->dispatch->steamvr_runtime && state->private_runtime) {
+        // Native-owned pacing has distinct display slots; CPU callback entry
+        // can vary with preparation after Wait. Do not reimpose the removed
+        // five-microsecond CPU grid as a supposed OpenXR requirement.
+        check(f.targets.size()==f.handoffs.size(),"every native image retains its display target");
+        for(unsigned i=1;i<f.targets.size();++i)
+            check(f.targets[i]-f.targets[i-1]>=period,"native display targets occupy distinct ordered refresh slots");
+        if(f.handoffs.size()>2)
+            check(f.handoffs.back()-f.handoffs.front()+period>=
+                static_cast<std::int64_t>(f.handoffs.size()-1)*period,
+                "throttling native runtime cannot deliver an accelerated sustained cadence");
+    } else {
     for(unsigned i=1;i<f.handoffs.size();++i) {
         if(!f.director_policies[i])continue; // Framework explicitly bypasses the final cadence.
         // The deadline uses the consumer's pre-call QPC stamp; this fixture
@@ -1407,6 +1451,7 @@ int main(int argc,char** argv) {
         const auto elapsed=f.handoffs[i]-f.handoffs[i-1];
         if(elapsed+native_entry_sampling_slop<period)std::fprintf(stderr,"handoff interval%lldns required%lldns (native entry sampling5us)\n",elapsed,period);
         check(elapsed+native_entry_sampling_slop>=period,"native callback cadence exceeds5us pre-call sampling uncertainty");
+    }
     }
     if(rife_latency) {
         std::vector<double> latency,minimum;

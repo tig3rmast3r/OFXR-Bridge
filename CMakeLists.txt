@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.819.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.821.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2192,3 +2192,10 @@ if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER AND XRFG_TEST_RIFE_RUNTIME)
   endforeach()
 endif()
 
+
+if(TARGET xrfg_private_openxr_runtime_tests)
+ foreach(mode native-contract native-adaptive-wait native-controls native-nondraining-controls director-scope-pairs director-qualified director-aged-cycle)
+  add_test(NAME xrfg_steamvr_${mode}_gpu COMMAND xrfg_private_openxr_runtime_tests ${mode})
+  set_tests_properties(xrfg_steamvr_${mode}_gpu PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+ endforeach()
+endif()

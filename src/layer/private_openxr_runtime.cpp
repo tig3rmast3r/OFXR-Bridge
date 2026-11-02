@@ -3,6 +3,7 @@
 #include "xrfg/interface_metrics.hpp"
 #include "xrfg/owned_d11_output.hpp"
 #include "xrfg/private_pacing_buffer.hpp"
+#include "xrfg/private_refresh_wait_policy.hpp"
 #include "xrfg/two_output_schedule.hpp"
 
 #include <algorithm>
@@ -131,6 +132,8 @@ struct PrivateOpenXrRuntime::Impl {
     std::optional<WaitResult> wait_result;
     bool wait_active{};
     std::uint64_t accepted_packets{},content_wait_jobs{};
+    PrivateRefreshWaitPolicy refresh_wait_policy; // guarded by mutex
+    bool stabilization_active{true}; // OFXR ON; independent of capacity, guarded by mutex
     std::deque<std::shared_ptr<Packet>> prepared;
     std::atomic_bool stopping{true};
     XrResult failure{XR_SUCCESS};
@@ -551,7 +554,133 @@ struct PrivateOpenXrRuntime::Impl {
         }
         return result;
     }
+    void run_native_contract() noexcept {
+        bool waited=false,begun=false;
+        const bool adaptive=options.native_adaptive_wait_lookahead;
+        bool prefetched=false;
+        XrFrameState prediction{XR_TYPE_FRAME_STATE};
+        try {
+            auto result=XR_SUCCESS;
+            const auto next_clock=[&](std::uint64_t ordinal) {
+                // A policy change cannot cancel a Wait that already owns a
+                // native cycle. Consume it once, then choose the next policy.
+                if(prefetched) {
+                    auto value=take_wait();prefetched=false;return value;
+                }
+                WaitResult value;value.entered=clock_ns();value.result=real_wait(value.prediction);value.returned=clock_ns();
+                if(tracing())options.trace(18,ordinal,value.entered,GetCurrentThreadId());
+                return std::optional<WaitResult>(value);
+            };
+            auto seed=next_clock(0);
+            if(seed){prediction=seed->prediction;result=seed->result;waited=XR_SUCCEEDED(result);}
+            else result=XR_ERROR_SESSION_NOT_RUNNING;
+            XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+            if(XR_SUCCEEDED(result))result=options.real.begin(options.real.session,&begin);
+            if(XR_SUCCEEDED(result)) {
+                waited=false;begun=true;
+                XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};empty.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+                empty.displayTime=prediction.predictedDisplayTime;
+                result=options.real.end(options.real.session,&empty);begun=false;
+            }
+            if(XR_FAILED(result) && !stopping)fail(result);
+            while(!stopping) {
+                {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || pending;});if(stopping)break;}
+                // Normal delivery takes Wait on this consumer. Full refresh owns
+                // exactly one future Wait after Begin, even while the producer
+                // is idle. Image readiness gates Begin/End, not this prediction.
+                // Renew expired cycles below without discarding the FIFO head.
+                auto clock=next_clock(++content_wait_jobs);
+                if(!clock)break;
+                result=clock->result;prediction=clock->prediction;
+                waited=XR_SUCCEEDED(result);
+                if(XR_FAILED(result)){fail(result);break;}
+                std::shared_ptr<Packet> packet;
+                {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || !prepared.empty();});
+                 if(stopping)break;packet=std::move(prepared.front());prepared.pop_front();}
+                const auto release_at=clock_ns();
+                result=release_prepared(*packet);
+                const auto release_done=clock_ns();
+                if(tracing())options.trace(35,packet->sequence,release_at,release_done);
+                auto begin_at=clock_ns();
+                if(XR_SUCCEEDED(result))result=options.real.begin(options.real.session,&begin);
+                auto begin_done=clock_ns();
+                if(XR_SUCCEEDED(result)){waited=false;begun=true;}
+                unsigned renewed{};
+                // Sparse-input regression from V592: a native Wait completed
+                // before slow source work can be stale by Begin. Preserve the
+                // same FIFO packet and renew only that unsubmitted XR cycle.
+                // Do not renew a CURRENT prediction to satisfy an invented
+                // CPU deadline or reserve another physical display slot.
+                while(!stopping && XR_SUCCEEDED(result) && prediction.shouldRender) {
+                    const auto target=prediction_qpc(prediction);
+                    if(!target || *target>clock_ns())break;
+                    if(tracing())options.trace(23,packet->sequence,*target,clock_ns());
+                    if(renewed && renewed%8==0 && !sleep_until(clock_ns()+period(prediction.predictedDisplayPeriod),1'250'000))break;
+                    auto fresh=next_clock(0);
+                    if(!fresh){result=XR_ERROR_SESSION_NOT_RUNNING;break;}
+                    result=fresh->result;
+                    if(XR_FAILED(result))break;
+                    prediction=fresh->prediction;clock=std::move(fresh);
+                    waited=true;begin_at=clock_ns();result=options.real.begin(options.real.session,&begin);begin_done=clock_ns();
+                    if(XR_SUCCEEDED(result)){waited=false;begun=true;++renewed;}
+                }
+                if(XR_FAILED(result) || stopping) {
+                    if(XR_FAILED(result) && !stopping)fail(result);
+                    retire(packet);fifo->retire();break;
+                }
+                if(tracing()) {
+                    options.trace(33,packet->sequence,begin_at,begin_done);
+                    options.trace(7,packet->sequence,clock->entered,0);options.trace(6,packet->sequence,clock->returned,0);
+                    options.trace(15,packet->sequence,release_at,release_done-release_at);
+                    options.trace(24,packet->sequence,prediction_qpc(prediction).value_or(0),renewed);
+                }
+                auto end=packet->info;end.displayTime=prediction.predictedDisplayTime;
+                if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
+                if(options.trace)options.trace(3,packet->sequence,end.displayTime,prediction.predictedDisplayTime);
+                bool prefetch_next=false;
+                if(adaptive) {
+                    std::scoped_lock lock(mutex);
+                    prefetch_next=stabilization_active && prediction.shouldRender && refresh_wait_policy.enabled(clock_ns());
+                }
+                if(prefetch_next) {
+                    // Begin has completed, hence a future native Wait is legal.
+                    // It must not issue any Begin/End or consume another image.
+                    if(!post_wait(0,false)) {
+                        if(!stopping)fail(XR_ERROR_CALL_ORDER_INVALID);
+                        retire(packet);fifo->retire();break;
+                    }
+                    prefetched=true;
+                }
+                if(adaptive && tracing())options.trace(38,packet->sequence,prefetch_next?1:0,prefetched?1:0);
+                const auto entered=clock_ns();result=options.real.end(options.real.session,&end);const auto returned=clock_ns();begun=false;
+                if(packet->delivery)packet->delivery->completed(result==XR_SUCCESS && end.layerCount,
+                    entered,returned,prediction_qpc(prediction).value_or(0),packet->prepared_at);
+                if(options.accepted_output && result==XR_SUCCESS && end.layerCount)options.accepted_output(returned);
+                if(options.trace)options.trace(8,packet->sequence,entered,0);
+                if(XR_SUCCEEDED(result))trace(2,packet->sequence);
+                if(XR_FAILED(result))fail(result);
+                retire(packet);fifo->retire();
+                if(XR_FAILED(result))break;
+            }
+        } catch(...) {fail(XR_ERROR_RUNTIME_FAILURE);}
+        if(waited){XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};begun=XR_SUCCEEDED(options.real.begin(options.real.session,&begin));}
+        if(begun){XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};empty.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;empty.displayTime=display_time(prediction);options.real.end(options.real.session,&empty);}
+        stopping=true;changed.notify_all();
+        if(adaptive) {
+            if(waiter.joinable())waiter.join();
+            std::optional<WaitResult> remaining;
+            {std::scoped_lock lock(mutex);remaining=std::move(wait_result);wait_result.reset();wait_job.reset();}
+            if(remaining && XR_SUCCEEDED(remaining->result)) {
+                XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+                if(XR_SUCCEEDED(options.real.begin(options.real.session,&begin))) {
+                    XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};empty.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+                    empty.displayTime=display_time(remaining->prediction);options.real.end(options.real.session,&empty);
+                }
+            }
+        }
+    }
     void run() noexcept {
+        if(options.native_frame_contract && !options.native_director_only){run_native_contract();return;}
         bool waited=false,begun=false;
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
         try {
@@ -622,9 +751,9 @@ struct PrivateOpenXrRuntime::Impl {
                 bool released_early=false;
                 if(XR_SUCCEEDED(result)) {
                     waited=true;
-                    if(buffered.load()) {
+                    if(buffered.load() || (options.native_director_only && director_enabled.load())) {
                         if(!take_prepared())break;
-                        if(packet->adaptive_buffer) {
+                        if(packet->adaptive_buffer || (options.native_director_only && packet->director)) {
                             // Only this FIFO head is released. The next image
                             // can now be acquired/copied while native Begin
                             // blocks; it remains unreleased until its own turn.
@@ -652,6 +781,72 @@ struct PrivateOpenXrRuntime::Impl {
                 if(!packet && !take_prepared())break;
                 const bool directed=packet->director;
                 if(diagnostic)options.trace(33,packet->sequence,initial_begin_enter,initial_begin_leave);
+                if(options.native_director_only && directed) {
+                    // Director-only native policy. The V819 Framework branch
+                    // below remains the reference, including its Buffer clock.
+                    bool early{};
+                    {std::scoped_lock lock(mutex);
+                     early=stabilization_active && prediction.shouldRender &&
+                         options.native_adaptive_wait_lookahead && refresh_wait_policy.enabled(clock_ns());}
+                    // A normal Wait can return immediately after preparation
+                    // held the prior clock for an entire pair. Do not drain the
+                    // two ready images into SteamVR a millisecond apart.
+                    const auto deadline=early?clock_ns():std::max(clock_ns(),last_handoff+physical);
+                    unsigned renewed{};
+                    while(!stopping && prediction.shouldRender) {
+                        const auto at=prediction_qpc(prediction);
+                        const auto handoff=std::max(clock_ns(),deadline);
+                        // SteamVR's prediction may be several periods ahead,
+                        // while the submission cycle obtained before a long
+                        // GPU preparation is already old. Refresh that cycle
+                        // after a whole physical interval, not just when the
+                        // far-future display timestamp itself expires.
+                        const bool old_cycle=packet->prepared_at-wait_leave>=physical;
+                        if(!old_cycle && (!at || *at>handoff))break;
+                        if(diagnostic)options.trace(old_cycle?40:23,packet->sequence,at.value_or(0),handoff);
+                        if(renewed && renewed%8==0 && !sleep_until(clock_ns()+physical,1'250'000))break;
+                        if(!post_wait(0,false)){result=XR_ERROR_CALL_ORDER_INVALID;break;}
+                        auto fresh=take_wait();if(!fresh){result=XR_ERROR_SESSION_NOT_RUNNING;break;}
+                        result=fresh->result;if(XR_FAILED(result))break;
+                        prediction=fresh->prediction;waited=true;
+                        wait_enter=fresh->entered;wait_leave=fresh->returned;
+                        XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};const auto entered=clock_ns();
+                        result=options.real.begin(options.real.session,&begin);
+                        if(XR_FAILED(result))break;
+                        waited=false;begun=true;begun_at=clock_ns();++renewed;
+                        if(diagnostic)options.trace(33,packet->sequence,entered,begun_at);
+                    }
+                    if(stopping || XR_FAILED(result)) {
+                        if(!stopping)fail(result);retire(packet);fifo->retire();break;
+                    }
+                    if(diagnostic) {
+                        options.trace(7,packet->sequence,wait_enter,0);options.trace(6,packet->sequence,wait_leave,0);
+                        options.trace(24,packet->sequence,prediction_qpc(prediction).value_or(0),renewed);
+                        options.trace(38,packet->sequence,early?1:0,early?1:0);
+                        options.trace(39,packet->sequence,deadline,std::max(std::int64_t{},deadline-clock_ns()));
+                    }
+                    // Qualified full refresh may overlap one future Wait. In
+                    // normal mode post only after End. Neither changes images.
+                    if(early) {
+                        {std::scoped_lock lock(mutex);++content_wait_jobs;}
+                        if(!post_wait(0,false)){if(!stopping)fail(XR_ERROR_CALL_ORDER_INVALID);retire(packet);fifo->retire();break;}
+                    }
+                    auto end=packet->info;end.displayTime=prediction.predictedDisplayTime;
+                    if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
+                    if(options.trace)options.trace(3,packet->sequence,end.displayTime,prediction.predictedDisplayTime);
+                    if(!sleep_until(deadline,1'250'000)){retire(packet);fifo->retire();break;}
+                    const auto entered=clock_ns();result=options.real.end(options.real.session,&end);const auto returned=clock_ns();begun=false;
+                    if(packet->delivery)packet->delivery->completed(result==XR_SUCCESS && end.layerCount,
+                        entered,returned,prediction_qpc(prediction).value_or(0),packet->prepared_at);
+                    if(options.accepted_output && result==XR_SUCCESS && end.layerCount)options.accepted_output(returned);
+                    last_handoff=entered;
+                    if(options.trace)options.trace(8,packet->sequence,entered,0);
+                    if(XR_SUCCEEDED(result))trace(2,packet->sequence);
+                    if(XR_SUCCEEDED(result) && !early && !post_wait(0))result=XR_ERROR_CALL_ORDER_INVALID;
+                    if(XR_FAILED(result))fail(result);
+                    retire(packet);fifo->retire();if(XR_FAILED(result))break;
+                    continue;
+                }
                 if(packet->policy_epoch!=applied_policy) {
                     // A live bypass round-trip must not revive an old phase,
                     // work floor or adaptive delay. Native/image owners stay.
@@ -976,8 +1171,9 @@ XrResult PrivateOpenXrRuntime::start() {
     if(s.running)return XR_ERROR_SESSION_RUNNING;
     s.fifo=std::make_unique<PrivateOutputFifo<std::shared_ptr<Impl::Packet>>>(s.options.capacity);
     s.prepared.clear();s.wait_job.reset();s.wait_result.reset();s.wait_active=false;s.accepted_packets=s.content_wait_jobs=0;
+    s.refresh_wait_policy=PrivateRefreshWaitPolicy{};
     s.failure=XR_SUCCESS;s.stopping=false;s.seeded=false;s.running=true;s.waits=s.begun=0;s.virtual_time=0;
-    s.waiter=std::thread([&s]{s.wait_loop();});
+    if(!s.options.native_frame_contract || s.options.native_adaptive_wait_lookahead || s.options.native_director_only)s.waiter=std::thread([&s]{s.wait_loop();});
     s.preparer=std::thread([&s]{s.prepare();});
     s.consumer=std::thread([&s]{s.run();});return XR_SUCCESS;
 }
@@ -1027,11 +1223,12 @@ XrResult PrivateOpenXrRuntime::set_director_enabled(bool enabled) {
     auto& s=*impl_;std::scoped_lock accept(s.accept_mutex);
     std::unique_lock lock(s.mutex);
     if(s.director_enabled.load()==enabled)return s.failure;
-    s.changed.wait(lock,[&]{return s.stopping || !s.pending;});
+    const bool shared_native_transport=s.options.native_frame_contract && !s.options.native_director_only;
+    if(!shared_native_transport)s.changed.wait(lock,[&]{return s.stopping || !s.pending;});
     if(XR_FAILED(s.failure))return s.failure;
     s.director_enabled=enabled;++s.policy_epoch;
-    // Lookahead has not entered native Wait without the next accepted input.
-    // Do not carry a previous director deadline into the bypass's first frame.
+    if(s.options.native_director_only)s.refresh_wait_policy=PrivateRefreshWaitPolicy{};
+    // Keep any already-owned native Wait; only remove a future CPU deadline.
     if(s.wait_job)s.wait_job->target=0;
     lock.unlock();s.changed.notify_all();return XR_SUCCESS;
 }
@@ -1043,18 +1240,28 @@ XrResult PrivateOpenXrRuntime::set_buffer_capacity(std::size_t capacity,bool sta
     auto& s=*impl_;std::scoped_lock accept(s.accept_mutex);
     std::unique_lock lock(s.mutex);
     const bool buffered=s.options.adaptive_buffer && stabilization_active && capacity==3;
+    const bool active_changed=s.options.native_frame_contract &&
+        (!s.options.native_director_only || s.director_enabled.load()) && s.stabilization_active!=stabilization_active;
     reset_learning=reset_learning && (s.buffered.load() || buffered);
-    if(s.options.capacity==capacity && s.buffered.load()==buffered && !reset_learning)return s.failure;
+    if(s.options.capacity==capacity && s.buffered.load()==buffered && !reset_learning && !active_changed)return s.failure;
     if(!s.running) {
         if(XR_FAILED(s.failure))return s.failure;
+        s.stabilization_active=stabilization_active;
+        if(active_changed)s.refresh_wait_policy=PrivateRefreshWaitPolicy{};
         s.options.capacity=capacity;s.stable_phase=capacity>=3;s.buffered=buffered;++s.policy_epoch;return XR_SUCCESS;
     }
     // Let the ordinary consumer finish every accepted image. Keep the FIFO
     // object and all GPU resources; only reset future admission and learning.
-    s.changed.wait(lock,[&]{return s.stopping || !s.pending;});
+    // The shared native consumer has no separate Director/Framework phase to
+    // drain. Change only FUTURE admission; owned packets keep their images and
+    // credits. Shrinking below current occupancy naturally blocks new reserve.
+    const bool shared_native_transport=s.options.native_frame_contract && !s.options.native_director_only;
+    if(!shared_native_transport)s.changed.wait(lock,[&]{return s.stopping || !s.pending;});
     if(XR_FAILED(s.failure))return s.failure;
     if(s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
     if(!s.fifo || !s.fifo->set_capacity(capacity))return XR_ERROR_RUNTIME_FAILURE;
+    s.stabilization_active=stabilization_active;
+    if(active_changed)s.refresh_wait_policy=PrivateRefreshWaitPolicy{};
     s.options.capacity=capacity;s.stable_phase=capacity>=3;s.buffered=buffered;++s.policy_epoch;
     if(s.wait_job)s.wait_job->target=0;
     lock.unlock();s.changed.notify_all();return XR_SUCCESS;
@@ -1135,7 +1342,14 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
     packet->accepted_at=clock_ns();
     {std::scoped_lock lock(s.mutex);++s.pending;transaction.counted=true;}
     if(!s.fifo->accept(packet))return XR_ERROR_SESSION_NOT_RUNNING;
-    transaction.accepted=true;{std::scoped_lock lock(s.mutex);s.begun=0;++s.accepted_packets;}s.changed.notify_all();
+    transaction.accepted=true;{
+        const bool native_policy=s.options.native_adaptive_wait_lookahead &&
+            (!s.options.native_director_only || packet->director);
+        const auto physical=native_policy && s.options.physical_period?s.options.physical_period():0;
+        std::scoped_lock lock(s.mutex);s.begun=0;++s.accepted_packets;
+        if(native_policy && s.stabilization_active)
+            s.refresh_wait_policy.observe(packet->accepted_at,physical);
+    }s.changed.notify_all();
     reservation->accepted();
     s.trace(1,packet->sequence);return XR_SUCCESS;
 }

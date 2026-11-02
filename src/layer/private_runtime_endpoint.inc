@@ -68,6 +68,9 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     options.director_enabled=state->menu_enabled && xrfg::embedded::snapshot().desired.pacing_mode!=0;
     options.capacity=xrfg::embedded::snapshot().desired.increase_buffer?3:2;
     options.adaptive_buffer=original->steamvr_runtime;
+    options.native_frame_contract=original->steamvr_runtime;
+    options.native_adaptive_wait_lookahead=original->steamvr_runtime;
+    options.native_director_only=original->steamvr_runtime;
     options.real={original->instance,state->handle,original->wait_frame,original->begin_frame,original->end_frame,
         original->create_swapchain,original->destroy_swapchain,original->enumerate_swapchain_images,
         original->acquire_swapchain_image,original->wait_swapchain_image,original->release_swapchain_image,
