@@ -58,7 +58,7 @@ inline void apply_runtime_settings() {
     if (!embedded::set_overlay_setting(s.overlay_position)) return;
     if (!embedded::set_logging_setting(s.diagnostics)) return;
     neural_rendering::Settings n{};
-    n.enabled=s.nr_enabled; n.before_sr=s.nr_before_sr;
+    n.enabled=s.nr_enabled; n.before_sr=s.nr_before_sr; n.second_pass=s.nr_second_pass;
     n.intensity=s.nr_intensity; n.preset=s.nr_preset; n.style=s.nr_style;
     n.local_structure=s.nr_local_structure; n.local_tone=s.nr_local_tone;
     n.skin_structure=s.nr_skin_structure; n.auto_mask=s.nr_auto_mask;

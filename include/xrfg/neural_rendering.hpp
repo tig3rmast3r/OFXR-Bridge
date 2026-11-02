@@ -30,6 +30,7 @@ struct Settings {
     float white_point_scale = 1.f;
     bool diagnostic_logging = false;
     bool crash_debug = false;
+    bool second_pass = false;
 };
 struct SubmissionReceipt {
     unsigned int handle = 0;

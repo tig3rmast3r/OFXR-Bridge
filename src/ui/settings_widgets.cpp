@@ -376,6 +376,8 @@ bool framewarp(Settings& draft, const Snapshot& state) {
 bool neural(SettingsWidgetState& ui, const Snapshot& state) {
     auto& draft = ui.draft;
     bool changed = ImGui::Checkbox("Enable Neural Rendering", &draft.nr_enabled);
+    changed |= ImGui::Checkbox("2x NR", &draft.nr_second_pass);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Runs Neural Rendering twice with the same settings and working resolution. Uses additional GPU time and VRAM.");
     changed |= ImGui::Checkbox("Run before super resolution", &draft.nr_before_sr);
     changed |= ImGui::SliderFloat("Detail strength", &draft.nr_transfer_strength, 0, 2, "%.2f");
     changed |= ImGui::SliderFloat("Colour strength", &draft.nr_colour_strength, 0, 1, "%.2f");

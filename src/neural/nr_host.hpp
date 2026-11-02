@@ -32,6 +32,7 @@ template<class T> struct NrValue {
 };
 struct NrConfiguration {
     NrValue<bool> DlssNrEnabled{false}, DlssNrRunBeforeSr{true};
+    NrValue<bool> DlssNrSecondPass{false};
     NrValue<uint32_t> DlssNrPreset{0}, DlssNrStyle{0}, DlssNrDebugView{0}, DlssNrCompare{0};
     NrValue<float> DlssNrIntensity{1.f}, DlssNrLocalStructure{1.f}, DlssNrLocalTone{1.f};
     NrValue<float> DlssNrSkinStructure{-1.f}, DlssNrTransferStrength{1.f}, DlssNrColourStrength{1.f};

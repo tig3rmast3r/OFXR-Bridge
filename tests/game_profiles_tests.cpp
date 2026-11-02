@@ -36,16 +36,21 @@ int child(const std::filesystem::path& game,const std::wstring& mode,const std::
     }
     check(a::initialize_game_configuration(game),"initialize game before startup choices");
     const auto first=a::snapshot().desired;
-    if(mode==L"factory")check(first==a::sanitize(a::Settings{}),"reset survives next process launch");
-    else check(first.backend==1 && first.scale==3 && first.afw_only && first.advanced_mode,"new game inherits customized main settings");
+    if(mode==L"factory")check(first==a::sanitize(a::Settings{}) && !first.nr_second_pass,"reset survives next process launch with second NR pass off");
+    else if(mode==L"persisted")check(first.backend==3 && first.nr_second_pass && first.nr_intensity==.625F,
+        "same game restores its second-pass choice and shared NR settings on restart");
+    else check(first.backend==1 && first.scale==3 && first.afw_only && first.advanced_mode && first.nr_second_pass,
+        "new game inherits customized main settings including second NR pass");
     check(a::configuration_path()==a::game_configuration_path(game),"process bound to own game profile");
     check(read(a::configuration_path()).find("[tray]")==std::string::npos && read(a::configuration_path()).find("[benchmark]")==std::string::npos,"global sections excluded from game files");
-    if(mode!=L"factory") {auto edit=first;edit.backend=3;edit.nr_intensity=.625F;check(a::request(edit),"game edit saved");}
+    if(mode!=L"factory") {auto edit=first;edit.backend=3;edit.nr_intensity=.625F;edit.nr_second_pass=mode!=L"reset";check(a::request(edit),"game edit saved");}
     a::RuntimeStatus report{};report.sessions=report.ready=1;a::report_runtime(report);
     if(mode==L"benchmark") {
         const auto original=a::snapshot().desired;
         check(a::start_benchmark(false),"suite starts in game profile with global enable flag");
         a::tick_benchmark();
+        check(a::snapshot().desired.nr_second_pass==original.nr_second_pass,
+            "automatic route switches preserve the shared Neural Rendering second-pass choice");
         const auto csv=std::filesystem::u8path(a::snapshot().benchmark.csv_path);
         check(csv.parent_path()==a::common_folder()/L"Benchmarks","profile benchmark output remains in common folder");
         a::stop_benchmark();a::tick_benchmark();
@@ -56,7 +61,8 @@ int child(const std::filesystem::path& game,const std::wstring& mode,const std::
     check(ready && go,"open child rendezvous");SetEvent(ready);
     check(WaitForSingleObject(go,5000)==WAIT_OBJECT_0,"continue child");
     if(mode==L"reset")check(a::snapshot().desired==a::sanitize(a::Settings{}),"desktop reset reached game without template inheritance");
-    if(mode==L"independent")check(a::snapshot().desired.nr_intensity==.625F,"other game's reset did not overwrite this mapping");
+    if(mode==L"independent")check(a::snapshot().desired.nr_intensity==.625F && a::snapshot().desired.nr_second_pass,
+        "other game's reset did not overwrite this game's NR settings or second-pass choice");
     a::report_runtime({});CloseHandle(ready);CloseHandle(go);return 0;
 }
 }
@@ -67,8 +73,9 @@ int wmain(int argc,wchar_t** argv) {
         root=std::filesystem::temp_directory_path()/(L"ofxr-v637-profiles-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));
         SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",root.c_str());
         check(a::initialize_user_configuration(),"initialize base configuration");
-        auto defaults=a::Settings{};check(!defaults.advanced_mode && !defaults.afw_only && defaults.backend==2 && defaults.scale==2,"release factory defaults");
+        auto defaults=a::Settings{};check(!defaults.advanced_mode && !defaults.afw_only && defaults.backend==2 && defaults.scale==2 && !defaults.nr_second_pass,"release factory defaults");
         auto customized=defaults;customized.advanced_mode=true;customized.backend=1;customized.scale=3;customized.afw_only=true;
+        customized.nr_second_pass=true;
         check(a::request(customized),"customize desktop template");
         check(a::write_configuration_sections(a::global_configuration_path(),"[tray]\npacing=force_vdxr\ncrash_debug=1\n[benchmark]\nenabled=1\n[dlssg]\npreset=3\n"),"save global choices");
         const auto original=read(a::global_configuration_path());
@@ -77,11 +84,13 @@ int wmain(int argc,wchar_t** argv) {
         {
             Child alpha(executable,L"Alpha.exe",L"independent",suffix+L"-a");
             check(a::configuration_path()==a::game_configuration_path(L"Alpha.exe"),"desktop discovers running game");
-            check(a::snapshot().desired.nr_intensity==.625F,"desktop follows active game mapping");
+            check(a::snapshot().desired.nr_intensity==.625F && a::snapshot().desired.nr_second_pass,"desktop follows active game mapping");
             {
                 Child beta(executable,L"Beta.exe",L"reset",suffix+L"-b");
                 check(a::configuration_path()==a::game_configuration_path(L"Beta.exe"),"second game has separate mapping");
+                check(!a::snapshot().desired.nr_second_pass,"second game can disable its inherited second pass independently");
                 check(a::reset_to_defaults(),"reset active game");
+                check(!a::snapshot().desired.nr_second_pass,"factory reset disables second Neural Rendering pass");
                 check(GetPrivateProfileIntW(L"dlssg",L"preset",0,a::configuration_path().c_str())==1,"reset restores factory preset A preference");
                 check(read(a::global_configuration_path())==original,"game changes/reset leave main byte-identical");
                 check(a::benchmark_enabled(),"benchmark flag remains global");
@@ -92,6 +101,7 @@ int wmain(int argc,wchar_t** argv) {
         check(a::configuration_path()==a::global_configuration_path(),"desktop returns to global defaults on disconnect");
         check(a::snapshot().desired.backend==1,"global settings restored without game contamination");
         {Child beta(executable,L"Beta.exe",L"factory",suffix+L"-c");beta.finish();}
+        {Child alpha(executable,L"Alpha.exe",L"persisted",suffix+L"-persisted");alpha.finish();}
         check(read(a::global_configuration_path())==original,"restart still leaves main unchanged");
         {Child gamma(executable,L"Gamma.exe",L"benchmark",suffix+L"-bench");gamma.finish();}
         check(read(a::global_configuration_path())==original,"game benchmark leaves main unchanged");

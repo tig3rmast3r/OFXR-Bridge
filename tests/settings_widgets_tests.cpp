@@ -234,7 +234,7 @@ void route_multiplier_widgets() {
     require(!snapshot().desired.triple_frame_gen, "DJ keeps its own 2X");
 }
 void release_controls() {
-    auto simple=Settings{};simple.backend=1;simple.scale=3;require(request(simple),"seed simple release UI");
+    auto simple=Settings{};simple.backend=1;simple.scale=3;simple.nr_second_pass=true;require(request(simple),"seed simple release UI");
     Context desktop({690,900},false);desktop.draw();desktop.draw(true);
     require(desktop.rendered_text.find("Motion source")==std::string::npos,"basic mode hides motion source");
     require(desktop.rendered_text.find("Framework+director")==std::string::npos,"basic UI has no combined mode or help");
@@ -244,6 +244,16 @@ void release_controls() {
     require(desktop.rendered_text.find("Pacing")<desktop.rendered_text.find("Frame generationOFXR"),"pacing is first under enable");
     desktop.activate("/Generation_","Reset to defaults");desktop.draw();desktop.draw();
     require(snapshot().desired==sanitize(Settings{}),"actual Reset button restores all factory settings");
+    const auto single_pass=snapshot().desired;
+    desktop.select_tab("Neural Rendering");desktop.draw(true);
+    require(desktop.rendered_text.find("2x NR")!=std::string::npos,
+        "basic Neural Rendering UI exposes one second-pass checkbox");
+    desktop.activate("/Neural_","2x NR");desktop.draw();
+    auto double_pass=single_pass;double_pass.nr_second_pass=true;
+    require(snapshot().desired==double_pass,
+        "second-pass checkbox is editable with NR off and changes no shared NR parameters");
+    desktop.activate("/Neural_","2x NR");desktop.draw();
+    require(snapshot().desired==single_pass,"second-pass checkbox returns to the unchanged single-pass settings");
     desktop.select_tab("Display");desktop.draw(true);
     require(desktop.rendered_text.find("Experimental features")==std::string::npos &&
         desktop.rendered_text.find("Output CSV")==std::string::npos &&
@@ -303,6 +313,17 @@ void actual_widgets() {
     tray.draw();
     require(tray.widgets.draft.nr_enabled == snapshot().desired.nr_enabled,
         "tray reflects hot headset checkbox edit");
+    const auto before_second=snapshot().desired;
+    headset.activate("/Neural_","2x NR");headset.draw();
+    auto after_second=before_second;after_second.nr_second_pass=!after_second.nr_second_pass;
+    require(snapshot().desired==after_second,
+        "real headset second-pass checkbox publishes only its independent flag");
+    tray.select_tab("Neural Rendering");tray.draw();
+    require(tray.widgets.draft.nr_second_pass==after_second.nr_second_pass,
+        "desktop reflects the hot headset second-pass edit");
+    tray.activate("/Neural_","2x NR");tray.draw();headset.draw();
+    require(snapshot().desired==before_second && headset.widgets.draft.nr_second_pass==before_second.nr_second_pass,
+        "desktop second-pass edit reaches F10 without changing model, scale or frame generation");
     headset.select_tab("Luke Ross");
     // The provider controls sit behind the persisted Advanced parameters checkbox.
     headset.activate("/Framewarp_", "Advanced parameters");

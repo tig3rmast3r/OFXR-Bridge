@@ -95,6 +95,7 @@ struct Settings {
     std::array<GenerationPreferences, kGenerationProfileCount> generation_profiles{default_generation_profiles()};
     bool profiles_initialized{}; // legacy flat profile migration
     bool luke_shared_swapchains{true}; // INI-only startup policy: share compatible final native outputs
+    bool nr_second_pass{}; // optional second NR evaluation, sharing the current model settings
     bool operator==(const Settings&) const = default;
 };
 

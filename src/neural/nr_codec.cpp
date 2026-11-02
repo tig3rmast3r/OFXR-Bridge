@@ -3,6 +3,7 @@
 #include "nr_codec.hpp"
 #include "DlssNr_Shader.h"
 #include "NrResizeGuides.h"
+#include "NrClampEncoded.h"
 #include <d3dcompiler.h>
 
 using Microsoft::WRL::ComPtr;
@@ -84,10 +85,27 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* list,const DlssNrConstants
     ID3D12Resource* source,ID3D12Resource* model,ID3D12Resource* original,ID3D12Resource* motion,
     ID3D12Resource* previous_edit,ID3D12Resource* target,ID3D12Resource* keep) {
     if(!_init||!list||!source||!target)return false;
+    if(constants.Mode==DlssNrMode_ClampEncoded) {
+        const auto input=source->GetDesc(),output=target->GetDesc();
+        if(source==target || !constants.Width || !constants.Height ||
+            constants.Width>input.Width || constants.Height>input.Height ||
+            constants.Width>output.Width || constants.Height>output.Height)return false;
+    }
     ID3D12Resource* const reads[5]={source,model?model:source,original?original:source,
         motion?motion:source,previous_edit?previous_edit:source};
     ID3D12Resource* const writes[2]={target,keep?keep:target};
     std::scoped_lock lock(_bindingsMutex);DispatchBinding* binding{};
+    if(constants.Mode==DlssNrMode_ClampEncoded && !_clampPipelineState) {
+        if(_clampAttempted)return false;
+        _clampAttempted=true;
+        ComPtr<ID3DBlob> shader,errors;
+        if(FAILED(D3DCompile(kNrClampEncodedShader,sizeof(kNrClampEncodedShader)-1,
+            "NR encoded multipass clamp",nullptr,nullptr,"main","cs_5_0",
+            D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&shader,&errors)))return false;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};pipeline.pRootSignature=_rootSignature.Get();
+        pipeline.CS={shader->GetBufferPointer(),shader->GetBufferSize()};
+        if(FAILED(_device->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&_clampPipelineState))))return false;
+    }
     for(auto& candidate:_bindings)if(candidate->matches(constants,reads,writes)){binding=candidate.get();break;}
     if(!binding) {
         auto candidate=std::make_unique<DispatchBinding>();candidate->constants=constants;
@@ -128,7 +146,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* list,const DlssNrConstants
     }
     ID3D12DescriptorHeap* heaps[]={binding->heap.Get()};list->SetDescriptorHeaps(1,heaps);
     binding->recording=_recording;
-    list->SetComputeRootSignature(_rootSignature.Get());list->SetPipelineState(constants.Mode==DlssNrMode_ResizePrivateGuides?_guidePipelineState.Get():_pipelineState.Get());
+    list->SetComputeRootSignature(_rootSignature.Get());
+    list->SetPipelineState(constants.Mode==DlssNrMode_ClampEncoded?_clampPipelineState.Get():
+        constants.Mode==DlssNrMode_ResizePrivateGuides?_guidePipelineState.Get():_pipelineState.Get());
     list->SetComputeRootDescriptorTable(0,binding->heap->GetGPUDescriptorHandleForHeapStart());
     list->Dispatch((constants.Width+7)/8,(constants.Height+7)/8,1);return true;
 }

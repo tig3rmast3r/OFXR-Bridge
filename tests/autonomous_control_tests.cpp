@@ -45,6 +45,23 @@ void codec() {
         require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(restored)).luke_osr==expected,
             "reconstruction migration stays stable after profile save/reload");
     }
+    require(!desired.nr_second_pass,"second Neural Rendering pass defaults off");
+    require(!xrfg::autonomous::parse_settings("[ofxr]\nnr_enabled=1\n").nr_second_pass,
+        "existing profiles retain one Neural Rendering pass");
+    auto second_pass=desired;second_pass.nr_second_pass=true;
+    for(bool before:{false,true}) {
+        second_pass.nr_before_sr=before;
+        const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(second_pass));
+        require(restored.nr_second_pass && restored.nr_before_sr==before,
+            "one second-pass flag persists for either pre-SR or post-SR placement");
+    }
+    second_pass=desired;second_pass.nr_second_pass=true;
+    auto concurrent_nr=desired;concurrent_nr.enabled=false;concurrent_nr.afw_mode=1;
+    concurrent_nr.nr_working_scale=.5F;concurrent_nr.nr_preset=2;
+    const auto merged_nr=xrfg::autonomous::merge_changes(concurrent_nr,desired,second_pass);
+    require(merged_nr.nr_second_pass && !merged_nr.enabled && merged_nr.afw_mode==1 &&
+        merged_nr.nr_working_scale==.5F && merged_nr.nr_preset==2,
+        "second-pass delta preserves concurrent OFXR, AFW and shared NR parameter edits");
     require(desired.benchmark_auto_pick,"automatic benchmark choice defaults on");
     require(!desired.status_json,"status export defaults off");
     auto exported=desired;exported.status_json=true;
@@ -142,6 +159,7 @@ void codec() {
     desired.triple_frame_gen = true;
     desired.afw_mode = 2; desired.afw_shading_rate = 8;
     desired.nr_enabled = true;
+    desired.nr_second_pass = true;
     desired.nr_working_scale = .731F;
     desired.nr_compare = 2;
     desired.nr_compare_split = .317F;
@@ -293,7 +311,7 @@ int wmain(int count, wchar_t** arguments) {
         if (count == 2 && (std::wstring_view(arguments[1]) == L"--child" ||
             std::wstring_view(arguments[1]) == L"--restart")) {
             const auto state = xrfg::autonomous::snapshot();
-            require(state.desired.backend == 3 && state.desired.nr_enabled && state.desired.nr_compare == 2,
+            require(state.desired.backend == 3 && state.desired.nr_enabled && state.desired.nr_second_pass && state.desired.nr_compare == 2,
                 "child observes exact published settings");
             auto settings = state.desired;
             xrfg::autonomous::select_generation(settings, 0, 3);
@@ -337,6 +355,7 @@ int wmain(int count, wchar_t** arguments) {
     }
     desired.backend = 3;
         desired.nr_enabled = true;
+        desired.nr_second_pass = true;
         desired.nr_compare = 2;
         xrfg::autonomous::select_generation(desired, 0, 3);
         desired.triple_frame_gen = true;

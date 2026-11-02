@@ -13,6 +13,7 @@
 #include "DeviceRemovalDred.h"
 #include "NrForwarderContract.h"
 #include "NrCommandListIdentity.h"
+#include "NrSecondPassChain.h"
 
 
 #include "nr_codec.hpp"
@@ -134,12 +135,9 @@ struct NrRuntime
 // One independent model feature and scratch set per source DLSS handle. The signed feature keeps
 // temporal history in its handle, so sharing one of these between two VR eyes makes every evaluate
 // reproject the other eye's previous image.
-struct NrPerHandle
+struct NrModelFeature
 {
     void* feature = nullptr;
-    Microsoft::WRL::ComPtr<ID3D12Device> device;
-    std::shared_ptr<DeviceRemovalDred::Monitor> removalMonitor;
-    std::shared_ptr<DlssNr_Dx12> compose;
 
     // Creation state stays owned by the feature for its complete lifetime.
     NVSDK_NGX_Parameter* params = nullptr;
@@ -150,9 +148,31 @@ struct NrPerHandle
     // allocator). Reuse is protected by the source handle's exact submission receipt and fence.
     std::unordered_map<ID3D12GraphicsCommandList*, NVSDK_NGX_Parameter*> evaluateParams;
 
+    ID3D12Resource* output = nullptr;
+    bool reset = true;
+    unsigned int builtPreset = 0;
+    float builtIntensity = 0.0f;
+    unsigned int builtStyle = 0;
+    float builtLocalStructure = 0.0f;
+    float builtLocalTone = 0.0f;
+    float builtSkinStructure = 0.0f;
+    bool builtAutoMask = false;
+};
+
+struct NrPerHandle : NrModelFeature
+{
+    Microsoft::WRL::ComPtr<ID3D12Device> device;
+    std::shared_ptr<DeviceRemovalDred::Monitor> removalMonitor;
+    std::shared_ptr<DlssNr_Dx12> compose;
+    // One optional feature/history per source handle, never shared with pass1
+    // or another eye. Only these two working-size images are additional.
+    std::unique_ptr<NrModelFeature> second;
+    ID3D12Resource* secondClamp = nullptr;
+    bool secondFailed = false, secondSucceeded = false;
+    std::string secondReason;
+
     // The model cannot read and write one resource, so the frame is staged through these.
     ID3D12Resource* colorCopy = nullptr;
-    ID3D12Resource* output = nullptr;
 
     // The frame as the upscaler wrote it. The resolve adds the model's edit to this rather than
     // reconstructing it by inverting the tone curve, which is what turned every light in the frame into
@@ -177,7 +197,6 @@ struct NrPerHandle
 
     unsigned int width = 0;
     unsigned int height = 0;
-    bool reset = true;
     bool sourceReset = false;
     unsigned long long sourceResetRequests = 0, lastSourceResetReport = 0;
 
@@ -193,13 +212,6 @@ struct NrPerHandle
     float guideMvScaleY = 1.0f;
 
     // The values the live feature was created with, and when a difference from them was first seen.
-    unsigned int builtPreset = 0;
-    float builtIntensity = 0.0f;
-    unsigned int builtStyle = 0;
-    float builtLocalStructure = 0.0f;
-    float builtLocalTone = 0.0f;
-    float builtSkinStructure = 0.0f;
-    bool builtAutoMask = false;
     unsigned long long settledAt = 0;
 
 };
@@ -568,7 +580,7 @@ bool EnsureForwarder()
 // feature expects at create time, which a freshly allocated block does not have.
 void DiscoverFloatSlot(NVSDK_NGX_Parameter* params);
 
-bool EnsureHandleParams(NrPerHandle& nr, ID3D12Device* device)
+bool EnsureHandleParams(NrModelFeature& nr, ID3D12Device* device)
 {
     if (nr.params != nullptr)
         return true;
@@ -607,7 +619,7 @@ bool EnsureHandleParams(NrPerHandle& nr, ID3D12Device* device)
 }
 
 NVSDK_NGX_Parameter* EvaluateParamsForCommandList(
-    NrPerHandle& nr,
+    NrModelFeature& nr,
     ID3D12GraphicsCommandList* commandList,
     ID3D12Device* device)
 {
@@ -745,7 +757,7 @@ void ParkNrParams(NVSDK_NGX_Parameter*& params)
     g_nrRetired.push_back(r);
 }
 
-void ParkNrEvaluateParams(NrPerHandle& nr)
+void ParkNrEvaluateParams(NrModelFeature& nr)
 {
     for (auto& [unusedCommandList, params] : nr.evaluateParams)
     {
@@ -753,6 +765,26 @@ void ParkNrEvaluateParams(NrPerHandle& nr)
         ParkNrParams(params);
     }
     nr.evaluateParams.clear();
+}
+
+void ParkNrCodec(std::shared_ptr<DlssNr_Dx12>& compose);
+void ParkSecondPass(NrPerHandle& nr)
+{
+    const bool hadSecond = nr.second != nullptr || nr.secondClamp != nullptr;
+    if (nr.second) {
+        ParkNrFeature(nr.second->feature);
+        ParkNrParams(nr.second->params);
+        ParkNrEvaluateParams(*nr.second);
+        ParkNrResource(nr.second->output);
+        nr.second.reset();
+    }
+    ParkNrResource(nr.secondClamp);
+    // Immutable codec bindings retain their referenced textures. Retire the
+    // codec with the same exact token too, including when NR is switched off
+    // and no subsequent recording would otherwise prune those bindings.
+    if (hadSecond) ParkNrCodec(nr.compose);
+    nr.secondFailed = nr.secondSucceeded = false;
+    nr.secondReason.clear();
 }
 
 void ParkNrCodec(std::shared_ptr<DlssNr_Dx12>& compose)
@@ -771,6 +803,7 @@ void BindNrDevice(NrPerHandle& nr,ID3D12Device* device)
     }
     // The caller already admitted exact prior-submission retirement. A native
     // D3D11/Vulkan handle can survive a recreated OpenXR D3D12 transport owner.
+    ParkSecondPass(nr);
     ParkNrFeature(nr.feature);ParkNrParams(nr.params);ParkNrEvaluateParams(nr);ParkNrCodec(nr.compose);
     for(ID3D12Resource** resource:{&nr.output,&nr.colorCopy,&nr.hdrCopy,&nr.colorSmall,
         &nr.resolveCopy,&nr.depthClone,&nr.motionClone})ParkNrResource(*resource);
@@ -821,6 +854,8 @@ void ReleaseSurfacesIfFormatChanged(NrPerHandle& nr, DXGI_FORMAT needed)
     ParkNrFeature(nr.feature);
     ParkNrParams(nr.params);
     ParkNrEvaluateParams(nr);
+
+    ParkSecondPass(nr);
 
     for (ID3D12Resource** r :
          { &nr.output, &nr.colorCopy, &nr.hdrCopy, &nr.colorSmall, &nr.depthSmall, &nr.motionSmall, &nr.resolveCopy })
@@ -1007,7 +1042,7 @@ void SetExtras(NVSDK_NGX_Parameter* params, const NrConfiguration& cfg, ID3D12Re
     g_runtime.setExtras(params, 1.0f, ui, ui, backbuffer, uiWidth, uiHeight, bbWidth, bbHeight);
 }
 
-bool TuningMatchesFeature(const NrPerHandle& nr, const NrConfiguration& cfg)
+bool TuningMatchesFeature(const NrModelFeature& nr, const NrConfiguration& cfg)
 {
     return nr.builtPreset == cfg.DlssNrPreset.value_or_default() &&
            nr.builtIntensity == cfg.DlssNrIntensity.value_or_default() &&
@@ -1018,7 +1053,7 @@ bool TuningMatchesFeature(const NrPerHandle& nr, const NrConfiguration& cfg)
            nr.builtAutoMask == cfg.DlssNrAutoMask.value_or_default();
 }
 
-void RecordBuiltTuning(NrPerHandle& nr, const NrConfiguration& cfg)
+void RecordBuiltTuning(NrModelFeature& nr, const NrConfiguration& cfg)
 {
     nr.builtPreset = cfg.DlssNrPreset.value_or_default();
     nr.builtIntensity = cfg.DlssNrIntensity.value_or_default();
@@ -1027,6 +1062,149 @@ void RecordBuiltTuning(NrPerHandle& nr, const NrConfiguration& cfg)
     nr.builtLocalTone = cfg.DlssNrLocalTone.value_or_default();
     nr.builtSkinStructure = cfg.DlssNrSkinStructure.value_or_default();
     nr.builtAutoMask = cfg.DlssNrAutoMask.value_or_default();
+}
+
+bool FailSecondPass(NrPerHandle& nr, std::string reason)
+{
+    nr.secondFailed = true;
+    nr.secondSucceeded = false;
+    nr.secondReason = "Neural Rendering second pass: " + std::move(reason);
+    LOG_ERROR("{}; unmodified game colour retained. Disable Second pass to use the first pass.", nr.secondReason);
+    return false;
+}
+
+enum class SecondPassPreparation { ready, created, failed };
+SecondPassPreparation PrepareSecondPass(NrPerHandle& nr, unsigned int sourceHandleId,
+    ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
+    ID3D12GraphicsCommandList* submissionList, DXGI_FORMAT format,
+    unsigned int workWidth, unsigned int workHeight, unsigned int createFlags,
+    bool hdr, const NrConfiguration& cfg)
+{
+    if (!cfg.DlssNrSecondPass.value_or_default()) return SecondPassPreparation::ready;
+    if (nr.second && nr.second->output) {
+        const auto desc = nr.second->output->GetDesc();
+        if (desc.Width != workWidth || desc.Height != workHeight || desc.Format != format ||
+            !TuningMatchesFeature(*nr.second, cfg)) ParkSecondPass(nr);
+    }
+    if (nr.secondFailed) return SecondPassPreparation::failed;
+    if (!nr.second) nr.second = std::make_unique<NrModelFeature>();
+    auto& second = *nr.second;
+    if (!second.output) second.output = CreateScratch(device, format, workWidth, workHeight);
+    if (!nr.secondClamp) nr.secondClamp = CreateScratch(device, format, workWidth, workHeight);
+    if (!second.output || !nr.secondClamp) {
+        FailSecondPass(nr, "working texture allocation failed");
+        return SecondPassPreparation::failed;
+    }
+    if (second.feature) return SecondPassPreparation::ready;
+    RecordBuiltTuning(second, cfg); // retain the failed key, never retry it every frame
+    if (!EnsureHandleParams(second, device)) {
+        FailSecondPass(nr, g_runtime.reason);
+        return SecondPassPreparation::failed;
+    }
+    auto snippet = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
+    if (!snippet) snippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
+    if (!snippet) {
+        FailSecondPass(nr, "nvngx_dlssnr.dll was not found");
+        return SecondPassPreparation::failed;
+    }
+    g_runtime.setContract(second.params, workWidth, workHeight, workWidth, workHeight,
+                          createFlags, hdr ? 1 : 0, 0);
+    SetExtras(second.params, cfg, nullptr, nullptr, 0, 0, 0, 0);
+    MarkNrRecorded(sourceHandleId, submissionList);
+    second.feature = g_runtime.create(snippet->wstring().c_str(), NrApplicationDataPath().c_str(),
+        device, cmdList, second.params, workWidth, workHeight,
+        (int)cfg.DlssNrPreset.value_or_default(), cfg.DlssNrIntensity.value_or_default(),
+        (int)cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
+        cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+        cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 0);
+    if (!second.feature) {
+        const auto result = static_cast<unsigned>(g_runtime.lastCreate ? *g_runtime.lastCreate : 0);
+        FailSecondPass(nr, std::format("model creation failed (0x{:X}, {})", result, NgxResultName(result)));
+        return SecondPassPreparation::failed;
+    }
+    second.reset = true;
+    nr.secondSucceeded = false;
+    LOG_INFO("DLSS-NR second pass created handle {} feature {:X} at {}x{}; shared preset {}, independent history",
+        sourceHandleId, (size_t)second.feature, workWidth, workHeight, second.builtPreset);
+    return SecondPassPreparation::created;
+}
+
+bool EvaluateSecondPass(NrPerHandle& nr, unsigned int sourceHandleId,
+    ID3D12Device* device, ID3D12GraphicsCommandList* list,
+    ID3D12Resource* depth, ID3D12Resource* motion,
+    unsigned int workWidth, unsigned int workHeight, unsigned int guideWidth,
+    unsigned int guideHeight, unsigned int createFlags, bool hdr,
+    float mvScaleX, float mvScaleY, const NrConfiguration& cfg)
+{
+    auto& second = *nr.second;
+    auto* parameters = EvaluateParamsForCommandList(second, list, device);
+    if (!parameters) return FailSecondPass(nr, g_runtime.reason);
+    g_runtime.setContract(parameters, workWidth, workHeight, workWidth, workHeight,
+                          createFlags, hdr ? 1 : 0, 0);
+    SetExtras(parameters, cfg, nullptr, nullptr, 0, 0, 0, 0);
+    second.reset = second.reset || nr.reset;
+    struct Operations {
+        NrPerHandle& nr;
+        NrModelFeature& second;
+        unsigned int handle;
+        ID3D12GraphicsCommandList* list;
+        NVSDK_NGX_Parameter* parameters;
+        ID3D12Resource* depth;
+        ID3D12Resource* motion;
+        unsigned int width, height, guideWidth, guideHeight;
+        float mvScaleX, mvScaleY;
+        const NrConfiguration& cfg;
+        void first_readable() {
+            Barrier(list, nr.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"NR pass1 output ready for clamp");
+        }
+        void restore_first() {
+            Barrier(list, nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"NR pass1 output reusable");
+        }
+        bool clamp() {
+            DlssNrConstants constants{};
+            constants.Mode = DlssNrMode_ClampEncoded;
+            constants.Width = width; constants.Height = height;
+            DredScope stage(list, L"OFXR NR second pass finite encoded clamp");
+            if (nr.compose->Dispatch(list, constants, nr.output, nullptr, nullptr, nullptr, nullptr,
+                                     nr.secondClamp, nullptr)) return true;
+            return FailSecondPass(nr, "encoded colour clamp could not run");
+        }
+        void clamp_readable() {
+            Barrier(list, nr.secondClamp, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"NR pass2 input ready");
+        }
+        void restore_clamp() {
+            Barrier(list, nr.secondClamp, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"NR pass2 clamp reusable");
+        }
+        bool evaluate() {
+            if (NrFlightTrace::RecordingEnabled()) {
+                wchar_t receipt[256]{};
+                swprintf_s(receipt, L"NR_MODEL_PASS2 handle=%u feature=%p params=%p color=%p depth=%p motion=%p output=%p reset=%u",
+                    handle, second.feature, parameters, nr.secondClamp, depth, motion, second.output,
+                    second.reset ? 1u : 0u);
+                NrFlightTrace::Write("NR_MODEL_PASS2", list, receipt);
+            }
+            DredScope stage(list, L"OFXR NR independent second model");
+            const auto result = g_runtime.evaluate(list, second.feature, parameters, nr.secondClamp,
+                depth, motion, second.output, width, height, guideWidth, guideHeight,
+                nr.guideDepthInverted ? 1 : 0, second.reset ? 1 : 0,
+                cfg.DlssNrIntensity.value_or_default(), (int)cfg.DlssNrStyle.value_or_default(),
+                cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+                cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0,
+                mvScaleX, mvScaleY);
+            if (result != NVSDK_NGX_Result_Success)
+                return FailSecondPass(nr, std::format("model evaluation failed (0x{:X}, {})",
+                    static_cast<unsigned>(result), NgxResultName(static_cast<unsigned>(result))));
+            second.reset = false;
+            return true;
+        }
+    } operations{nr, second, sourceHandleId, list, parameters, depth, motion,
+        workWidth, workHeight, guideWidth, guideHeight, mvScaleX, mvScaleY, cfg};
+    nr.secondSucceeded = DlssNr::RunOptionalSecondPass(true, operations);
+    return nr.secondSucceeded;
 }
 
 } // namespace
@@ -1043,8 +1221,12 @@ void RetryAfterFailure()
     g_runtime.failed = false;
     g_runtime.reason = "";
 
-    for (auto& [handleId, nr] : g_nrByHandle)
+    for (auto& [handleId, nr] : g_nrByHandle) {
         nr.reset = true;
+        if (nr.second) nr.second->reset = true;
+        nr.secondFailed = nr.secondSucceeded = false;
+        nr.secondReason.clear();
+    }
 }
 
 // Every way out of the pass before it does anything is silent on purpose -- an evaluate that carries
@@ -1363,6 +1545,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         ParkNrFeature(nr.feature);
         ParkNrParams(nr.params);
         ParkNrEvaluateParams(nr);
+        ParkSecondPass(nr);
 
         // Only a resolution change invalidates the scratch textures. Tuning does not, and throwing
         // them away for it would mean a reallocation every time a slider moves.
@@ -1463,6 +1646,9 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         nr.height = height;
         nr.reset = true;
         RecordBuiltTuning(nr, cfg);
+        if (cfg.DlssNrSecondPass.value_or_default())
+            static_cast<void>(PrepareSecondPass(nr, sourceHandleId, device, cmdList,
+                submissionList.Get(), desc.Format, workWidth, workHeight, createFlags, isHdrBuffer, cfg));
         LOG_INFO("OFXR-BRIDGE V449 DLSS-NR BEFORE SR handle {} running at {}x{}, guides {}x{} (preset {}, intensity {}, style {})",
                  sourceHandleId, width, height, guideWidth, guideHeight, nr.builtPreset,
                  nr.builtIntensity, nr.builtStyle);
@@ -1480,6 +1666,13 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
 
     if (nr.feature == nullptr)
     {
+        device->Release();
+        return;
+    }
+
+    if (cfg.DlssNrSecondPass.value_or_default() &&
+        PrepareSecondPass(nr, sourceHandleId, device, cmdList, submissionList.Get(), desc.Format,
+            workWidth, workHeight, createFlags, isHdrBuffer, cfg) != SecondPassPreparation::ready) {
         device->Release();
         return;
     }
@@ -1642,6 +1835,14 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     }
 
 
+    bool secondAccepted = !cfg.DlssNrSecondPass.value_or_default();
+    ID3D12Resource* finalModelOutput = nr.output;
+    if (result == NVSDK_NGX_Result_Success && cfg.DlssNrSecondPass.value_or_default()) {
+        secondAccepted = EvaluateSecondPass(nr, sourceHandleId, device, cmdList, depthIn, motionIn,
+            workWidth, workHeight, modelGuideWidth, modelGuideHeight, createFlags, isHdrBuffer,
+            modelScaleX, modelScaleY, cfg);
+        if (secondAccepted) finalModelOutput = nr.second->output;
+    }
     nr.reset = false;
 
     // Once, a few seconds in, so it lands after the values have been written at least once.
@@ -1686,7 +1887,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
                  cfg.DlssNrStyle.value_or_default());
     }
 
-    if (result == NVSDK_NGX_Result_Success)
+    if (result == NVSDK_NGX_Result_Success && secondAccepted)
     {
         ++g_successfulEvaluations;
         MarkSuccessfulNrEvaluation();
@@ -1708,7 +1909,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         resolveParams.CompareZoom = std::max(1.0f, cfg.DlssNrCompareZoom.value_or_default());
         resolveParams.CompareSwap = cfg.DlssNrCompareSwap.value_or_default() ? 1u : 0u;
 
-        Barrier(cmdList, nr.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        Barrier(cmdList, finalModelOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"pre-SR-model-output-ready");
 
         ID3D12Resource* resolveTarget = targetSupportsUav ? target : nr.resolveCopy;
@@ -1717,10 +1918,10 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"pre-SR-resolve-target-write");
         {
             DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR pre-SR resolve");
-            nr.compose->Dispatch(cmdList, resolveParams, modelInput, nr.output, nr.hdrCopy, motionIn,
+            nr.compose->Dispatch(cmdList, resolveParams, modelInput, finalModelOutput, nr.hdrCopy, motionIn,
                                 nullptr, resolveTarget, nullptr);
         }
-        Barrier(cmdList, nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        Barrier(cmdList, finalModelOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"pre-SR-model-output-restore");
 
         if (targetSupportsUav)
@@ -1758,7 +1959,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
             g_captureRetirements.push_back(CurrentRetirement());
         }
     }
-    else
+    else if (result != NVSDK_NGX_Result_Success)
     {
         g_runtime.failed = true;
         g_runtime.reason = "the model refused to run";
@@ -1980,6 +2181,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
         ParkNrFeature(nr.feature);
         ParkNrParams(nr.params);
         ParkNrEvaluateParams(nr);
+        ParkSecondPass(nr);
 
         // Only a resolution change invalidates the scratch textures. Tuning does not, and throwing
         // them away for it would mean a reallocation every time a slider moves.
@@ -2067,6 +2269,9 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
         nr.height = height;
         nr.reset = true;
         RecordBuiltTuning(nr, cfg);
+        if (cfg.DlssNrSecondPass.value_or_default())
+            static_cast<void>(PrepareSecondPass(nr, sourceHandleId, device, cmdList,
+                submissionList.Get(), desc.Format, workWidth, workHeight, createFlags, isHdrBuffer, cfg));
         LOG_INFO("OFXR-BRIDGE V449 DLSS-NR AFTER SR handle {} running at {}x{}, guides {}x{} (preset {}, intensity {}, style {})",
                  sourceHandleId, width, height, guideWidth, guideHeight, nr.builtPreset,
                  nr.builtIntensity, nr.builtStyle);
@@ -2081,6 +2286,13 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
 
     if (nr.feature == nullptr)
     {
+        device->Release();
+        return;
+    }
+
+    if (cfg.DlssNrSecondPass.value_or_default() &&
+        PrepareSecondPass(nr, sourceHandleId, device, cmdList, submissionList.Get(), desc.Format,
+            workWidth, workHeight, createFlags, isHdrBuffer, cfg) != SecondPassPreparation::ready) {
         device->Release();
         return;
     }
@@ -2247,6 +2459,14 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
     }
 
 
+    bool secondAccepted = !cfg.DlssNrSecondPass.value_or_default();
+    ID3D12Resource* finalModelOutput = nr.output;
+    if (result == NVSDK_NGX_Result_Success && cfg.DlssNrSecondPass.value_or_default()) {
+        secondAccepted = EvaluateSecondPass(nr, sourceHandleId, device, cmdList, depthIn, motionIn,
+            workWidth, workHeight, modelGuideWidth, modelGuideHeight, createFlags, isHdrBuffer,
+            modelScaleX, modelScaleY, cfg);
+        if (secondAccepted) finalModelOutput = nr.second->output;
+    }
     nr.reset = false;
 
     // Once, a few seconds in, so it lands after the values have been written at least once.
@@ -2291,7 +2511,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
                  cfg.DlssNrStyle.value_or_default());
     }
 
-    if (result == NVSDK_NGX_Result_Success)
+    if (result == NVSDK_NGX_Result_Success && secondAccepted)
     {
         ++g_successfulEvaluations;
         MarkSuccessfulNrEvaluation();
@@ -2313,14 +2533,14 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
         resolveParams.CompareZoom = std::max(1.0f, cfg.DlssNrCompareZoom.value_or_default());
         resolveParams.CompareSwap = cfg.DlssNrCompareSwap.value_or_default() ? 1u : 0u;
 
-        Barrier(cmdList, nr.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        Barrier(cmdList, finalModelOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"post-SR-model-output-ready");
         {
             DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR post-SR resolve");
-            nr.compose->Dispatch(cmdList, resolveParams, modelInput, nr.output, nr.hdrCopy, motionIn,
+            nr.compose->Dispatch(cmdList, resolveParams, modelInput, finalModelOutput, nr.hdrCopy, motionIn,
                                 nullptr, target, nullptr);
         }
-        Barrier(cmdList, nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        Barrier(cmdList, finalModelOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"post-SR-model-output-restore");
 
         // On-demand matched captures map only after all exact submission tokens retire.
@@ -2333,7 +2553,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
             g_captureRetirements.push_back(CurrentRetirement());
         }
     }
-    else
+    else if (result != NVSDK_NGX_Result_Success)
     {
         g_runtime.failed = true;
         g_runtime.reason = "the model refused to run";
@@ -2371,11 +2591,22 @@ bool IsRunning()
         return false;
     const auto last=g_nrLastSubmittedMs.load(std::memory_order_acquire),now=GetTickCount64();
     if(!last || now<last || now-last>=2000) return false;
-    return std::any_of(g_nrByHandle.begin(), g_nrByHandle.end(),
-                       [](const auto& entry) { return entry.second.feature != nullptr; });
+    const bool second = NrConfiguration::Instance()->DlssNrSecondPass.value_or_default();
+    if (second && std::any_of(g_nrByHandle.begin(), g_nrByHandle.end(),
+            [](const auto& entry) { return entry.second.secondFailed; })) return false;
+    return std::any_of(g_nrByHandle.begin(), g_nrByHandle.end(), [second](const auto& entry) {
+        const auto& nr = entry.second;
+        return nr.feature != nullptr && (!second || (nr.second && nr.second->feature && nr.secondSucceeded));
+    });
 }
 
-const char* FailureReason() { return g_runtime.failed ? g_runtime.reason : ""; }
+const char* FailureReason() {
+    if (g_runtime.failed) return g_runtime.reason;
+    if (NrConfiguration::Instance()->DlssNrSecondPass.value_or_default())
+        for (const auto& [handle, nr] : g_nrByHandle)
+            if (nr.secondFailed) return nr.secondReason.c_str();
+    return "";
+}
 
 // V23072 deliberately records no timestamp queries for Neural Rendering. The
 // old three-slot query ring had no retirement fence and became invalid once
@@ -2399,6 +2630,7 @@ void ReleaseForHandleLocked(unsigned int sourceHandleId)
         return;
 
     NrPerHandle& nr = it->second;
+    ParkSecondPass(nr);
     ParkNrFeature(nr.feature);
     ParkNrParams(nr.params);
     ParkNrEvaluateParams(nr);
@@ -2466,6 +2698,13 @@ void Shutdown()
         return;
     }
 
+    // All native submissions above are proven retired. Include the optional
+    // histories in the same release path, rather than freeing raw members
+    // through unique_ptr while their vendor objects remain alive.
+    for (auto& [handleId, nr] : g_nrByHandle) {
+        NrRetirementScope retirementScope(handleId);
+        ParkSecondPass(nr);
+    }
     for (auto& r : g_nrRetired)
     {
         if (r.feature != nullptr && g_runtime.release != nullptr)
@@ -2528,6 +2767,17 @@ void configure(const Settings& settings) {
     auto& c=*NrConfiguration::Instance();
     c.DlssNrEnabled=settings.enabled;
     c.DlssNrRunBeforeSr=settings.before_sr;
+    c.DlssNrSecondPass=settings.second_pass;
+    if (!settings.enabled || !settings.second_pass) {
+        bool parked = false;
+        for (auto& [handle, nr] : g_nrByHandle) {
+            if (!nr.second && !nr.secondClamp && !nr.secondFailed) continue;
+            NrRetirementScope retirementScope(handle);
+            ParkSecondPass(nr);
+            parked = true;
+        }
+        if (parked) TickNrRetired(); // polling only; never wait in settings
+    }
     c.DlssNrPreset=settings.preset;
     c.DlssNrIntensity=std::clamp(settings.intensity,0.f,5.f);
     c.DlssNrStyle=settings.style;

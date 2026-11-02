@@ -80,7 +80,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 80301;
+constexpr std::uint32_t kAbi = 80401;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -439,7 +439,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(afw_mode) READ_FIELD(afw_debug) READ_FIELD(afw_clear_before_warping)
         READ_FIELD(afw_ignore_motion_threshold) READ_FIELD(afw_depth_dilate_mode) READ_FIELD(afw_shading_rate)
         READ_FIELD(luke_osr) READ_FIELD(luke_osr_cover) READ_FIELD(luke_osr_trim) READ_FIELD(luke_osr_fill) READ_FIELD(luke_advanced)
-        READ_FIELD(nr_enabled) READ_FIELD(nr_before_sr) READ_FIELD(nr_intensity)
+        READ_FIELD(nr_enabled) READ_FIELD(nr_second_pass) READ_FIELD(nr_before_sr) READ_FIELD(nr_intensity)
         READ_FIELD(nr_preset) READ_FIELD(nr_style) READ_FIELD(nr_local_structure)
         READ_FIELD(nr_local_tone) READ_FIELD(nr_skin_structure) READ_FIELD(nr_auto_mask)
         READ_FIELD(nr_transfer_strength) READ_FIELD(nr_colour_strength)
@@ -478,7 +478,7 @@ std::string serialize_settings(const Settings& settings) {
     WRITE_FIELD(afw_mode) WRITE_FIELD(afw_debug) WRITE_FIELD(afw_clear_before_warping)
     WRITE_FIELD(afw_ignore_motion_threshold) WRITE_FIELD(afw_depth_dilate_mode) WRITE_FIELD(afw_shading_rate)
     WRITE_FIELD(luke_osr) WRITE_FIELD(luke_osr_cover) WRITE_FIELD(luke_osr_trim) WRITE_FIELD(luke_osr_fill) WRITE_FIELD(luke_advanced)
-    WRITE_FIELD(nr_enabled) WRITE_FIELD(nr_before_sr) WRITE_FIELD(nr_intensity)
+    WRITE_FIELD(nr_enabled) WRITE_FIELD(nr_second_pass) WRITE_FIELD(nr_before_sr) WRITE_FIELD(nr_intensity)
     WRITE_FIELD(nr_preset) WRITE_FIELD(nr_style) WRITE_FIELD(nr_local_structure)
     WRITE_FIELD(nr_local_tone) WRITE_FIELD(nr_skin_structure) WRITE_FIELD(nr_auto_mask)
     WRITE_FIELD(nr_transfer_strength) WRITE_FIELD(nr_colour_strength)
@@ -664,7 +664,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
     MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
     MERGE_FIELD(luke_osr) MERGE_FIELD(luke_osr_cover) MERGE_FIELD(luke_osr_trim) MERGE_FIELD(luke_osr_fill) MERGE_FIELD(luke_advanced)
-    MERGE_FIELD(nr_enabled) MERGE_FIELD(nr_before_sr) MERGE_FIELD(nr_intensity)
+    MERGE_FIELD(nr_enabled) MERGE_FIELD(nr_second_pass) MERGE_FIELD(nr_before_sr) MERGE_FIELD(nr_intensity)
     MERGE_FIELD(nr_preset) MERGE_FIELD(nr_style) MERGE_FIELD(nr_local_structure)
     MERGE_FIELD(nr_local_tone) MERGE_FIELD(nr_skin_structure) MERGE_FIELD(nr_auto_mask)
     MERGE_FIELD(nr_transfer_strength) MERGE_FIELD(nr_colour_strength)
