@@ -2626,6 +2626,19 @@ struct D3D12FrameSynthesizer::Impl {
 
         device = input_device;
         queue = input_queue;
+        if (input_nvidia_options.rife_model >= 0 && input_nvidia_options.rife_async) {
+            // Each asynchronous eye owns its GPU submission order. Sharing the
+            // session queue lets another eye enqueue a future acquire/history
+            // wait ahead of this eye's completion signal, while the runtime
+            // queue already waits for that completion before the future signal.
+            // Keep the existing cross-queue producer/consumer fences, but never
+            // allow another worker's future dependency to block this worker.
+            const auto queue_description = input_queue->GetDesc();
+            queue.Reset();
+            result = device->CreateCommandQueue(&queue_description, IID_PPV_ARGS(&queue));
+            if (FAILED(result)) return result;
+            queue->SetName(L"OFXR asynchronous RIFE eye");
+        }
         history = std::move(input_history);
         image_description = description;
         view_format = input_view_format;

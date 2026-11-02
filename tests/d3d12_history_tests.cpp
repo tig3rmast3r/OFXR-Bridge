@@ -5786,6 +5786,65 @@ void test_rife_multiframe(D3D12WarpFixture& fixture,int model,unsigned factor,bo
     fixture.require_no_debug_errors();
 }
 
+// Reproduce a foreign eye's future-acquire wait on the session synthesis queue.
+// Its acquire becomes ready only after this eye's output reaches the runtime.
+// An async worker must not inherit that unrelated wait ahead of its own copy.
+void test_rife_eye_queue(D3D12WarpFixture& fixture) {
+    constexpr UINT width=256,height=128;
+    std::array<ComPtr<ID3D12Resource>,2> input,real,synthetic;
+    std::array<std::shared_ptr<xrfg::D3D12SwapchainHistory>,2> histories;
+    std::array<xrfg::D3D12FrameSynthesizer,2> synths;
+    std::array<xrfg::D3D12HistoryCaptureTicket,2> captures{};
+    std::array<xrfg::D3D12FrameSynthesisTicket,2> tickets{};
+    std::array<StereoPattern,2> expected{
+        translated_motion_pattern(width,height,{0,0}),
+        translated_motion_pattern(width,height,{6,6})};
+    ComPtr<ID3D12CommandQueue> background;
+    D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+    require_hresult(fixture.device()->CreateCommandQueue(&desc,IID_PPV_ARGS(&background)),"eye shared queue");
+    xrfg::D3D12NvidiaOpticalFlowOptions options{};
+    options.rife_model=2;options.rife_async=true;
+    options.input_scale=xrfg::D3D12NvidiaInputScale::quarter;
+    for(unsigned eye=0;eye<2;++eye){
+        input[eye]=create_source_texture(fixture,width,height);
+        real[eye]=create_source_texture(fixture,width,height);
+        synthetic[eye]=create_source_texture(fixture,width,height);
+        upload_pattern(fixture,input[eye].Get(),expected[eye]);
+        std::array<ID3D12Resource*,1> inputs{input[eye].Get()},reals{real[eye].Get()},outputs{synthetic[eye].Get()};
+        histories[eye]=std::make_shared<xrfg::D3D12SwapchainHistory>();
+        require_hresult(histories[eye]->initialize(fixture.device(),fixture.queue(),inputs,D3D12_RESOURCE_STATE_RENDER_TARGET),"eye history");
+        require_hresult(synths[eye].initialize(fixture.device(),background.Get(),histories[eye],reals,outputs,kFormat,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,xrfg::D3D12OpticalFlowBackend::nvidia,options,true),"eye initialize");
+        require_hresult(histories[eye]->capture(0,&captures[eye]),"eye capture");
+        require_hresult(histories[eye]->commit(captures[eye]),"eye commit");
+    }
+    ComPtr<ID3D12Fence> future_acquire;
+    require_hresult(fixture.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&future_acquire)),"eye acquire gate");
+    require_hresult(background->Wait(future_acquire.Get(),1),"foreign eye acquire wait");
+    // This is a bounded negative control: rescue only our own test fence.
+    // Even the old implementation must drain normally, without a hung GPU.
+    std::jthread rescue([future_acquire]{
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));future_acquire->Signal(1);
+    });
+    const auto views=make_reprojection_views();
+    require_hresult(synths[0].submit_prime(captures[0],views,0,&tickets[0]),"eye first prime");
+    require_hresult(synths[0].synchronize_consumer_queue(fixture.queue(),tickets[0]),"eye first consumer join");
+    require_hresult(fixture.queue()->Signal(future_acquire.Get(),1),"eye future acquire signal");
+    require_hresult(synths[1].synchronize_producer_queue(fixture.queue()),"eye second producer join");
+    require_hresult(synths[1].submit_prime(captures[1],views,0,&tickets[1]),"eye second prime");
+    const auto first=synths[0].wait_for_previous_submission(250);
+    const auto second=synths[1].wait_for_previous_submission(250);
+    rescue.join();
+    require_hresult(synths[0].wait_for_previous_submission(30000),"eye first drain");
+    require_hresult(synths[1].wait_for_previous_submission(30000),"eye second drain");
+    require_hresult(first,"RIFE first eye blocked behind foreign acquire");
+    require_hresult(second,"RIFE second eye did not follow first eye completion");
+    for(unsigned eye=0;eye<2;++eye)
+        require(readback_pattern(fixture,real[eye].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==expected[eye],"eye queue changed real pixels");
+    fixture.require_no_debug_errors();
+    std::cout<<"RIFE independent eye queues: startup copies and consumer joins PASS\n";
+}
+
 // Deliberately queue two frames while their producer is blocked. Their camera,
 // images and completion receipts must remain independent after the API returns.
 void test_rife_pipeline(D3D12WarpFixture& fixture,bool refusal=false) {
@@ -5964,6 +6023,9 @@ int main(int argc, char** argv) {
         }
         if(argc>1 && std::string_view(argv[1])=="rife-refusal") {
             D3D12WarpFixture fixture(true);test_rife_pipeline(fixture,true);return 0;
+        }
+        if(argc>1 && std::string_view(argv[1])=="rife-eye-queue") {
+            D3D12WarpFixture fixture(true);test_rife_eye_queue(fixture);return 0;
         }
         if(argc>1 && std::string_view(argv[1])=="rife-async") {
             D3D12WarpFixture fixture(true);
