@@ -562,7 +562,15 @@ bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, o
         const int2 t = int2(floor(at_scene - HistoryDejitter));
         float history_near = 0.0;
         const float2 toward = halo_direction(HistoryDepth, t, at_depth, history_near);
-        if (history_near > at_depth * EdgeRatio + FarDepth &&
+        // The anti-aliased edge of a camera-attached surface (the weapon, the
+        // arms) stays where it was in this eye's view: the surface keeps its
+        // place, so its edge pixels are never stale. Both tests treat it as
+        // world geometry: parallax fires whenever the camera moves, and the
+        // warp, several pixels off that near, does not hold it where the
+        // edge is. Dropped, the lit rim of the arm became a 2-3 px mirrored
+        // line alternating with the real frames' rim, a band around the
+        // weapon (Cyberpunk, F8 of 2026-11-02 10:06:52).
+        if (history_near > at_depth * EdgeRatio + FarDepth && history_near < LockedDepth &&
             (halo_parallax(BackwardHistory, ndc, at_depth, history_near, toward) > HaloParallax ||
              !nearer_surface_present(c, at_depth)))
             found = false;
@@ -770,12 +778,19 @@ void OsrFullResolve(uint3 id : SV_DispatchThreadID) {
                     // keep it when the source eye could not have seen it.
                     const bool nearer_unseen = zh > zs * (1.0 + DepthTolerance) + FarDepth &&
                         source_sees_not_farther(ndc, zh);
-                    // A camera-attached surface (the first-person weapon) is
-                    // rendered by the other eye at this very instant; the
-                    // previous frame only knows where it was. Keep the warp on
-                    // it and take the previous frame only for the side of it
-                    // the other eye cannot see.
+                    // A camera-attached surface keeps its place in this eye's
+                    // previous frame, which knows exactly where it is in this
+                    // eye's view. The warp places it through the stereo
+                    // disparity, hundreds of pixels that near, so a small error
+                    // in the eye separation moves it visibly: in Kingdom Come
+                    // Deliverance II a crossbow 0.09 units away has about 1000
+                    // px of disparity, the warp put it 26 px left of both real
+                    // frames (2.6%, 1.6 mm of separation) and it shimmered
+                    // (F8 of 2026-11-02 09:51:06). Where the warp shows such a
+                    // surface the previous frame is taken; it also covers the
+                    // strip of background the misplaced warp drew over.
                     const bool attached = (previous_word & HistoryLockedBit) != 0;
+                    const bool warp_attached = zs >= LockedDepth;
                     // At a fringe, depth cannot tell a stale surface from a
                     // strand the other eye happens to miss: hair and foliage
                     // edges cover different strands in each eye and frame, and
@@ -789,7 +804,7 @@ void OsrFullResolve(uint3 id : SV_DispatchThreadID) {
                     // pixels flicked to the light background and 4.4% to a
                     // strand, the generated frame 34% further from its real
                     // neighbours than they are from each other.
-                    if ((same && !attached) || nearer_unseen || (fringe && !attached)) {
+                    if (warp_attached || (same && !attached) || nearer_unseen || (fringe && !attached)) {
                         WarpedOut[id.xy] = previous;
                         ResolvedOut[id.xy] = (previous_word & ~3u) | TagStereo;
                         return;

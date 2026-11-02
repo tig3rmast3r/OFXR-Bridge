@@ -222,6 +222,17 @@ the generated eye.
    surface is always legitimate band content: both tests reproject it as
    world geometry, and while strafing they failed on the weapon's own side
    faces, so the inpaint mirrored a second copy of the weapon into them.
+   Where the warp itself shows a camera-attached surface, the previous frame
+   is taken: it knows exactly where the weapon is in this eye's view, while
+   the warp places it through a disparity of hundreds of pixels, so a small
+   error in the eye separation moves it visibly (a crossbow 0.09 units away
+   in Kingdom Come Deliverance II: about 1000 px of disparity, the warp 26 px
+   off both real frames, 2.6% or 1.6 mm of separation, and it shimmered). The
+   anti-aliased edge of a camera-attached surface is never a stale halo
+   either: the surface keeps its place, while parallax fires whenever the
+   camera moves and the warp does not hold it where the edge is; dropped,
+   the arm's lit rim became a mirrored line, a band around the weapon
+   (Cyberpunk, F8 of 2026-11-02 10:06:52).
 4. **Inpaint.** Every pixel that is not a stereo pixel belongs to a band: a
    run of history, moved and hole pixels along the row between two stereo
    pixels. The nearer bounding pixel is the occluder; the band is background
