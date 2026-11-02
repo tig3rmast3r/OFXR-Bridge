@@ -21,6 +21,7 @@ struct Settings {
     int frame_generation{}; // 0 OFXR synthesis, 1 FSR 3, 2 native DLSS-G
     unsigned native_scale{100};
     bool hybrid{};
+    int rife_multiplier{2};
     int rife_model{-1}; // -1 ordinary routes; otherwise portable RIFE model
     bool operator==(const Settings&) const = default;
 };

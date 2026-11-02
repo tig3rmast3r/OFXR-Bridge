@@ -39,6 +39,7 @@ inline void apply_runtime_settings() {
     e.backward=s.backward; e.separate_synthesis=s.separate_synthesis; e.lower_vram=s.lower_vram;
     e.motion_vectors=s.motion_vectors; e.frame_generation=s.frame_generation>=3 ? 0 : s.frame_generation;
     e.hybrid=s.frame_generation==3;
+    e.rife_multiplier=s.rife_multiplier;
     e.rife_model=s.frame_generation==4?s.rife_model:-1;
     if(e.hybrid) e.backend=0; // Fixed FidelityFX fallback, independent of OFXR profile.
     e.native_scale=static_cast<unsigned>(s.native_scale);

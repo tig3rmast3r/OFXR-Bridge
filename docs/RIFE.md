@@ -1,11 +1,14 @@
-# Experimental RIFE route (v736)
+# Experimental RIFE route (v737)
 
 The Frame generation menu includes RIFE between OFXR and Hybrid. Model choices
 are 4.6, 4.4 and 4.3. The initial trial selects 4.6 with 25% motion
 inference when entering its new profile. Existing OFXR defaults are unchanged.
 
 This is a NVIDIA CUDA / PyTorch experiment, not TensorRT and not an AMD backend.
-No DLSS motion vectors or depth are needed. RIFE is 2X only. Benchmarks continue
+No DLSS motion vectors or depth are needed. Default remains 2X. Experimental 3X/4X
+are available on the private native D3D12 route (Framework or Director). Legacy,
+pipelined and Luke/D3D11/Vulkan interop routes retain 2X; unsupported multi-output
+requests are refused instead of silently duplicating outputs. Benchmarks continue
 to test the existing accepted routes; this experiment is selected manually.
 
 ## Native-resolution colour
@@ -15,7 +18,8 @@ camera and sampled at the chosen motion-inference resolution. RIFE predicts
 the forward/backward sampling displacements and blending mask at that size.
 The D3D12 output shader applies those fields to the original full-resolution
 colour images, including their alpha. It does **not** enlarge a low-resolution
-RGB generated frame. The real frame is copied unchanged. 20% is also available (per axis); full-resolution output is retained. Lower inference
+RGB generated frame. The real frame is copied unchanged. The inference menu uses exact fractions per axis:1/1,1/2,1/3,1/4,1/5,1/6.
+The75% option is hidden from RIFE; full-resolution output is retained. Lower inference
 resolution still reduces motion/occlusion precision, especially on fine edges.
 
 The RIFE model implementations are derived from
@@ -132,3 +136,35 @@ Background GPU/scheduler variation is present (one4.6/20% sample16.13ms).
 These are small laboratory comparisons, not a guaranteed headset FPS gain.
 All six configurations retain native one-pixel colour detail in the GPU fixture;
 finer motion and occlusion accuracy still depend on model and inference grid.
+
+
+## Experimental multi-frame generation (v737)
+
+The RIFE multiplier is independent of the old Djules3X preference.3X computes
+fractions1/3 and2/3;4X computes1/4,1/2 and3/4. A single persistent model and its
+buffers are reused serially across fractions and eyes. Each output has its own
+native full-resolution image and target camera metadata. No repeated midpoint
+is counted as a new intermediate. The final native GPU completion receipt and
+per-output content mask guard the whole batch, including the real B copy.
+
+The private worker delivers S1,S2,[S3],B in order to the same framework/director
+endpoint; physical pacing and its buffer2/3 preference are unchanged. Source
+admission applies backpressure when the logical output queue is full.3X needs
+two distinct S destinations and4X three, with both real-image slots retained
+also in Fast mode. The4X logical descriptor buffer holds A/S1/S2/S3/B; it is
+not an additional compositor-pacing queue or a duplicate model allocation.
+Switching multiplier uses the existing drain/reconfigure/output-retirement
+transaction. Disabled FG and AFW-only bypass still ignore a saved multiplier.
+
+Whole-batch GPU timing starts before the first input pack and ends after the
+last native composition. On a healthy-device inference error all outputs fall
+back to current-colour reprojection, with zero generated bits, and the real
+frame remains valid. The2X colour/model/pacing contract is unchanged.
+
+Tests cover3X/4X on all three models in synchronous and asynchronous submission,
+exact1/6 grids, one1/3 case, temporal order/distinct pixels, real copies,
+repeated captures, invalid destination aliasing, receipts and reconfigure.
+3700x3400per-eye3X/4X with4.4/1/6 also passes. Actual layer CPU tests verify
+multiplier clocks, Fast on/off pool sizes, per-output delivery indices and
+isolation from ordinary OFXR; the logical queue verifies ordered4X batches.
+No in-game FPS or latency improvement is guaranteed by these laboratory tests.

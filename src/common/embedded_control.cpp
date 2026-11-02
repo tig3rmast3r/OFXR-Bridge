@@ -56,6 +56,7 @@ struct Control {
         wchar_t generation[16]{};
         GetPrivateProfileStringW(L"ofxr", L"frame_generation", L"ofxr", generation, 16, ini().c_str());
         settings.frame_generation = _wcsicmp(generation, L"fsr3") == 0 ? 1 : _wcsicmp(generation, L"dlss") == 0 ? 2 : 0;
+        settings.rife_multiplier=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr",L"rife_multiplier",2,ini().c_str())),2,4);
         settings.rife_model=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr",L"rife_model",-1,ini().c_str())),-1,4);
         settings.hybrid = GetPrivateProfileIntW(L"ofxr",L"dlss_flow_hybrid",0,ini().c_str())!=0;
         settings.native_scale = std::clamp(GetPrivateProfileIntW(L"ofxr", L"dlssg_resolution", 100, ini().c_str()), 25u, 100u);
@@ -126,8 +127,8 @@ Snapshot snapshot() {
 }
 bool request(Settings s) {
     if (s.pacing_mode < 0 || s.pacing_mode > 2 || s.backend < 0 || s.backend > 3 || s.preset < 0 || s.preset > 2 ||
-        s.scale < 0 || s.scale > (s.rife_model>=0?4:3) || s.motion_vectors < 0 || s.motion_vectors > 1 ||
-        s.frame_generation < 0 || s.frame_generation > 2 || s.rife_model < -1 || s.rife_model > 4 ||
+        s.scale < 0 || s.scale > (s.rife_model>=0?6:3) || s.motion_vectors < 0 || s.motion_vectors > 1 ||
+        s.frame_generation < 0 || s.frame_generation > 2 || s.rife_model < -1 || s.rife_model > 4 || s.rife_multiplier<2 || s.rife_multiplier>4 ||
         s.native_scale < 25 || s.native_scale > 100 ||
         s.separate_synthesis < 0 || s.separate_synthesis > 1 || s.lower_vram < 0 || s.lower_vram > 1) return false;
     auto& c = control(); std::scoped_lock lock(c.mutex);
@@ -143,7 +144,7 @@ bool request(Settings s) {
     if (old.backend != s.backend) ok &= write(L"ofxr", L"backend", s.backend ? L"nvidia" : L"fidelityfx");
     if (old.backend != s.backend) ok &= write(L"ofxr", L"nvidia_route", s.backend == 3 ? L"djules" : s.backend == 2 ? L"new" : L"legacy");
     const wchar_t* presets[]{L"slow", L"medium", L"fast"};
-    const wchar_t* scales[]{L"100", L"75", L"50", L"25", L"20"};
+    const wchar_t* scales[]{L"100", L"75", L"50", L"25", L"20", L"1/6", L"1/3"};
     if (old.preset != s.preset) ok &= write(L"ofxr", L"nvidia_preset", presets[s.preset]);
     if (old.scale != s.scale) ok &= write(L"ofxr", L"nvidia_input_scale", scales[s.scale]);
     if(old.separate_synthesis != s.separate_synthesis) ok &= write(L"ofxr", L"separate_synthesis", s.separate_synthesis ? L"1" : L"0");
@@ -153,6 +154,7 @@ bool request(Settings s) {
     if (old.motion_vectors != s.motion_vectors) ok &= write(L"ofxr", L"motion_vectors", s.motion_vectors ? L"dlss" : L"off");
     if (old.frame_generation != s.frame_generation) ok &= write(L"ofxr", L"frame_generation", s.frame_generation == 1 ? L"fsr3" : s.frame_generation == 2 ? L"dlss" : L"ofxr");
     if (old.hybrid != s.hybrid) ok &= write(L"ofxr",L"dlss_flow_hybrid",s.hybrid ? L"1" : L"0");
+    if(old.rife_multiplier!=s.rife_multiplier){wchar_t value[16]{};swprintf_s(value,L"%d",s.rife_multiplier);ok &= write(L"ofxr",L"rife_multiplier",value);}
     if(old.rife_model!=s.rife_model){wchar_t value[16]{};swprintf_s(value,L"%d",s.rife_model);ok &= write(L"ofxr",L"rife_model",value);}
     if (old.native_scale != s.native_scale) {
         wchar_t value[16]{}; swprintf_s(value,L"%u",s.native_scale);

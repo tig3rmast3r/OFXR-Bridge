@@ -14,7 +14,7 @@ RifeMemoryStatus rife_memory_for_adapter(LUID adapter,bool request) noexcept;
 // synchronization is with this worker's exact GPU transactions, never a game tail.
 class D3D12Rife {
 public:
-    struct Timing {ID3D12QueryHeap* queries{};ID3D12Resource* readback{};UINT base{};};
+    struct Timing {ID3D12QueryHeap* queries{};ID3D12Resource* readback{};UINT base{};bool first{true},last{true};};
     D3D12Rife();
     ~D3D12Rife();
     HRESULT initialize(ID3D12Device*, ID3D12CommandQueue*, DXGI_FORMAT, int model, float scale) noexcept;

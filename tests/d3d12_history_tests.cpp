@@ -5662,6 +5662,64 @@ void test_rife_stereo(D3D12WarpFixture& fixture,int model,UINT width=256,UINT he
 }
 
 
+
+void test_rife_multiframe(D3D12WarpFixture& fixture,int model,unsigned factor,bool asynchronous,UINT width=512,UINT height=256,
+    xrfg::D3D12NvidiaInputScale grid=xrfg::D3D12NvidiaInputScale::sixth) {
+    auto a=create_source_texture(fixture,width,height),b=create_source_texture(fixture,width,height);
+    std::array<ComPtr<ID3D12Resource>,2> real{create_source_texture(fixture,width,height),create_source_texture(fixture,width,height)};
+    std::array<ComPtr<ID3D12Resource>,3> output;
+    std::array<ID3D12Resource*,3> outputs{};
+    for(UINT i=0;i<3;++i){output[i]=create_source_texture(fixture,width,height);outputs[i]=output[i].Get();}
+    auto pa=translated_motion_pattern(width,height,{0,0}),pb=pa;
+    for(UINT eye=0;eye<2;++eye)for(std::size_t j=0;j<pa[eye].size();++j){
+        pa[eye][j]=j%4==3?255:40+eye*10;pb[eye][j]=j%4==3?255:200-eye*10;
+    }
+    upload_pattern(fixture,a.Get(),pa);upload_pattern(fixture,b.Get(),pb);
+    std::array<ID3D12Resource*,2> inputs{a.Get(),b.Get()},reals{real[0].Get(),real[1].Get()};
+    auto history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+    require_hresult(history->initialize(fixture.device(),fixture.queue(),inputs,D3D12_RESOURCE_STATE_RENDER_TARGET),"RIFE multi history");
+    ComPtr<ID3D12CommandQueue> queue;
+    D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+    require_hresult(fixture.device()->CreateCommandQueue(&desc,IID_PPV_ARGS(&queue)),"RIFE multi queue");
+    xrfg::D3D12NvidiaOpticalFlowOptions options{};options.rife_model=model;options.rife_multiplier=factor;
+    options.rife_async=asynchronous;options.input_scale=grid;
+    xrfg::D3D12FrameSynthesizer synth;
+    require_hresult(synth.initialize(fixture.device(),asynchronous?queue.Get():fixture.queue(),history,reals,outputs,kFormat,
+        D3D12_RESOURCE_STATE_RENDER_TARGET,xrfg::D3D12OpticalFlowBackend::nvidia,options,true),"RIFE multi init");
+    const auto views=make_reprojection_views();xrfg::D3D12HistoryCaptureTicket ca{},cb{};
+    xrfg::D3D12FrameSynthesisTicket prime{},pair{};
+    require_hresult(history->capture(0,&ca),"RIFE multi A");require_hresult(history->commit(ca),"RIFE multi commit A");
+    require_hresult(synth.submit_prime(ca,views,0,&prime),"RIFE multi prime");require_frame_start_gate(synth,"RIFE multi prime done");
+    require_hresult(history->capture(1,&cb),"RIFE multi B");require_hresult(history->commit(cb),"RIFE multi commit B");
+    xrfg::D3D12ExtraSynthetic extra{1,2.F/factor,views,factor==4?2U:UINT32_MAX,3.F/factor,views};
+    auto aliased=extra;aliased.third_destination_index=1;
+    require(synth.submit_pair(cb,views,views,0,1,&pair,{}, {},false,1.F/factor,{},aliased)==E_INVALIDARG,"RIFE aliased third output accepted");
+    require_hresult(synth.submit_pair(cb,views,views,0,1,&pair,{}, {},false,1.F/factor,{},extra),"RIFE multi pair");
+    require_hresult(synth.wait_for_previous_submission(30000),"RIFE multi completion");
+    require(readback_pattern(fixture,reals[1],D3D12_RESOURCE_STATE_RENDER_TARGET)==pb,"RIFE multi real B changed");
+    std::vector<StereoPattern> generated;
+    for(unsigned i=0;i<factor-1;++i){
+        generated.push_back(readback_pattern(fixture,outputs[i],D3D12_RESOURCE_STATE_RENDER_TARGET));
+        if(asynchronous)require(pair.native_result && pair.native_result->generated(i),"RIFE multi missing output receipt");
+        if(i){
+            require(generated[i]!=generated[i-1],"RIFE intermediate fractions returned duplicate images");
+            const auto center=(height/2*width+width/2)*4;
+            require(generated[i][0][center]>generated[i-1][0][center],"RIFE controlled fade temporal order reversed");
+        }
+    }
+    xrfg::D3D12NvidiaGpuTiming timing{};
+    require(synth.consume_nvidia_gpu_timing(&timing)==S_OK && timing.total_microseconds>0,"RIFE multi whole batch GPU timing");
+    std::cout<<"RIFE_MULTI model="<<model<<" factor="<<factor<<" async="<<asynchronous<<" total_us="<<timing.total_microseconds<<" values=";
+    for(const auto& image:generated)std::cout<<unsigned(image[0][(height/2*width+width/2)*4])<<',';
+    std::cout<<std::endl;
+    require_frame_start_gate(synth,"RIFE multi repeat gate");
+    require_hresult(synth.submit_pair(cb,views,views,0,0,&pair,{}, {},false,1.F/factor,{},extra),"RIFE multi repeat");
+    require_hresult(synth.wait_for_previous_submission(30000),"RIFE multi repeat done");
+    for(unsigned i=0;i<factor-1;++i)require(readback_pattern(fixture,outputs[i],D3D12_RESOURCE_STATE_RENDER_TARGET)==pb,"RIFE repeated multi output invalid");
+    require_hresult(synth.reconfigure(xrfg::D3D12OpticalFlowBackend::nvidia,options,xrfg::D3D12FrameGenerationMode::ofxr),"RIFE multi reconfigure");
+    fixture.require_no_debug_errors();
+}
+
 // Deliberately queue two frames while their producer is blocked. Their camera,
 // images and completion receipts must remain independent after the API returns.
 void test_rife_pipeline(D3D12WarpFixture& fixture,bool refusal=false) {
@@ -5698,7 +5756,7 @@ void test_rife_pipeline(D3D12WarpFixture& fixture,bool refusal=false) {
     std::thread release([gate]{std::this_thread::sleep_for(std::chrono::milliseconds(500));gate->Signal(1);});
     const auto start=std::chrono::steady_clock::now();
     HRESULT result=history->capture(1,&b);if(SUCCEEDED(result))result=history->commit(b);
-    if(SUCCEEDED(result))result=synth->submit_pair(b,views,views,0,1,&one);
+    if(SUCCEEDED(result))result=synth->submit_pair(b,views,views,0,1,&one,{}, {},false,refusal?.25F:.5F,{},refusal?std::optional<xrfg::D3D12ExtraSynthetic>{{1,.5F,views,2,.75F,views}}:std::nullopt);
     if(!refusal && SUCCEEDED(result)){
         result=history->capture(2,&c);if(SUCCEEDED(result))result=history->commit(c);
         if(SUCCEEDED(result))result=synth->submit_pair(c,views,views,1,2,&two);
@@ -5717,6 +5775,8 @@ void test_rife_pipeline(D3D12WarpFixture& fixture,bool refusal=false) {
     if(refusal){
         require(one.native_result && one.native_result->resolve()==0,"RIFE failed inference counted as generation");
         require(first_generated==first,"RIFE worker refusal did not provide valid fallback colour");
+        require(one.native_result->outputs==3,"RIFE failed batch lost output count");
+        for(unsigned i=1;i<3;++i)require(readback_pattern(fixture,outputs[i],D3D12_RESOURCE_STATE_RENDER_TARGET)==first,"RIFE failed batch left an output uninitialized");
     }else{
         require(one.native_result->resolve()==1 && two.native_result->resolve()==1,"RIFE queued content decisions crossed");
         require(readback_pattern(fixture,reals[2],D3D12_RESOURCE_STATE_RENDER_TARGET)==last,"RIFE next job replaced earlier real");
@@ -5821,6 +5881,15 @@ int main(int argc, char** argv) {
             for(int model:{2,3,4})for(auto scale:{xrfg::D3D12NvidiaInputScale::quarter,xrfg::D3D12NvidiaInputScale::fifth})
                 test_rife_stereo(fixture,model,3700,3400,scale,true);
             fixture.require_no_debug_errors();return 0;
+        }
+        if(argc>1 && std::string_view(argv[1])=="rife-multi-headset") {
+            D3D12WarpFixture fixture(true);for(unsigned factor:{3U,4U})test_rife_multiframe(fixture,3,factor,true,3700,3400);return 0;
+        }
+        if(argc>1 && std::string_view(argv[1])=="rife-multi") {
+            D3D12WarpFixture fixture(true);
+            for(int model:{2,3,4})for(unsigned factor:{3U,4U})for(bool async:{false,true})test_rife_multiframe(fixture,model,factor,async);
+            test_rife_multiframe(fixture,3,4,true,512,256,xrfg::D3D12NvidiaInputScale::third);
+            return 0;
         }
         if(argc>1 && std::string_view(argv[1])=="rife-refusal") {
             D3D12WarpFixture fixture(true);test_rife_pipeline(fixture,true);return 0;

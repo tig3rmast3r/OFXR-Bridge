@@ -501,7 +501,10 @@ ConfiguredNvidiaOptions read_nvidia_options(
             L"nvidia_input_scale",
             50,
             ini_path.c_str());
-        options.input_scale = input_scale == 75
+        wchar_t fraction[16]{};GetPrivateProfileStringW(L"ofxr",L"nvidia_input_scale",L"50",fraction,16,ini_path.c_str());
+        options.input_scale = wcscmp(fraction,L"1/6")==0 ? ConfiguredNvidiaInputScale::sixth
+            : wcscmp(fraction,L"1/3")==0 ? ConfiguredNvidiaInputScale::third
+            : input_scale == 75
             ? ConfiguredNvidiaInputScale::three_quarter
             : input_scale == 50
                 ? ConfiguredNvidiaInputScale::half

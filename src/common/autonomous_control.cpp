@@ -80,7 +80,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 79101;
+constexpr std::uint32_t kAbi = 79201;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -321,7 +321,7 @@ Settings sanitize(Settings value) noexcept {
     // queue/history policy: benchmark and manual/INI/IPC selection must agree.
     if (value.frame_generation == 2) value.backend = 0;
     value.preset = std::clamp(value.preset, 0, 2);
-    value.scale = std::clamp(value.scale, 0, value.frame_generation==4?4:3);
+    value.scale = std::clamp(value.scale, 0, value.frame_generation==4?6:3);
     value.separate_synthesis = std::clamp(value.separate_synthesis, 0, 1);
     value.lower_vram = std::clamp(value.lower_vram, 0, 1);
     value.separate_synthesis = value.lower_vram;
@@ -356,8 +356,9 @@ Settings sanitize(Settings value) noexcept {
     // FSR and DLSS-G require engine guides. No optical-flow substitution is
     // silently offered for a guide-only generation backend.
     if (value.frame_generation > 0 && value.frame_generation < 4) value.motion_vectors = 1;
+    value.rife_multiplier=std::clamp(value.rife_multiplier,2,4);
     value.rife_model=std::clamp(value.rife_model,2,4); // retired Lite choices migrate to 4.6
-    if(value.frame_generation==4){value.backend=2;value.motion_vectors=0;value.triple_frame_gen=false;value.backward=false;}
+    if(value.frame_generation==4){if(value.scale==1)value.scale=0;value.backend=2;value.motion_vectors=0;value.triple_frame_gen=false;value.backward=false;}
     // Legacy profiles only know the selected route. Keep its explicit values;
     // unseen routes start from their own defaults, never from another menu.
     if (!value.profiles_initialized) {
@@ -369,7 +370,7 @@ Settings sanitize(Settings value) noexcept {
     for (std::size_t i = 0; i < value.generation_profiles.size(); ++i) {
         auto& p = value.generation_profiles[i];
         p.motion_vectors = i == 7 ? 0 : i >= 4 ? 1 : std::clamp(p.motion_vectors, 0, 1);
-        p.preset = std::clamp(p.preset, 0, 2); p.scale = std::clamp(p.scale, 0, i==7?4:3);
+        p.preset = std::clamp(p.preset, 0, 2); p.scale = std::clamp(p.scale, 0, i==7?6:3);
         p.separate_synthesis = std::clamp(p.separate_synthesis, 0, 1);
         p.lower_vram = std::clamp(p.lower_vram, 0, 1);
         p.separate_synthesis = p.lower_vram;
@@ -430,7 +431,7 @@ Settings parse_settings(std::string_view text) {
         if(key=="single_director") legacy_single_director=number!=0;
 #define READ_FIELD(name) if (key == #name) value.name = static_cast<decltype(value.name)>(number);
         READ_FIELD(increase_buffer) READ_FIELD(enabled) READ_FIELD(afw_only) READ_FIELD(backend) READ_FIELD(motion_vectors)
-        READ_FIELD(frame_generation) READ_FIELD(rife_model) READ_FIELD(hybrid_backend) READ_FIELD(preset) READ_FIELD(scale)
+        READ_FIELD(frame_generation) READ_FIELD(rife_multiplier) READ_FIELD(rife_model) READ_FIELD(hybrid_backend) READ_FIELD(preset) READ_FIELD(scale)
         READ_FIELD(pacing_mode) READ_FIELD(backward) READ_FIELD(separate_synthesis) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
         READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(r19_camera)
         READ_FIELD(afw_mode) READ_FIELD(afw_debug) READ_FIELD(afw_clear_before_warping)
@@ -468,7 +469,7 @@ std::string serialize_settings(const Settings& settings) {
     output << "[ofxr]\nAdvancedMode=" << value.advanced_mode << '\n' << std::setprecision(9);
 #define WRITE_FIELD(name) output << #name << '=' << value.name << '\n';
     WRITE_FIELD(increase_buffer) WRITE_FIELD(enabled) WRITE_FIELD(afw_only) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
-    WRITE_FIELD(frame_generation) WRITE_FIELD(rife_model) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
+    WRITE_FIELD(frame_generation) WRITE_FIELD(rife_multiplier) WRITE_FIELD(rife_model) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
     WRITE_FIELD(pacing_mode) WRITE_FIELD(backward) WRITE_FIELD(separate_synthesis) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
     WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(r19_camera)
     WRITE_FIELD(afw_mode) WRITE_FIELD(afw_debug) WRITE_FIELD(afw_clear_before_warping)
@@ -656,7 +657,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
 #undef MERGE_PROFILE
     }
 #define MERGE_FIELD(name) if (base.name != desired.name) current.name = desired.name;
-    MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(rife_model) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
+    MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(rife_multiplier) MERGE_FIELD(rife_model) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
     MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
     MERGE_FIELD(luke_osr) MERGE_FIELD(luke_osr_cover) MERGE_FIELD(luke_osr_trim) MERGE_FIELD(luke_osr_fill) MERGE_FIELD(luke_advanced)
@@ -773,7 +774,7 @@ void csv_mib(std::ostream& stream,bool valid,std::uint64_t bytes) {
     else stream<<"N/A";
 }
 bool same_trial(const Settings& a,const Settings& b) {
-    return a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation && a.rife_model==b.rife_model &&
+    return a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation && a.rife_model==b.rife_model && a.rife_multiplier==b.rife_multiplier &&
         a.triple_frame_gen==b.triple_frame_gen && a.prefer_fps==b.prefer_fps &&
         a.separate_synthesis==b.separate_synthesis && a.lower_vram==b.lower_vram &&
         a.afw_mode==b.afw_mode && (!a.afw_mode || a.afw_shading_rate==b.afw_shading_rate);

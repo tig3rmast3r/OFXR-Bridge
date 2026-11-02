@@ -123,6 +123,8 @@ struct NvidiaInputScaleRatio {
         return {1U, 2U};
     case D3D12NvidiaInputScale::quarter:
         return {1U, 4U};
+    case D3D12NvidiaInputScale::sixth: return {1U,6U};
+    case D3D12NvidiaInputScale::third: return {1U,3U};
     case D3D12NvidiaInputScale::fifth:
         return {1U, 5U};
     case D3D12NvidiaInputScale::full:
@@ -982,10 +984,13 @@ struct D3D12FrameSynthesizer::Impl {
 
     std::unique_ptr<D3D12Rife> rife;
     struct RifePair {
-        ComPtr<ID3D12Resource> a,b,out;
-        std::array<D3D12ReprojectionView,2> av{},bv{},tv{};
-        std::array<std::array<float,4>,2> ar{},br{};
-        UINT count{};bool pending{};
+        ComPtr<ID3D12Resource> a,b;
+        std::array<ComPtr<ID3D12Resource>,3> out;
+        std::array<D3D12ReprojectionView,2> av{},bv{};
+        std::array<std::array<D3D12ReprojectionView,2>,3> tv{};
+        std::array<std::array<std::array<float,4>,2>,3> ar{},br{};
+        std::array<float,3> fractions{};
+        UINT count{},outputs{1};bool pending{};
     } rife_pair;
     struct RifeWork {
         RifePair pair;
@@ -1087,17 +1092,17 @@ struct D3D12FrameSynthesizer::Impl {
     // rate; away from that the synthetic belongs somewhere else between them.
     float synthetic_fraction{0.5F};
     std::optional<D3D12ExtraSynthetic> extra_output;
-    UINT synthetic_output_count() const noexcept { return extra_output ? 2U : 1U; }
+    UINT synthetic_output_count() const noexcept { return extra_output ? (extra_output->third_destination_index!=UINT32_MAX?3U:2U) : 1U; }
     UINT synthetic_output_destination(UINT output, UINT first) const noexcept {
-        return output ? extra_output->destination_index : first;
+        return output==2?extra_output->third_destination_index : output ? extra_output->destination_index : first;
     }
     // Each synthetic output's target camera, per view, as the rotation from
     // it into the current capture's camera; set by every submit_pair beside
     // the fractions. An output whose camera is B's in every view is drawn
     // exactly as before, without the flag.
-    std::array<std::array<std::array<float, 4>, kMaxReprojectionViews>, 2>
+    std::array<std::array<std::array<float, 4>, kMaxReprojectionViews>, 3>
         synthetic_camera_rotations{};
-    std::array<bool, 2> synthetic_camera_turned{};
+    std::array<bool, 3> synthetic_camera_turned{};
     bool synthetic_camera_requested{}, fsr_pair_in_target_camera{};
 
     // Sets one composition draw's synthetic camera: the flag, and the rotation
@@ -1121,7 +1126,7 @@ struct D3D12FrameSynthesizer::Impl {
     }
 
     float synthetic_output_fraction(UINT output) const noexcept {
-        return output ? extra_output->interpolation_fraction : synthetic_fraction;
+        return output==2?extra_output->third_fraction : output ? extra_output->interpolation_fraction : synthetic_fraction;
     }
     // The work slot whose current copy has been recorded and closed but not
     // yet submitted, and the fence value that submission will signal. The
@@ -2699,9 +2704,9 @@ struct D3D12FrameSynthesizer::Impl {
         if(nvidia_options.rife_model>=0){
             if(generation_mode!=D3D12FrameGenerationMode::ofxr)return E_INVALIDARG;
             rife=std::make_unique<D3D12Rife>();
-            constexpr float scales[]{1.F,.75F,.5F,.25F,.20F};
+            constexpr float scales[]{1.F,.75F,.5F,.25F,.20F,1.F/6.F,1.F/3.F};
             result=rife->initialize(device.Get(),queue.Get(),view_format,nvidia_options.rife_model,
-                scales[std::clamp(static_cast<int>(nvidia_options.input_scale),0,4)]);
+                scales[std::clamp(static_cast<int>(nvidia_options.input_scale),0,6)]);
             if(FAILED(result))return result;
         }
         if(rife && nvidia_options.rife_async)rife_thread=std::thread([this]{run_rife_work();});
@@ -2751,6 +2756,9 @@ struct D3D12FrameSynthesizer::Impl {
             return status;
         }
 
+        if(rife && slot.rife_result && slot.rife_result->resolve()==0){
+            slot.timing_pending=false;return S_FALSE; // fallback is not a completed inference span
+        }
         const SIZE_T byte_begin =
             static_cast<SIZE_T>(slot.timing_query_base) *
             sizeof(std::uint64_t);
@@ -4902,19 +4910,24 @@ struct D3D12FrameSynthesizer::Impl {
         if (used_game_motion == nullptr) return E_POINTER;
         *used_game_motion = false;
         if(rife){
-            if(extra_output || target_views.size()!=current_source.view_count || previous_source.view_count!=current_source.view_count)return E_INVALIDARG;
+            if(target_views.size()!=current_source.view_count || previous_source.view_count!=current_source.view_count)return E_INVALIDARG;
             slot.timing_metadata={};slot.timing_metadata.previous_serial=previous_source.ticket.serial;
-            slot.timing_metadata.current_serial=current_source.ticket.serial;
-            // The portable worker gives one aggregate inference interval for
-            // both sequential eyes, not a fictitious split into two GPU spans.
-            slot.timing_metadata.eye_count=1;
+            slot.timing_metadata.current_serial=current_source.ticket.serial;slot.timing_metadata.eye_count=1;
             rife_pair={};rife_pair.a=previous_source.resource;rife_pair.b=current_source.resource;
-            rife_pair.out=synthetic_destinations[synthetic_destination_index].resource;
-            rife_pair.count=current_source.view_count;
+            rife_pair.count=current_source.view_count;rife_pair.outputs=synthetic_output_count();
             for(UINT eye=0;eye<rife_pair.count;++eye){
-                rife_pair.av[eye]=previous_source.views[eye];rife_pair.bv[eye]=current_source.views[eye];rife_pair.tv[eye]=target_views[eye];
-                rife_pair.ar[eye]=target_to_current_rotation(previous_source.views[eye],target_views[eye]);
-                rife_pair.br[eye]=target_to_current_rotation(current_source.views[eye],target_views[eye]);
+                rife_pair.av[eye]=previous_source.views[eye];rife_pair.bv[eye]=current_source.views[eye];
+            }
+            for(UINT output=0;output<rife_pair.outputs;++output){
+                rife_pair.out[output]=synthetic_destinations[synthetic_output_destination(output,synthetic_destination_index)].resource;
+                rife_pair.fractions[output]=synthetic_output_fraction(output);
+                const auto targets=output==0?target_views:output==1?extra_output->target_views:extra_output->third_views;
+                for(UINT eye=0;eye<rife_pair.count;++eye){
+                    const auto& view=targets.empty()?current_source.views[eye]:targets[eye];
+                    rife_pair.tv[output][eye]=view;
+                    rife_pair.ar[output][eye]=target_to_current_rotation(previous_source.views[eye],view);
+                    rife_pair.br[output][eye]=target_to_current_rotation(current_source.views[eye],view);
+                }
             }
             auto* source=current_source.resource.Get();auto* destination=current_destinations[current_destination_index].resource.Get();
             const std::array before{transition_barrier(source,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE),transition_barrier(destination,release_state,D3D12_RESOURCE_STATE_COPY_DEST)};
@@ -5543,6 +5556,16 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
+    HRESULT generate_rife_batch(RifePair& p,UINT base) noexcept {
+        for(UINT output=0;output<p.outputs;++output){
+            const auto result=rife->generate(p.a.Get(),p.b.Get(),p.out[output].Get(),
+                {p.av.data(),p.count},{p.bv.data(),p.count},{p.tv[output].data(),p.count},
+                {p.ar[output].data(),p.count},{p.br[output].data(),p.count},release_state,p.fractions[output],
+                {nvidia_gpu_timing_enabled?nvidia_timestamp_heap.Get():nullptr,nvidia_timestamp_readback.Get(),base,output==0,output+1==p.outputs});
+            if(FAILED(result))return result;
+        }
+        return S_OK;
+    }
     void stop_rife_work() noexcept {
         {std::scoped_lock lock(rife_work_mutex);rife_stopping=true;}
         rife_work_changed.notify_all();
@@ -5565,11 +5588,7 @@ struct D3D12FrameSynthesizer::Impl {
             if(SUCCEEDED(result) && job.pair.pending){
                 result=rife_error.load(std::memory_order_acquire);
                 if(SUCCEEDED(result)){
-                    auto& p=job.pair;const auto count=p.count;
-                    result=rife->generate(p.a.Get(),p.b.Get(),p.out.Get(),
-                        {p.av.data(),count},{p.bv.data(),count},{p.tv.data(),count},
-                        {p.ar.data(),count},{p.br.data(),count},release_state,job.fraction,
-                        {nvidia_gpu_timing_enabled?nvidia_timestamp_heap.Get():nullptr,nvidia_timestamp_readback.Get(),job.timing_base});
+                    result=generate_rife_batch(job.pair,job.timing_base);
                 }
             }
             const auto generated=result;
@@ -5585,7 +5604,7 @@ struct D3D12FrameSynthesizer::Impl {
                 ID3D12CommandList* lists[]{selected};queue->ExecuteCommandLists(1,lists);
                 two_frame_capture_submission(queue.Get(),1,lists);
                 if(job.copy){ID3D12CommandList* copies[]{job.copy.Get()};queue->ExecuteCommandLists(1,copies);}
-                job.result->mask.store(SUCCEEDED(generated)?1U:0U,std::memory_order_release);
+                job.result->mask.store(SUCCEEDED(generated)?((1U<<job.result->outputs)-1U):0U,std::memory_order_release);
                 result=queue->Signal(fence.Get(),job.value);
                 if(FAILED(result))rife_error.store(result,std::memory_order_release);
             }else{
@@ -5608,7 +5627,7 @@ struct D3D12FrameSynthesizer::Impl {
             job.commands=slot.command_list;
             if(copy)job.copy=slot.current_copy_command_list;
             if(job.pair.pending)job.fallback=slot.rife_fallback_list;
-            job.result=std::make_shared<D3D12NativeFrameResult>();job.result->outputs=1;
+            job.result=std::make_shared<D3D12NativeFrameResult>();job.result->outputs=job.pair.pending?job.pair.outputs:synthetic_output_count();
             job.value=next_fence_value;job.serial=next->active()?next->ticket.serial:previous.ticket.serial;
             job.fraction=synthetic_fraction;job.timing_base=slot.timing_query_base;
             std::unique_lock lock(rife_work_mutex);
@@ -5650,10 +5669,7 @@ struct D3D12FrameSynthesizer::Impl {
         const bool rife_generated=rife_pair.pending;
         if(rife && !nvidia_options.rife_async && rife_pair.pending){
             rife_pair.pending=false;
-            auto& p=rife_pair;const auto count=p.count;
-            const auto generated=rife->generate(p.a.Get(),p.b.Get(),p.out.Get(),
-                {p.av.data(),count},{p.bv.data(),count},{p.tv.data(),count},{p.ar.data(),count},{p.br.data(),count},release_state,synthetic_fraction,
-                {nvidia_gpu_timing_enabled?nvidia_timestamp_heap.Get():nullptr,nvidia_timestamp_readback.Get(),slot.timing_query_base});
+            auto& p=rife_pair;const auto generated=generate_rife_batch(p,slot.timing_query_base);
             p={};
             if(FAILED(generated)){
                 // A failed native signal is not proof that the pack stopped
@@ -6299,6 +6315,17 @@ struct D3D12FrameSynthesizer::Impl {
                 !std::isfinite(extra_synthetic->interpolation_fraction) ||
                 extra_synthetic->interpolation_fraction <= 0.05F ||
                 extra_synthetic->interpolation_fraction >= 0.95F) return E_INVALIDARG;
+            if(extra_synthetic->third_destination_index!=UINT32_MAX){
+                if(!rife || extra_synthetic->third_destination_index>=synthetic_destinations.size() ||
+                    extra_synthetic->third_destination_index==synthetic_destination_index ||
+                    extra_synthetic->third_destination_index==extra_synthetic->destination_index ||
+                    !std::isfinite(extra_synthetic->third_fraction) || extra_synthetic->third_fraction<=extra_synthetic->interpolation_fraction ||
+                    extra_synthetic->third_fraction>=.95F)return E_INVALIDARG;
+                if(!extra_synthetic->third_views.empty() && (!valid_view_layout(extra_synthetic->third_views,
+                    static_cast<UINT>(image_description.Width),image_description.Height,image_description.DepthOrArraySize) ||
+                    extra_synthetic->third_views.size()!=current_source_views.size() || !same_view_layout(current_source_views,extra_synthetic->third_views,image_description.DepthOrArraySize)))return E_INVALIDARG;
+            }
+            if(rife && extra_synthetic->interpolation_fraction<=synthetic_fraction)return E_INVALIDARG;
             extra_output = extra_synthetic;
             if (!extra_synthetic->target_views.empty()) extra_target_views = extra_synthetic->target_views;
         }
@@ -6363,9 +6390,10 @@ struct D3D12FrameSynthesizer::Impl {
                 image_description.DepthOrArraySize)) {
             return E_INVALIDARG;
         }
-        const std::array<std::span<const D3D12ReprojectionView>, 2> output_target_views{
+        const std::array<std::span<const D3D12ReprojectionView>, 3> output_target_views{
             synthetic_target_views,
             extra_target_views,
+            extra_output && !extra_output->third_views.empty()?extra_output->third_views:current_source_views,
         };
         for (std::size_t view_index = 0;
              view_index < current_source_views.size();
@@ -6452,8 +6480,8 @@ struct D3D12FrameSynthesizer::Impl {
         }
         ID3D12Resource* const extra_destination = extra_output
             ? synthetic_destinations[extra_output->destination_index].resource.Get() : nullptr;
-        if (extra_output) {
-            result = destination_available(synthetic_destinations[extra_output->destination_index]);
+        for(UINT out=1;out<synthetic_output_count();++out) {
+            result = destination_available(synthetic_destinations[synthetic_output_destination(out,synthetic_destination_index)]);
             if (FAILED(result)) return result;
         }
         std::uint32_t work_slot_index = 0;
@@ -6515,7 +6543,7 @@ struct D3D12FrameSynthesizer::Impl {
             previous.last_use_fence_value = fence_value;
             current_destinations[current_destination_index].fence_value = fence_value;
             synthetic_destinations[synthetic_destination_index].fence_value = fence_value;
-            if (extra_output) synthetic_destinations[extra_output->destination_index].fence_value = fence_value;
+            for(UINT out=1;out<synthetic_output_count();++out)synthetic_destinations[synthetic_output_destination(out,synthetic_destination_index)].fence_value=fence_value;
             next_work_slot = (work_slot_index + 1U) %
                 static_cast<std::uint32_t>(work_slots.size());
 
@@ -6715,7 +6743,7 @@ struct D3D12FrameSynthesizer::Impl {
         fsr_stale_guide_gap = false;
         current_destinations[current_destination_index].fence_value = fence_value;
         synthetic_destinations[synthetic_destination_index].fence_value = fence_value;
-            if (extra_output) synthetic_destinations[extra_output->destination_index].fence_value = fence_value;
+            for(UINT out=1;out<synthetic_output_count();++out)synthetic_destinations[synthetic_output_destination(out,synthetic_destination_index)].fence_value=fence_value;
         next_work_slot = (work_slot_index + 1U) %
             static_cast<std::uint32_t>(work_slots.size());
 

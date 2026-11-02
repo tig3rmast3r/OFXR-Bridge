@@ -2367,13 +2367,54 @@ void gta_flat_scene_test() {
     std::cout<<"GTA flat scene: full application BOTH-eye quad despite erased CRC, no staging read or fake FPS; normal status resumes PASS\n";
 }
 #include "quarantine_history_recovery_test.inc"
+
+void test_rife_layer_multiframe_contract() {
+    auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
+    state->dispatch=std::make_shared<Dispatch>();state->dispatch->steamvr_runtime=true;
+    state->private_runtime=std::make_shared<xrfg::PrivateOpenXrRuntime>(xrfg::PrivateOpenXrRuntime::Options{});
+    state->graphics_binding=SessionGraphicsBinding::d3d12;state->menu_enabled=true;
+    state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::nvidia;state->nvidia_new_route=true;
+    state->nvidia_options.rife_model=3;state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::ofxr;
+    state->three_slot_director=true;
+    for(int multiplier:{2,3,4})for(int fast:{0,1}){
+        state->nvidia_options.rife_multiplier=multiplier;state->lower_vram=fast;state->separate_synthesis=fast;
+        check(rife_multiframe_capable(*state),"native private RIFE capability");
+        check(native_frame_multiplier(*state)==multiplier,"RIFE factor lost in layer policy");
+        check(multiplier==2 || (native_synthetic_rings(*state)==multiplier-1 && native_current_rings(*state)==2),"RIFE output storage aliases or overallocates");
+        if(multiplier>2)check(three_slot_generation_session(state),"RIFE multi missing ordered worker");
+        check(djules_application_period(*state,11111111)==multiplier*11111111LL,"RIFE advertised game period");
+        for(unsigned i=0;i<unsigned(multiplier-1);++i)
+            check(std::abs(synthetic_interpolation_fraction(state,{},ProjectionSnapshot{},i)-float(i+1)/multiplier)<.00001F,"RIFE intermediate time order");
+    }
+    auto receipt=std::make_shared<xrfg::D3D12NativeFrameResult>();receipt->outputs=3;receipt->mask=7;
+    PreparedProjectionFrame prepared;prepared.resources.emplace_back();auto& g=prepared.resources.back().generation;
+    g.native_result=receipt;g.direct_synthetic_lease=std::make_shared<DirectSyntheticLease>();
+    g.direct_extra_lease=std::make_shared<DirectSyntheticLease>();g.direct_third_lease=std::make_shared<DirectSyntheticLease>();
+    GeneratedFrameEndInfo real,first,second,third;
+    attach_djules_outputs(prepared,real,&first,&second,&third);
+    check(first.native_output==0 && second.native_output==1 && third.native_output==2,"RIFE meter output indices crossed");
+    for(auto* frame:{&first,&second,&third})check(frame->native_results.size()==1 &&
+        frame->native_results[0]->generated(frame->native_output) && frame->direct_synthetic_leases.size()==1,"RIFE native receipts or image leases lost");
+    state->nvidia_options.rife_model=-1;state->djules_route=false;state->djules_triple_requested=false;
+    check(native_frame_multiplier(*state)==2,"RIFE factor leaked to ordinary OFXR");
+    state->nvidia_options.rife_model=3;state->private_runtime.reset();
+    check(!rife_multiframe_capable(*state),"legacy interop incorrectly claims RIFE multi support");
+    std::cout<<"RIFE layer:2X/3X/4X clocks, Fast on/off pools and all three delivery receipts PASS\n";
+}
+
 int main(int argc, char** argv) {
     if(argc>1 && std::string_view(argv[1])=="quarantine-history-recovery") {
         try {quarantine_history_recovery_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
     }
+
+    if(argc>1 && std::string_view(argv[1])=="rife-layer-multi") {
+        try {test_rife_layer_multiframe_contract();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="gta-flat-scene") {
-        try {xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
+        try {
+xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
     }
     if(argc>1 && std::string_view(argv[1])=="luke-queue-policy") {

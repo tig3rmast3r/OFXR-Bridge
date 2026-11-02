@@ -159,7 +159,8 @@ enum class D3D12OpticalFlowInputScale {
     three_quarter,
     half,
     quarter, // optional quarter flow; also used by Hybrid
-    fifth, // RIFE motion-inference grid, 20% per axis
+    sixth = 5, third = 6, // RIFE-only exact unit fractions
+    fifth = 4, // RIFE motion-inference grid, 20% per axis
 };
 
 // The name the NVIDIA options and the tray settings already use.
@@ -181,6 +182,7 @@ struct D3D12NvidiaOpticalFlowOptions {
     std::uint32_t native_scale{100};
     bool hybrid{}; // explicit optional Hybrid route only
     int rife_model{-1}; // experimental Python/CUDA generator, no OFA/engine guides
+    int rife_multiplier{2};
     bool rife_async{}; // dedicated producer/consumer queues only; owned FIFO work
 };
 
@@ -215,6 +217,9 @@ struct D3D12ExtraSynthetic {
     std::uint32_t destination_index{};
     float interpolation_fraction{0.5F};
     std::span<const D3D12ReprojectionView> target_views{};
+    std::uint32_t third_destination_index{UINT32_MAX};
+    float third_fraction{.75F};
+    std::span<const D3D12ReprojectionView> third_views{};
 };
 
 class D3D12FrameSynthesizer final {

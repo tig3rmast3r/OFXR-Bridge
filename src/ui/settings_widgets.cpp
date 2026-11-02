@@ -218,8 +218,14 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     } else if (draft.frame_generation==4) {
         int model=draft.rife_model-2;
         if(ImGui::Combo("RIFE model", &model,"4.6\0" "4.4\0" "4.3\0")){draft.rife_model=model+2;changed=true;}
-        changed |= ImGui::Combo("Motion inference resolution", &draft.scale,"100%\0" "75%\0" "50%\0" "25%\0" "20%\0");
-        ImGui::TextWrapped("Experimental portable Python/CUDA. One model, sequential eyes. Motion and blending are estimated at the selected resolution; original full-resolution colours are warped at output. Lower inference resolution reduces motion/occlusion precision. Requires the shared RIFE runtime. 2X only.");
+        int multiplier=draft.rife_multiplier-2;
+        if(ImGui::Combo("RIFE multiplier",&multiplier,"2X\0" "3X\0" "4X\0")){draft.rife_multiplier=multiplier+2;changed=true;}
+        constexpr int fractions[]{0,2,6,3,4,5};
+        int fraction=3;
+        for(int i=0;i<6;++i)if(draft.scale==fractions[i])fraction=i;
+        if(ImGui::Combo("Motion inference resolution",&fraction,"1/1\0" "1/2\0" "1/3\0" "1/4\0" "1/5\0" "1/6\0")){draft.scale=fractions[fraction];changed=true;}
+        ImGui::TextWrapped("3X/4X require the private native D3D12 route. Additional intermediates increase GPU work, memory use and latency.");
+        ImGui::TextWrapped("Experimental portable Python/CUDA. One model, sequential eyes. Motion and blending are estimated at the selected resolution; original full-resolution colours are warped at output. Lower inference resolution reduces motion/occlusion precision. Requires the shared RIFE runtime.");
     } else if (draft.frame_generation==3) {
         ImGui::TextWrapped("Game motion vectors + FidelityFX optical flow (25% per axis). If game guides are unavailable or rejected, uses FidelityFX optical flow.");
     } else {

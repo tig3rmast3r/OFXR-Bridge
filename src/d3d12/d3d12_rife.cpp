@@ -321,7 +321,7 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
         const UINT w=std::max(32U,static_cast<UINT>(std::ceil(roi.width*p.scale))),h=std::max(32U,static_cast<UINT>(std::ceil(roi.height*p.scale)));
         p.size(w,h,static_cast<UINT>(av.size()));
         const auto mark=[&](UINT query){if(timing.queries)p.commands->EndQuery(timing.queries,D3D12_QUERY_TYPE_TIMESTAMP,timing.base+query);};
-        p.begin();mark(0);mark(5);
+        p.begin();if(timing.first){mark(0);mark(5);}
         // The validated target layout is disjoint. A complete union needs no
         // preliminary B copy; cropped/packed subrects preserve B outside it.
         std::uint64_t covered=0;
@@ -353,7 +353,7 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
             before=barrier(resource,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);input=barrier(p.buffers[source_index].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
             p.commands->ResourceBarrier(1,&before);p.commands->ResourceBarrier(1,&input);
         }
-        mark(1);p.execute();
+        if(timing.first)mark(1);p.execute();
         check(p.worker->request("{\"op\":\"infer\",\"id\":"+std::to_string(p.id)+",\"model\":"+std::to_string(p.model)+",\"fraction\":"+std::to_string(fraction)+"}"));
         // Restore full-resolution A/B descriptors after both reduced-input
         // packs have retired. Only flow/mask planes return from Python.
@@ -363,7 +363,7 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
             srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.Texture2DArray.MipLevels=1;srv.Texture2DArray.ArraySize=description.DepthOrArraySize;
             p.device->CreateShaderResourceView(resource,&srv,p.cpu(12+source_index));
         }
-        p.begin();mark(2);mark(3);
+        p.begin();if(timing.last){mark(2);mark(3);}
         auto output=barrier(out,output_state,D3D12_RESOURCE_STATE_RENDER_TARGET);auto result=barrier(p.buffers[2].Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         auto alpha=barrier(b,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);p.commands->ResourceBarrier(1,&alpha);
         auto peer=barrier(a,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);p.commands->ResourceBarrier(1,&peer);
@@ -386,8 +386,8 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
         alpha=barrier(b,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);p.commands->ResourceBarrier(1,&alpha);
         peer=barrier(a,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);p.commands->ResourceBarrier(1,&peer);
         if(output_state!=D3D12_RESOURCE_STATE_RENDER_TARGET)p.commands->ResourceBarrier(1,&output);
-        p.commands->ResourceBarrier(1,&result);mark(4);mark(6);
-        if(timing.queries&&timing.readback)p.commands->ResolveQueryData(timing.queries,D3D12_QUERY_TYPE_TIMESTAMP,timing.base,7,timing.readback,timing.base*sizeof(std::uint64_t));
+        p.commands->ResourceBarrier(1,&result);if(timing.last){mark(4);mark(6);}
+        if(timing.last&&timing.queries&&timing.readback)p.commands->ResolveQueryData(timing.queries,D3D12_QUERY_TYPE_TIMESTAMP,timing.base,7,timing.readback,timing.base*sizeof(std::uint64_t));
         p.execute();p.inflight_images={};return S_OK;
     }catch(HRESULT hr){return hr;}catch(...){return E_FAIL;}
 }

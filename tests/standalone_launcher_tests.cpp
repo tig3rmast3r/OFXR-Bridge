@@ -109,6 +109,9 @@ int main() {
     rife_settings.frame_generation=4;rife_settings.rife_model=3;rife_settings.scale=4;
     const auto rife_ini=build_runtime_ini(release_defaults,rife_settings);
     if(!contains(rife_ini,"nvidia_input_scale=20") || !contains(rife_ini,"rife_model=3")) return 1;
+    rife_settings.rife_multiplier=4;rife_settings.scale=5;
+    const auto sixth_ini=build_runtime_ini(release_defaults,rife_settings);
+    if(!contains(sixth_ini,"nvidia_input_scale=1/6") || !contains(sixth_ini,"rife_multiplier=4"))return 1;
     for (auto position : {xrfg::FpsOverlayPosition::off, xrfg::FpsOverlayPosition::upper_left,
         xrfg::FpsOverlayPosition::upper_right, xrfg::FpsOverlayPosition::lower_left, xrfg::FpsOverlayPosition::lower_right}) {
         LauncherSettings option;
@@ -381,6 +384,8 @@ int main() {
     }
     if(xrfg::implicit_layer::read_nvidia_options(backend_directory).input_scale !=
         xrfg::implicit_layer::ConfiguredNvidiaInputScale::fifth) return 1;
+    {std::ofstream ini(backend_directory / L"ofxr_bridge.ini",std::ios::trunc);ini << sixth_ini;}
+    if(xrfg::implicit_layer::read_nvidia_options(backend_directory).input_scale != xrfg::implicit_layer::ConfiguredNvidiaInputScale::sixth)return 1;
     std::error_code cleanup_error;
     std::filesystem::remove_all(backend_directory, cleanup_error);
     if (!backend_from_ini || !preset_round_trips ||

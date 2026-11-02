@@ -162,6 +162,8 @@ std::string nvidia_input_scale_ini_value(NvidiaInputScale scale) {
         return "50";
     case NvidiaInputScale::quarter:
         return "25";
+    case NvidiaInputScale::sixth: return "1/6";
+    case NvidiaInputScale::third: return "1/3";
     case NvidiaInputScale::fifth:
         return "20";
     case NvidiaInputScale::full:
@@ -214,6 +216,8 @@ LauncherSettings parse_settings(std::string_view text) {
                         ? NvidiaInputScale::three_quarter
                         : value == "50"
                             ? NvidiaInputScale::half
+                            : value == "1/6" ? NvidiaInputScale::sixth
+                            : value == "1/3" ? NvidiaInputScale::third
                             : value == "20" ? NvidiaInputScale::fifth
                             : value == "25" ? NvidiaInputScale::quarter
                             : NvidiaInputScale::full;
@@ -620,6 +624,8 @@ std::string build_runtime_ini(
         : desired.preset == 2 ? NvidiaPerformancePreset::fast : NvidiaPerformancePreset::medium;
     settings.nvidia_input_scale = desired.scale == 0 ? NvidiaInputScale::full
         : desired.scale == 1 ? NvidiaInputScale::three_quarter
+        : desired.scale == 5 ? NvidiaInputScale::sixth
+        : desired.scale == 6 ? NvidiaInputScale::third
         : desired.scale == 4 ? NvidiaInputScale::fifth
         : desired.scale == 3 ? NvidiaInputScale::quarter : NvidiaInputScale::half;
     settings.nvidia_bidirectional = desired.backward;
@@ -640,6 +646,7 @@ std::string build_runtime_ini(
     };
     replace_value("motion_vectors", desired.motion_vectors ? "dlss" : "off");
     replace_value("dlss_flow_hybrid", desired.frame_generation==3 ? "1" : "0");
+    replace_value("rife_multiplier", std::to_string(desired.rife_multiplier));
     replace_value("rife_model", std::to_string(desired.frame_generation==4 ? desired.rife_model : -1));
     if(desired.frame_generation==3) {
         replace_value("backend", backend_ini_value(FlowBackend::fidelity_fx));
@@ -652,7 +659,7 @@ std::string build_runtime_ini(
     const auto first_section = result.find("\r\n\r\n[diagnostics]");
     result.insert(first_section,
         "\r\nenabled=" + std::string(desired.enabled ? "1" : "0") +
-        "\r\nnvidia_route=" + route+"\r\nrife_model="+std::to_string(desired.frame_generation==4?desired.rife_model:-1));
+        "\r\nnvidia_route=" + route+"\r\nrife_multiplier="+std::to_string(desired.rife_multiplier)+"\r\nrife_model="+std::to_string(desired.frame_generation==4?desired.rife_model:-1));
     result += "\r\n[experimental]\r\nluke_afw_mode=" + std::to_string(desired.afw_mode) +
         "\r\nluke_afw_debug=" + std::string(desired.afw_debug ? "1" : "0") +
         "\r\nluke_afw_clear_before_warping=" + (desired.afw_clear_before_warping ? "1" : "0") +

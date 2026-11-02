@@ -235,6 +235,10 @@ void route_profiles() {
     require(fifth.scale<=3,"ordinary OFXR never inherits unsupported fifth grid");
     select_generation(fifth,4,2);
     require(fifth.scale==4,"RIFE restores its fifth inference grid after route changes");
+    auto multi=parse_settings("[ofxr]\nframe_generation=4\nrife_model=3\nrife_multiplier=4\nscale=5\n");
+    auto multi_copy=parse_settings(serialize_settings(multi));
+    require(multi_copy.rife_multiplier==4 && multi_copy.scale==5,"RIFE4X and exact1/6 persist");
+    multi.rife_multiplier=8;multi=sanitize(multi);require(multi.rife_multiplier==4,"RIFE multiplier bounded to4X");
     auto retired=parse_settings("[ofxr]\nframe_generation=4\nrife_model=1\n");
     require(retired.rife_model==2,"retired heavy Lite choice migrates to accepted 4.6");
     auto legacy = parse_settings("[ofxr]\nframe_generation=2\nbackend=3\nmotion_vectors=1\ntriple_frame_gen=1\nlower_vram=1\n");
