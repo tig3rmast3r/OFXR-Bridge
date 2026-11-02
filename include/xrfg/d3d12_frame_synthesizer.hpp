@@ -179,6 +179,7 @@ struct D3D12NvidiaOpticalFlowOptions {
     bool pose_compensated_input{}; // Optional djules input/composition contract.
     std::uint32_t native_scale{100};
     bool hybrid{}; // explicit optional Hybrid route only
+    int rife_model{-1}; // experimental Python/CUDA generator, no OFA/engine guides
 };
 
 // The fraction submit_pair actually generates at for the one it is given:
@@ -204,7 +205,9 @@ struct D3D12NvidiaOpticalFlowOptions {
 // synthesis exactly as it was. current remains a bit-exact B copy. Translation
 // remains depth-unaware. A repeated capture ticket is a
 // legal unchanged-resource input: each view reuses only its own retained mono
-// image while camera metadata advances. Submission calls never wait on the CPU.
+// image while camera metadata advances. Ordinary routes never wait on the CPU.
+// The experimental portable RIFE route waits its own exact interop receipts on
+// the synthesis thread; it does not wait a game queue tail or alter pacing.
 // D29: another output from the same optical-flow pair and completion fence.
 struct D3D12ExtraSynthetic {
     std::uint32_t destination_index{};

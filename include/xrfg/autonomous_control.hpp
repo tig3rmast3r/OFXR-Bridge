@@ -23,7 +23,12 @@ struct GenerationPreferences {
     int native_scale{100};
     bool operator==(const GenerationPreferences&) const = default;
 };
-constexpr std::size_t kGenerationProfileCount = 7; // four OFXR engines, FSR, DLSS-G
+constexpr std::size_t kGenerationProfileCount = 8; // four OFXR engines, FSR, DLSS-G, Hybrid, RIFE
+constexpr auto default_generation_profiles() noexcept {
+    std::array<GenerationPreferences,kGenerationProfileCount> profiles{};
+    profiles[7].scale=3;
+    return profiles;
+}
 
 // Plain CPU values shared between the standalone UI and the in-process layer.
 // No application resource pointers cross this boundary.
@@ -35,7 +40,8 @@ struct Settings {
     int pacing_mode{1}; // 0 framework, 1 sole director, 2 framework + director
     int backend{2}; // 0 FidelityFX, 1 NVIDIA reference, 2 NVIDIA new, 3 NVIDIA djules
     int motion_vectors{}; // 0 optical flow, 1 native game guides
-    int frame_generation{}; // 0 OFXR, 1 FSR 3, 2 native DLSS Frame Generation, 3 Hybrid
+    int rife_model{2}; // 0 4.25 Lite, 1 4.16 Lite, 2 4.6 (fastest measured)
+    int frame_generation{}; // 0 OFXR, 1 FSR 3, 2 native DLSS Frame Generation, 3 Hybrid, 4 RIFE
     int hybrid_backend{}; // legacy profile key; Hybrid fallback is always FidelityFX
     int preset{1}; // 0 slow, 1 medium, 2 fast
     int scale{2}; // 0 full, 1 three-quarter, 2 half, 3 quarter
@@ -84,7 +90,7 @@ struct Settings {
     float menu_scale{1.F}; // physical headset interface multiplier, 0.5 to 1.25
     float menu_offset_x{}; // common-FOV centre offset, normalized -1 to 1
     float menu_offset_y{};
-    std::array<GenerationPreferences, kGenerationProfileCount> generation_profiles{};
+    std::array<GenerationPreferences, kGenerationProfileCount> generation_profiles{default_generation_profiles()};
     bool profiles_initialized{}; // legacy flat profile migration
     bool luke_shared_swapchains{true}; // INI-only startup policy: share compatible final native outputs
     bool operator==(const Settings&) const = default;
@@ -226,8 +232,8 @@ bool initialize_user_configuration() noexcept;
 bool write_configuration_sections(const std::filesystem::path& path, std::string_view sections) noexcept;
 bool benchmark_enabled() noexcept; // controller/UI only; never called by frame sampling
 
-constexpr int generation_ui_index(int mode) noexcept { return mode==3 ? 1 : mode==1 ? 2 : mode==2 ? 3 : 0; }
-constexpr int generation_from_ui(int index) noexcept { return index==1 ? 3 : index==2 ? 1 : index==3 ? 2 : 0; }
+constexpr int generation_ui_index(int mode) noexcept { return mode==4 ? 1 : mode==3 ? 2 : mode==1 ? 3 : mode==2 ? 4 : 0; }
+constexpr int generation_from_ui(int index) noexcept { return index==1 ? 4 : index==2 ? 3 : index==3 ? 1 : index==4 ? 2 : 0; }
 void select_generation(Settings& value, int generation, int ofxr_engine) noexcept;
 Settings sanitize(Settings value) noexcept;
 Settings parse_settings(std::string_view text);

@@ -69,6 +69,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
         return fallback ? "Fallback to optical flow: guide queue ownership mismatch" :
             "Bypass: guide queue ownership mismatch; real frames only";
     default:
+        if (mode == 4) return "RIFE: portable Python/CUDA interpolation, same-eye temporal pairs";
         if (mode == 3) return motion_source == 1 ? "Hybrid: game motion vectors + FidelityFX optical flow" :
             "Hybrid fallback: FidelityFX optical flow; no complete native stereo guides";
         if (mode == 1) return "FSR: native stereo motion and depth guides active";
@@ -79,7 +80,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 77301;
+constexpr std::uint32_t kAbi = 78801;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -109,8 +110,9 @@ std::string trim(std::string_view value) {
 }
 constexpr std::array<std::string_view, kGenerationProfileCount> profile_sections{
     "[route.ofxr_fidelityfx]", "[route.ofxr_reference]", "[route.ofxr_new]",
-    "[route.ofxr_djules]", "[route.fsr]", "[route.dlssg]", "[route.hybrid]"};
+    "[route.ofxr_djules]", "[route.fsr]", "[route.dlssg]", "[route.hybrid]", "[route.rife]"};
 std::size_t selected_profile(const Settings& s) noexcept {
+    if (s.frame_generation==4) return 7;
     if (s.frame_generation==3) return 6;
     return s.frame_generation == 0 ? static_cast<std::size_t>(std::clamp(s.backend, 0, 3)) :
         static_cast<std::size_t>(std::clamp(s.frame_generation, 1, 2) + 3);
@@ -314,7 +316,7 @@ Settings sanitize(Settings value) noexcept {
     value.backend = std::clamp(value.backend, 0, 3);
     value.hybrid_backend = 0; // Migrate old selectable fallbacks to FidelityFX.
     value.motion_vectors = std::clamp(value.motion_vectors, 0, 1);
-    value.frame_generation = std::clamp(value.frame_generation, 0, 3);
+    value.frame_generation = std::clamp(value.frame_generation, 0, 4);
     // DLSS-G owns its generator. Do not inherit a previous OFXR presenter's
     // queue/history policy: benchmark and manual/INI/IPC selection must agree.
     if (value.frame_generation == 2) value.backend = 0;
@@ -353,15 +355,20 @@ Settings sanitize(Settings value) noexcept {
     value.menu_offset_y = bounded(value.menu_offset_y, -1.F, 1.F, 0.F);
     // FSR and DLSS-G require engine guides. No optical-flow substitution is
     // silently offered for a guide-only generation backend.
-    if (value.frame_generation != 0) value.motion_vectors = 1;
+    if (value.frame_generation > 0 && value.frame_generation < 4) value.motion_vectors = 1;
+    value.rife_model=std::clamp(value.rife_model,0,2);
+    if(value.frame_generation==4){value.backend=2;value.motion_vectors=0;value.triple_frame_gen=false;value.backward=false;}
     // Legacy profiles only know the selected route. Keep its explicit values;
     // unseen routes start from their own defaults, never from another menu.
-    if (!value.profiles_initialized) value.generation_profiles = {};
+    if (!value.profiles_initialized) {
+        value.generation_profiles = {};
+        value.generation_profiles[7].scale=3; // RIFE's motion-only trial starts at 25%.
+    }
     value.profiles_initialized = true;
     value.generation_profiles[selected_profile(value)] = active_preferences(value);
     for (std::size_t i = 0; i < value.generation_profiles.size(); ++i) {
         auto& p = value.generation_profiles[i];
-        p.motion_vectors = i >= 4 ? 1 : std::clamp(p.motion_vectors, 0, 1);
+        p.motion_vectors = i == 7 ? 0 : i >= 4 ? 1 : std::clamp(p.motion_vectors, 0, 1);
         p.preset = std::clamp(p.preset, 0, 2); p.scale = std::clamp(p.scale, 0, 3);
         p.separate_synthesis = std::clamp(p.separate_synthesis, 0, 1);
         p.lower_vram = std::clamp(p.lower_vram, 0, 1);
@@ -374,7 +381,7 @@ Settings sanitize(Settings value) noexcept {
 
 void select_generation(Settings& value, int generation, int ofxr_engine) noexcept {
     value = sanitize(value); // commit outgoing edits before restoring the target
-    value.frame_generation = std::clamp(generation, 0, 3);
+    value.frame_generation = std::clamp(generation, 0, 4);
     value.backend = value.frame_generation == 2 ? 0 : std::clamp(ofxr_engine, 0, 3);
     restore_preferences(value);
 }
@@ -423,7 +430,7 @@ Settings parse_settings(std::string_view text) {
         if(key=="single_director") legacy_single_director=number!=0;
 #define READ_FIELD(name) if (key == #name) value.name = static_cast<decltype(value.name)>(number);
         READ_FIELD(increase_buffer) READ_FIELD(enabled) READ_FIELD(afw_only) READ_FIELD(backend) READ_FIELD(motion_vectors)
-        READ_FIELD(frame_generation) READ_FIELD(hybrid_backend) READ_FIELD(preset) READ_FIELD(scale)
+        READ_FIELD(frame_generation) READ_FIELD(rife_model) READ_FIELD(hybrid_backend) READ_FIELD(preset) READ_FIELD(scale)
         READ_FIELD(pacing_mode) READ_FIELD(backward) READ_FIELD(separate_synthesis) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
         READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(r19_camera)
         READ_FIELD(afw_mode) READ_FIELD(afw_debug) READ_FIELD(afw_clear_before_warping)
@@ -461,7 +468,7 @@ std::string serialize_settings(const Settings& settings) {
     output << "[ofxr]\nAdvancedMode=" << value.advanced_mode << '\n' << std::setprecision(9);
 #define WRITE_FIELD(name) output << #name << '=' << value.name << '\n';
     WRITE_FIELD(increase_buffer) WRITE_FIELD(enabled) WRITE_FIELD(afw_only) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
-    WRITE_FIELD(frame_generation) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
+    WRITE_FIELD(frame_generation) WRITE_FIELD(rife_model) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
     WRITE_FIELD(pacing_mode) WRITE_FIELD(backward) WRITE_FIELD(separate_synthesis) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
     WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(r19_camera)
     WRITE_FIELD(afw_mode) WRITE_FIELD(afw_debug) WRITE_FIELD(afw_clear_before_warping)
@@ -649,7 +656,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
 #undef MERGE_PROFILE
     }
 #define MERGE_FIELD(name) if (base.name != desired.name) current.name = desired.name;
-    MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
+    MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(rife_model) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
     MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
     MERGE_FIELD(luke_osr) MERGE_FIELD(luke_osr_cover) MERGE_FIELD(luke_osr_trim) MERGE_FIELD(luke_osr_fill) MERGE_FIELD(luke_advanced)
@@ -766,7 +773,7 @@ void csv_mib(std::ostream& stream,bool valid,std::uint64_t bytes) {
     else stream<<"N/A";
 }
 bool same_trial(const Settings& a,const Settings& b) {
-    return a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
+    return a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation && a.rife_model==b.rife_model &&
         a.triple_frame_gen==b.triple_frame_gen && a.prefer_fps==b.prefer_fps &&
         a.separate_synthesis==b.separate_synthesis && a.lower_vram==b.lower_vram &&
         a.afw_mode==b.afw_mode && (!a.afw_mode || a.afw_shading_rate==b.afw_shading_rate);
@@ -1168,16 +1175,17 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
         const bool nr=fresh && r.nr_running && s.desired.nr_enabled;
         // Static views retain noexcept/zero allocation on both UI surfaces.
         // Columns: base, + AFW, + Neural, + AFW + Neural, + OSR, + OSR + Neural.
-        static constexpr std::string_view names[7][6]={
+        static constexpr std::string_view names[8][6]={
             {"FidelityFX","FidelityFX + AFW","FidelityFX + Neural","FidelityFX + AFW + Neural","FidelityFX + OSR","FidelityFX + OSR + Neural"},
             {"OFXR 0.2.1","OFXR 0.2.1 + AFW","OFXR 0.2.1 + Neural","OFXR 0.2.1 + AFW + Neural","OFXR 0.2.1 + OSR","OFXR 0.2.1 + OSR + Neural"},
             {"OFXR 0.3.0","OFXR 0.3.0 + AFW","OFXR 0.3.0 + Neural","OFXR 0.3.0 + AFW + Neural","OFXR 0.3.0 + OSR","OFXR 0.3.0 + OSR + Neural"},
             {"OFXR 0.2.13","OFXR 0.2.13 + AFW","OFXR 0.2.13 + Neural","OFXR 0.2.13 + AFW + Neural","OFXR 0.2.13 + OSR","OFXR 0.2.13 + OSR + Neural"},
             {"Hybrid","Hybrid + AFW","Hybrid + Neural","Hybrid + AFW + Neural","Hybrid + OSR","Hybrid + OSR + Neural"},
             {"FSR","FSR + AFW","FSR + Neural","FSR + AFW + Neural","FSR + OSR","FSR + OSR + Neural"},
-            {"DLSS-G","DLSS-G + AFW","DLSS-G + Neural","DLSS-G + AFW + Neural","DLSS-G + OSR","DLSS-G + OSR + Neural"}};
+            {"DLSS-G","DLSS-G + AFW","DLSS-G + Neural","DLSS-G + AFW + Neural","DLSS-G + OSR","DLSS-G + OSR + Neural"},
+            {"RIFE","RIFE + AFW","RIFE + Neural","RIFE + AFW + Neural","RIFE + OSR","RIFE + OSR + Neural"}};
         const int route=r.generation_mode==1 ? 5 : r.generation_mode==2 ? 6 :
-            r.generation_mode==3 ? 4 : std::clamp(s.desired.backend,0,3);
+            r.generation_mode==4 ? 7 : r.generation_mode==3 ? 4 : std::clamp(s.desired.backend,0,3);
         // OSR replaces AFW as the eye renderer.
         const int osr=afw ? normalize_osr_reconstruction(s.desired.luke_osr) : 0;
         return names[route][osr==2 ? (nr?5:4) : (afw?1:0)+(nr?2:0)];
@@ -1187,7 +1195,7 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
 bool interface_generation_active(const Snapshot& s) noexcept {
     const auto text=interface_state_text(s);
     return s.desired.enabled && (text.starts_with("FidelityFX") || text.starts_with("OFXR ") ||
-        text.starts_with("Hybrid") || text.starts_with("FSR") || text.starts_with("DLSS-G"));
+        text.starts_with("RIFE") || text.starts_with("Hybrid") || text.starts_with("FSR") || text.starts_with("DLSS-G"));
 }
 bool interface_afw_only_active(const Snapshot& s,std::uint64_t now) noexcept {
     const auto& r=s.runtime;

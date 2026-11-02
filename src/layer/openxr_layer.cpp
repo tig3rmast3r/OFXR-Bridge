@@ -1832,7 +1832,7 @@ void log_benchmark_configuration(SessionState& state) noexcept {
         (state.djules_triple_requested != s.triple_frame_gen ||
          state.djules_deep_pipeline != (s.prefer_fps || s.triple_frame_gen))) return;
     const std::uint64_t bits = (s.enabled ? 1ULL : 0ULL) | (std::uint64_t(s.backend) << 1) |
-        (std::uint64_t(s.frame_generation) << 3) | (s.separate_synthesis ? 1ULL << 5 : 0ULL) |
+        (std::uint64_t(s.frame_generation==4?0:s.frame_generation) << 3) | (s.frame_generation==4 ? 1ULL<<63 : 0ULL) | (s.separate_synthesis ? 1ULL << 5 : 0ULL) |
         (s.lower_vram ? 1ULL << 6 : 0ULL) | (s.frame_generation == 3 ? 1ULL << 7 : 0ULL) |
         (state.nvidia_options.hybrid ? 1ULL << 8 : 0ULL) | (s.prefer_fps ? 1ULL << 9 : 0ULL) |
         (s.triple_frame_gen ? 1ULL << 10 : 0ULL) | (s.motion_vectors ? 1ULL << 11 : 0ULL) |
@@ -5710,6 +5710,7 @@ XrResult layer_create_session_impl(
         static_cast<xrfg::D3D12NvidiaInputScale>(initial_control.desired.scale),
         initial_control.desired.backward,
         state->nvidia_new_route, xrfg::flow_encoding_for_route(state->nvidia_new_route), state->nvidia_new_route, initial_control.desired.native_scale};
+    state->nvidia_options.rife_model=initial_control.desired.rife_model;
     state->menu_enabled = initial_control.desired.enabled;
     state->frame_generation_mode = static_cast<xrfg::D3D12FrameGenerationMode>(initial_control.desired.frame_generation);
     state->luke_afw_enabled = xrfg::native_ingress::luke_detected();
@@ -15517,13 +15518,14 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(control.desired.preset),
         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
         nvidia_new_route, xrfg::flow_encoding_for_route(nvidia_new_route), nvidia_new_route, control.desired.native_scale};
+    options.rife_model=control.desired.rife_model;
     if(hybrid_ready) {
         options.hybrid=true; options.input_scale=xrfg::D3D12NvidiaInputScale::quarter;
         backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;
     }
     const int effective_separation = effective_memory_control(*state,control.desired.separate_synthesis);
     const int effective_reduction = effective_memory_control(*state,control.desired.lower_vram);
-    const bool changed = options.hybrid!=state->nvidia_options.hybrid ||
+    const bool changed = options.rife_model!=state->nvidia_options.rife_model || options.hybrid!=state->nvidia_options.hybrid ||
         control.desired.hybrid!=state->hybrid_requested || force_startup_rendezvous || state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||
         options.input_scale != state->nvidia_options.input_scale ||

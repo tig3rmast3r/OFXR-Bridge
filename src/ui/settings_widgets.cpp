@@ -187,7 +187,7 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     }
     int selected_generation = generation_ui_index(draft.frame_generation);
     if (ImGui::Combo("Frame generation", &selected_generation,
-            "OFXR (fast)\0Hybrid (slow, needs DLSS)\0FSR 3.1 (slow, needs DLSS)\0DLSS Frame Generation (slowest, needs DLSS)\0")) {
+            "OFXR (fast)\0RIFE (experimental, NVIDIA)\0Hybrid (slow, needs DLSS)\0FSR 3.1 (slow, needs DLSS)\0DLSS Frame Generation (slowest, needs DLSS)\0")) {
         select_generation(draft, generation_from_ui(selected_generation), draft.backend);
         changed = true;
     }
@@ -210,13 +210,17 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
             ImGui::TextWrapped("Flow resolution changes motion estimation only; output stays at full resolution. At high eye resolutions, 25% reduces OFA work with a detail tradeoff.");
             changed |= ImGui::Checkbox("Bidirectional flow", &draft.backward);
         }
+    } else if (draft.frame_generation==4) {
+        changed |= ImGui::Combo("RIFE model", &draft.rife_model,"4.25 Lite\0" "4.16 Lite\0" "4.6\0");
+        changed |= ImGui::Combo("Motion inference resolution", &draft.scale,"100%\0" "75%\0" "50%\0" "25%\0");
+        ImGui::TextWrapped("Experimental portable Python/CUDA. One model, sequential eyes. Motion and blending are estimated at the selected resolution; original full-resolution colours are warped at output. Lower inference resolution reduces motion/occlusion precision. Requires the shared RIFE runtime. 2X only.");
     } else if (draft.frame_generation==3) {
         ImGui::TextWrapped("Game motion vectors + FidelityFX optical flow (25% per axis). If game guides are unavailable or rejected, uses FidelityFX optical flow.");
     } else {
         ImGui::TextDisabled("Uses game motion vectors and depth");
     }
     if (state.runtime.luke_detected && draft.afw_mode != 0 &&
-        (draft.motion_vectors != 0 || draft.frame_generation != 0))
+        (draft.motion_vectors != 0 || (draft.frame_generation > 0 && draft.frame_generation < 4)))
         ImGui::TextWrapped("AFW reconstructs one eye without native guides for that eye. Post-AFW OFXR/Hybrid uses optical flow; FSR/DLSS-G requires a complete stereo guide pair.");
     const bool djules = draft.frame_generation == 0 && draft.backend == 3;
     const bool dlssg = draft.frame_generation == 2;

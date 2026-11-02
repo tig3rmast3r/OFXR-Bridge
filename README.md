@@ -421,6 +421,10 @@ See the [Windows build instructions](https://github.com/tig3rmast3r/OFXR-Bridge/
 
 The combined standalone distribution is licensed under [GPL-3.0](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/LICENSE). Original components and third-party libraries retain their respective notices and licenses; proprietary providers have their own terms. See [attribution and third-party notices](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/licenses/ATTRIBUTION.md).
 
+## Experimental RIFE (v733)
+
+This laboratory build adds an optional portable Python/CUDA RIFE route with native-resolution colour composition. See [RIFE setup and limitations](docs/RIFE.md). The large shared runtime is kept separately from the build ZIP.
+
 ## Credits
 
 - **Djules:** improvements to the 0.2.x route, 3X frame generation, SteamVR behaviour, Vulkan support, expanded Luke Ross guide/camera handling and OSR (OFXR Stereo Reconstruction).

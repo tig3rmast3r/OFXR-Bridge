@@ -5534,6 +5534,101 @@ void test_srgb_synthesis_preserves_brightness(
 }
 
 
+void test_rife_stereo(D3D12WarpFixture& fixture,int model,UINT width=256,UINT height=128,
+    xrfg::D3D12NvidiaInputScale scale=xrfg::D3D12NvidiaInputScale::full,bool detail=false) {
+    auto a=create_source_texture(fixture,width,height),b=create_source_texture(fixture,width,height);
+    auto real_a=create_source_texture(fixture,width,height),real_b=create_source_texture(fixture,width,height);
+    auto synthetic=create_source_texture(fixture,width,height);
+    StereoPattern pattern=translated_motion_pattern(width,height,{0,0});
+    for(UINT eye=0;eye<2;++eye)for(std::size_t i=0;i<pattern[eye].size();++i)
+        pattern[eye][i]=i%4==3?255:static_cast<std::uint8_t>(eye? (i%4==0?35:140):(i%4==0?170:55));
+    if(detail)for(UINT eye=0;eye<2;++eye)for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x){
+        const auto v=static_cast<std::uint8_t>(((x+y+eye)%2)?220:35);
+        for(UINT c=0;c<3;++c)pattern[eye][(y*width+x)*4+c]=v;
+    }
+    upload_pattern(fixture,a.Get(),pattern);upload_pattern(fixture,b.Get(),pattern);
+    std::array<ID3D12Resource*,2> inputs{a.Get(),b.Get()},real{real_a.Get(),real_b.Get()};
+    std::array<ID3D12Resource*,1> generated{synthetic.Get()};
+    auto history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+    require_hresult(history->initialize(fixture.device(),fixture.queue(),inputs,D3D12_RESOURCE_STATE_RENDER_TARGET),"RIFE history");
+    xrfg::D3D12NvidiaOpticalFlowOptions options{};options.rife_model=model;options.input_scale=scale;
+    xrfg::D3D12FrameSynthesizer synth;
+    require_hresult(synth.initialize(fixture.device(),fixture.queue(),history,real,generated,kFormat,
+        D3D12_RESOURCE_STATE_RENDER_TARGET,xrfg::D3D12OpticalFlowBackend::nvidia,options,true),"RIFE initialize");
+    const auto views=make_reprojection_views();
+    xrfg::D3D12HistoryCaptureTicket ca{},cb{};xrfg::D3D12FrameSynthesisTicket prime{},pair{};
+    require_hresult(history->capture(0,&ca),"RIFE capture A");require_hresult(history->commit(ca),"RIFE commit A");
+    require_hresult(synth.submit_prime(ca,views,0,&prime),"RIFE prime");require_frame_start_gate(synth,"RIFE prime gate");
+    require_hresult(history->capture(1,&cb),"RIFE capture B");require_hresult(history->commit(cb),"RIFE commit B");
+    const auto hr=synth.submit_pair(cb,views,views,0,1,&pair);fixture.require_no_debug_errors();require_hresult(hr,"RIFE pair");
+    auto actual=readback_pattern(fixture,synthetic.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+    auto real_output=readback_pattern(fixture,real_b.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+    require(real_output==pattern,"RIFE must preserve real B bit-exactly");
+    for(UINT eye=0;eye<2;++eye){
+        auto error=mean_absolute_rgb_error(actual,pattern,width,height,eye,24);
+        std::cout<<"RIFE model="<<model<<" eye="<<eye<<" static MAE="<<error<<std::endl;
+        if(detail){
+            // A one-pixel checkerboard vanishes from quarter/half-resolution
+            // RGB inputs. Retained output contrast proves native colour is
+            // sampled at composition, rather than upscaling the small RGB.
+            double sum=0,square=0;std::uint64_t count=0;
+            for(UINT y=24;y<height-24;++y)for(UINT x=24;x<width-24;++x){
+                const double v=actual[eye][(y*width+x)*4];sum+=v;square+=v*v;++count;
+            }
+            const double deviation=std::sqrt(std::max(0.,square/count-(sum/count)*(sum/count)));
+            std::cout<<"RIFE retained native one-pixel detail stddev="<<deviation<<std::endl;
+            require(deviation>20.,"RIFE native-colour detail collapsed to an upscaled small RGB image");
+        }else require(error<3.,"RIFE temporal/static input or eye isolation changed");
+    }
+    require(pair.synthetics_in_target_camera,"RIFE target-camera receipt");
+    xrfg::D3D12NvidiaGpuTiming timing{};
+    require(synth.consume_nvidia_gpu_timing(&timing)==S_OK && timing.previous_serial==ca.serial &&
+        timing.current_serial==cb.serial && timing.total_microseconds>0 && timing.gpu_end_qpc>timing.gpu_begin_qpc,
+        "RIFE timing must cover actual pack, worker inference and output composition");
+    std::cout<<"RIFE total generation us="<<timing.total_microseconds<<std::endl;
+    // A real temporal change must produce an intermediate, not a disguised B
+    // copy. The old anchor remains independent of source resource reuse.
+    auto next_pattern=pattern;
+    for(auto& eye:next_pattern)for(std::size_t i=0;i<eye.size();++i)if(i%4!=3)eye[i]=static_cast<std::uint8_t>(255-eye[i]);
+    upload_pattern(fixture,a.Get(),next_pattern);
+    require_frame_start_gate(synth,"RIFE next gate");
+    xrfg::D3D12HistoryCaptureTicket cc{};xrfg::D3D12FrameSynthesisTicket next_pair{};
+    require_hresult(history->capture(0,&cc),"RIFE C capture");require_hresult(history->commit(cc),"RIFE C commit");
+    require_hresult(synth.submit_pair(cc,views,views,0,0,&next_pair),"RIFE changed temporal pair");
+    actual=readback_pattern(fixture,synthetic.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+    require(actual!=next_pattern && actual!=pattern,"RIFE generates intermediate pixels from both temporal inputs");
+    real_output=readback_pattern(fixture,real_a.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+    require(real_output==next_pattern,"RIFE changed real remains exact");
+    require(synth.consume_nvidia_gpu_timing(&timing)==S_OK && timing.current_serial==cc.serial,"RIFE steady interval receipt");
+    std::cout<<"RIFE warmed stereo generation us="<<timing.total_microseconds<<std::endl;
+    if(!detail){
+        xrfg::D3D12FrameSynthesisTicket repeated{};
+        require_frame_start_gate(synth,"RIFE repeated gate");
+        require_hresult(synth.submit_pair(cc,views,views,0,1,&repeated),"RIFE repeated source");
+        auto repeated_real=readback_pattern(fixture,real_b.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+        require(repeated_real==next_pattern,"RIFE repeated source copy");
+        auto repeated_synthetic=readback_pattern(fixture,synthetic.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+        require(repeated_synthetic==next_pattern,"RIFE repeated source reprojection must not depend on an OFA allocation");
+        fixture.require_no_debug_errors();
+    }
+    if(detail){
+        std::vector<std::uint64_t> samples;
+        for(UINT iteration=0;iteration<5;++iteration){
+            require_frame_start_gate(synth,"RIFE warmed gate");
+            xrfg::D3D12HistoryCaptureTicket captured{};xrfg::D3D12FrameSynthesisTicket generated_pair{};
+            const auto source=iteration%2?0:1;
+            require_hresult(history->capture(source,&captured),"RIFE warmed capture");require_hresult(history->commit(captured),"RIFE warmed commit");
+            require_hresult(synth.submit_pair(captured,views,views,0,source,&generated_pair),"RIFE warmed pair");
+            require_frame_start_gate(synth,"RIFE warmed completion");
+            require(synth.consume_nvidia_gpu_timing(&timing)==S_OK,"RIFE warmed timing");samples.push_back(timing.total_microseconds);
+        }
+        std::cout<<"RIFE_HEADSET model="<<model<<" width="<<width<<" height="<<height<<" scale="<<static_cast<int>(scale)<<" stereo_us=";
+        for(auto us:samples)std::cout<<us<<',';std::cout<<std::endl;
+    }
+    fixture.require_no_debug_errors();
+}
+
+
 #ifdef OFXR_TEST_DJULES_ROUTE
 void test_djules_extra_output(D3D12WarpFixture& fixture) {
     constexpr UINT width=256,height=128;
@@ -5623,6 +5718,17 @@ int main(int argc, char** argv) {
         xrfg::bridge_flight_logger().initialize(trace_dir);
     }
     try {
+        if(argc>1 && std::string_view(argv[1])=="rife-headset") {
+            D3D12WarpFixture fixture(true);
+            for(int model:{2,1,0})for(auto scale:{xrfg::D3D12NvidiaInputScale::quarter,xrfg::D3D12NvidiaInputScale::half})
+                test_rife_stereo(fixture,model,3700,3400,scale,true);
+            fixture.require_no_debug_errors();return 0;
+        }
+        if(argc>1 && std::string_view(argv[1])=="rife") {
+            D3D12WarpFixture fixture(true);
+            for(int model=0;model<3;++model)test_rife_stereo(fixture,model);
+            fixture.require_no_debug_errors();return 0;
+        }
         if(argc>1 && std::string_view(argv[1])=="memory-lifecycle") {
             D3D12WarpFixture fixture;
             std::cout<<"MEMORY_TEST history begin"<<std::endl;

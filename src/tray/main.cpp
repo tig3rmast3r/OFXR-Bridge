@@ -455,6 +455,7 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     if (desired.frame_generation == 2) tooltip += L" - DLSS FG";
     else if (desired.frame_generation == 1) tooltip += L" - FSR 3.1";
     else if (desired.frame_generation == 3) tooltip += L" - Hybrid";
+    else if (desired.frame_generation == 4) tooltip += L" - RIFE";
     else {
         const wchar_t* engines[]{L" - FidelityFX", L" - NVIDIA reference", L" - NVIDIA new", L" - NVIDIA djules"};
         tooltip += engines[std::clamp(desired.backend, 0, 3)];

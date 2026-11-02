@@ -1,0 +1,24 @@
+#pragma once
+#include "xrfg/d3d12_frame_synthesizer.hpp"
+
+namespace xrfg {
+// Experimental portable-Python generator. Owns no XR objects or pacing policy.
+// The caller queues both producer receipts before generate(). The only CPU
+// synchronization is with this worker's exact GPU transactions, never a game tail.
+class D3D12Rife {
+public:
+    struct Timing {ID3D12QueryHeap* queries{};ID3D12Resource* readback{};UINT base{};};
+    D3D12Rife();
+    ~D3D12Rife();
+    HRESULT initialize(ID3D12Device*, ID3D12CommandQueue*, DXGI_FORMAT, int model, float scale) noexcept;
+    HRESULT generate(ID3D12Resource* a, ID3D12Resource* b, ID3D12Resource* output,
+        std::span<const D3D12ReprojectionView> av, std::span<const D3D12ReprojectionView> bv,
+        std::span<const D3D12ReprojectionView> target,
+        std::span<const std::array<float,4>> a_rotations,
+        std::span<const std::array<float,4>> b_rotations,
+        D3D12_RESOURCE_STATES output_state, float fraction=.5F, Timing timing={}) noexcept;
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+}

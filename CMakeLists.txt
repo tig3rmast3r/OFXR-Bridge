@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.773.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.788.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -25,6 +25,7 @@ endif()
 
 option(XRFG_BUILD_LAYER "Build the Windows OpenXR API layer" ON)
 option(XRFG_BUILD_TESTS "Build the core test executable" ON)
+option(XRFG_TEST_RIFE_GPU "Enable portable RIFE tests (requires shared runtime and CUDA GPU)" OFF)
 option(XRFG_BUILD_STANDALONE "Build the Windows standalone tray launcher" ON)
 set(XRFG_DEPENDENCY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.local/ofxr-autonomous-deps" CACHE PATH "Standalone vendor SDK and runtime store")
 set(XRFG_DLSS_SDK_ROOT "${XRFG_DEPENDENCY_ROOT}/DLSS" CACHE PATH "NVIDIA DLSS SDK")
@@ -468,6 +469,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         src/vulkan/vulkan_session_bridge.cpp
         src/d3d11/d3d11_color_identity.cpp
         src/d3d12/d3d12_guide_composer.cpp
+        src/d3d12/d3d12_rife.cpp
         src/d3d12/d3d12_history.cpp
         src/d3d12/d3d12_fsr_frame_generator.cpp
         ${XRFG_SYNTHESIS_SOURCE}
@@ -532,6 +534,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
        NOT EXISTS "${XRFG_DLSSG_RUNTIME}")
         message(FATAL_ERROR "XRFG_NATIVE_DLSSG requires a complete NVIDIA DLSS SDK at XRFG_DLSS_SDK_ROOT")
     endif()
+    foreach(stage pack vertex unpack)
+        set(header "${XRFG_GENERATED_SHADER_DIR}/rife_${stage}_shader.hpp")
+        if(stage STREQUAL "pack")
+            set(profile cs_5_1)
+        elseif(stage STREQUAL "vertex")
+            set(profile vs_5_1)
+        else()
+            set(profile ps_5_1)
+        endif()
+        add_custom_command(OUTPUT "${header}"
+            COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ${profile} /E ${stage}
+                /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect /Fh "${header}"
+                /Vn g_xrfg_rife_${stage}_shader "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/rife.hlsl"
+            DEPENDS src/d3d12/rife.hlsl VERBATIM)
+        target_sources(xrfg_d3d12_history PRIVATE "${header}")
+    endforeach()
     foreach(stage pack seed vertex pixel)
         set(header "${XRFG_GENERATED_SHADER_DIR}/native_dlssg_${stage}_shader.hpp")
         if(stage STREQUAL "pack")
@@ -1575,6 +1593,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             d3d12
             dxgi)
         target_compile_features(xrfg_d3d12_history_tests PRIVATE cxx_std_20)
+        if(XRFG_TEST_RIFE_GPU)
+            add_test(NAME xrfg_rife_stereo_gpu COMMAND xrfg_d3d12_history_tests rife)
+            set_tests_properties(xrfg_rife_stereo_gpu PROPERTIES TIMEOUT 240 RUN_SERIAL TRUE)
+        endif()
         if(MSVC)
             target_compile_options(xrfg_d3d12_history_tests PRIVATE
                 /W4 /permissive- /EHsc)

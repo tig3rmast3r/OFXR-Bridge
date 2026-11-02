@@ -1,0 +1,164 @@
+{
+  "schema": 1,
+  "python": "3.12.10",
+  "torch": "2.9.1+cu128",
+  "model_source": {
+    "repository": "HolyWu/vs-rife",
+    "commit": "3488617283db7c428a83ba4a19382285da698b6a"
+  },
+  "ofxr_adapter": "Return flow and sigmoid blending mask; compose original native colours in D3D12",
+  "assets": [
+    {
+      "path": "downloads/python-3.12.10-embed-amd64.zip",
+      "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+      "sha256": "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3",
+      "bytes": 11133606
+    },
+    {
+      "path": "downloads/filelock-3.20.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/76/91/7216b27286936c16f5b4d0c530087e4a54eead683e6b0b73dd0c64844af6/filelock-3.20.0-py3-none-any.whl",
+      "sha256": "339b4732ffda5cd79b13f4e2711a31b0365ce445d95d243bb996273d072546a2",
+      "bytes": 16054
+    },
+    {
+      "path": "downloads/fsspec-2025.10.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/eb/02/a6b21098b1d5d6249b7c5ab69dde30108a71e4e819d4a9778f1de1d5b70d/fsspec-2025.10.0-py3-none-any.whl",
+      "sha256": "7c7712353ae7d875407f97715f0e1ffcc21e33d5b24556cb1e090ae9409ec61d",
+      "bytes": 200966
+    },
+    {
+      "path": "downloads/jinja2-3.1.6-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+      "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+      "bytes": 134899
+    },
+    {
+      "path": "downloads/markupsafe-3.0.3-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/aa/5b/bec5aa9bbbb2c946ca2733ef9c4ca91c91b6a24580193e891b5f7dbe8e1e/markupsafe-3.0.3-cp312-cp312-win_amd64.whl",
+      "sha256": "26a5784ded40c9e318cfc2bdb30fe164bdb8665ded9cd64d500a34fb42067b1c",
+      "bytes": 15105
+    },
+    {
+      "path": "downloads/mpmath-1.3.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+      "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c",
+      "bytes": 536198
+    },
+    {
+      "path": "downloads/networkx-3.5-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/eb/8d/776adee7bbf76365fdd7f2552710282c79a4ead5d2a46408c9043a2b70ba/networkx-3.5-py3-none-any.whl",
+      "sha256": "0030d386a9a06dee3565298b4a734b68589749a544acbb6c412dc9e2489ec6ec",
+      "bytes": 2034406
+    },
+    {
+      "path": "downloads/numpy-2.2.6-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/36/fa/8c9210162ca1b88529ab76b41ba02d433fd54fecaf6feb70ef9f124683f1/numpy-2.2.6-cp312-cp312-win_amd64.whl",
+      "sha256": "c1f9540be57940698ed329904db803cf7a402f3fc200bfe599334c9bd84a40b2",
+      "bytes": 12614190
+    },
+    {
+      "path": "downloads/sympy-1.14.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+      "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5",
+      "bytes": 6299353
+    },
+    {
+      "path": "downloads/torch-2.9.1+cu128-cp312-cp312-win_amd64.whl",
+      "url": "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-win_amd64.whl",
+      "sha256": "3a01f0b64c10a82d444d9fd06b3e8c567b1158b76b2764b8f51bfd8f535064b0",
+      "bytes": 2862033275
+    },
+    {
+      "path": "downloads/typing_extensions-4.15.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl",
+      "sha256": "f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548",
+      "bytes": 44614
+    },
+    {
+      "path": "models/flownet_v4.6.pkl",
+      "url": "https://github.com/HolyWu/vs-rife/releases/download/model/flownet_v4.6.pkl",
+      "sha256": "008646e761f0e67cb77f0c6c44cfe3c3e5a05d9d9465311b9681ca650ce030db",
+      "bytes": 21273159
+    },
+    {
+      "path": "models/flownet_v4.16.lite.pkl",
+      "url": "https://github.com/HolyWu/vs-rife/releases/download/model/flownet_v4.16.lite.pkl",
+      "sha256": "290cf343fb5a933f4503920ca07826c4d30561bd9b573b11b054b33ea0dee642",
+      "bytes": 10516847
+    },
+    {
+      "path": "models/flownet_v4.25.lite.pkl",
+      "url": "https://github.com/HolyWu/vs-rife/releases/download/model/flownet_v4.25.lite.pkl",
+      "sha256": "81cdba223fe72a120130cc8552e5d2ecac824259d406f0c15323b3decf96b8b1",
+      "bytes": 24467405
+    },
+    {
+      "path": "downloads/cuda_bindings-12.9.10-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/69/d9/f3a7223079160b384ccd32729dde6cf24d5e1667a43a8d5dd947c7c7aaee/cuda_bindings-12.9.10-cp312-cp312-win_amd64.whl",
+      "sha256": "a43a26d9b42da215d3ecac5dc35a7e75c219083a7eeab765a718567393b34fca",
+      "bytes": 7601037
+    },
+    {
+      "path": "downloads/cuda_pathfinder-1.8.4-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/8e/93/f0904fa7d954ecc4c0db17c8d63d185d442dd59fc6757f1d1f448c59c256/cuda_pathfinder-1.8.4-py3-none-any.whl",
+      "sha256": "85a4e708c725d603f576042ef32781a3d1737c51e84c35fe361d2680191af65a",
+      "bytes": 62594
+    }
+  ],
+  "msvc_crt": {
+    "version": "14.44.35112",
+    "files": [
+      {
+        "name": "concrt140.dll",
+        "sha256": "2405355f0a58067b258f8df33c327e3a3d716eaac5a3a5aebb757842d85bd376",
+        "bytes": 324208
+      },
+      {
+        "name": "msvcp140.dll",
+        "sha256": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9",
+        "bytes": 557728
+      },
+      {
+        "name": "msvcp140_1.dll",
+        "sha256": "bfad5aef4c63a669e3c140655cdfdf395b6c979b400a447bd5dcb65ed8826c3d",
+        "bytes": 35952
+      },
+      {
+        "name": "msvcp140_2.dll",
+        "sha256": "3ea06f0ee098b4823cb79599df3780e7f23cce52c19aac31d2a0d47efe33a5e9",
+        "bytes": 280200
+      },
+      {
+        "name": "msvcp140_atomic_wait.dll",
+        "sha256": "640b2aefced484d0368eea5bdd06addd0658a3a70a49256e560d6923b404a479",
+        "bytes": 50304
+      },
+      {
+        "name": "msvcp140_codecvt_ids.dll",
+        "sha256": "f2069a52880ec885ee7f0511186100eb7fada0411a2b4948fafea7735b878a18",
+        "bytes": 31872
+      },
+      {
+        "name": "vccorlib140.dll",
+        "sha256": "19839407c3fdbc824e5bce189bf68ddf8097f12ec28b757797ffa0415c144ddd",
+        "bytes": 352384
+      },
+      {
+        "name": "vcruntime140.dll",
+        "sha256": "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066",
+        "bytes": 124544
+      },
+      {
+        "name": "vcruntime140_1.dll",
+        "sha256": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f",
+        "bytes": 49792
+      },
+      {
+        "name": "vcruntime140_threads.dll",
+        "sha256": "219915cf20822f34d5e7c1fdd4e21ae7f3396881096c51036225fb8f84b47afa",
+        "bytes": 38528
+      }
+    ],
+    "source": "Unmodified x64 Microsoft.VC143.CRT redistributable from Visual Studio Build Tools"
+  }
+}

@@ -178,9 +178,9 @@ void codec() {
 }
 void route_profiles() {
     using namespace xrfg::autonomous;
-    require(generation_ui_index(0)==0 && generation_ui_index(3)==1 && generation_ui_index(1)==2 && generation_ui_index(2)==3,
+    require(generation_ui_index(0)==0 && generation_ui_index(4)==1 && generation_ui_index(3)==2 && generation_ui_index(1)==3 && generation_ui_index(2)==4,
         "Hybrid UI order preserves existing persisted generator IDs");
-    require(generation_from_ui(1)==3 && generation_from_ui(2)==1 && generation_from_ui(3)==2,"UI selection maps to stable route IDs");
+    require(generation_from_ui(1)==4 && generation_from_ui(2)==3 && generation_from_ui(3)==1 && generation_from_ui(4)==2,"UI selection maps to stable route IDs");
     Settings hybrid;select_generation(hybrid,0,2);hybrid.scale=0;hybrid.motion_vectors=0;hybrid=sanitize(hybrid);
     select_generation(hybrid,3,2);hybrid.scale=1;hybrid.lower_vram=1;hybrid.hybrid_backend=1;hybrid=sanitize(hybrid);
     select_generation(hybrid,1,2);hybrid.native_scale=42;hybrid=sanitize(hybrid);
@@ -217,6 +217,16 @@ void route_profiles() {
             restored.native_scale == 30 + i * 10 && restored.backward == bool(i % 2) &&
             restored.prefer_fps == !bool(i % 2), "each route restores its own complete preferences");
     }
+    Settings fresh_rife;
+    select_generation(fresh_rife,4,2);fresh_rife=sanitize(fresh_rife);
+    require(fresh_rife.scale==3 && fresh_rife.rife_model==2,"new RIFE profile defaults to 4.6 motion-only quarter resolution");
+    auto migrated_rife=parse_settings("[ofxr]\nframe_generation=0\n[route.ofxr_new]\nscale=2\n");
+    select_generation(migrated_rife,4,2);migrated_rife=sanitize(migrated_rife);
+    require(migrated_rife.scale==3,"RIFE profile seeds quarter resolution when upgrading an existing profile INI");
+    auto rife=parse_settings("[ofxr]\nframe_generation=4\nrife_model=2\nmotion_vectors=1\ntriple_frame_gen=1\n");
+    require(rife.frame_generation==4 && rife.rife_model==2 && rife.motion_vectors==0 && !rife.triple_frame_gen,"RIFE uses no engine guides and is 2X only");
+    auto rife_roundtrip=parse_settings(serialize_settings(rife));
+    require(rife_roundtrip.rife_model==2 && rife_roundtrip.frame_generation==4,"RIFE model survives per-game INI roundtrip");
     auto legacy = parse_settings("[ofxr]\nframe_generation=2\nbackend=3\nmotion_vectors=1\ntriple_frame_gen=1\nlower_vram=1\n");
     require(legacy.triple_frame_gen && legacy.lower_vram, "legacy active DLSS-G preferences retained");
     select_generation(legacy, 0, 3);

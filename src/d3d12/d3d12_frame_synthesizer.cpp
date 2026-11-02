@@ -1,4 +1,5 @@
 #include "xrfg/d3d12_frame_synthesizer.hpp"
+#include "xrfg/d3d12_rife.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/d3d12_guide_composer.hpp"
 #include "xrfg/fsr_frame_generation.hpp"
@@ -971,6 +972,13 @@ struct D3D12FrameSynthesizer::Impl {
 
 
 
+    std::unique_ptr<D3D12Rife> rife;
+    struct RifePair {
+        ComPtr<ID3D12Resource> a,b,out;
+        std::array<D3D12ReprojectionView,2> av{},bv{},tv{};
+        std::array<std::array<float,4>,2> ar{},br{};
+        UINT count{};bool pending{};
+    } rife_pair;
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
     std::shared_ptr<D3D12SwapchainHistory> history;
@@ -2107,7 +2115,7 @@ struct D3D12FrameSynthesizer::Impl {
                 return result;
             }
             if (backend == D3D12OpticalFlowBackend::nvidia &&
-                generation_mode == D3D12FrameGenerationMode::ofxr && !flow_resources_deferred) {
+                generation_mode == D3D12FrameGenerationMode::ofxr && !flow_resources_deferred && nvidia_options.rife_model<0) {
                 result = device->CreateCommandAllocator(
                     D3D12_COMMAND_LIST_TYPE_DIRECT,
                     IID_PPV_ARGS(slot.synthesis_allocator.GetAddressOf()));
@@ -2589,7 +2597,7 @@ struct D3D12FrameSynthesizer::Impl {
         // both backends, and FidelityFX is the one that had no measurement.
         allow_luke_guide_device_alias =
             input_allow_luke_guide_device_alias;
-        flow_resources_deferred = defer_flow_resources && input_generation_mode == D3D12FrameGenerationMode::ofxr;
+        flow_resources_deferred = defer_flow_resources && input_generation_mode == D3D12FrameGenerationMode::ofxr && input_nvidia_options.rife_model<0;
         requested_gpu_timing = enable_nvidia_gpu_timing;
         nvidia_gpu_timing_enabled = enable_nvidia_gpu_timing && !flow_resources_deferred;
         const UINT node_mask = queue->GetDesc().NodeMask;
@@ -2621,7 +2629,7 @@ struct D3D12FrameSynthesizer::Impl {
         // FSR owns its optical-flow contexts. Its dispatch returns before the
         // ordinary OFXR optical backend, just as native DLSS-G does. Selecting
         // it must not allocate an unused second flow engine per swapchain.
-        result = flow_resources_deferred || generation_mode != D3D12FrameGenerationMode::ofxr ? S_OK
+        result = input_nvidia_options.rife_model>=0 || flow_resources_deferred || generation_mode != D3D12FrameGenerationMode::ofxr ? S_OK
                  : backend == D3D12OpticalFlowBackend::nvidia
                      ? create_nvidia_resources(node_mask)
                      : create_fidelityfx_resources(node_mask);
@@ -2655,6 +2663,14 @@ struct D3D12FrameSynthesizer::Impl {
                     device.Get(), image_description, view_format);
                 if (FAILED(result)) return result;
             }
+        }
+        if(nvidia_options.rife_model>=0){
+            if(generation_mode!=D3D12FrameGenerationMode::ofxr)return E_INVALIDARG;
+            rife=std::make_unique<D3D12Rife>();
+            constexpr float scales[]{1.F,.75F,.5F,.25F};
+            result=rife->initialize(device.Get(),queue.Get(),view_format,nvidia_options.rife_model,
+                scales[std::clamp(static_cast<int>(nvidia_options.input_scale),0,3)]);
+            if(FAILED(result))return result;
         }
         synthesis_enabled = true;
         return S_OK;
@@ -4845,6 +4861,29 @@ struct D3D12FrameSynthesizer::Impl {
         bool* used_game_motion) noexcept {
         if (used_game_motion == nullptr) return E_POINTER;
         *used_game_motion = false;
+        if(rife){
+            if(extra_output || target_views.size()!=current_source.view_count || previous_source.view_count!=current_source.view_count)return E_INVALIDARG;
+            slot.timing_metadata={};slot.timing_metadata.previous_serial=previous_source.ticket.serial;
+            slot.timing_metadata.current_serial=current_source.ticket.serial;
+            // The portable worker gives one aggregate inference interval for
+            // both sequential eyes, not a fictitious split into two GPU spans.
+            slot.timing_metadata.eye_count=1;
+            rife_pair={};rife_pair.a=previous_source.resource;rife_pair.b=current_source.resource;
+            rife_pair.out=synthetic_destinations[synthetic_destination_index].resource;
+            rife_pair.count=current_source.view_count;
+            for(UINT eye=0;eye<rife_pair.count;++eye){
+                rife_pair.av[eye]=previous_source.views[eye];rife_pair.bv[eye]=current_source.views[eye];rife_pair.tv[eye]=target_views[eye];
+                rife_pair.ar[eye]=target_to_current_rotation(previous_source.views[eye],target_views[eye]);
+                rife_pair.br[eye]=target_to_current_rotation(current_source.views[eye],target_views[eye]);
+            }
+            auto* source=current_source.resource.Get();auto* destination=current_destinations[current_destination_index].resource.Get();
+            const std::array before{transition_barrier(source,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE),transition_barrier(destination,release_state,D3D12_RESOURCE_STATE_COPY_DEST)};
+            slot.current_copy_command_list->ResourceBarrier(2,before.data());slot.current_copy_command_list->CopyResource(destination,source);
+            const std::array after{transition_barrier(source,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON),transition_barrier(destination,D3D12_RESOURCE_STATE_COPY_DEST,release_state)};
+            slot.current_copy_command_list->ResourceBarrier(2,after.data());
+            rife_pair.pending=true;*used_game_motion=true; // direct submission, no OFA dispatch
+            return S_OK;
+        }
         if (native_dlss) {
             native_pair_generated = false;
 
@@ -5475,6 +5514,19 @@ struct D3D12FrameSynthesizer::Impl {
             return E_FAIL;
         }
 
+        if(rife && rife_pair.pending){
+            rife_pair.pending=false;
+            auto& p=rife_pair;const auto count=p.count;
+            const auto generated=rife->generate(p.a.Get(),p.b.Get(),p.out.Get(),
+                {p.av.data(),count},{p.bv.data(),count},{p.tv.data(),count},{p.ar.data(),count},{p.br.data(),count},release_state,synthetic_fraction,
+                {nvidia_gpu_timing_enabled?nvidia_timestamp_heap.Get():nullptr,nvidia_timestamp_readback.Get(),slot.timing_query_base});
+            p={};
+            if(FAILED(generated)){
+                // A failed native signal is not proof that the pack stopped
+                // reading the history. Keep both leases until queue drain.
+                synthesis_enabled=false;untracked_source=std::move(*newly_acquired);return generated;
+            }
+        }
         HRESULT result = slot.command_list->Close();
         if (FAILED(result)) {
             if (generation_mode == D3D12FrameGenerationMode::fsr3) {
@@ -5800,6 +5852,7 @@ struct D3D12FrameSynthesizer::Impl {
         std::uint32_t current_destination_index,
         D3D12FrameSynthesisTicket* output_ticket,
         bool preserve_temporal_anchor) noexcept {
+        rife_pair={};
         if (output_ticket == nullptr) {
             return E_POINTER;
         }
@@ -5947,6 +6000,7 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12FrameSynthesisTicket* output_ticket,
         std::shared_ptr<const DlssMotionVectorSet> motion_vectors,
         D3D12PresentationTransform presentation_transform) noexcept {
+        rife_pair={};
         if (output_ticket == nullptr) {
             return E_POINTER;
         }
@@ -6085,6 +6139,7 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12PresentationTransform presentation_transform,
         const std::optional<D3D12ExtraSynthetic>& extra_synthetic,
         bool allow_synthetic_camera) noexcept {
+        rife_pair={}; // no abandoned pre-submission transaction survives a retry
         synthetic_fraction = usable_synthesis_fraction(interpolation_fraction, false);
         synthetic_camera_turned = {};
         synthetic_camera_requested=allow_synthetic_camera;
@@ -6493,7 +6548,7 @@ struct D3D12FrameSynthesizer::Impl {
             last_fsr_context_fence_values[active_fsr_domain] = fence_value;
         }
         if (native_dlss) native_dlss->submitted(fence.Get(), fence_value, last_synthetic_fence_value);
-        if (used_game_motion && (!native_dlss || native_pair_generated)) report_dlss_motion_vector_use();
+        if (!rife && used_game_motion && (!native_dlss || native_pair_generated)) report_dlss_motion_vector_use();
 
         next.last_use_fence_value = fence_value;
         result = history->retire_consumer(
@@ -6742,7 +6797,7 @@ HRESULT D3D12FrameSynthesizer::replace_resources_locked(D3D12OpticalFlowBackend 
 // Upgrade once when OFXR really primes, after old copy fences have retired.
 HRESULT D3D12FrameSynthesizer::ensure_flow_resources_locked() {
     if(!impl_)return E_UNEXPECTED;
-    if(!impl_->flow_resources_deferred)return S_OK;
+    if(impl_->rife || !impl_->flow_resources_deferred)return S_OK;
     // Only this engine's completed copy resources are being replaced. The
     // incoming history capture can be queued behind a publication gate: neither
     // drain that history nor append a global-queue drain behind that gate.

@@ -636,6 +636,7 @@ std::string build_runtime_ini(
     };
     replace_value("motion_vectors", desired.motion_vectors ? "dlss" : "off");
     replace_value("dlss_flow_hybrid", desired.frame_generation==3 ? "1" : "0");
+    replace_value("rife_model", std::to_string(desired.frame_generation==4 ? desired.rife_model : -1));
     if(desired.frame_generation==3) {
         replace_value("backend", backend_ini_value(FlowBackend::fidelity_fx));
         replace_value("nvidia_route", "legacy");
@@ -647,7 +648,7 @@ std::string build_runtime_ini(
     const auto first_section = result.find("\r\n\r\n[diagnostics]");
     result.insert(first_section,
         "\r\nenabled=" + std::string(desired.enabled ? "1" : "0") +
-        "\r\nnvidia_route=" + route);
+        "\r\nnvidia_route=" + route+"\r\nrife_model="+std::to_string(desired.frame_generation==4?desired.rife_model:-1));
     result += "\r\n[experimental]\r\nluke_afw_mode=" + std::to_string(desired.afw_mode) +
         "\r\nluke_afw_debug=" + std::string(desired.afw_debug ? "1" : "0") +
         "\r\nluke_afw_clear_before_warping=" + (desired.afw_clear_before_warping ? "1" : "0") +
