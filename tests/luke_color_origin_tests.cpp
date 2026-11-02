@@ -247,6 +247,15 @@ void codec_tests() {
     require(!xrfg::compact_luke_origin_layout(UINT32_MAX,1440,1319,1440,layout),"oversized/overflow layout admitted");
     require(!xrfg::compact_luke_origin_layout(512,8,512,8,layout),"insufficient band margin accepted");
     require(!xrfg::compact_luke_origin_layout(512,32,1024,32,layout),"upscaled/crop mismatch accepted");
+    {
+        // TLOU1 under VDXR: a 1941x2119 eye from a 3920x2112 output (slightly
+        // magnified vertically) still gets its protected layout.
+        xrfg::LukeColorOriginLayout magnified;
+        require(xrfg::compact_luke_origin_layout(3920,2112,1941,2119,magnified,32,32)&&magnified.band_count>0,
+            "slightly magnified eye has no layout");
+        require(!xrfg::compact_luke_origin_layout(3920,2112,1941,2112+2112/20+1,magnified,32,32),
+            "eye more than 5% taller than the output accepted");
+    }
     // V641 Outlaws F8: 3056x3344 -> 3056x3337; final-color translation can
     // clip the corner sync, while REAL VR's FPS block covers its left side.
     // Protect the token, not the decoder: all bits/CRC remain mandatory.

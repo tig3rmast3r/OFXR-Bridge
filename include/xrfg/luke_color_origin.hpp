@@ -328,6 +328,16 @@ inline bool compact_luke_origin_layout(unsigned output_width, unsigned output_he
     unsigned color_width, unsigned color_height, LukeColorOriginLayout& layout,
     unsigned inset_x = 0, unsigned inset_y = 0, bool from_bottom = false) noexcept {
     layout = {};
+    // An eye image slightly larger than the output shows the output slightly
+    // magnified: The Last of Us Part I under VDXR delivered a 1941x2119 eye
+    // from a 2112-high output at one resolution, which had no layout at all,
+    // so that eye could never be paired. Lay it out as a full-size crop; a
+    // few percent moves the band by a few pixels at most, inside the reader's
+    // translation window. Larger is a mismatch.
+    if (color_height > output_height && color_height - output_height <= output_height / 20)
+        color_height = output_height;
+    if (color_width > output_width && color_width - output_width <= output_width / 20)
+        color_width = output_width;
     if (!color_width || !color_height || output_width>16384 || output_height>8192 ||
         color_width > output_width || color_height > output_height ||
         inset_x>16384 || inset_y>8192 ||
