@@ -245,7 +245,7 @@ void log_lifecycle(const std::filesystem::path& local_directory,
         L"flush_each_event",
         0,
         source.empty() ? destination.c_str() : source.c_str()) != 0;
-    std::string configuration = xrfg::with_shared_rife_runtime(xrfg::standalone::build_runtime_ini(
+    std::string configuration = xrfg::with_rife_runtime(xrfg::standalone::build_runtime_ini(
         state.settings, xrfg::autonomous::snapshot().desired, max_file_mb, flush_each_event),state.executable_directory);
     if (!manifest.empty()) {
         const auto control = xrfg::implicit_layer::arm_signal_name(manifest);
