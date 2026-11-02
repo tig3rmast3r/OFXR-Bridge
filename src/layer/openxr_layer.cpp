@@ -13359,6 +13359,20 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
             xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::three_slot_gpu_ready,
                 (djules_deep_active(*state)||djules_triple_active(*state)) ? 2 : job->pair ? 1 : 0,
                 job->current->source_sequence, job->current->previous_sequence);
+            // A ready RIFE pair owns its history independently of the delivery
+            // descriptor. With distinct real handles C can use the other ring
+            // while B awaits endpoint admission. Fast2's single handle must
+            // still wait, as must every resource whose actual allocation differs
+            // from the current policy (including shared Luke configurations).
+            const bool overlap_rife_source = state->nvidia_options.rife_model >= 0 &&
+                native_current_rings(*state) >= 2 && !prepared.resources.empty() &&
+                std::all_of(prepared.resources.begin(), prepared.resources.end(), [](const auto& resource) {
+                    const auto& generation = resource.generation.worker_generation;
+                    return generation && generation->current_runtime_rings >= 2 &&
+                        generation->current[0].handle != XR_NULL_HANDLE &&
+                        generation->current[1].handle != XR_NULL_HANDLE &&
+                        generation->current[0].handle != generation->current[1].handle;
+                });
             {
                 std::unique_lock lock(state->presenter_mutex);
                 audit.stage=8;
@@ -13366,7 +13380,9 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 if (job->pair) {
                     // With immediate real delivery there may be no retained A.
                     // Align B beside its S slots, without requiring another input.
-                    if (independent_synthesis_anchor(*state) && !state->three_slots.slot(0))
+                    const auto& tail = state->three_slots.slot(state->three_slots.capacity()-1);
+                    if (independent_synthesis_anchor(*state) && !state->three_slots.slot(0) &&
+                        tail && tail->value == job->current)
                         static_cast<void>(state->three_slots.shift_empty());
                     // A may still be inside downstream EndFrame. Never replace
                     // its descriptor until the director has acknowledged it.
@@ -13404,7 +13420,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                     for(std::size_t i=1;i<state->three_slots.capacity();++i)
                         static_cast<void>(state->three_slots.shift_empty());
                 }
-                if (independent_synthesis_anchor(*state)) {
+                if (independent_synthesis_anchor(*state) && !overlap_rife_source) {
                     // No additional ready-pair backlog. The endpoint credit is the
                     // only delivery admission; retain this batch until accepted,
                     // not until native EndFrame/display. The app may render ahead.
@@ -13414,6 +13430,10 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                             state->presenter_stop_requested || XR_FAILED(state->presenter_failure);
                     });
                 }
+                // Release the producer after compute and descriptor publication,
+                // not after downstream delivery. can_accept_real still admits
+                // only one future C while the completed B is retained; output
+                // leases and synthetic insertion retain their original waits.
                 state->synthesis_busy = false;
             }
             xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::timing_worker_publish,

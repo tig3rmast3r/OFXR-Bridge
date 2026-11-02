@@ -13,6 +13,17 @@
 #include "steamvr_vram_budget_test.inc"
 
 static bool framework_session_probe{},vdxr_legacy_probe{};
+// This gate holds an actual native End, not RIFE or an artificial GPU sleep.
+// The private endpoint keeps its two FIFO credits until that End returns.
+static std::atomic_uint rife_overlap_hold_after{UINT_MAX};
+static XrResult XRAPI_CALL rife_overlap_native_end(XrSession session,const XrFrameEndInfo* info) {
+    if(info->layerCount && current->real_ends.load()==rife_overlap_hold_after.load()) {
+        current->end_entered=false;
+        current->block_end=true;
+        rife_overlap_hold_after=UINT_MAX;
+    }
+    return Fixture::end(session,info);
+}
 // Star Citizen loads no implicit Vulkan layer, so the bridge declines its
 // Vulkan session, which SteamVR then creates natively. The private endpoint
 // has no D3D device to own; xrCreateSession must pass that session through,
@@ -114,6 +125,9 @@ int main(int argc,char** argv) {
     const bool rife_luke=route.starts_with("rife-luke");
     const unsigned rife_luke_factor=route.find("luke4")!=std::string::npos?4:3;
     const bool rife_tail=route.starts_with("rife-tail");
+    const bool rife_overlap=route.starts_with("rife-overlap");
+    const bool rife_overlap_retire=rife_overlap && route.find("retire")!=std::string::npos;
+    const unsigned rife_overlap_factor=route.find("overlap4")!=std::string::npos?4:3;
     const unsigned rife_tail_factor=route.find("tail3")!=std::string::npos?3:4;
     const bool rife_latency=route.find("rife-latency")!=std::string::npos;
     const unsigned rife_latency_factor=route.find("latency3")!=std::string::npos?3:4;
@@ -126,8 +140,8 @@ int main(int argc,char** argv) {
     const unsigned rife_phase_frames=rife_stress?64:12;
     const int rife_pacing=route.ends_with("director")?1:0;
     const bool rife_fast=route.find("fast")!=std::string::npos;
-    const unsigned rife_factor=rife_luke?(rife_switch?2:rife_luke_factor):rife_tail?rife_tail_factor:rife_latency?rife_latency_factor:(rife_report||rife_replay)?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
-    if(rife_factor)route=rife_luke?(rife_pacing?"hfw-solo-luke-d11-new":"hfw-luke-d11-new"):"new";
+    const unsigned rife_factor=rife_luke?(rife_switch?2:rife_luke_factor):rife_overlap?rife_overlap_factor:rife_tail?rife_tail_factor:rife_latency?rife_latency_factor:(rife_report||rife_replay)?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
+    if(rife_factor)route=rife_luke?(rife_pacing?"hfw-solo-luke-d11-new":"hfw-luke-d11-new"):rife_overlap?"solo-new":"new";
 
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
     if(route=="unbridged-vulkan-session")return unbridged_vulkan_session_test();
@@ -255,6 +269,7 @@ int main(int argc,char** argv) {
     if(pimax_session){dispatch->runtime_name="Pimax OpenXR";dispatch->inline_unless_pipelined=true;}
     if(measured)dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult{*out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;};
     dispatch->wait_frame=Fixture::wait;dispatch->begin_frame=Fixture::begin;dispatch->end_frame=Fixture::end;
+    if(rife_overlap)dispatch->end_frame=rife_overlap_native_end;
     dispatch->create_swapchain=Fixture::create;dispatch->destroy_swapchain=Fixture::destroy;dispatch->enumerate_swapchain_images=Fixture::enumerate;
     dispatch->acquire_swapchain_image=Fixture::acquire;dispatch->wait_swapchain_image=Fixture::wait_image;dispatch->release_swapchain_image=Fixture::release;dispatch->convert_time_to_qpc=Fixture::to_qpc;
     if(route=="session") {
@@ -553,6 +568,9 @@ int main(int argc,char** argv) {
         state->dispatch->steamvr_runtime=false;if(!rife_luke)check(presenter_forbidden(*state),"VDXR pacing changed");state->dispatch->steamvr_runtime=true;
     }
     f.transport=state->private_runtime;state->uevr_application=pooled;
+    if(rife_overlap)check(single_director_pacing(*state)==bool(rife_pacing) &&
+        f.transport->director_enabled()==bool(rife_pacing),
+        "overlap probe did not select its actual Framework/Director delivery policy");
     if(pooled)f.native_chain_limit=4; // two app chains plus two physical publication sinks
     if(publication_budget) {
         f.native_chain_limit=16;
@@ -815,10 +833,23 @@ int main(int argc,char** argv) {
     unsigned rife_phase_start{};
     unsigned rife_phase_factor=rife_factor;
     bool hfw_gate_proven=false;
+    bool rife_overlap_proven=false;
+    std::uint64_t rife_overlap_b_sequence{};
+    ComPtr<ID3D12Fence> rife_overlap_compute_gate;
     for(unsigned n=1;n<=input_count;++n) {
-        if(rife_switch && (n-1)%12==0) {
-            constexpr unsigned factors[]{2,3,2,4,2};
-            rife_phase_factor=factors[(n-1)/12];
+        if(rife_overlap && n==4) {
+            xr_ok(wait_for_synthesis_handoff(state),"overlap probe drains the previous compute job");
+            xr_ok(wait_for_presenter_idle(state),"overlap probe drains previous upper descriptors");
+            xr_ok(f.transport->drain(),"overlap probe starts with both endpoint credits free");
+            check(f.transport->buffer_capacity()==2,"overlap probe uses the normal two endpoint credits");
+            // X3: hold S1, queue S2, leave B at the upper front. X4: let S1
+            // retire, hold S2 and queue S3, leaving the same one-real geometry.
+            f.end_entered=false;
+            rife_overlap_hold_after=f.real_ends.load()+rife_factor-3;
+        }
+        if(rife_switch && (n-1)%rife_phase_frames==0) {
+            constexpr unsigned factors[]{2,3,4,3,2};
+            rife_phase_factor=factors[(n-1)/rife_phase_frames];
             auto desired=xrfg::autonomous::snapshot().desired;
             desired.rife_multiplier=rife_phase_factor;
             if(rife_luke){constexpr int percentages[]{10,15,23,40,15};desired.rife_resolution=percentages[(n-1)/rife_phase_frames];}
@@ -903,7 +934,21 @@ int main(int argc,char** argv) {
         }
         if(rife_latency)std::this_thread::sleep_for(16ms);
         std::fprintf(stderr,"frame %u write (physical=%u)\n",n,f.real_ends.load());
-        const auto color=((n-1)%8+1)*20;f.write(chain,color);if(split_eyes)f.write(right,color+7);
+        const auto color=((n-1)%8+1)*20;
+        if(rife_overlap && n==5) {
+            // Exercise the real application Release/capture path as well as
+            // EndFrame: native D12 Release waits for synthesis_busy itself.
+            auto released=std::async(std::launch::async,[&]{f.write(chain,color);});
+            const bool captured=released.wait_for(1500ms)==std::future_status::ready;
+            if(!captured) {
+                f.unblock();
+                check(released.wait_for(5s)==std::future_status::ready,
+                    "source Release did not wake after the blocked native batch was released");
+            }
+            released.get();
+            check(captured,"RIFE next source Release/capture waited for old batch delivery admission after GPU completion");
+        } else f.write(chain,color);
+        if(split_eyes)f.write(right,color+7);
         if(panel_test)f.write(panel_chain,30+n);
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=image_width;g->output_height=g->depth_height=g->motion_height=image_height;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
@@ -929,6 +974,13 @@ int main(int argc,char** argv) {
             rife_replay_time=end.displayTime;
         }
         if(rife_latency)rife_source_ends.push_back(xrfg::interface_clock_ns());
+        if(rife_overlap_retire && n==5) {
+            check(bool(state->d3d12_synthesis_queue),"retirement race requires the real independent synthesis queue");
+            ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&rife_overlap_compute_gate)),
+                "retirement-race compute gate");
+            ok(state->d3d12_synthesis_queue->Wait(rife_overlap_compute_gate.Get(),1),
+                "hold C compute while the presenter retires B");
+        }
         if(hfw) std::fprintf(stderr,"HFW before%u active%u worker%u request%u forbidden%u mode%u enabled%u\n",n,
             unsigned(continuous_presenter_active(state)),unsigned(state->three_slot_director),unsigned(state->presenter_start_requested),
             unsigned(presenter_forbidden(*state)),unsigned(state->single_director_requested.load()),unsigned(state->menu_enabled.load()));
@@ -958,7 +1010,84 @@ int main(int argc,char** argv) {
             check(independent,"bridge acceptance returns to game before blocked native End with spare credits");
         } else {
             const auto submitted=layer_end_frame_impl(state->handle,&end);
-            if(!(rife_report && n==6))xr_ok(submitted,"shipping OFXR End handoff");
+            xr_ok(submitted,"shipping OFXR End handoff");
+        }
+        if(rife_overlap && n==4) {
+            std::unique_lock lock(state->presenter_mutex);
+            rife_overlap_b_sequence=state->next_source_sequence-1;
+            check(state->presenter_condition.wait_for(lock,5s,[&] {
+                const auto& front=state->three_slots.slot(0);
+                return front && !front->synthetic && front->value->frame &&
+                    front->value->source_sequence==rife_overlap_b_sequence && state->three_slots.can_accept_real() &&
+                    state->presenter_inflight_frame==front->value->frame;
+            }),"native End gate did not leave exactly the completed old real B pending");
+            lock.unlock();
+            // In4X Director S1 may finish and B reach the upper front before
+            // S2 enters its later native refresh slot. Do not accidentally
+            // unblock S1 and then arm a brand-new S2 hold after the test moved on.
+            std::unique_lock native_lock(f.mutex);
+            check(f.changed.wait_for(native_lock,5s,[&] {
+                return rife_overlap_hold_after==UINT_MAX && f.block_end && f.end_entered;
+            }),"target native synthetic End did not consume the overlap gate");
+        }
+        if(rife_overlap && n==5) {
+            bool computed{};
+            if(rife_overlap_retire) {
+                f.unblock();
+                {
+                    std::unique_lock lock(state->presenter_mutex);
+                    computed=state->presenter_condition.wait_for(lock,5s,[&] {
+                        const auto& current=state->three_slots.slot(state->three_slots.capacity()-2);
+                        return !state->three_slots.slot(0) && current && !current->synthetic &&
+                            current->value->source_sequence==rife_overlap_b_sequence+1 &&
+                            !current->value->frame;
+                    });
+                    if(!computed) {
+                        std::fprintf(stderr,"RETIRE_GATE physical=%u busy=%u failure=%d inflight=%p queue=%p delivery=%p gate=%llu\n",
+                            f.real_ends.load(),unsigned(state->synthesis_busy),int(state->presenter_failure),
+                            state->presenter_inflight_frame.get(),state->d3d12_synthesis_queue.Get(),
+                            f.delivery_queue.Get(),rife_overlap_compute_gate->GetCompletedValue());
+                        for(std::size_t index=0;index<state->three_slots.capacity();++index) {
+                            const auto& entry=state->three_slots.slot(index);
+                            std::fprintf(stderr,"RETIRE_SLOT index=%zu present=%u synthetic=%u source=%llu frame=%p\n",
+                                index,unsigned(bool(entry)),unsigned(entry && entry->synthetic),
+                                entry?entry->value->source_sequence:0,entry?entry->value->frame.get():nullptr);
+                        }
+                    }
+                }
+                ok(rife_overlap_compute_gate->Signal(1),"release C compute after B has advanced the logical head");
+                check(computed,"old real B did not retire while C compute was independently held");
+                {
+                    std::unique_lock lock(state->presenter_mutex);
+                    computed=state->presenter_condition.wait_for(lock,5s,[&] {
+                        return !state->synthesis_busy || XR_FAILED(state->presenter_failure);
+                    }) && XR_SUCCEEDED(state->presenter_failure);
+                }
+                check(computed,"RIFE shifted current C twice after old B retired during its compute");
+            } else {
+                std::unique_lock lock(state->presenter_mutex);
+                const auto complete=[&] {
+                    const auto& front=state->three_slots.slot(0);
+                    const auto& tail=state->three_slots.slot(state->three_slots.capacity()-1);
+                    return front && !front->synthetic && front->value->source_sequence==rife_overlap_b_sequence &&
+                        tail && !tail->synthetic && tail->value->source_sequence==rife_overlap_b_sequence+1 &&
+                        bool(tail->value->frame);
+                };
+                // The production worker need not notify a test observer between
+                // setting C.frame and waiting for B's insertion slot.
+                const auto limit=std::chrono::steady_clock::now()+5s;
+                while(!(computed=complete()) && std::chrono::steady_clock::now()<limit)
+                    state->presenter_condition.wait_for(lock,10ms);
+                if(computed)check(!state->three_slots.can_accept_real(),
+                    "overlap admitted a second future real source beyond bounded B/C capacity");
+            }
+            const bool native_still_held=rife_overlap_retire || f.block_end.load();
+            f.unblock();
+            check(computed && native_still_held,
+                "RIFE next pair compute/publication waited for old batch delivery admission");
+            rife_overlap_proven=true;
+            std::printf("RIFE_OVERLAP factor=%u pacing=%d retire_during_compute=%u next_source_capture_and_compute_independent_of_old_batch_delivery PASS\n",
+                rife_factor,rife_pacing,unsigned(rife_overlap_retire));
         }
         if(rife_tail && (n==4 || n==8)) {
             // No drain request, extra source, control change or Director clock:
@@ -969,8 +1098,21 @@ int main(int argc,char** argv) {
             check(f.real_ends==expected,"RIFE tail repeated or lost an output");
             std::printf("RIFE_NO_FUTURE factor=%u source=%u outputs=%u PASS\n",rife_factor,n,f.real_ends.load());
         }
-        if(rife_report && n==6) {
-            check(XR_FAILED(wait_for_synthesis_handoff(state)),"injected impossible4X batch must fail");
+        if(rife_report && n==5) {
+            // The deliberately impossible4X buffer faults asynchronously after
+            // this accepted End. The terminal error can already reach the next
+            // Release, so do not insist on another successful f.write first.
+            const auto failure=wait_for_synthesis_handoff(state);
+            check(failure==XR_ERROR_RUNTIME_FAILURE,"injected impossible4X batch must fail with its real worker error");
+            unsigned failed_index{};
+            xr_ok(f.transport->acquire_image(chain,nullptr,&failed_index),"fault probe acquires the next application image");
+            XrSwapchainImageWaitInfo failed_wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};failed_wait.timeout=XR_INFINITE_DURATION;
+            xr_ok(f.transport->wait_image(chain,&failed_wait),"fault probe waits for its application image");
+            auto failed_source=find_swapchain(chain);
+            {std::scoped_lock lock(failed_source->mutex);failed_source->acquired_indices.push_back(failed_index);++failed_source->waited_count;}
+            XrSwapchainImageReleaseInfo failed_release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            check(layer_release_swapchain_image_impl(chain,&failed_release)==failure,
+                "next application Release must propagate the terminal synthesis failure rather than fabricate success");
             stop_continuous_presenter(state);
             const auto directory=xrfg::bridge_flight_logger().log_path().parent_path();
             bool report{};
@@ -1055,6 +1197,17 @@ int main(int argc,char** argv) {
     xr_ok(wait_for_synthesis_handoff(state),"worker complete");
     if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"generator transport drained");
     xr_ok(f.transport->drain(),"common physical FIFO drained");
+    if(rife_overlap) {
+        check(rife_overlap_proven,"RIFE blocked-native overlap was never exercised");
+        check(f.real_ends==2+(input_count-2)*rife_factor,
+            "RIFE overlap lost or duplicated a real/intermediate output after bounded backpressure");
+        for(unsigned source=1;source<=input_count;++source) {
+            const auto index=source<3?source-1:1+(source-2)*rife_factor;
+            check(index<f.pixels.size() && f.pixels[index]==((source-1)%8+1)*20 &&
+                std::abs(f.positions[index]-(float(source)-.032F))<.001F,
+                "RIFE overlap replaced an older real's own pixels/pose with a later real ring publication");
+        }
+    }
     stop_continuous_presenter(state);
     auto generated=count>0 && f.real_ends>=(steady_memory?input_count+4:(switching || hfw_offon)?10:12);
     std::printf("%s physical outputs=%u generation state=%u\n",route.c_str(),f.real_ends.load(),unsigned(state->generation_status.load()));
