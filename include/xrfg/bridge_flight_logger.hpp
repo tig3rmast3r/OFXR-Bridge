@@ -18,6 +18,15 @@ inline std::filesystem::path benchmark_log_path(const std::filesystem::path& fli
 
 enum class BridgeFlightOperation : std::uint32_t {
     rife_worker = 10000, rife_memory,
+    // F9-only native RIFE phases: a=configuration id, b=width<<32|height,
+    // c=eyes<<32|fraction float bits. Span result is the actual HRESULT.
+    rife_pack_execute = 10002,
+    rife_pack_wait = 10003,
+    rife_infer = 10004,
+    rife_compose_execute = 10005,
+    rife_compose_wait = 10006,
+    // Same a/b/c; result bit0=TensorRT, bit1=optimizing, bit2=valid receipt.
+    rife_backend = 10007,
     logger = 0,
     negotiation,
     instance_create,

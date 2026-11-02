@@ -120,6 +120,14 @@ public:
     XrResult begin_frame(const XrFrameBeginInfo*);
     XrResult end_frame(const XrFrameEndInfo*,
         const std::shared_ptr<InterfaceDeliveryReceipt>& delivery={});
+    // Same-thread RAII admission. Reserve before taking an optional overlay's
+    // resource mutex; compose/own the frame only after a credit is available.
+    // Cancellation participates in drain/stop and never owns application pixels.
+    struct EndFrameReservation;
+    XrResult reserve_end_frame(std::shared_ptr<EndFrameReservation>&);
+    XrResult end_frame_reserved(const XrFrameEndInfo*,
+        const std::shared_ptr<InterfaceDeliveryReceipt>&,
+        const std::shared_ptr<EndFrameReservation>&);
     XrResult create_swapchain(const XrSwapchainCreateInfo*, XrSwapchain*,
         D3D12_RESOURCE_STATES image_state=D3D12_RESOURCE_STATE_RENDER_TARGET,
         std::uint32_t image_count=3,
@@ -133,6 +141,9 @@ public:
     XrResult destroy_swapchain(XrSwapchain);
     XrResult enumerate_images(XrSwapchain,std::uint32_t,std::uint32_t*,XrSwapchainImageBaseHeader*);
     XrResult acquire_image(XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t*);
+    // Same ownership checks, with no wait or mutation when every eligible
+    // image is still read by an earlier packet. Busy is XR_TIMEOUT_EXPIRED.
+    XrResult try_acquire_image(XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t*);
     XrResult wait_image(XrSwapchain,const XrSwapchainImageWaitInfo*);
     XrResult release_image(XrSwapchain,const XrSwapchainImageReleaseInfo*);
     // Completion proof for the EXACT acquired output; never a guessed serial.
@@ -145,7 +156,8 @@ public:
     // CPU-only inventory; busy transport returns no partial snapshot.
     [[nodiscard]] std::optional<std::vector<SwapchainMapping>> native_swapchain_mapping() const;
 private:
+    XrResult acquire_image_impl(XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t*,bool blocking);
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<Impl> impl_;
 };
 } // namespace xrfg

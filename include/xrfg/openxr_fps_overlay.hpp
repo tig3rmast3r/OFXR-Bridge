@@ -37,7 +37,9 @@ public:
     void set_delivery_source(SteamVrDelivery* delivery) noexcept;
     void set_runtime_acceptance_source(std::function<std::optional<float>(std::int64_t)> source, bool direct=false) noexcept;
     using ObservedEndFrame=std::function<XrResult(const XrFrameEndInfo*,const std::shared_ptr<InterfaceDeliveryReceipt>&)>;
-    void set_private_delivery_end(ObservedEndFrame);
+    struct PreparedEndFrame { XrResult result{XR_SUCCESS}; ObservedEndFrame submit; };
+    using PrepareEndFrame=std::function<PreparedEndFrame()>;
+    void set_private_delivery_end(ObservedEndFrame,PrepareEndFrame prepare={});
     void set_unique_content_only(bool enabled) noexcept;
     void set_luke_scene_measurement(bool enabled) noexcept;
     [[nodiscard]] XrResult end_frame(const XrFrameEndInfo* info, bool synthetic, bool new_content = true,

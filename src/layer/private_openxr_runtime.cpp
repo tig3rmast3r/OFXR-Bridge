@@ -136,7 +136,7 @@ struct PrivateOpenXrRuntime::Impl {
     unsigned waits{},begun{};
     bool seeded{},running{};
     std::uint64_t sequence{},ready_serial{},copy_serial{};
-    std::size_t pending{};
+    std::size_t pending{},outstanding_reservations{};
     ComPtr<ID3D12Device> device12;
     ComPtr<ID3D12CommandQueue> queue12;
     ComPtr<ID3D12CommandQueue> producer_queue12;
@@ -789,7 +789,31 @@ struct PrivateOpenXrRuntime::Impl {
     }
 };
 
-PrivateOpenXrRuntime::PrivateOpenXrRuntime(Options options):impl_(std::make_unique<Impl>(std::move(options))){}
+struct PrivateOpenXrRuntime::EndFrameReservation {
+    std::shared_ptr<Impl> owner;
+    std::unique_lock<std::mutex> acceptance;
+    DWORD thread{GetCurrentThreadId()};
+    bool reserved{},counted{};
+    explicit EndFrameReservation(std::shared_ptr<Impl> state)
+        :owner(std::move(state)),acceptance(owner->accept_mutex){}
+    void cancel() {
+        if(counted) {std::scoped_lock lock(owner->mutex);--owner->outstanding_reservations;counted=false;}
+        if(reserved) {owner->fifo->cancel();reserved=false;}
+        if(acceptance.owns_lock())acceptance.unlock();
+        owner->changed.notify_all();
+    }
+    void accepted() {
+        // Only accepted packets enter the virtual prediction's pending count.
+        // Admission itself must not add a refresh to the producer clock.
+        if(counted) {std::scoped_lock lock(owner->mutex);--owner->outstanding_reservations;counted=false;}
+        reserved=false;
+        acceptance.unlock();
+        owner->changed.notify_all();
+    }
+    ~EndFrameReservation(){cancel();}
+};
+
+PrivateOpenXrRuntime::PrivateOpenXrRuntime(Options options):impl_(std::make_shared<Impl>(std::move(options))){}
 PrivateOpenXrRuntime::~PrivateOpenXrRuntime(){stop();}
 HRESULT PrivateOpenXrRuntime::initialize() {
     auto& s=*impl_;auto& real=s.options.real;
@@ -851,7 +875,7 @@ void PrivateOpenXrRuntime::stop() {
             target->released=XR_SUCCEEDED(s.options.real.release(c->handle,&release));
         }
     }
-    {std::scoped_lock lock(s.mutex);s.fifo.reset();s.prepared.clear();s.pending=0;s.running=false;
+    {std::scoped_lock lock(s.mutex);s.fifo.reset();s.prepared.clear();s.pending=s.outstanding_reservations=0;s.running=false;
      for(auto& [h,c]:s.chains) {c->consumers=0;for(auto& image:c->images)image.readers=0;}
      for(auto& c:owned_chains) {
          // Static runtime images can be acquired/released only once for their
@@ -864,7 +888,7 @@ void PrivateOpenXrRuntime::stop() {
 }
 XrResult PrivateOpenXrRuntime::drain() {
     auto& s=*impl_;std::unique_lock lock(s.mutex);
-    s.changed.wait(lock,[&]{return s.stopping || !s.pending;});return s.failure;
+    s.changed.wait(lock,[&]{return s.stopping || (!s.pending && !s.outstanding_reservations);});return s.failure;
 }
 XrResult PrivateOpenXrRuntime::set_director_enabled(bool enabled) {
     auto& s=*impl_;std::scoped_lock accept(s.accept_mutex);
@@ -928,19 +952,40 @@ XrResult PrivateOpenXrRuntime::begin_frame(const XrFrameBeginInfo* info) {
 }
 XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::shared_ptr<InterfaceDeliveryReceipt>& delivery) {
     if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
-    auto& s=*impl_;std::scoped_lock accept(s.accept_mutex);
+    std::shared_ptr<EndFrameReservation> reservation;
+    const auto admitted=reserve_end_frame(reservation);
+    return XR_FAILED(admitted)?admitted:end_frame_reserved(info,delivery,reservation);
+}
+XrResult PrivateOpenXrRuntime::reserve_end_frame(std::shared_ptr<EndFrameReservation>& output) {
+    output.reset();
+    auto reservation=std::make_shared<EndFrameReservation>(impl_);
+    auto& s=*impl_;
     {std::scoped_lock lock(s.mutex);if(XR_FAILED(s.failure))return s.failure;if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;if(!s.begun)return XR_ERROR_CALL_ORDER_INVALID;}
+    {std::scoped_lock lock(s.mutex);++s.outstanding_reservations;reservation->counted=true;}
     if(!s.fifo->reserve()){std::scoped_lock lock(s.mutex);return XR_FAILED(s.failure)?s.failure:XR_ERROR_SESSION_NOT_RUNNING;}
+    reservation->reserved=true;
+    output=std::move(reservation);
+    return XR_SUCCESS;
+}
+XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
+    const std::shared_ptr<InterfaceDeliveryReceipt>& delivery,
+    const std::shared_ptr<EndFrameReservation>& reservation) {
+    if(!reservation || reservation->owner!=impl_ || reservation->thread!=GetCurrentThreadId() ||
+        !reservation->reserved || !reservation->acceptance.owns_lock())return XR_ERROR_CALL_ORDER_INVALID;
+    struct CancelUnused {const std::shared_ptr<EndFrameReservation>& value;~CancelUnused(){value->cancel();}} cancel{reservation};
+    if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
+    auto& s=*impl_;
+    {std::scoped_lock lock(s.mutex);if(XR_FAILED(s.failure))return s.failure;if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;if(!s.begun)return XR_ERROR_CALL_ORDER_INVALID;}
     std::shared_ptr<Impl::Packet> packet;
     struct Reservation {
         Impl& s;std::shared_ptr<Impl::Packet>& packet;bool accepted{},counted{};
         ~Reservation(){if(accepted)return;{std::scoped_lock lock(s.mutex);
+            if(counted)--s.pending;
             if(packet)for(auto& lease:packet->leases) {
                 if(!lease.source_released)--lease.chain->images[lease.image].readers;
                 --lease.chain->consumers;
-            }
-            if(counted)--s.pending;}s.fifo->cancel();s.changed.notify_all();}
-    } reservation{s,packet};
+            }}s.changed.notify_all();}
+    } transaction{s,packet};
     packet=std::make_shared<Impl::Packet>();packet->delivery=delivery;
     packet->director=s.director_enabled.load();packet->policy_epoch=s.policy_epoch;XrResult result;
     {std::scoped_lock lock(s.mutex);result=s.own(*packet,*info);
@@ -953,9 +998,10 @@ XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::s
         s.ready_serial=packet->ready;
     }
     packet->accepted_at=clock_ns();
-    {std::scoped_lock lock(s.mutex);++s.pending;reservation.counted=true;}
+    {std::scoped_lock lock(s.mutex);++s.pending;transaction.counted=true;}
     if(!s.fifo->accept(packet))return XR_ERROR_SESSION_NOT_RUNNING;
-    reservation.accepted=true;{std::scoped_lock lock(s.mutex);s.begun=0;++s.accepted_packets;}s.changed.notify_all();
+    transaction.accepted=true;{std::scoped_lock lock(s.mutex);s.begun=0;++s.accepted_packets;}s.changed.notify_all();
+    reservation->accepted();
     s.trace(1,packet->sequence);return XR_SUCCESS;
 }
 XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count,XrSwapchain publication_source,ID3D12Device* d11_output_owner) {
@@ -1057,6 +1103,12 @@ XrResult PrivateOpenXrRuntime::enumerate_images(XrSwapchain handle,std::uint32_t
     return XR_SUCCESS;
 }
 XrResult PrivateOpenXrRuntime::acquire_image(XrSwapchain handle,const XrSwapchainImageAcquireInfo* info,std::uint32_t* output) {
+    return acquire_image_impl(handle,info,output,true);
+}
+XrResult PrivateOpenXrRuntime::try_acquire_image(XrSwapchain handle,const XrSwapchainImageAcquireInfo* info,std::uint32_t* output) {
+    return acquire_image_impl(handle,info,output,false);
+}
+XrResult PrivateOpenXrRuntime::acquire_image_impl(XrSwapchain handle,const XrSwapchainImageAcquireInfo* info,std::uint32_t* output,bool blocking) {
     if(!valid(info,XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO) || !output)return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::unique_lock lock(s.mutex);auto it=s.chains.find(handle);if(it==s.chains.end())return XR_ERROR_HANDLE_INVALID;auto chain=it->second;
     if((chain->info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) && chain->released)return XR_ERROR_CALL_ORDER_INVALID;
@@ -1071,6 +1123,8 @@ XrResult PrivateOpenXrRuntime::acquire_image(XrSwapchain handle,const XrSwapchai
     bool all_acquired=true;
     for(unsigned index=0;index<chain->images.size();++index)if(!held_release(index) && !chain->images[index].acquired){all_acquired=false;break;}
     if(all_acquired)return XR_ERROR_CALL_ORDER_INVALID;
+    if(!blocking && !((s.running && s.stopping) || chain->destroying || available().has_value()))
+        return XR_TIMEOUT_EXPIRED;
     s.changed.wait(lock,[&]{return (s.running && s.stopping) || chain->destroying || available().has_value();});
     if(s.running && s.stopping)return XR_FAILED(s.failure)?s.failure:XR_ERROR_SESSION_NOT_RUNNING;if(chain->destroying)return XR_ERROR_HANDLE_INVALID;
     auto index=*available();chain->images[index].acquired=true;chain->images[index].waited=false;chain->acquired.push_back(index);chain->cursor=(index+1)%chain->images.size();*output=index;return XR_SUCCESS;

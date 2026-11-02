@@ -91,6 +91,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -2629,14 +2630,16 @@ void refresh_luke_prediction_clock(SessionState& state,const XrFrameState& slot,
 void record_rolling_runtime_output(const XrFrameEndInfo* info) noexcept;
 [[nodiscard]] bool continuous_presenter_active(const std::shared_ptr<SessionState>& state) noexcept;
 XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& state,
-    const XrFrameEndInfo* info,const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery={});
+    const XrFrameEndInfo* info,const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery={},
+    const std::shared_ptr<xrfg::PrivateOpenXrRuntime::EndFrameReservation>& reservation={});
 
 XrResult observed_content_end_frame(const std::shared_ptr<SessionState>& state,const XrFrameEndInfo* info,
-    const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery) {
+    const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery,
+    const std::shared_ptr<xrfg::PrivateOpenXrRuntime::EndFrameReservation>& reservation={}) {
     if(!state || !state->dispatch->end_frame)return XR_ERROR_HANDLE_INVALID;
     const auto session=state->handle;
     if(!state->luke_fresh_only || continuous_presenter_active(state))
-        return end_frame_with_private_auxiliary(state,info,delivery);
+        return end_frame_with_private_auxiliary(state,info,delivery,reservation);
     if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
     if(!state->luke_output_begun) {
         XrFrameState slot{XR_TYPE_FRAME_STATE};
@@ -2669,7 +2672,7 @@ XrResult observed_content_end_frame(const std::shared_ptr<SessionState>& state,c
         submitted.layers=nullptr;
     }
     record_rolling_runtime_output(&submitted);
-    const auto result=end_frame_with_private_auxiliary(state,&submitted,delivery);
+    const auto result=end_frame_with_private_auxiliary(state,&submitted,delivery,reservation);
     if(xrfg::diagnostic_ring_enabled)xrfg::diagnostic_ring_record("{\"kind\":\"runtime_result\",\"qpc\":"+
         std::to_string(xrfg::diagnostic_ring_qpc())+",\"display_time\":"+std::to_string(submitted.displayTime)+",\"result\":"+std::to_string(result)+"}");
     state->luke_output_begun=false;
@@ -2682,11 +2685,29 @@ XrResult XRAPI_CALL content_end_frame(XrSession session,const XrFrameEndInfo* in
 void bind_private_delivery_metrics(const std::shared_ptr<SessionState>& state) {
     if((!state->private_runtime && !state->afw_only) || !state->fps_overlay)return;
     const std::weak_ptr<SessionState> weak=state;
+    xrfg::OpenXrFpsOverlay::PrepareEndFrame prepare;
+    if(state->private_runtime)prepare=[weak]() -> xrfg::OpenXrFpsOverlay::PreparedEndFrame {
+        const auto owner=weak.lock();
+        if(!owner || !owner->private_runtime)return {XR_ERROR_HANDLE_INVALID,{}};
+        const auto endpoint=owner->private_runtime;
+        std::shared_ptr<xrfg::PrivateOpenXrRuntime::EndFrameReservation> reservation;
+        const auto result=endpoint->reserve_end_frame(reservation);
+        if(XR_FAILED(result))return {result,{}};
+        return {XR_SUCCESS,[owner,endpoint,reservation=std::move(reservation)](const XrFrameEndInfo* info,
+            const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery) mutable {
+            auto permit=std::exchange(reservation,{});
+            if(!permit)return XR_ERROR_CALL_ORDER_INVALID;
+            if(owner->private_runtime!=endpoint)return XR_ERROR_SESSION_NOT_RUNNING;
+            // Even auxiliary validation errors cancel before this callback
+            // returns, while no UI resource can be reused underneath it.
+            return observed_content_end_frame(owner,info,delivery,permit);
+        }};
+    };
     state->fps_overlay->set_private_delivery_end([weak](const XrFrameEndInfo* info,
         const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery) {
         const auto owner=weak.lock();
         return owner?observed_content_end_frame(owner,info,delivery):XR_ERROR_HANDLE_INVALID;
-    });
+    },std::move(prepare));
 }
 
 [[nodiscard]] std::shared_ptr<SwapchainState> find_swapchain(XrSwapchain swapchain) {
@@ -13476,8 +13497,10 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
 }
 
 XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& state,
-    const XrFrameEndInfo* info,const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery) {
+    const XrFrameEndInfo* info,const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery,
+    const std::shared_ptr<xrfg::PrivateOpenXrRuntime::EndFrameReservation>& reservation) {
     const auto submit=[&](const XrFrameEndInfo* end) {
+        if(reservation && state->private_runtime)return state->private_runtime->end_frame_reserved(end,delivery,reservation);
         if(delivery && state->private_runtime)return state->private_runtime->end_frame(end,delivery);
         // AFW-only measures the exact native target after the Luke source clock
         // has been replaced by the real runtime slot. Observation only: no
@@ -13762,6 +13785,57 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     return supported;
 }
 
+// Auxiliary snapshots have a CPU descriptor lease and a separate endpoint
+// image-reader lease. A descriptor can be free while its image is still being
+// copied, so test image availability atomically before choosing that slot.
+[[nodiscard]] XrResult acquire_private_auxiliary_image(
+    SessionState* session, PrivateSwapchainState& image, bool blocking) noexcept {
+    try {
+        if (!session || !session->private_runtime || !session->dispatch ||
+            !session->dispatch->wait_swapchain_image ||
+            !session->dispatch->release_swapchain_image || image.handle==XR_NULL_HANDLE)
+            return XR_ERROR_HANDLE_INVALID;
+        const auto& dispatch=session->dispatch;
+        if (image.phase!=PrivateOwnershipPhase::idle &&
+            !release_private_image(session,dispatch,image)) return XR_ERROR_RUNTIME_FAILURE;
+        XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        std::uint32_t acquired_index{};
+        const auto acquire_token=xrfg::bridge_flight_logger().begin(
+            xrfg::BridgeFlightOperation::private_swapchain_acquire,
+            handle_value(image.handle),static_cast<std::uint64_t>(image.phase));
+        const XrResult acquired=with_runtime_entry(session,[&] {
+            return blocking
+                ? session->private_runtime->acquire_image(image.handle,&acquire_info,&acquired_index)
+                : session->private_runtime->try_acquire_image(image.handle,&acquire_info,&acquired_index);
+        });
+        xrfg::bridge_flight_logger().end(acquire_token,
+            xrfg::BridgeFlightOperation::private_swapchain_acquire,acquired,
+            handle_value(image.handle),acquired_index,static_cast<std::uint64_t>(image.phase));
+        // XR_TIMEOUT_EXPIRED is positive, but it does not transfer ownership.
+        if (acquired!=XR_SUCCESS) return acquired;
+        image.acquired_index=acquired_index;
+        image.phase=PrivateOwnershipPhase::acquired;
+        XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        wait_info.timeout=XR_INFINITE_DURATION;
+        const auto wait_token=xrfg::bridge_flight_logger().begin(
+            xrfg::BridgeFlightOperation::private_swapchain_wait,
+            handle_value(image.handle),image.acquired_index,static_cast<std::uint64_t>(image.phase));
+        const XrResult waited=with_runtime_entry(session,[&] {
+            return dispatch->wait_swapchain_image(image.handle,&wait_info);
+        });
+        xrfg::bridge_flight_logger().end(wait_token,
+            xrfg::BridgeFlightOperation::private_swapchain_wait,waited,
+            handle_value(image.handle),image.acquired_index,static_cast<std::uint64_t>(image.phase));
+        if (waited!=XR_SUCCESS && waited!=XR_SESSION_LOSS_PENDING) return waited;
+        image.phase=PrivateOwnershipPhase::waited;
+        if (!image.first_use_logged) {
+            image.first_use_logged=true;
+            log_video_memory(*session,VideoMemoryStage::private_first_use,handle_value(image.handle));
+        }
+        return XR_SUCCESS;
+    } catch (...) {return XR_ERROR_RUNTIME_FAILURE;}
+}
+
 [[nodiscard]] XrResult own_composition_images(
     const std::shared_ptr<SessionState>& session, GeneratedFrameEndInfo& metadata,
     XrResult* creation_refusal = nullptr) {
@@ -13819,7 +13893,27 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             capture.public_output=std::move(output);
         }
         std::shared_ptr<CompositionImageSlot> slot;
-        for (auto& candidate : capture.outputs) {
+        const bool select_available=session->private_runtime && !private_auxiliary;
+        std::shared_ptr<CompositionImageSlot>* blocked_slot=nullptr;
+        bool image_acquired=false;
+        if (select_available) {
+            for (auto& candidate:capture.outputs) {
+                if (!candidate || candidate.use_count()!=1 || candidate->public_output) continue;
+                if (!blocked_slot) blocked_slot=&candidate;
+                const auto result=acquire_private_auxiliary_image(session.get(),candidate->image,false);
+                if (result==XR_TIMEOUT_EXPIRED) continue;
+                if (result!=XR_SUCCESS) {
+                    static_cast<void>(failed(3,handle_value(candidate->image.handle)));
+                    return result;
+                }
+                slot=candidate;image_acquired=true;break;
+            }
+        }
+        // Reuse every available allocated image before allocating another one.
+        // If all three images have readers, retain one bounded blocking wait;
+        // neither polling nor an unbounded resource expansion is needed.
+        if (!slot) for (auto& candidate : capture.outputs) {
+            if (select_available && candidate) continue;
             if (candidate && candidate->public_output) {
                 if (candidate->copy_failed) continue;
                 const auto completed=candidate->public_output->fence->GetCompletedValue();
@@ -13870,9 +13964,18 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             slot = candidate;
             break;
         }
+        if (!slot && blocked_slot) slot=*blocked_slot;
         if (!slot) return failed(2); // all auxiliary slots still leased
-        if (!slot->public_output && !acquire_and_wait_private_image(session.get(), session->dispatch, slot->image))
-            return failed(3,handle_value(slot->image.handle));
+        if (!slot->public_output && !image_acquired) {
+            if (select_available) {
+                const auto result=acquire_private_auxiliary_image(session.get(),slot->image,true);
+                if (result!=XR_SUCCESS) {
+                    static_cast<void>(failed(3,handle_value(slot->image.handle)));
+                    return result;
+                }
+            } else if (!acquire_and_wait_private_image(session.get(),session->dispatch,slot->image))
+                return failed(3,handle_value(slot->image.handle));
+        }
         HRESULT result;
         {
             std::scoped_lock gpu_lock(session->gpu_mutex);

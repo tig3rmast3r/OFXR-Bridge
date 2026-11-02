@@ -1,4 +1,5 @@
 #include "xrfg/d3d12_rife.hpp"
+#include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/rife_runtime_locator.hpp"
 #include "rife_pack_shader.hpp"
 #include "rife_vertex_shader.hpp"
@@ -18,6 +19,15 @@
 namespace xrfg { namespace {
 using Microsoft::WRL::ComPtr;
 void check(HRESULT hr) { if(FAILED(hr)) throw hr; }
+template<class F>
+void rife_phase(BridgeFlightLogger* logger,BridgeFlightOperation operation,
+    std::uint64_t id,std::uint64_t dimensions,std::uint64_t fraction_eyes,F&& run){
+    if(!logger){run();return;}
+    const auto token=logger->begin(operation,id,dimensions,fraction_eyes);
+    try{run();logger->end(token,operation,S_OK,id,dimensions,fraction_eyes);}
+    catch(HRESULT hr){logger->end(token,operation,hr,id,dimensions,fraction_eyes);throw;}
+    catch(...){logger->end(token,operation,E_FAIL,id,dimensions,fraction_eyes);throw;}
+}
 struct Handle {
     HANDLE value{};
     ~Handle(){ if(value && value!=INVALID_HANDLE_VALUE) CloseHandle(value); }
@@ -171,7 +181,7 @@ public:
         return result;
     }
     HANDLE process()const{return process_.value;}
-    HRESULT request(const std::string& message) noexcept {
+    HRESULT request(const std::string& message,RifeExecutionStatus* receipt=nullptr) noexcept {
         std::scoped_lock lock(mutex_);
         if(!live_)return E_FAIL;
         try{
@@ -185,13 +195,17 @@ public:
             const auto reply=read(30000); // first model graph warm-up may take seconds
             if(reply.find("\"ok\": true")==std::string::npos)throw E_FAIL;
             if(message.find("\"op\":\"infer\"")!=std::string::npos) {
-                optimizing_.store(boolean(reply,"\"optimizing\""),std::memory_order_relaxed);
+                const bool optimizing=boolean(reply,"\"optimizing\"");
+                optimizing_.store(optimizing,std::memory_order_relaxed);
                 // Protocol values are emitted by our owned portable worker.
                 auto backend=reply.find("\"backend\"");
                 backend=backend==std::string::npos?backend:reply.find(':',backend);
                 const auto value=backend==std::string::npos?backend:reply.find('"',backend+1);
-                tensorrt_.store(value!=std::string::npos && reply.compare(value,10,"\"tensorrt\"")==0,std::memory_order_relaxed);
-                execution_updated_ms_.store(GetTickCount64(),std::memory_order_release);
+                const bool tensorrt=value!=std::string::npos && reply.compare(value,10,"\"tensorrt\"")==0;
+                tensorrt_.store(tensorrt,std::memory_order_relaxed);
+                const auto updated=GetTickCount64();
+                execution_updated_ms_.store(updated,std::memory_order_release);
+                if(receipt)*receipt={updated,true,optimizing,tensorrt};
             }
             std::uint64_t usage{},reserved{};
             if(number(reply,"\"vram_private\"",usage) && number(reply,"\"torch_reserved\"",reserved)){
@@ -274,12 +288,19 @@ struct D3D12Rife::Impl{
     D3D12_CPU_DESCRIPTOR_HANDLE cpu(UINT i){auto h=heap->GetCPUDescriptorHandleForHeapStart();h.ptr+=i*device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);return h;}
     D3D12_GPU_DESCRIPTOR_HANDLE gpu(UINT i){auto h=heap->GetGPUDescriptorHandleForHeapStart();h.ptr+=i*device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);return h;}
     void begin(){check(allocator->Reset());check(commands->Reset(allocator.Get(),nullptr));}
-    void execute(){
-        check(commands->Close());ID3D12CommandList* list=commands.Get();queue->ExecuteCommandLists(1,&list);
-        submitted=++value;check(queue->Signal(fence.Get(),submitted));
-        if(fence->GetCompletedValue()<submitted){check(fence->SetEventOnCompletion(submitted,event.value));
-            if(WaitForSingleObject(event.value,30000)!=WAIT_OBJECT_0)throw HRESULT_FROM_WIN32(ERROR_TIMEOUT);}
-        check(device->GetDeviceRemovedReason());
+    void execute(BridgeFlightLogger* diagnostic=nullptr,std::uint64_t fraction_eyes=0,bool compose=false){
+        const auto dimensions=(static_cast<std::uint64_t>(width)<<32)|height;
+        rife_phase(diagnostic,compose?BridgeFlightOperation::rife_compose_execute:BridgeFlightOperation::rife_pack_execute,
+            id,dimensions,fraction_eyes,[&]{
+                check(commands->Close());ID3D12CommandList* list=commands.Get();queue->ExecuteCommandLists(1,&list);
+                submitted=++value;check(queue->Signal(fence.Get(),submitted));
+            });
+        rife_phase(diagnostic,compose?BridgeFlightOperation::rife_compose_wait:BridgeFlightOperation::rife_pack_wait,
+            id,dimensions,fraction_eyes,[&]{
+                if(fence->GetCompletedValue()<submitted){check(fence->SetEventOnCompletion(submitted,event.value));
+                    if(WaitForSingleObject(event.value,30000)!=WAIT_OBJECT_0)throw HRESULT_FROM_WIN32(ERROR_TIMEOUT);}
+                check(device->GetDeviceRemovedReason());
+            });
     }
     void size(UINT w,UINT h,UINT count){
         if(w==width&&h==height&&count==eyes)return;
@@ -364,6 +385,10 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
         p.inflight_images={a,b,out};
         const UINT w=std::max(32U,static_cast<UINT>(std::ceil(roi.width*p.scale))),h=std::max(32U,static_cast<UINT>(std::ceil(roi.height*p.scale)));
         p.size(w,h,static_cast<UINT>(av.size()));
+        auto& flight=bridge_flight_logger();
+        auto* diagnostic=flight.enabled()?&flight:nullptr;
+        std::uint64_t fraction_eyes=0;
+        if(diagnostic){std::uint32_t bits{};std::memcpy(&bits,&fraction,sizeof(bits));fraction_eyes=(static_cast<std::uint64_t>(p.eyes)<<32)|bits;}
         const auto mark=[&](UINT query){if(timing.queries)p.commands->EndQuery(timing.queries,D3D12_QUERY_TYPE_TIMESTAMP,timing.base+query);};
         p.begin();if(timing.first){mark(0);mark(5);}
         // The validated target layout is disjoint. A complete union needs no
@@ -397,8 +422,14 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
             before=barrier(resource,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);input=barrier(p.buffers[source_index].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
             p.commands->ResourceBarrier(1,&before);p.commands->ResourceBarrier(1,&input);
         }
-        if(timing.first)mark(1);p.execute();
-        check(p.worker->request("{\"op\":\"infer\",\"id\":"+std::to_string(p.id)+",\"model\":"+std::to_string(p.model)+",\"fraction\":"+std::to_string(fraction)+"}"));
+        if(timing.first)mark(1);p.execute(diagnostic,fraction_eyes);
+        RifeExecutionStatus receipt;
+        const auto dimensions=(static_cast<std::uint64_t>(w)<<32)|h;
+        rife_phase(diagnostic,BridgeFlightOperation::rife_infer,p.id,dimensions,fraction_eyes,[&]{
+            check(p.worker->request("{\"op\":\"infer\",\"id\":"+std::to_string(p.id)+",\"model\":"+std::to_string(p.model)+",\"fraction\":"+std::to_string(fraction)+"}",diagnostic?&receipt:nullptr));
+        });
+        if(diagnostic)diagnostic->event(BridgeFlightOperation::rife_backend,
+            (receipt.tensorrt?1:0)|(receipt.optimizing?2:0)|(receipt.active?4:0),p.id,dimensions,fraction_eyes);
         // Restore full-resolution A/B descriptors after both reduced-input
         // packs have retired. Only flow/mask planes return from Python.
         for(UINT source_index=0;source_index<2;++source_index){
@@ -432,7 +463,7 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
         if(output_state!=D3D12_RESOURCE_STATE_RENDER_TARGET)p.commands->ResourceBarrier(1,&output);
         p.commands->ResourceBarrier(1,&result);if(timing.last){mark(4);mark(6);}
         if(timing.last&&timing.queries&&timing.readback)p.commands->ResolveQueryData(timing.queries,D3D12_QUERY_TYPE_TIMESTAMP,timing.base,7,timing.readback,timing.base*sizeof(std::uint64_t));
-        p.execute();p.inflight_images={};return S_OK;
+        p.execute(diagnostic,fraction_eyes,true);p.inflight_images={};return S_OK;
     }catch(HRESULT hr){return hr;}catch(...){return E_FAIL;}
 }
 }

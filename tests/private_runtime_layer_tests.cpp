@@ -11,8 +11,147 @@
 
 #include "afw_only_session_test.inc"
 #include "steamvr_vram_budget_test.inc"
+#include "auxiliary_slot_selection_test.inc"
 
 static bool framework_session_probe{},vdxr_legacy_probe{};
+static int admission_credit_test() {
+    {
+        // Use the largest supported physical interval. Wall-clock elapsed is
+        // accounted below, so scheduling delays cannot mimic an extra period.
+        const auto saved_period=period;period=50'000'000;
+        {
+            Fixture f(true);f.throttled=false;f.unblock();f.begin_virtual();
+            XrFrameState before{XR_TYPE_FRAME_STATE},after{XR_TYPE_FRAME_STATE};
+            const auto entered=ns();xr_ok(f.transport->predict_frame(&before),"prediction before admission");
+            std::shared_ptr<xrfg::PrivateOpenXrRuntime::EndFrameReservation> permit;
+            xr_ok(f.transport->reserve_end_frame(permit),"reserve without accepting a packet");
+            xr_ok(f.transport->predict_frame(&after),"prediction during owned admission");
+            const auto elapsed=ns()-entered;
+            check(after.predictedDisplayTime-before.predictedDisplayTime<=elapsed+period/2,
+                "an unaccepted End reservation must not add a refresh to virtual prediction");
+            permit.reset();xr_ok(f.transport->drain(),"cancelled prediction reservation drains");
+        }
+        period=saved_period;
+    }
+    {
+        Fixture f(true);f.throttled=false;f.unblock();
+        xr_ok(f.transport->set_buffer_capacity(2),"credit test uses normal capacity");
+        const auto chain=f.make_chain();f.write(chain,77);f.begin_virtual();
+        std::shared_ptr<xrfg::PrivateOpenXrRuntime::EndFrameReservation> permit;
+        xr_ok(f.transport->reserve_end_frame(permit),"reserve owned End credit");
+        auto drained=std::async(std::launch::async,[&]{return f.transport->drain();});
+        check(drained.wait_for(40ms)==std::future_status::timeout,"drain includes an owned, not-yet-accepted reservation");
+        permit.reset();
+        check(drained.wait_for(2s)==std::future_status::ready,"cancelling reservation wakes drain");xr_ok(drained.get(),"cancelled reservation drain");
+        xr_ok(f.transport->reserve_end_frame(permit),"reserve before policy change");
+        auto policy=std::async(std::launch::async,[&]{return f.transport->set_director_enabled(false);});
+        check(policy.wait_for(40ms)==std::future_status::timeout,"policy change serializes with an owned End credit");
+        permit.reset();
+        check(policy.wait_for(2s)==std::future_status::ready,"cancelled credit releases policy serialization");xr_ok(policy.get(),"policy change after cancellation");
+        xr_ok(f.transport->reserve_end_frame(permit),"reserve before invalid commit");
+        check(f.transport->end_frame_reserved(nullptr,{},permit)==XR_ERROR_VALIDATION_FAILURE,
+            "invalid reserved End returns validation failure");
+        xr_ok(f.transport->drain(),"invalid commit returned its admission count and credit");
+        check(f.transport->end_frame_reserved(nullptr,{},permit)==XR_ERROR_CALL_ORDER_INVALID,
+            "a consumed reservation cannot be committed twice");
+        permit.reset();
+        xr_ok(f.submit(chain,1),"normal End remains usable after cancelled and failed reservations");
+        f.wait_count(1);xr_ok(f.transport->drain(),"valid frame after failed commit");
+        xr_ok(f.transport->destroy_swapchain(chain),"reservation lifecycle source cleanup");
+    }
+    {
+        Fixture f(true);f.throttled=false;
+        xr_ok(f.transport->set_buffer_capacity(2),"stop reservation uses normal capacity");
+        const auto chain=f.make_chain();f.write(chain,88);
+        for(unsigned source=1;source<=2;++source) {
+            f.begin_virtual();xr_ok(f.submit(chain,float(source)),"fill stop-test endpoint");
+            if(source==1)f.wait_entered();
+        }
+        f.begin_virtual();
+        auto waiting=std::async(std::launch::async,[&] {
+            std::shared_ptr<xrfg::PrivateOpenXrRuntime::EndFrameReservation> permit;
+            return f.transport->reserve_end_frame(permit);
+        });
+        check(waiting.wait_for(40ms)==std::future_status::timeout,"full endpoint blocks only reservation acquisition");
+        auto stopped=std::async(std::launch::async,[&]{f.transport->stop();});
+        check(waiting.wait_for(2s)==std::future_status::ready,"stop wakes blocked reservation before native End returns");
+        check(waiting.get()==XR_ERROR_SESSION_NOT_RUNNING,"stopped reservation propagates the real session state");
+        f.unblock();
+        check(stopped.wait_for(3s)==std::future_status::ready,"stop joins after reservation cancellation and native release");stopped.get();
+        xr_ok(f.transport->destroy_swapchain(chain),"stopped reservation source cleanup");
+    }
+    std::puts("End reservation: bounded credits, drain, policy serialization, invalid/double commit and stop wakeup PASS");
+    return 0;
+}
+static int overlay_admission_test(bool measured) {
+    xrfg_fixture::ControlProfile profile;
+    xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,measured);
+    Fixture f(true);f.throttled=false;
+    xr_ok(f.transport->set_buffer_capacity(2),"normal two-credit endpoint for overlay admission probe");
+    const auto chain=f.make_chain();f.write(chain,80);
+    for(unsigned source=1;source<=2;++source) {
+        f.begin_virtual();xr_ok(f.submit(chain,float(source)),"fill private endpoint before overlay probe");
+        if(source==1)f.wait_entered();
+    }
+    auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);
+    dispatch->end_frame=+[](XrSession,const XrFrameEndInfo* info)->XrResult {
+        return current->transport->end_frame(info);
+    };
+    const auto unavailable=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult {
+        *out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;
+    };
+    auto state=std::make_shared<SessionState>(dispatch);state->handle=reinterpret_cast<XrSession>(2);
+    state->private_runtime=f.transport;
+    std::atomic_uint input_polls{};
+    const auto input=+[](void* user) {
+        ++*static_cast<std::atomic_uint*>(user);
+        xrfg::OverlayMenuInputFrame frame{};frame.focused=true;return frame;
+    };
+    state->fps_overlay=std::make_unique<xrfg::OpenXrFpsOverlay>(dispatch->instance,state->handle,0,
+        unavailable,dispatch->end_frame,nullptr,nullptr,nullptr,
+        xrfg::autonomous::configuration_path(),true,input,&input_polls);
+    bind_private_delivery_metrics(state);
+    XrCompositionLayerProjectionView view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+    view.pose.orientation.w=1;view.pose.position.x=3;view.subImage.swapchain=chain;
+    view.subImage.imageRect.extent={1,1};
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=1;projection.views=&view;
+    const auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=epoch+ns();end.layerCount=1;
+    end.layers=&layer;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    xrfg::InterfaceFrameStamp stamp{};
+    if(measured) {stamp.entered_ns=xrfg::interface_clock_ns();stamp.cycle=std::make_shared<xrfg::InterfaceCycle>(stamp.entered_ns);}
+    f.begin_virtual();
+    auto waiting=std::async(std::launch::async,[&]{return state->fps_overlay->end_frame(&end,false,true,{},0,stamp);});
+    check(waiting.wait_for(50ms)==std::future_status::timeout,"endpoint pressure must hold the third submission");
+    auto producer=std::async(std::launch::async,[&] {
+        // Exactly the production lock order: UI refresh holds the game GPU
+        // mutex, so waiting for the presenter's UI mutex also stalls synthesis.
+        std::scoped_lock gpu_lock(state->gpu_mutex);
+        state->fps_overlay->application_frame(&end);
+    });
+    const bool independent=producer.wait_for(250ms)==std::future_status::ready;
+    const bool polled=input_polls.load()!=0;
+    f.unblock();
+    check(producer.wait_for(3s)==std::future_status::ready,"UI probe retires after native gate release");producer.get();
+    check(input_polls.load()!=0,"UI probe must execute its actual input callback after the gate is released");
+    check(waiting.wait_for(3s)==std::future_status::ready,"third endpoint submission retires after native gate release");
+    xr_ok(waiting.get(),"held overlay submission accepted once");
+    f.wait_count(3);xr_ok(f.transport->drain(),"overlay admission exact FIFO drain");
+    if(measured) {
+        float cycle{};
+        check(stamp.cycle->read_minimum_cycle(xrfg::interface_clock_ns(),cycle) && cycle>=40.F,
+            "moving the delivery-credit wait must not remove it from the measured native cycle");
+    }
+    std::printf("OVERLAY_ADMISSION measured=%u producer_returned_before_native=%u input_polled_before_native=%u total_input_polls=%u\n",
+        unsigned(measured),unsigned(independent),unsigned(polled),input_polls.load());
+    check(independent && polled,"application_frame and its real input callback waited for private delivery capacity");
+    check(f.positions==std::vector<float>({1,2,3}) && f.pixels==std::vector<unsigned>({80,80,80}),
+        "moving admission outside UI mutex changed frame ownership or delivery order");
+    state->fps_overlay.reset();xr_ok(f.transport->destroy_swapchain(chain),"overlay admission source cleanup");
+    std::printf("Overlay admission measured=%u: blocked native End retains credits while producer UI/input progresses PASS\n",unsigned(measured));
+    return 0;
+}
 // This gate holds an actual native End, not RIFE or an artificial GPU sleep.
 // The private endpoint keeps its two FIFO credits until that End returns.
 static std::atomic_uint rife_overlap_hold_after{UINT_MAX};
@@ -122,6 +261,12 @@ int main(int argc,char** argv) {
         std::puts("OSR fresh/held terminal metadata, unchanged source/orientation/FOV/time and legacy PASS");return 0;
     }
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
+    if(route=="auxiliary-slot-available")return auxiliary_slot_selection_test(0);
+    if(route=="auxiliary-slot-lazy")return auxiliary_slot_selection_test(1);
+    if(route=="auxiliary-slot-all-busy")return auxiliary_slot_selection_test(2);
+    if(route=="overlay-admission" || route=="overlay-admission-measured")
+        return overlay_admission_test(route.ends_with("measured"));
+    if(route=="admission-credit")return admission_credit_test();
     const bool rife_luke=route.starts_with("rife-luke");
     const unsigned rife_luke_factor=route.find("luke4")!=std::string::npos?4:3;
     const bool rife_tail=route.starts_with("rife-tail");

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.801.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.803.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -695,7 +695,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     if(XRFG_BUILD_TESTS)
         add_executable(xrfg_private_openxr_runtime_tests tests/private_openxr_runtime_tests.cpp)
         add_executable(xrfg_private_release_readiness_tests tests/private_release_readiness_tests.cpp)
-        target_link_libraries(xrfg_private_release_readiness_tests PRIVATE xrfg_steamvr_delivery)
+        target_link_libraries(xrfg_private_release_readiness_tests PRIVATE xrfg_steamvr_delivery xrfg_d3d12_history)
         target_compile_features(xrfg_private_release_readiness_tests PRIVATE cxx_std_20)
         add_test(NAME xrfg_private_d11_release_readiness COMMAND xrfg_private_release_readiness_tests)
         set_tests_properties(xrfg_private_d11_release_readiness PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
@@ -1246,6 +1246,17 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(xrfg_pimax_native_session_gpu xrfg_pimax_forced_framework_session_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_private_d11_entry_gate COMMAND xrfg_private_runtime_layer_tests d11-entry-gate)
         set_tests_properties(xrfg_private_d11_entry_gate PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE)
+        add_test(NAME xrfg_private_overlay_admission COMMAND xrfg_private_runtime_layer_tests overlay-admission)
+        add_test(NAME xrfg_private_overlay_admission_measured COMMAND xrfg_private_runtime_layer_tests overlay-admission-measured)
+        add_test(NAME xrfg_private_admission_credit COMMAND xrfg_private_runtime_layer_tests admission-credit)
+        set_tests_properties(xrfg_private_overlay_admission xrfg_private_overlay_admission_measured xrfg_private_admission_credit
+            PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
+        foreach(auxiliary_case available lazy all-busy)
+            add_test(NAME xrfg_private_auxiliary_slot_${auxiliary_case}
+                COMMAND xrfg_private_runtime_layer_tests auxiliary-slot-${auxiliary_case})
+            set_tests_properties(xrfg_private_auxiliary_slot_${auxiliary_case}
+                PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
+        endforeach()
         if(XRFG_TEST_RIFE_GPU)
             foreach(rife_case rife-overlap3 rife-overlap3-director rife-overlap4 rife-overlap4-director rife-overlap3-retire rife-overlap3-retire-director rife-overlap4-retire rife-overlap4-retire-director rife-luke3 rife-luke4 rife-luke3-director rife-luke4-director rife-luke3-fast-buffer3 rife-luke4-fast-buffer3 rife-luke3-fast-buffer3-director rife-luke4-fast-buffer3-director rife-luke-switch rife-luke-switch-director rife2 rife3 rife4 rife-tail3 rife-tail4 rife-tail3-fast-buffer3 rife-tail4-fast-buffer3 rife-report rife-replay rife-switch rife-switch-director rife-switch-fast rife-switch-fast-director)
                 add_test(NAME xrfg_private_${rife_case}_gpu COMMAND xrfg_private_runtime_layer_tests ${rife_case})

@@ -87,6 +87,12 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::synthesis_prime: return "synthesis_prime";
     case BridgeFlightOperation::rife_worker: return "rife_worker";
     case BridgeFlightOperation::rife_memory: return "rife_memory";
+    case BridgeFlightOperation::rife_pack_execute: return "rife_pack_execute";
+    case BridgeFlightOperation::rife_pack_wait: return "rife_pack_wait";
+    case BridgeFlightOperation::rife_infer: return "rife_infer";
+    case BridgeFlightOperation::rife_compose_execute: return "rife_compose_execute";
+    case BridgeFlightOperation::rife_compose_wait: return "rife_compose_wait";
+    case BridgeFlightOperation::rife_backend: return "rife_backend";
     case BridgeFlightOperation::synthesis_pair: return "synthesis_pair";
     case BridgeFlightOperation::downstream_first_end_frame:
         return "downstream_first_end_frame";

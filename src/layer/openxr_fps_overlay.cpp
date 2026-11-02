@@ -45,6 +45,7 @@ struct OpenXrFpsOverlay::Impl {
     PFN_xrGetInstanceProcAddr get{};
     PFN_xrEndFrame downstream_end{};
     ObservedEndFrame private_delivery_end;
+    std::atomic<std::shared_ptr<PrepareEndFrame>> private_delivery_prepare;
     PFN_xrCreateReferenceSpace create_space{};
     PFN_xrDestroySpace destroy_space{};
     PFN_xrCreateSwapchain create_swapchain{};
@@ -1122,13 +1123,26 @@ std::optional<OverlayPlacement> OpenXrFpsOverlay::marker_placement() const noexc
     return impl_->placement;
 }
 
-void OpenXrFpsOverlay::set_private_delivery_end(ObservedEndFrame end) {
+void OpenXrFpsOverlay::set_private_delivery_end(ObservedEndFrame end,PrepareEndFrame prepare) {
+    auto admission=prepare?std::make_shared<PrepareEndFrame>(std::move(prepare)):nullptr;
     std::scoped_lock lock(impl_->mutex);impl_->private_delivery_end=std::move(end);
+    impl_->private_delivery_prepare.store(std::move(admission),std::memory_order_release);
 }
 
 XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic, bool new_content,
     std::span<const std::shared_ptr<D3D12NativeFrameResult>> native_results, unsigned native_output,
     InterfaceFrameStamp stamp) {
+    const bool measure = interface_measurement_requested() && new_content && stamp.entered_ns;
+    const auto admission_clock=measure?interface_clock_ns():0;
+    // Waiting for a delivery credit must not own the optional UI resource
+    // mutex. application_frame holds the game's GPU mutex while refreshing
+    // that UI. Reserve first, then keep composition/image ownership locked
+    // throughout the now nonblocking endpoint acceptance.
+    PreparedEndFrame prepared;
+    if(const auto admission=impl_->private_delivery_prepare.load(std::memory_order_acquire)) {
+        prepared=(*admission)();
+        if(XR_FAILED(prepared.result))return prepared.result;
+    }
     std::scoped_lock lock(impl_->mutex);
     std::array<const XrCompositionLayerBaseHeader*, 128> layers{};
     XrFrameEndInfo composed{};
@@ -1152,7 +1166,6 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
             layers[composed.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&impl_->menu_quad);
         submitted = &composed;
     }
-    const bool measure = interface_measurement_requested() && new_content && stamp.entered_ns;
     std::int64_t display{};
     if (measure && !synthetic && nonempty && impl_->converter)
         if (!impl_->converter(impl_->converter_user, info->displayTime, display)) display = 0;
@@ -1162,8 +1175,11 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
         try {delivery=std::make_shared<InterfaceDeliveryReceipt>(synthetic);
             stamp.cycle->attach_native_delivery(delivery);}catch(...) {} // Missing receipt stays N/A.
     }
-    const auto submit_clock = measure ? interface_clock_ns() : 0;
-    const auto result = delivery?impl_->private_delivery_end(submitted,delivery):impl_->downstream_end(impl_->session, submitted);
+    // Preserve the measured private-End boundary: admission is still part of
+    // delivery even though its wait now happens before the optional UI lock.
+    const auto submit_clock = prepared.submit?admission_clock:measure?interface_clock_ns():0;
+    const auto result = prepared.submit?prepared.submit(submitted,delivery):
+        delivery?impl_->private_delivery_end(submitted,delivery):impl_->downstream_end(impl_->session, submitted);
     const auto accepted_clock = measure ? interface_clock_ns() : 0;
     if (measure && !synthetic) {
         if(result==XR_SUCCESS && nonempty && stamp.cycle)stamp.cycle->real_prediction(display);
