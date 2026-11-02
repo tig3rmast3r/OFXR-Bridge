@@ -2637,6 +2637,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             in.source_motion_state = D3D12_RESOURCE_STATE_COMMON;
             in.source_eye = source_eye;
             in.use_history = history_usable;
+            in.reset_history = guide.reset;
             // The history frame's own motion needs that eye's frame before it
             // for the camera's share: the two publications back it points to.
             in.use_history_motion = history_usable && history.has_motion &&
@@ -2697,8 +2698,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             impl_->osr_full.record_history_update(command_list, in, kept);
             final_color.texture = impl_->osr_full.output();
             final_color.initial_state = D3D12_RESOURCE_STATE_COMMON;
-            // 1310: a = effective mode (bits 8+), history used (bit 0) and
-            // history motion used (bit 1); b = publication, c = the history
+            // 1310: a = effective mode (bits 8+), CPU history eligibility (bit 0) and
+            // motion eligibility (bit 1); GPU scene state can veto both. b = publication, c = the history
             // frame's publication.
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
                 (static_cast<std::int64_t>(effective_mode) << 8) | (history_usable ? 1 : 0) | (in.use_history_motion ? 2 : 0),
@@ -2717,6 +2718,14 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     1312, guide.publication, pack(guide.jitter_x, guide.jitter_y));
             }
             if (two_frame_capture_active()) {
+                TwoFrameImageInfo scene{};
+                scene.stage = "osr_scene_state";
+                scene.stream = guide.stream;
+                scene.capture_serial = guide.publication;
+                scene.eye = static_cast<std::int32_t>(peer_eye);
+                scene.width = 5; scene.height = 1;
+                two_frame_capture_record_ng_x(scene, impl_->device.Get(), command_list,
+                    impl_->osr_full.scene_state(), impl_->osr_full.scene_state_state());
                 TwoFrameImageInfo stereo{};
                 stereo.stage = "osr_stereo_depth";
                 stereo.stream = guide.stream;

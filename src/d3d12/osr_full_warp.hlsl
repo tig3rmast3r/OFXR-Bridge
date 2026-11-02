@@ -41,6 +41,9 @@ RWTexture2D<float4> WarpedOut   : register(u2);
 RWTexture2D<uint>   ResolvedOut : register(u3);
 RWTexture2D<float4> Output      : register(u4);
 RWTexture2D<uint>   OffsetOut   : register(u5);
+// OSR-private receipt: history allowed, valid/motion eye masks, cut, votes,
+// history motion allowed. Never read back by the production frame thread.
+RWTexture2D<uint>   SceneState  : register(u6);
 SamplerState LinearClamp : register(s0);
 
 cbuffer Osr : register(b0) {
@@ -101,8 +104,83 @@ static const int2 FillDirections[8] = {
     int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1),
     int2(1, 1), int2(-1, 1), int2(1, -1), int2(-1, -1) };
 
+groupshared uint SceneValid[64];
+groupshared uint SceneChanged[64];
+groupshared uint SceneSource[64];
+
+// Only group zero participates. Reuse the clear dispatch, existing cameras,
+// colour and depth; 576 samples independent of headset resolution.
+void classify_scene(uint lane) {
+    const uint eye = (Flags >> 4u) & 1u;
+    const uint peer = 1u - eye;
+    uint mask = (Flags & 8u) != 0 ? 0u : SceneState[uint2(1, 0)];
+    const bool available = (Flags & 2u) != 0 && (mask & (1u << peer)) != 0;
+    uint valid = 0, changed = 0, source_valid = 0;
+    if (available) {
+        [loop] for (uint i = lane; i < 576u; i += 64u) {
+            const float2 uv = 0.05 + 0.9 * (float2(i % 32u, i / 32u) + 0.5) / float2(32, 18);
+            const int2 t = clamp(int2(floor(uv * DepthSize - SourceDejitter)), 0, int2(DepthSize) - 1);
+            const float z = SourceDepth.Load(int3(t, 0));
+            if (!isfinite(z) || z < 0 || z > 1) continue;
+            ++source_valid;
+            const float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+            const float4 q = mul(mul(float4(ndc, max(z, FarDepth), 1), Forward), BackwardHistory);
+            if (!all(isfinite(q)) || q.w <= 1e-8) continue;
+            const float3 h = q.xyz / q.w;
+            const float2 huv = float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);
+            if (any(huv < 0.0) || any(huv >= 1.0)) continue;
+            const int2 ht = clamp(int2(floor(huv * DepthSize - HistoryDejitter)), 0, int2(DepthSize) - 1);
+            const float hz = HistoryDepth.Load(int3(ht, 0));
+            const float3 a = max(SourceColor.SampleLevel(LinearClamp, uv, 0).rgb, 0);
+            const float3 b = max(HistoryColor.SampleLevel(LinearClamp, huv, 0).rgb, 0);
+            if (!isfinite(hz) || hz < 0 || hz > 1 || !all(isfinite(a)) || !all(isfinite(b))) continue;
+            const float peak_a = max(a.r, max(a.g, a.b));
+            const float peak_b = max(b.r, max(b.g, b.b));
+            const float3 delta = abs(a - b);
+            const float difference = max(delta.r, max(delta.g, delta.b)) / max(0.2, max(peak_a, peak_b));
+            const float3 chroma_delta = abs(a / max(0.05, peak_a) - b / max(0.05, peak_b));
+            const float chroma = max(chroma_delta.r, max(chroma_delta.g, chroma_delta.b));
+            const bool depth_changed = abs(hz - max(h.z, 0.0)) > 0.25 * max(FarDepth, max(hz, h.z));
+            ++valid;
+            // Require a broad, strong change. Exposure-only flashes retain
+            // both geometry and chromaticity; local motion cannot win the vote.
+            if (difference > 0.45 && (depth_changed || chroma > 0.45)) ++changed;
+        }
+    }
+    SceneValid[lane] = valid;
+    SceneChanged[lane] = changed;
+    SceneSource[lane] = source_valid;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            SceneValid[lane] += SceneValid[lane + stride];
+            SceneChanged[lane] += SceneChanged[lane + stride];
+            SceneSource[lane] += SceneSource[lane + stride];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane == 0) {
+        // A wholly different camera can have no overlap to compare. Discard
+        // that history too; a normal partial head turn keeps its useful edge.
+        const bool cut = (SceneValid[0] >= 288u && SceneChanged[0] * 4u >= SceneValid[0] * 3u) ||
+            (SceneSource[0] >= 432u && SceneValid[0] <= 32u);
+        SceneState[uint2(0, 0)] = available && !cut ? 1u : 0u;
+        SceneState[uint2(2, 0)] = cut ? 1u : 0u;
+        SceneState[uint2(3, 0)] = SceneValid[0] | (SceneChanged[0] << 16u);
+        SceneState[uint2(4, 0)] = available && !cut && (mask & (4u << peer)) != 0 ? 1u : 0u;
+        if (cut) mask = 0;
+        // The current source is copied later in this same command list. Its
+        // motion is usable only if its preceding same-eye frame survived.
+        const bool previous_source_valid = (mask & (1u << eye)) != 0;
+        mask &= ~(4u << eye);
+        if (previous_source_valid) mask |= 4u << eye;
+        SceneState[uint2(1, 0)] = mask | (1u << eye);
+    }
+}
+
 [numthreads(8, 8, 1)]
-void OsrFullClear(uint3 id : SV_DispatchThreadID) {
+void OsrFullClear(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
+    if (all(group == 0)) classify_scene(lane);
     if (any(id.xy >= DepthSize)) return;
     SplatOut[id.xy] = 0;
     SplatOut2[id.xy] = 0;
@@ -142,7 +220,7 @@ float2 history_texel_now(int2 t, float z, out bool locked) {
     float2 pos = float2(t) + 0.5 + HistoryDejitter;
     float2 now = pos; // single exit: fxc rejects early returns here
     locked = z >= LockedDepth;
-    if (!locked && (MotionScale.x != 0.0 || MotionScale.y != 0.0)) {
+    if (!locked && SceneState[uint2(4, 0)] != 0 && (MotionScale.x != 0.0 || MotionScale.y != 0.0)) {
         float2 total = HistoryMotion.Load(int3(t, 0)) * MotionScale;
         float2 ndc = float2(pos.x / DepthSize.x * 2.0 - 1.0, 1.0 - pos.y / DepthSize.y * 2.0);
         float4 q = mul(float4(ndc, z, 1.0), BackwardHistory);
@@ -195,6 +273,7 @@ bool history_landing(uint2 id, out float2 p, out uint word, out float2 origin) {
 
 [numthreads(8, 8, 1)]
 void OsrFullSplatHistory(uint3 id : SV_DispatchThreadID) {
+    if (SceneState[uint2(0, 0)] == 0) return;
     if (any(id.xy >= DepthSize)) return;
     float2 p, origin; uint word;
     if (!history_landing(id.xy, p, word, origin)) return;
@@ -209,6 +288,7 @@ void OsrFullSplatHistory(uint3 id : SV_DispatchThreadID) {
 
 [numthreads(8, 8, 1)]
 void OsrFullSplatOffset(uint3 id : SV_DispatchThreadID) {
+    if (SceneState[uint2(0, 0)] == 0) return;
     if (any(id.xy >= DepthSize)) return;
     float2 p, origin; uint word;
     if (!history_landing(id.xy, p, word, origin)) return;
@@ -591,7 +671,7 @@ void OsrFullResolve(uint3 id : SV_DispatchThreadID) {
     int2 c = clamp(int2(floor(depth_pixel)), int2(0, 0), int2(DepthSize) - 1);
     float4 color = 0;
     uint word = 0;
-    const bool history = (Flags & 2u) != 0;
+    const bool history = (Flags & 2u) != 0 && SceneState[uint2(0, 0)] != 0;
     if (resolve_image(StereoDepth, SourceDepth, SourceColor, BackwardSource, SourceDejitter, false, c, ndc, color, word)) {
         const float2 stereo_at = g_fetch_position;
         const float stereo_depth = g_fetch_depth;
