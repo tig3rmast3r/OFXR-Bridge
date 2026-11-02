@@ -19,7 +19,7 @@ Download it from [GitHub Releases](https://github.com/tig3rmast3r/OFXR-Bridge/re
 
 What changed in this version: see the [release notes](https://github.com/tig3rmast3r/OFXR-Bridge/releases).
 
-Not working, or not feeling smoother? See the [troubleshooting guide](https://github.com/tig3rmast3r/OFXR-Bridge/blob/nightly/docs/TROUBLESHOOTING.md).
+Not working, or not feeling smoother? See the [troubleshooting guide](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/docs/TROUBLESHOOTING.md).
 
 > [!WARNING]
 > This is a beta release. It may not work with your game, VR mod, GPU or OpenXR
@@ -362,7 +362,7 @@ live state once a second: whether OFXR is enabled or paused, the multiplier, the
 game and headset frame rates, and the latency.
 [MSFS AutoFPS](https://github.com/ResetXPDR/MSFS_AutoFPS) reads it to keep the
 simulator at its target frame rate. File format:
-[status.json](https://github.com/tig3rmast3r/OFXR-Bridge/blob/nightly/docs/STATUS_JSON.md).
+[status.json](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/docs/STATUS_JSON.md).
 
 ## What the tray changes on your PC
 
@@ -415,11 +415,11 @@ Diagnostic logs are independent of game/mod logging. They record bridge activity
 
 ## Building from source
 
-See the [Windows build instructions](https://github.com/tig3rmast3r/OFXR-Bridge/blob/nightly/docs/BUILDING.md).
+See the [Windows build instructions](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/docs/BUILDING.md).
 
 ## License
 
-The combined standalone distribution is licensed under [GPL-3.0](https://github.com/tig3rmast3r/OFXR-Bridge/blob/nightly/LICENSE). Original components and third-party libraries retain their respective notices and licenses; proprietary providers have their own terms. See [attribution and third-party notices](https://github.com/tig3rmast3r/OFXR-Bridge/blob/nightly/licenses/ATTRIBUTION.md).
+The combined standalone distribution is licensed under [GPL-3.0](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/LICENSE). Original components and third-party libraries retain their respective notices and licenses; proprietary providers have their own terms. See [attribution and third-party notices](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/licenses/ATTRIBUTION.md).
 
 ## Credits
 
