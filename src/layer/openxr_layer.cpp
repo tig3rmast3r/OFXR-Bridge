@@ -6547,7 +6547,12 @@ XrResult layer_wait_frame_impl(
             state->application_frame_has_overlapping_wait = true;
             ++state->pipelined_wait_streak;
         }
-        if (!presenter_forbidden(*state) && !state->luke_afw_enabled && state->pipelined_wait_streak >= 2 &&
+        // RIFE's private endpoint already owns asynchronous XR submission.
+        // Preserve overlap bookkeeping, but do not promote its application
+        // tickets into the legacy presenter: that makes 3X/4X appear unsupported
+        // and can reject a live multiplier change before synthesis starts.
+        const bool private_rife=state->private_runtime && state->nvidia_options.rife_model>=0;
+        if (!private_rife && !presenter_forbidden(*state) && !state->luke_afw_enabled && state->pipelined_wait_streak >= 2 &&
             state->last_inline_frame_state_valid) {
             // The current runtime frame is still owned by the render thread,
             // so the transition cannot start its presenter until xrEndFrame

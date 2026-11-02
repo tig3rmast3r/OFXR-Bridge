@@ -289,6 +289,9 @@ int main(int argc,char** argv) {
             legacy_snapshot.layers[0].views[1].pose.position.x==1,"absent OSR receipt preserves the existing AFW/pass-through metadata");
         std::puts("OSR fresh/held terminal metadata, unchanged source/orientation/FOV/time and legacy PASS");return 0;
     }
+    const auto overlap_tag=route.find("-app-overlap");
+    const bool rife_app_overlap=overlap_tag!=std::string::npos;
+    if(rife_app_overlap)route.erase(overlap_tag,std::string("-app-overlap").size());
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
     const bool adaptive_framework=route.starts_with("adaptive-framework-");
     const bool adaptive_director=route.starts_with("adaptive-director-");
@@ -1017,6 +1020,7 @@ int main(int argc,char** argv) {
     bool rife_overlap_proven=false;
     std::uint64_t rife_overlap_b_sequence{};
     ComPtr<ID3D12Fence> rife_overlap_compute_gate;
+    XrFrameState overlap_prediction{XR_TYPE_FRAME_STATE};bool overlap_wait_ready=false;
     for(unsigned n=1;n<=input_count;++n) {
         if(rife_overlap && n==4) {
             xr_ok(wait_for_synthesis_handoff(state),"overlap probe drains the previous compute job");
@@ -1133,7 +1137,10 @@ int main(int argc,char** argv) {
         if(panel_test)f.write(panel_chain,30+n);
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=image_width;g->output_height=g->depth_height=g->motion_height=image_height;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
-        XrFrameState prediction{XR_TYPE_FRAME_STATE};xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
+        XrFrameState prediction{XR_TYPE_FRAME_STATE};
+        if(overlap_wait_ready){prediction=overlap_prediction;overlap_wait_ready=false;}
+        else xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");
+        xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
         if(measured)if(auto cycle=state->interface_waited_cycle.load())measured_cycles.push_back(std::move(cycle));
         std::array<XrCompositionLayerProjectionView,2> views;
         for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={int(image_width),int(image_height)};}
@@ -1161,6 +1168,12 @@ int main(int argc,char** argv) {
                 "retirement-race compute gate");
             ok(state->d3d12_synthesis_queue->Wait(rife_overlap_compute_gate.Get(),1),
                 "hold C compute while the presenter retires B");
+        }
+        if(rife_app_overlap && n<input_count) {
+            xr_ok(layer_wait_frame_impl(state->handle,nullptr,&overlap_prediction),"next application Wait precedes current End");
+            overlap_wait_ready=true;
+            check(continuous_presenter_active(state) || state->application_frame_has_overlapping_wait,
+                "private RIFE keeps overlapping application-frame bookkeeping");
         }
         if(hfw) std::fprintf(stderr,"HFW before%u active%u worker%u request%u forbidden%u mode%u enabled%u\n",n,
             unsigned(continuous_presenter_active(state)),unsigned(state->three_slot_director),unsigned(state->presenter_start_requested),
@@ -1551,6 +1564,8 @@ int main(int argc,char** argv) {
         check(fractional>0,"private outputs lost interpolated panel poses");
         std::printf("Private panel atlas: %zu physical frames, %u fractional poses PASS\n",f.panel_positions.size(),fractional);
     }
+    if(rife_app_overlap)check(!state->pipelined_presenter_mode,
+        "private RIFE must not enter legacy presenter mode when application frames overlap");
     f.transport->stop();
     for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
     xr_ok(layer_destroy_swapchain_impl(chain),"shipping destroy");
