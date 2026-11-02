@@ -261,6 +261,10 @@ int main(int argc,char** argv) {
         std::puts("OSR fresh/held terminal metadata, unchanged source/orientation/FOV/time and legacy PASS");return 0;
     }
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
+    const bool adaptive_framework=route.starts_with("adaptive-framework-");
+    const bool adaptive_director=route.starts_with("adaptive-director-");
+    if(adaptive_framework)route="large-"+route.substr(19);
+    if(adaptive_director)route="large-"+route.substr(18);
     if(route=="auxiliary-slot-available")return auxiliary_slot_selection_test(0);
     if(route=="auxiliary-slot-lazy")return auxiliary_slot_selection_test(1);
     if(route=="auxiliary-slot-all-busy")return auxiliary_slot_selection_test(2);
@@ -391,7 +395,7 @@ int main(int argc,char** argv) {
         auto desired=xrfg::autonomous::snapshot().desired;
         xrfg::autonomous::select_generation(desired,route=="fsr"?1:route=="dlssg"?2:route=="hybrid"?3:0,
             route=="ref"?1:route=="new"?2:route=="djules"?3:0);
-        desired.enabled=!steady_memory;desired.pacing_mode=1;
+        desired.enabled=!steady_memory;desired.pacing_mode=adaptive_framework?0:1;
         desired.lower_vram=b;desired.separate_synthesis=a;
         desired.motion_vectors=route=="fsr" || route=="hybrid" || route=="dlssg";
         desired.triple_frame_gen=triple;desired.prefer_fps=triple || deep;

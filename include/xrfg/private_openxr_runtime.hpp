@@ -97,6 +97,9 @@ public:
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
         std::function<void(std::int64_t)> accepted_output; // optional native End success, never enqueue
         bool director_enabled{true}; // false: ordered native-runtime paced bypass
+        // SteamVR only. Capacity3 enables the VDXR-style adaptive timing reserve
+        // in either pacing policy. Native/Legacy and opt-in other runtimes opt out.
+        bool adaptive_buffer{};
         // Luke D11/SteamVR only. Freeze image readiness at Release, not after
         // newer game commands at End. Admission/work budget is selected separately.
         bool d11_release_readiness{};
@@ -112,7 +115,7 @@ public:
     // Drain accepted packets and change only final delivery policy. Session,
     // native binding, private images and worker ownership remain unchanged.
     XrResult set_director_enabled(bool);
-    XrResult set_buffer_capacity(std::size_t);
+    XrResult set_buffer_capacity(std::size_t,bool stabilization_active=true,bool reset_learning=false);
     [[nodiscard]] std::size_t buffer_capacity() const noexcept;
     [[nodiscard]] bool director_enabled() const noexcept;
     XrResult wait_frame(const XrFrameWaitInfo*, XrFrameState*);

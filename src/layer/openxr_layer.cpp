@@ -15788,7 +15788,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             if(state->private_runtime) {
                 const auto policy=state->private_runtime->set_director_enabled(state->menu_enabled && control.desired.pacing_mode!=0);
                 if(XR_FAILED(policy))return E_FAIL;
-                const auto buffer=state->private_runtime->set_buffer_capacity(control.desired.increase_buffer?3:2);
+                const auto buffer=state->private_runtime->set_buffer_capacity(control.desired.increase_buffer?3:2,state->menu_enabled);
                 if(XR_FAILED(buffer))return E_FAIL;
                 state->single_director_requested=control.desired.pacing_mode==1;
             }
@@ -15805,6 +15805,12 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     const bool previously_enabled = state->menu_enabled;
     if (continuous_presenter_active(state))
         static_cast<void>(wait_for_presenter_idle(state));
+    // Retire the buffered consumer before taking capture/GPU locks for an
+    // engine reconfiguration. Its completed packets may still need those owners.
+    if(state->private_runtime && state->dispatch->steamvr_runtime &&
+        (control.desired.increase_buffer || (state->applied_generation_settings &&
+            state->applied_generation_settings->increase_buffer)) &&
+        XR_FAILED(state->private_runtime->drain()))return E_FAIL;
     state->menu_enabled = false;
     {
         std::scoped_lock lock(state->presenter_mutex);
@@ -16140,7 +16146,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     // held phase or sole-director framework policy may remain effective OFF.
     state->menu_enabled = SUCCEEDED(result) && control.desired.enabled;
     if(state->private_runtime) {
-        const auto buffer=state->private_runtime->set_buffer_capacity(control.desired.increase_buffer?3:2);
+        const auto buffer=state->private_runtime->set_buffer_capacity(control.desired.increase_buffer?3:2,state->menu_enabled,true);
         if(XR_FAILED(buffer)) {result=E_FAIL;state->menu_enabled=false;}
         const auto policy=state->private_runtime->set_director_enabled(
             state->menu_enabled && control.desired.pacing_mode!=0);

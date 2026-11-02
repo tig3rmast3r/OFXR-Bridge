@@ -67,6 +67,7 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     xrfg::PrivateOpenXrRuntime::Options options;
     options.director_enabled=state->menu_enabled && xrfg::embedded::snapshot().desired.pacing_mode!=0;
     options.capacity=xrfg::embedded::snapshot().desired.increase_buffer?3:2;
+    options.adaptive_buffer=original->steamvr_runtime;
     options.real={original->instance,state->handle,original->wait_frame,original->begin_frame,original->end_frame,
         original->create_swapchain,original->destroy_swapchain,original->enumerate_swapchain_images,
         original->acquire_swapchain_image,original->wait_swapchain_image,original->release_swapchain_image,
@@ -106,6 +107,7 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     options.trace_enabled=[]{return xrfg::bridge_flight_logger().enabled();};
     auto transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
     auto result=transport->initialize();if(FAILED(result))return result;
+    if(XR_FAILED(transport->set_buffer_capacity(xrfg::embedded::snapshot().desired.increase_buffer?3:2,state->menu_enabled)))return E_FAIL;
     auto dispatch=std::make_shared<Dispatch>(*original);
     dispatch->inline_unless_pipelined=false; // common endpoint owns the runtime frame loop
     dispatch->wait_frame=private_runtime_wait;dispatch->begin_frame=private_runtime_begin;dispatch->end_frame=private_runtime_end;
