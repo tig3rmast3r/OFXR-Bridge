@@ -1,155 +1,179 @@
-# OFXR Bridge troubleshooting
+# OFXR-BRIDGE troubleshooting
 
 > [!IMPORTANT]
-> **First, make sure you are on the latest version: 0.2.13.1.** Every
-> release fixes problems reported here, so check the
-> [releases page](https://github.com/djules75/OFXR-Bridge/releases) before
-> anything else. The tray's menu shows the version you are running.
+> **First, make sure you are on the latest version: 0.3.2.** Every release
+> fixes problems reported here, so check the
+> [releases page](https://github.com/tig3rmast3r/OFXR-Bridge/releases) before
+> anything else. **About** in the tray menu shows the version you are running.
 
-> [!WARNING]
-> **Pimax headsets: use SteamVR, not Pimax OpenXR.** Pimax Play's OpenXR
-> runtime keeps an extra copy in VRAM of every image it is handed, so OFXR
-> costs about **1.5 times** more on it than on SteamVR, and the copies stay
-> until the game closes. We have reported it to Pimax so they can fix their
-> runtime; there is nothing OFXR can do about it in the meantime. Until it is
-> fixed, run your Pimax through SteamVR with
-> [sboys3's native SteamVR driver](https://store.pimax.com/blogs/blogs/sboys3-native-steamvr-driver-setup-guide)
-> and make SteamVR the active OpenXR runtime (SteamVR → Settings → OpenXR).
-> This matters most in MSFS 2024, which is already close to the VRAM limit
-> at Pimax resolutions. Details in
-> [How much VRAM OFXR uses](#how-much-vram-ofxr-uses).
+> [!IMPORTANT]
+> **Enable OFXR before you start the game.** Run the tray and select
+> **Enable** first. If you enable it while a game is running, restart the game.
+> This matters most for Hybrid, FSR 3.1, DLSS-G and Luke Ross games: OFXR has
+> to be running when the game sets up DLSS.
+
+## Low frame rate or stutter?
+
+Try these in order. Most apply while you play; open the settings with **F10**
+in the headset or **Settings...** in the tray.
+
+| Step | Change |
+| --- | --- |
+| 1 | **Frame generation / Pacing**: switch between **Director** (default) and **Framework**, and compare in the same scene. Framework can be better. |
+| 2 | **Flow resolution**: 25% |
+| 3 | **Frame generation**: **OFXR** instead of Hybrid, FSR 3.1 or DLSS-G (the menu marks those slow and slowest) |
+| 4 | **Neural Rendering**: off |
+| 5 | Lower the per-eye resolution in your VR software |
+
+Still not right? Click **Reset to defaults** in the **Frame generation** tab
+and restart the game. You can also let OFXR find the best settings: with
+**Enable benchmarks** ticked in the tray, run a suite from the **Display** tab
+with **Auto pick best one** on. If the problem is still there, carry on below.
 
 ## Step 1: is OFXR running in your game?
 
-Turn on the FPS overlay: right-click the tray icon, **FPS overlay**, pick a
-corner. Start the game and look at that corner in the headset.
+OFXR shows an **information overlay** at the bottom of your view by default.
+You can change it under **Display / Headset FPS counter**: a corner counter, an
+overlay that follows the controller, or off.
 
 | You see | It means | Go to |
-|---|---|---|
-| No number at all | OFXR is not loaded in the game | [Table A](#a-ofxr-is-not-loaded) |
-| A **red** number | OFXR is loaded but not generating frames | [Table B](#b-ofxr-is-loaded-but-not-generating) |
-| A **green** number | OFXR is generating frames | [Table C](#c-ofxr-works-but-it-does-not-feel-better) |
-| **Two orange bars** before the number | Frame generation is paused | Choose **Resume frame generation** in the tray menu, or press the pause key (Ctrl + Alt + F7 unless you changed it) |
+| --- | --- | --- |
+| No overlay or counter at all | OFXR is not loaded in the game | [A](#a-ofxr-is-not-loaded) |
+| Numbers in **red**, or a **red** corner counter | OFXR is loaded but not generating frames | [B](#b-ofxr-is-loaded-but-not-generating), or [C](#c-luke-ross-games) in a Luke Ross game |
+| Numbers in **green**, or a **green** or **blue** corner counter | OFXR is working (blue: Luke Ross reconstruction is producing the frames) | [D](#d-ofxr-works-but-it-does-not-feel-better) |
+| **Paused** in the top right corner | Frame generation is paused | Press the pause key again (**Ctrl + Alt + F7** unless you changed it; the tray menu shows it), or tick **Enable frame generation** in Settings |
 
-Vulkan games (No Man's Sky, for example) show no FPS number. For those, use
-the flight recorder instead: tick **Bridge flight recorder** in the tray, play
-for a minute, then **Open bridge logs**. If no new log file appears, OFXR is
-not loaded (Table A).
+The information overlay says what OFXR is doing:
+
+- **Top right:** what runs, for example **OFXR 0.3.0**, **Hybrid + OSR**,
+  **OSR**, **Real frames only**, **Waiting** or **Paused**.
+- **Top centre:** VRAM use.
+- **Vectors:** **DLSS** when OFXR sees the game's DLSS, **None** otherwise.
+- **Status:** any problem, in plain words (the tables below use the same
+  words), then **OFXR**, **OSR** or **AFW**, and **Neural Render**, each
+  **Active**, **Waiting** or **Off**.
 
 ## A. OFXR is not loaded
 
 | Cause | What to do |
-|---|---|
-| The game uses **OpenVR**, not OpenXR | OFXR only works with OpenXR games. Some OpenVR games can run through OpenXR with [OpenComposite](https://gitlab.com/znixian/OpenOVR). |
-| The game runs **as administrator** | Run the game, and Steam or its launcher, normally. Never as administrator. |
-| The tray was not armed when the game started | Start the tray first; it arms by itself. Then start the game. If you disarm and re-arm, restart the game. |
+| --- | --- |
+| The game uses **OpenVR**, not OpenXR | OFXR only works with OpenXR games. Many OpenVR games run through OpenXR with [OpenComposite](https://gitlab.com/znixian/OpenOVR). With UEVR, choose its OpenXR option. |
+| OFXR was not enabled when the game started | Select **Enable** in the tray, then restart the game. |
+| The game runs **as administrator** | Run the game, and Steam or its launcher, normally, not as administrator. |
 | The game runs under another Windows user | Run the tray and the game under the same Windows account. |
-| The game is 32-bit | Not supported. |
-| The game's anti-cheat blocks it | Not supported. |
+| The game is 32-bit | Not supported in 0.3. |
+| The game uses OpenGL | Not supported. |
+| The game's anti-cheat blocks it | Star Citizen works with Easy Anti-Cheat, because OFXR's files are signed. Only the official release is signed. Other anti-cheats may still block OFXR. Using OFXR with an anti-cheat protected game is at your own risk. |
+| The game crashes at start | Try without ReShade and other OpenXR layers, then [send a log](#still-stuck-send-a-log). |
 
 ## B. OFXR is loaded but not generating
 
+Find the words shown after **Status:** on the information overlay.
+
+| Status shows | What to do |
+| --- | --- |
+| **Waiting**, in a menu or loading screen | Normal. Generation starts once you are in the 3D world. |
+| **OFXR: Off** | **Enable frame generation** is unticked in Settings, or OFXR was disabled in the tray. Tick it; after **Disable** in the tray, select **Enable** and restart the game. |
+| **Missing game vectors**, or **Vectors: None** with Hybrid, FSR 3.1 or DLSS-G | These need the game's **DLSS** (Super Resolution or Ray Reconstruction). Turn DLSS on in the game: not FSR, XeSS or TAA. Enable OFXR before starting the game. Without DLSS, use **OFXR** (optical flow). |
+| **Missing depth** | OFXR could not read the game's depth. [Send a log](#still-stuck-send-a-log), and use **OFXR** (optical flow) meanwhile. |
+| **Game output does not match the eye image** | The game's DLSS image is not the size of the eye image. Usually a foveated-rendering mod or layer (for example Quad-Views-Foveated) or dynamic resolution: turn it off. MSFS 2024's own foveated rendering and Cheeky Foveated DLSS are supported, except Cheeky in Luke Ross games. |
+| **Missing stereo pair**, **Frame mismatch / missing history pair**, **Invalid vectors / guide identity** | [Send a log](#still-stuck-send-a-log). |
+| **Fallback** in the top right, with Hybrid | Not an error: the game's vectors cannot be used right now, so Hybrid uses optical flow only. |
+| **DLSS-G provider unavailable** | DLSS-G needs an RTX 40 or 50-series card and a recent driver. The first time, restart the game once. Otherwise choose another frame generation. |
+| **NGX refused interpolation** or **NGX rejected generation** | The NVIDIA driver declined DLSS-G for these frames. Choose Hybrid or OFXR, and [send a log](#still-stuck-send-a-log). |
+| **FSR provider missing** | A file is missing from the `ofxr` folder. Extract the complete archive again. |
+| **Swapchain allocation refused**, **Overlay swapchain limit reached** | SteamVR ran out of OpenXR swapchains. Turn off OpenXR overlays you don't need (OpenKneeboard, toolkits) and, in UEVR, depth submission. In Luke Ross games, the **Luke Ross** tab shows the swapchain details. |
+| **Vulkan game-vector capture suspended** | In this Vulkan game, OFXR cannot use the game's vectors at the moment. Use **OFXR** or **Hybrid**, which fall back to optical flow; FSR 3.1 and DLSS-G show real frames only. |
+| **Paused** | See [Step 1](#step-1-is-ofxr-running-in-your-game). If it pauses and resumes by itself, your game or a mod uses the same key: choose another with **Pause key** in the tray menu. |
+| Anything else | [Send a log](#still-stuck-send-a-log). |
+
+## C. Luke Ross games
+
+In Luke Ross R.E.A.L. VR games, OFXR rebuilds the eye the game skipped. The
+**Status:** line shows **OSR** (or **AFW** with AFW (legacy) selected).
+
+| You see | What to do |
+| --- | --- |
+| **OSR: N/A** | OFXR did not detect the Luke Ross mod. Update the mod (tested with v2609.18.2 and newer), and enable OFXR before starting the game. |
+| **OSR: Waiting**, numbers in red | In the REAL VR menu, select **Legacy AER** (not AER V2 or AER 1/2) and turn on DLSS in the game. Cheeky Foveated DLSS does not work in Luke Ross games yet: turn it off. |
+| **OSR: 2D scene (no stereo source)** | Normal in menus and cutscenes the mod shows flat. It starts again in the 3D world. |
+| A doubled or flashing image, or one eye wrong | Usually AER V2 instead of **Legacy AER**: change it in the REAL VR menu. |
+| Turning in a vehicle looks stepped | In the REAL VR menu, turn off **Camera rotation compensation**. |
+| The HUD or icons show twice when you move or turn | It depends on the game: see the HUD table in the [README](https://github.com/tig3rmast3r/OFXR-Bridge#readme). |
+| **Frame Reconstruction only** has no effect | Restart the game after changing it. |
+| You want to compare with AFW | Select **AFW (legacy)** under **Luke Ross / Reconstruction**. It applies while you play. |
+
+## D. OFXR works, but it does not feel better
+
 | Cause | What to do |
-|---|---|
-| You are in a menu or loading screen | Normal. Generation starts once you are in the 3D world. |
-| The game uses OpenGL | Not supported. |
-| Too many swapchains for SteamVR (some UEVR games, often with depth submission on) | Turn off **Prefer FPS over latency**, or turn off depth submission in UEVR. |
-| You disarmed OFXR from the tray | Arm it again, then restart the game. |
-| You paused frame generation, from the tray or with the pause key (the FPS number shows two orange bars) | Choose **Resume frame generation** in the tray menu, or press the key again. No restart needed. |
-| Generation stops and starts by itself while you play | The pause key (Ctrl + Alt + F7 by default) is also a key your game or a mod uses. Choose another under **Current key binding** in the tray menu. |
-| Something else | Send a flight log (see below). |
+| --- | --- |
+| The game already runs near your headset's refresh rate | Nothing to gain: OFXR helps games that can't hold full rate. In a Luke Ross game, try **Frame Reconstruction only** instead. |
+| The game runs **below half** your refresh rate (under 45 FPS at 90 Hz) | Lower the refresh rate (72 Hz needs 36 FPS) or the game's settings until it holds half. For games around a third, choose **3X** under **Multiplier** (OFXR 0.2.14 engine or DLSS-G; not in Luke Ross games). |
+| **3X** is on for a game that can hold half your refresh rate | Go back to 2X: 3X holds the game to a third of the refresh rate, and 2X looks better. |
+| Your VR software's own frame smoothing is on | Turn it off, it fights OFXR: **SteamVR** Motion Smoothing and "fixed frame rate at half" (per-application video settings), **Meta** ASW, **Virtual Desktop** SSW, **Pimax Play** Smart Smoothing, **Pico Streaming Assistant** Frame Interpolation. |
+| Frames feel uneven although the number is high | Switch **Pacing** between Director and Framework (step 1 [above](#low-frame-rate-or-stutter)). |
+| Your GPU runs out of VRAM | Signs: stutter, sudden drops, or a crash, often after a few minutes. Watch VRAM at the top of the information overlay. Lower the game's settings or the per-eye resolution first, then try **Fast mode** (not in Luke Ross games). See [VRAM](#vram). |
+| The number stops short of the refresh rate (110 to 115 at 120 Hz, for example), although the game runs above half of it without OFXR | Generating frames costs GPU time too, so the game needs some headroom above half the refresh rate. Lower the refresh rate, the per-eye resolution or the flow resolution. |
+| Dips only in heavy scenes | Disable OFXR and play the same scene. If the dips are still there, lower the per-eye resolution: OFXR can't make up frames the game doesn't render. |
+| Another FPS counter shows half of OFXR's | fpsVR, SteamVR frame timing and in-game counters measure before OFXR. Trust OFXR's overlay. |
+| You want to know whether a problem comes from OFXR | Select **Disable** in the tray and restart the game. Pausing is not enough: a paused game still runs through OFXR. |
 
-## C. OFXR works, but it does not feel better
+## VRAM
+
+OFXR needs video memory on top of the game's, and more as your per-eye
+resolution grows. Luke Ross reconstruction and Neural Rendering add more.
+The top of the information overlay shows the current use, and every benchmark
+records it in its CSV.
+
+- **Fast mode (lower vram, lower latency, may reduce performance)** keeps
+  fewer working images. Compare both: its effect on performance depends on the
+  game. It has no effect in Luke Ross games.
+- **Pimax headsets:** Pimax OpenXR keeps its own copy of every image, so
+  everything costs more VRAM on it. If VRAM is tight, run your Pimax through
+  SteamVR with
+  [sboys3's native SteamVR driver](https://store.pimax.com/blogs/blogs/sboys3-native-steamvr-driver-setup-guide),
+  especially for MSFS 2024.
+
+### Know your real per-eye resolution
+
+It is what your VR software asks the game to render, not the panel's
+resolution or the "100%" figure. In SteamVR, the global resolution and the
+game's own resolution **multiply**. On a Pimax Crystal Super:
+
+| SteamVR global | Game's own setting | Pixels rendered | Per eye |
+| --- | --- | --- | --- |
+| 100% | 100% | 1× | about 4096×3206 |
+| 200% | 100% | 2× | about 5793×4534 |
+| 200% | 200% | 4× | 8192×6412 |
+
+The `view_configuration` record near the top of a log shows the real per-eye
+size. If you run out of VRAM, lower the per-eye resolution first: it lowers
+both OFXR's use and the game's.
+
+## Crashes
 
 | Cause | What to do |
-|---|---|
-| The game already runs near your headset's refresh rate | Nothing to gain: OFXR helps games that can't hold full rate. Raise resolution or settings until the game sits around half your refresh rate. |
-| The game runs **below half** your refresh rate (under 45 FPS at 90 Hz) | Turn on **3X Frame Gen** in the tray (for games around 30 FPS at 90 Hz), lower the refresh rate (72 Hz needs 36 FPS), or lower settings until the game holds half. |
-| **3X Frame Gen** is on for a game that can hold half your refresh rate | Turn 3X off: it holds the game to a third of the refresh rate, and 2X looks better. |
-| Your VR software's own frame smoothing is on | Turn it off, it fights OFXR: **SteamVR** Motion Smoothing and "fixed frame rate at half" (per-application video settings), **Virtual Desktop** SSW, **Pimax Play** Smart Smoothing, **Pico Streaming Assistant** Frame Interpolation. |
-| Your GPU runs out of VRAM | OFXR needs extra video memory on top of the game (see [How much VRAM OFXR uses](#how-much-vram-ofxr-uses)). Signs: stutter, sudden drops, or a crash, often after a few minutes. Lower the game's settings or the per-eye resolution first. |
-| 3X doesn't switch while you play | The game was started with **Prefer FPS over latency** off. Restart the game. |
-| The number stops short of the refresh rate (110 to 115 at 120 Hz, for example), although the game runs above half of it without OFXR | Generating frames costs GPU time too, so the game needs some headroom above half the refresh rate. Lower the refresh rate, the per-eye resolution or the optical-flow resolution. Example: No Man's Sky ran at 94 FPS without OFXR; OFXR gave an even 100 at 100 Hz and 113 to 115 at 120 Hz, because a real frame plus a generated one took about 17.7 ms and 120 Hz allows 16.7. |
-| Dips only in heavy scenes | Disarm OFXR and play the same scene. If the dips are still there, lower the per-eye resolution: OFXR can't make up frames the game doesn't render. |
-| One eye flickers or shimmers and the other is fine (MSFS 2024 with 3X Frame Gen) | Fixed in 0.2.12.2. Update. |
-| Stutter or drop-outs that 0.2.9.1 did not have, with VRAM to spare (seen on an AMD RX 9070 XT in AMS2) | Untick **Lower VRAM (may cause stuttering)** in the tray and restart the game. It restores the layout 0.2.9.1 used, at about 15% more VRAM. |
-| You want to know whether a problem comes from OFXR | **Disarm** and restart the game. **Pause frame generation** is not enough: a paused game still runs through OFXR, it only stops making extra frames. |
+| --- | --- |
+| A crash or "device hung" with **Neural Rendering** on | Turn Neural Rendering off. It can be unstable in some games. |
+| A crash at start | Try without ReShade and other OpenXR layers. |
+| A crash now and then | Tick **Crash debug (restart game)** in the tray, restart the game, and send the log after the next crash. Untick it for normal play. |
 
-## How much VRAM OFXR uses
+## Still stuck? Send a log
 
-The bridge needs extra video memory on top of what the game uses. How much
-depends on your per-eye resolution, the game's graphics API, and on which
-OpenXR runtime the headset runs through. Since 0.2.10.1 the mode no longer
-matters: 2X, 2X with **Prefer FPS over latency** and **3X Frame Gen** cost
-the same, on every graphics API. The optical-flow backend makes no real
-difference either: NVIDIA and FidelityFX are within 0.01 GB of each other.
+1. Tick **Diagnostic logging** in the **Display** tab, or press **F9** in the
+   game. For a problem at start-up, tick it before starting the game.
+2. Reproduce the problem once.
+3. Close the game, so the log is complete.
+4. Select **Open folder** in the tray, then open **RuntimeLayer** and the
+   folder of your version (for example `v770`).
+5. Send the newest `ofxr-bridge-flight-*.log` on
+   [GitHub Issues](https://github.com/tig3rmast3r/OFXR-Bridge/issues) or the
+   [Flat2VR Modding Discord](https://discord.gg/flat2vr), with:
+   - the game and its version, and the VR mod, if any;
+   - your headset and VR software (SteamVR, Virtual Desktop, Pimax Play...);
+   - your GPU and driver version;
+   - the OFXR version, frame generation, engine and pacing you chose;
+   - what you did and what you saw.
 
-Total extra VRAM, both eyes, on SteamVR, Virtual Desktop and the Meta runtime:
-
-| Per-eye resolution | D3D12 | D3D11 | Vulkan |
-|---|---|---|---|
-| 2064×2208 (4.6 Mpx, Quest 3 class) | 0.45 GB | 0.55 GB | 0.66 GB |
-| 3030×2971 (9.0 Mpx) | 0.90 GB | 1.11 GB | 1.33 GB |
-| 4172×3268 (13.6 Mpx, Crystal Super) | 1.36 GB | 1.67 GB | 2.00 GB |
-| 5040×3948 (19.9 Mpx) | 1.99 GB | 2.44 GB | 2.93 GB |
-| 5884×4608 (27.1 Mpx) | 2.72 GB | 3.32 GB | 3.98 GB |
-
-D3D11 and Vulkan games run through a bridge, on by default, that hands the
-runtime a D3D12 session; it costs one extra set of images, plus a little
-more on Vulkan, where the shared images take more memory than their size.
-The figures are worked out from what the bridge allocates and assume a game
-rendering 8-bit colour; a game rendering 16-bit colour roughly doubles them.
-Measured on SteamVR they hold within 10%: 3.1 GB in MSFS 2024 in 3X at
-29 megapixels per eye, and in No Man's Sky about 2.0 GB per swapchain at
-27 megapixels. Above the table, count about **0.10 GB per megapixel of
-per-eye resolution** on D3D12, 0.12 GB on D3D11 and 0.15 GB on Vulkan.
-
-The historical table assumes **Lower VRAM** on. Autonomous V444 defaults it off.
-With it off, the bridge keeps two working images per output as 0.2.9.1 and
-earlier did: about 15% more on D3D12 and D3D11 with Prefer FPS over latency
-or 3X on. 0.2.9.1 also used about twice as much on Vulkan, which then
-mirrored every image instead of sharing it; that part is not affected by
-the switch.
-
-> [!WARNING]
-> **On Pimax OpenXR, add about half again.** Pimax Play's runtime keeps an
-> extra copy of every image it is handed, made the first time the image is
-> shown and kept until the game closes, so OFXR's private images cost twice
-> on it: measured **4.6 GB against 3.1 GB on SteamVR** at the same
-> 29 megapixels per eye in 3X with 0.2.10.1 (7.0 against 4.2 GB with 0.2.9.1,
-> which held twice as many images). At the Crystal Super row that is about
-> 2.0 GB instead of 1.36 on D3D12 and 2.5 instead of 1.67 on D3D11. SteamVR
-> does not do this; the other runtimes have not been measured yet. We have
-> reported it to Pimax so they can fix their runtime, and there is nothing
-> OFXR can do about it for now: run your Pimax through SteamVR with
-> [sboys3's native SteamVR driver](https://store.pimax.com/blogs/blogs/sboys3-native-steamvr-driver-setup-guide)
-> instead, especially for MSFS 2024.
-
-**Know your real per-eye resolution.** It is what your VR software asks the
-game to render, not the headset's panel and not the "100%" figure. In
-SteamVR the global resolution and a per-application resolution **multiply**:
-200% global with 199% for the game gave 8192×6412 per eye on a Crystal
-Super, four times the 100% figure, and OFXR paid for all of it. The flight
-log says what was really asked: the `view_configuration` record near the
-top holds the per-eye size.
-
-If you run out of VRAM, lower the per-eye resolution first; it moves every
-column of this table and the game's own usage with it.
-Since 0.2.10.1, OFXR stays out of **Pimax Home**, which takes the headset
-whenever a game leaves VR and used to hold OFXR's buffers at full resolution
-the whole time the game was out of VR; earlier versions let it.
-
-## Still stuck? Send a flight log
-
-1. Tick **Bridge flight recorder** in the tray.
-2. Start the game, reproduce the problem, play for a minute or two.
-3. Use **Open bridge logs** and send the newest file, with your headset, VR
-   software (SteamVR, Pimax Play, Virtual Desktop...) and the game's name, on
-   [GitHub Issues](https://github.com/djules75/OFXR-Bridge/issues) or Discord.
-
-You can also tick the recorder while the game is already running: it starts
-within a moment, and the log still begins with the game's start-up
-information. Untick it to close the file. The game hitches once each time.
-
-The recorder keeps only the last part of a long session, so switch it on
-shortly before the problem, or reproduce the problem early.
+If no log appeared, say so too: it usually means OFXR was not loaded
+([A](#a-ofxr-is-not-loaded)).
