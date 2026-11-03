@@ -25,7 +25,7 @@ void buffer_plan_contract() {
             if(luke)check(!step.a && !step.b && !step.triple && (step.generation==0 || step.generation==4) && (step.shading==0 || step.shading==4),"Luke has qualities and buffers, no Fast/vector/3X trial");
             else check(step.a==step.b,"normal Fast consistently selects both operations");
         }
-        check(references==(luke?4u:1u) && two_credit==three_credit,"one reference per quality and equal two/three coverage");
+        check(references==(luke?2u:1u) && two_credit==three_credit,"one reference per quality and equal two/three coverage");
         const auto exported=benchmark_export_plan(full,luke,true,false);
         check(exported.size()==plan.size(),"export retains every potential RIFE multiplier column");
         if(luke)for(const auto& step:exported)check(step.shading==0 || step.shading==4,"Luke export retains both AFW qualities");

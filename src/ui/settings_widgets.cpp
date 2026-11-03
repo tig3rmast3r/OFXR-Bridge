@@ -542,11 +542,11 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
         benchmark_plan(false,false,modern,draft.advanced_mode).size(),
         benchmark_plan(true,false,modern,draft.advanced_mode).size());
     ImGui::TextWrapped(modern
-        ? "Framework and Director, Normal/Fast and buffer comparison; Advanced also includes combined pacing."
-        : "Legacy VDXR: Framework Normal/Fast, including RIFE Medium and High.");
-    ImGui::TextWrapped("Luke Ross: up to %zu tests. AFW 1x1, AFW 2x2, OSR and OSR cheap, each with RIFE Medium and High.",
+        ? "Framework and Director: Normal/Fast, each with Buffer off/on."
+        : "Legacy VDXR: Normal/Fast, including RIFE Medium, High and Very High.");
+    ImGui::TextWrapped("Luke Ross: up to %zu tests. OSR normal/cheap only, including RIFE Medium, High and Very High.",
         benchmark_plan(false,true,modern,draft.advanced_mode).size());
-    ImGui::TextWrapped("RIFE 4.4: Medium and High at 2X first. Test all 3X configurations only if no preceding result holds full refresh, then 4X if needed. Higher multipliers require session support. TensorRT optimization is setup, not measured time.");
+    ImGui::TextWrapped("RIFE 4.4: Medium, High and Very High at2X, then3X only if no preceding result holds full headset refresh. No Djules3X or automatic4X in this temporary suite. TensorRT optimization completes before settling and measurement.");
     ImGui::TextWrapped("Suite length adjusts to measured results and session capabilities. Skipped configurations remain n.a. in CSV.");
     ImGui::TextWrapped("Close the menu and keep the same test scene. Stop restores original settings. Completion restores them unless Auto pick best one selects a valid result. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
     if(draft.advanced_mode && ImGui::CollapsingHeader("Experimental features")) {

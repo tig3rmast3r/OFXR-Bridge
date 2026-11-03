@@ -2416,6 +2416,26 @@ void test_rife_layer_multiframe_contract() {
     state->nvidia_options.rife_model=3;state->private_runtime.reset();
     check(!rife_multiframe_capable(*state),"legacy interop incorrectly claims RIFE multi support");
     check(!independent_synthesis_anchor(*state),"legacy/interop real retention changed");
+    state->dispatch->virtual_desktop_runtime=true;state->dispatch->steamvr_runtime=false;state->vdxr_legacy=true;
+    state->nvidia_options.rife_multiplier=3;
+    check(rife_multiframe_capable(*state) && rife_benchmark_max_multiplier(*state)==3,"native VDXR D12 advertises true3X only");
+    for(int fast:{0,1}){
+        state->lower_vram=state->separate_synthesis=fast;
+        check(rife_frames(*state)==3 && native_synthetic_rings(*state)==2 && native_current_rings(*state)==2,"native RIFE3 output storage stays distinct under Fast");
+        check(three_slot_generation_session(state),"native RIFE3 has the ordered synthesis worker");
+    }
+    Microsoft::WRL::ComPtr<ID3D12Device> native_device;
+    check(SUCCEEDED(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&native_device))),"native Luke test device");
+    D3D12_COMMAND_QUEUE_DESC native_queue{};
+    check(SUCCEEDED(native_device->CreateCommandQueue(&native_queue,IID_PPV_ARGS(&state->luke_synthesis_queue))),"native Luke synthesis queue");
+    state->luke_afw_enabled=state->luke_fresh_only=true;
+    check(fresh_luke_director_worker(*state) && three_slot_generation_session(state) && rife_multiframe_capable(*state),"native Luke3X has an isolated ordered worker");
+    state->nvidia_options.rife_multiplier=2;
+    check(!fresh_luke_director_worker(*state),"native Luke2X route remains unchanged");
+    state->nvidia_options.rife_multiplier=3;
+    state->pipelined_presenter_mode=true;check(rife_benchmark_max_multiplier(*state)==2,"native borrowed frame owner cannot promise3X");state->pipelined_presenter_mode=false;
+    state->split_frame_loop=true;check(!rife_multiframe_capable(*state),"split native loop cannot advertise unsupported3X");state->split_frame_loop=false;
+    state->graphics_binding=SessionGraphicsBinding::d3d11;check(!rife_multiframe_capable(*state),"native D11 does not silently claim3X");
     std::cout<<"RIFE layer:2X/3X/4X clocks, Fast on/off pools and all three delivery receipts PASS\n";
 }
 

@@ -80,7 +80,7 @@ int main() {
         buffer_plan_contract();automatic_choice_rules();quality_choice_rules();
         for(bool modern:{false,true})for(bool advanced:{false,true})for(bool luke:{false,true})for(bool full:{false,true}) {
             const auto plan=benchmark_plan(full,luke,modern,advanced);
-            const auto expected=modern?(luke?(advanced?112:148):full?(advanced?79:105):(advanced?61:81)):(luke?24:full?19:13);
+            const auto expected=modern?(luke?74:full?97:73):(luke?20:full?25:19);
             check(plan.size()==std::size_t(expected),"complete matrix count");
             std::set<std::tuple<int,int,int,int,int,int,int,int,bool,bool,int,int>> unique;
             for(const auto& step:plan) {
@@ -90,7 +90,7 @@ int main() {
                 check(applied.afw_shading_rate==(luke?step.shading:0) && saved.afw_shading_rate==8,"each reconstruction quality is applied without mutating saved settings");
                 if(luke){
                     check(applied.luke_osr==step.osr && applied.luke_osr_lower_quality==bool(step.osr_lower_quality),"Luke explicitly selects engine and cheap mode");
-                    check(step.shading==0 || (step.osr==0 && step.shading==4),"only AFW2x2 reduces provider quality");
+                    check(step.shading==0 && step.osr==2,"Luke suite uses only explicitly enabled OSR normal/cheap");
                 }
                 if(step.generation==4)check(applied.rife_model==3 && applied.rife_resolution==step.rife_quality && applied.rife_multiplier==step.rife_multiplier && !applied.motion_vectors,"exact RIFE4.4 Medium/High multiplier, never labelled vectors");
                 else if(!full)check(step.generation==0,"no-vector suite admits only optical or RIFE");
@@ -106,9 +106,20 @@ int main() {
                 if(step.rife_multiplier>2)high_tier=true;
                 else check(!high_tier,"all2X reconstruction blocks finish before3X");
             }
-            check(references==std::vector<std::string>{"AFW 1x1 / only","AFW 2x2 / only","OSR / only","OSR cheap / only"},"requested four reconstruction references in exact order at any resolution");
-            check(modes.size()==4,"exactly four distinct reconstruction configurations");
+            check(references==std::vector<std::string>{"OSR / only","OSR cheap / only"},"requested two reconstruction references in exact order at any resolution");
+            check(modes.size()==2,"exactly two OSR reconstruction configurations");
         }
+        for(double hz:{72.,80.,90.,120.,144.}){
+            auto plan=benchmark_plan(true,false,true,false);
+            const auto boundary=std::find_if(plan.begin(),plan.end(),[](const auto& p){return p.generation==4 && p.rife_multiplier==3;})-plan.begin();
+            BenchmarkScore capped{hz,40,1,1,true};capped.display_hz=hz;capped.fps_min=hz-1;
+            benchmark_prune_rife(plan,boundary,{capped});
+            check(std::none_of(plan.begin(),plan.end(),[](const auto& p){return p.rife_multiplier==3;}),"3X skip follows arbitrary actual headsetHz");
+            plan=benchmark_plan(true,false,true,false);capped.fps=hz-2;capped.fps_min=hz-3;
+            benchmark_prune_rife(plan,boundary,{capped});
+            check(std::any_of(plan.begin(),plan.end(),[](const auto& p){return p.rife_multiplier==3;}),"3X executes below actual headsetHz");
+        }
+        for(const auto& p:benchmark_plan(true,false,true,true))check(!p.triple && p.rife_multiplier<=3 && p.pacing<2,"temporary matrix has no Djules3X/4X/combined pacing");
         auto normal=BenchmarkScore{81,60,1,1,true};normal.display_hz=90;normal.osr=true;normal.afw_only=true;
         auto cheap=normal;cheap.fps=89;cheap.latency=20;cheap.osr_lower_quality=true;
         check(benchmark_best({normal,cheap},true)==0,"normal OSR wins over cheap when both reconstruction-only results qualify90percent");

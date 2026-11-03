@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 84701;
+constexpr std::uint32_t kAbi = 84801;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1147,7 +1147,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
                     (s.runtime.osr_mode>=0 && s.runtime.osr_mode!=s.desired.luke_osr) ||
                     (s.desired.luke_osr==2 && s.runtime.osr_lower_quality>=0 && s.runtime.osr_lower_quality!=int(s.desired.luke_osr_lower_quality)));
                 const bool pacing_pending=rec.steamvr && s.runtime.pacing_mode!=static_cast<unsigned>(s.desired.pacing_mode);
-                const bool buffer_pending=rec.steamvr && !b.advanced &&
+                const bool buffer_pending=rec.steamvr && rec.plan[b.index].buffer>=0 &&
                     s.runtime.buffer_capacity!=static_cast<unsigned>(s.desired.enabled && s.desired.pacing_mode!=0
                         ? (s.desired.increase_buffer?4:3):s.desired.increase_buffer?3:2);
                 const bool rife=s.desired.frame_generation==4;

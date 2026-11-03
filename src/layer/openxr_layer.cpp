@@ -1686,11 +1686,20 @@ private:
 // SteamVR endpoint and an isolated synthesis lane are already available.
 // All RIFE multipliers use that worker; Framework still owns its existing
 // delivery policy. Ordinary OFXR Framework eligibility is unchanged.
+// Native VDXR uses the existing ordered three-slot worker, without a private
+// OpenXR endpoint. Limit the new native path to D12, unsplit loops and3X.
+[[nodiscard]] bool native_vdxr_rife_three(const SessionState& state) noexcept {
+    return !state.private_runtime && state.dispatch->virtual_desktop_runtime && state.vdxr_legacy &&
+        !state.afw_only && !state.split_frame_loop && !state.d3d11_bridge && !state.vulkan_bridge &&
+        state.graphics_binding==SessionGraphicsBinding::d3d12 &&
+        (!state.luke_afw_enabled || state.luke_synthesis_queue);
+}
 [[nodiscard]] bool fresh_luke_director_worker(const SessionState& state) noexcept {
     return state.luke_fresh_only && !state.afw_only &&
         (single_director_pacing(state) || (state.private_runtime &&
-         state.nvidia_options.rife_model>=0)) &&
-        state.dispatch->steamvr_runtime && state.luke_synthesis_queue &&
+         state.nvidia_options.rife_model>=0) || (native_vdxr_rife_three(state) &&
+         state.nvidia_options.rife_model>=0 && state.nvidia_options.rife_multiplier==3)) &&
+        (state.dispatch->steamvr_runtime || native_vdxr_rife_three(state)) && state.luke_synthesis_queue &&
         state.optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
         state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr;
 }
@@ -1734,10 +1743,10 @@ private:
     return djules_native_scheduler(state) || fsr_steamvr_phase_clock(state);
 }
 
-// Experimental multi-output RIFE uses the native private endpoint's ordered
-// worker. Shared/legacy and AER/interop retain their accepted 2X contract.
+// Private RIFE uses its ordered worker. Native Legacy VDXR D12 also admits3X;
+// other native/interop configurations retain their accepted2X contract.
 bool rife_multiframe_capable(const SessionState& state) noexcept {
-    if(!state.private_runtime || state.pipelined_presenter_mode)return false;
+    if((!state.private_runtime && !native_vdxr_rife_three(state)) || state.pipelined_presenter_mode)return false;
     if(state.luke_afw_enabled) {
         // Interpolate completed post-AFW colors on the isolated synthesis lane.
         // AFW itself still evaluates once per fresh source, never per RIFE output.
@@ -1750,6 +1759,7 @@ bool rife_multiframe_capable(const SessionState& state) noexcept {
         !state.d3d11_bridge && !state.vulkan_bridge;
 }
 unsigned rife_benchmark_max_multiplier(const SessionState& state) noexcept {
+    if(native_vdxr_rife_three(state))return state.pipelined_presenter_mode?2:3;
     if(rife_multiframe_capable(state))return 4;
     // Selecting private D12 RIFE retires the optical route's legacy overlap
     // owner before bootstrapping. That transient owner is not a session limit.
@@ -1760,7 +1770,7 @@ unsigned rife_benchmark_max_multiplier(const SessionState& state) noexcept {
 }
 unsigned rife_frames(const SessionState& state) noexcept {
     return state.nvidia_options.rife_model>=0 && rife_multiframe_capable(state)
-        ? static_cast<unsigned>(std::clamp(state.nvidia_options.rife_multiplier,2,4)):2U;
+        ? static_cast<unsigned>(std::clamp(state.nvidia_options.rife_multiplier,2,native_vdxr_rife_three(state)?3:4)):2U;
 }
 // RIFE owns its temporal history independently of the output descriptor.
 // Publish completed B without waiting for the next application source. This
@@ -1788,7 +1798,8 @@ unsigned rife_frames(const SessionState& state) noexcept {
     // The framework may retain A while B is prepared. 3X must keep both even
     // with Fast selected; one B handle would alias an owned source descriptor.
     const bool private_triple=state.private_runtime && extra_output_capacity(state);
-    return reduced_native_outputs(state) && !private_triple ? 1U : 2U;
+    const bool native_rife=native_vdxr_rife_three(state) && rife_frames(state)>2;
+    return reduced_native_outputs(state) && !private_triple && !native_rife ? 1U : 2U;
 }
 
 [[nodiscard]] bool djules_triple_active(const SessionState& state) noexcept {
@@ -16025,7 +16036,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     options.rife_model=control.desired.rife_model;
     options.rife_resolution_percent=control.desired.rife_resolution;
     options.rife_multiplier=control.desired.rife_multiplier;
-    if(control.desired.enabled && !state->afw_only && options.rife_model>=0 && options.rife_multiplier>2 && !rife_multiframe_capable(*state)) {
+    if(control.desired.enabled && !state->afw_only && options.rife_model>=0 && options.rife_multiplier>2 && (!rife_multiframe_capable(*state) || (native_vdxr_rife_three(*state) && options.rife_multiplier>3))) {
         // A refused revision must be observable as an error, not an eternal
         // pending transaction. Preserve the already-working route/enable state.
         state->menu_enabled=previously_enabled;state->control_revision=control.revision;

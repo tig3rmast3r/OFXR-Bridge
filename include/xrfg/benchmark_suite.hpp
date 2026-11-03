@@ -23,112 +23,46 @@ struct BenchmarkStep {
     int rife_multiplier{2},rife_quality{18};
     int osr{-1},osr_lower_quality{-1};
 };
-inline std::vector<BenchmarkStep> legacy_benchmark_plan(bool full,bool luke=false) {
-    std::vector<BenchmarkStep> steps;
-    for(const int quality : (luke ? std::vector<int>{0} : std::vector<int>{-1})) {
-        BenchmarkStep off{0,0,0,0,false,false,true,luke?"AFW only":"Disabled"};
-        off.pacing=0;if(luke){off.afw=3;off.shading=quality;}steps.push_back(off);
-        const auto route=[&](const char* name,int generation,int backend,bool triple,bool fast) {
-            BenchmarkStep s{generation,backend,luke?0:int(fast),luke?0:int(fast),triple,triple,false,
-                std::string(name)+(luke?" 00":fast?" Fast":" Normal")};
-            s.pacing=0;if(luke){s.afw=3;s.shading=quality;}steps.push_back(std::move(s));
-        };
-        for(auto [name,backend]:{std::pair{"0.2.1",1},std::pair{"Djules 2X",3}}) {
-            route(name,0,backend,false,false);
-            if(!luke)route(name,0,backend,false,true);
-        }
-        if(!luke){route("Djules 3X",0,3,true,false);route("Djules 3X",0,3,true,true);}
-        route("0.3.0",0,2,false,false);if(!luke)route("0.3.0",0,2,false,true);
-        if(full&&!luke)for(auto [name,mode]:{std::pair{"Hybrid",3},std::pair{"FSR",1},std::pair{"DLSS-G",2}}) {
-            route(name,mode,0,false,false);route(name,mode,0,false,true);
-        }
-    }
-    return steps;
-}
 inline const char* benchmark_pacing_label(int mode) {
     return mode==0 ? "Framework" : mode==1 ? "Director" : "Framework+director";
 }
-inline void benchmark_add_rife(std::vector<BenchmarkStep>& steps,bool luke,bool modern,bool advanced) {
-    for(int multiplier=2;multiplier<=(modern?4:2);++multiplier)
-      for(const int quality:{18,21})
-        for(int pacing=0;pacing<(modern?(advanced?3:2):1);++pacing)
-          for(int buffer=0;buffer<(modern&&!advanced?2:1);++buffer)
-            for(int fast=0;fast<(luke?1:2);++fast) {
-                BenchmarkStep step{4,2,fast,fast,false,false,false,
-                    "RIFE "+std::string(quality==18?"Medium":"High")+" "+std::to_string(multiplier)+"X "+
-                    benchmark_pacing_label(pacing)+(luke?"":fast?" Fast":" Normal")+(buffer?" Buffer":"")};
-                step.pacing=pacing;if(modern&&!advanced)step.buffer=buffer;
-                if(luke){step.afw=3;step.shading=0;}
-                step.rife_multiplier=multiplier;step.rife_quality=quality;steps.push_back(std::move(step));
-            }
+inline const char* benchmark_rife_quality_label(int quality) {
+    return quality==18?"Medium":quality==21?"High":"Very High";
 }
-inline std::vector<BenchmarkStep> luke_benchmark_plan(bool modern,bool advanced) {
-    struct Reconstruction {const char* label;int osr,lower,shading;};
-    constexpr Reconstruction variants[]{{"AFW 1x1",0,0,0},{"AFW 2x2",0,0,4},
-        {"OSR",2,0,0},{"OSR cheap",2,1,0}};
+// Temporary owner-sheet matrix: 2 legacy variants or 8 private-runtime variants.
+// Luke uses normal/cheap reconstruction in the Normal/Fast positions, never Fast.
+inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool modern=true,bool advanced=false) {
+    (void)advanced; // the provisional matrix always includes both buffer budgets
     std::vector<BenchmarkStep> steps;
-    const auto add=[&](const Reconstruction& variant,const char* name,int generation,int backend,
-        bool disabled,int multiplier=2,int quality=18) {
-        for(int pacing=0;pacing<(disabled?1:modern?(advanced?3:2):1);++pacing)
-          for(int buffer=0;buffer<(disabled?1:modern&&!advanced?2:1);++buffer){
-            BenchmarkStep step{generation,backend,0,0,false,false,disabled,
-                std::string(variant.label)+" / "+name+(disabled?"":" "+std::string(benchmark_pacing_label(pacing)))+
-                (buffer?" Buffer":"")};
-            step.afw=3;step.shading=variant.shading;step.osr=variant.osr;step.osr_lower_quality=variant.lower;
-            step.pacing=pacing;if(modern&&!advanced)step.buffer=buffer;
-            step.rife_multiplier=multiplier;step.rife_quality=quality;steps.push_back(std::move(step));
-        }
+    const auto label=[&](bool cheap,const std::string& route){
+        return luke?std::string(cheap?"OSR cheap / ":"OSR / ")+route:route;
     };
-    const auto rife=[&](const Reconstruction& variant,int multiplier){
-        for(const int quality:{18,21}){
-            const auto name="RIFE "+std::string(quality==18?"Medium":"High")+" "+std::to_string(multiplier)+"X";
-            add(variant,name.c_str(),4,2,false,multiplier,quality);
-        }
-    };
-    // The four requested reconstruction blocks are explicit, including RIFE2X.
-    // Complete every2X candidate before considering any3X/4X tier.
-    for(const auto& variant:variants){
-        add(variant,"only",0,0,true);
-        add(variant,"0.2.1",0,1,false);add(variant,"Djules 2X",0,3,false);add(variant,"0.3.0",0,2,false);
-        rife(variant,2);
+    for(int variant=0;variant<(luke?2:1);++variant){
+        BenchmarkStep off{0,0,0,0,false,false,true,label(variant,"only")};
+        if(!luke)off.label="Disabled";
+        off.pacing=0;if(modern)off.buffer=0;
+        if(luke){off.afw=3;off.shading=0;off.osr=2;off.osr_lower_quality=variant;}
+        steps.push_back(std::move(off));
     }
-    if(modern)for(int multiplier=3;multiplier<=4;++multiplier)
-        for(const auto& variant:variants)rife(variant,multiplier);
-    return steps;
-}
-inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool steamvr=true,bool advanced=false) {
-    if(luke)return luke_benchmark_plan(steamvr,advanced);
-    // The session-latched transport selects the new matrix or Legacy VDXR plan.
-    if(!steamvr){auto legacy=legacy_benchmark_plan(full,luke);benchmark_add_rife(legacy,luke,false,advanced);return legacy;}
-    std::vector<BenchmarkStep> steps;
-    const auto route=[&](const char* name,int generation,int backend,bool triple,int quality) {
-        for(int pacing=0;pacing<(advanced?3:2);++pacing) {
-          for(int buffer=0;buffer<(advanced?1:2);++buffer) {
-            for(int fast=0;fast<(luke ? 1 : 2);++fast) {
-                BenchmarkStep step{generation,backend,fast,fast,triple,triple,false,
-                    std::string(name)+" "+benchmark_pacing_label(pacing)+(luke ? "" : fast ? " Fast" : " Normal")+
-                        (buffer ? " Buffer" : "")};
-                step.pacing=pacing;
-                if(!advanced)step.buffer=buffer;
-                if(luke) {step.afw=3;step.shading=quality;}
+    const auto add=[&](const std::string& route,int generation,int backend,int multiplier=2,int quality=18){
+        for(int pacing=0;pacing<(modern?2:1);++pacing)
+          for(int buffer=0;buffer<(modern?2:1);++buffer)
+            for(int variant=0;variant<2;++variant){
+                const int fast=luke?0:variant;
+                const auto suffix=modern?std::string(benchmark_pacing_label(pacing))+(luke?"":variant?" Fast":" Normal")+(buffer?" Buffer":"")
+                    : std::string(luke?"":variant?"Fast":"Normal");
+                BenchmarkStep step{generation,backend,fast,fast,false,false,false,
+                    label(variant,route+(suffix.empty()?"":" ")+suffix)};
+                step.pacing=pacing;if(modern)step.buffer=buffer;
+                step.rife_multiplier=multiplier;step.rife_quality=quality;
+                if(luke){step.afw=3;step.shading=0;step.osr=2;step.osr_lower_quality=variant;}
                 steps.push_back(std::move(step));
             }
-          }
-        }
     };
-    for(const int quality : (luke ? std::vector<int>{0} : std::vector<int>{-1})) {
-        BenchmarkStep off{0,0,0,0,false,false,true,luke ? "AFW only" : "Disabled"};
-        off.pacing=0;
-        if(!advanced)off.buffer=0; // one reference, never repeat it for buffer/fast/pacing
-        if(luke) {off.afw=3;off.shading=quality;}
-        steps.push_back(std::move(off));
-        route("0.2.1",0,1,false,quality);
-        route("Djules 2X",0,3,false,quality);
-        if(!luke)route("Djules 3X",0,3,true,quality);
-        route("0.3.0",0,2,false,quality);
-        if(full && !luke) {route("Hybrid",3,0,false,quality);route("FSR",1,0,false,quality);route("DLSS-G",2,0,false,quality);}
-    }
-    benchmark_add_rife(steps,luke,true,advanced);
+    add("0.2.1",0,1);add("Djules 2X",0,3);add("0.3.0",0,2);
+    for(int multiplier:{2,3})for(int quality:{18,21,25})
+        add("RIFE "+std::string(benchmark_rife_quality_label(quality))+" "+std::to_string(multiplier)+"X",4,2,multiplier,quality);
+    if(full&&!luke){add("Hybrid",3,0);add("FSR",1,0);add("DLSS-G",2,0);}
     return steps;
 }
 inline bool benchmark_afw_quality_allowed(int shading,std::uint32_t eye_long_side) {
