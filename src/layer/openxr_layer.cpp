@@ -9418,6 +9418,7 @@ void continuous_presenter_main(
         // Which half of the pair the presenter submitted, kept at this scope so
         // the flight record below can carry it.
         bool fresh_synthetic = false;
+        bool repeat_refused = false;
         // When the downstream xrEndFrame was entered, so the bias controller
         // below can see how long the runtime held this submission.
         auto downstream_end_started = std::chrono::steady_clock::now();
@@ -9989,11 +9990,30 @@ void continuous_presenter_main(
             if (frame_content_refused(end_result)) {
                 state->presenter_last_frame.reset();
                 state->presenter_pending_current_pair_sequence = 0;
+            } else if ((!request || request->owned_frame) && end_result == XR_ERROR_CALL_ORDER_INVALID) {
+                // A frame leases its private outputs only inside its End: the
+                // producer may have acquired the same output for a newer pair
+                // in between, and the runtime then refuses the lease (private
+                // trace 44 code 4). A repeat or an owned output is lost alone;
+                // no application frame waits on it. Latched as a failure it
+                // froze the view for good (UEVR OSR with frame generation,
+                // Dead Island 2 and Atomic Heart, 2026-11-03). Holding the
+                // producer back instead throttled every frame where outputs
+                // rotate (Cyberpunk 2077 under Luke Ross, r51).
+                if (!request) state->presenter_last_frame.reset();
+                else request->result = XR_SUCCESS; // the frame is dropped, not the application's call
+                state->presenter_pending_current_pair_sequence = 0;
+                repeat_refused = true;
             } else if (XR_FAILED(end_result)) {
                 fail_pending_presenter_submissions_locked(*state, end_result);
             }
         }
         state->presenter_condition.notify_all();
+        // 762: a repeat or owned output lost its private output and was
+        // skipped; a = its display time, b = 1 owned output.
+        if (repeat_refused)
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition, 762,
+                static_cast<std::uint64_t>(frame_state.predictedDisplayTime), request ? 1 : 0, 0);
         // Instrumentation runs after the submission's ownership and queue
         // state are settled, so an optional runtime conversion cannot delay
         // the next application admission for this pair.
@@ -10022,7 +10042,10 @@ void continuous_presenter_main(
                     : 0,
                 static_cast<std::uint64_t>(qpc_frequency.QuadPart));
         }
-        if (XR_FAILED(end_result) && !frame_content_refused(end_result)) {
+        // A skipped output keeps the presenter running: leaving the loop here
+        // stopped it for good, and the application's next End waited on it
+        // forever (Dead Island 2 under SteamVR, UEVR OSR with DLSS-G, 2026-11-03).
+        if (XR_FAILED(end_result) && !frame_content_refused(end_result) && !repeat_refused) {
             break;
         }
     }

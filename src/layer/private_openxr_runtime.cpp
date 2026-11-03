@@ -182,6 +182,16 @@ struct PrivateOpenXrRuntime::Impl {
         return value>=2'000'000 && value<=50'000'000?value:
             std::clamp<std::int64_t>(fallback,2'000'000,50'000'000);
     }
+    // Trace 44: a frame call refused as out of order. code 1 End without a
+    // begun frame (a = thread, b = waits), 2 End reservation not this
+    // thread's (b = bits), 3 begun frame gone before the End (a = thread,
+    // b = waits), 4 a layer's swapchain has no released image or that image
+    // is acquired again (a = swapchain, b = released index, -1 none),
+    // 5 Begin without a Wait (a = thread, b = begun). Always logged.
+    std::uintptr_t refused_lease{};std::int64_t refused_lease_state{};
+    void refused_end(int code,std::uint64_t a,std::int64_t b) {
+        if(options.trace)options.trace(44,static_cast<std::uint64_t>(code),static_cast<std::int64_t>(a),b);
+    }
     void trace(int stage,std::uint64_t seq,std::int64_t hold=0) {
         if(tracing())options.trace(stage,seq,clock_ns(),hold);
     }
@@ -266,7 +276,12 @@ struct PrivateOpenXrRuntime::Impl {
         auto it=chains.find(handle);
         if(it==chains.end() || it->second->destroying)return XR_ERROR_HANDLE_INVALID;
         auto& chain=*it->second;
-        if(!chain.released || chain.images[*chain.released].acquired)return XR_ERROR_CALL_ORDER_INVALID;
+        if(!chain.released || chain.images[*chain.released].acquired) {
+            // Trace 44 (refused End, code 4): this chain and why.
+            refused_lease=reinterpret_cast<std::uintptr_t>(handle);
+            refused_lease_state=!chain.released ? -1 : static_cast<std::int64_t>(*chain.released);
+            return XR_ERROR_CALL_ORDER_INVALID;
+        }
         packet.leases.push_back({it->second,*chain.released,chain.images[*chain.released].generation});
         if(options.d11_release_readiness && !d12())
             packet.ready=std::max(packet.ready,chain.images[*chain.released].ready11_value);
@@ -1344,7 +1359,7 @@ XrResult PrivateOpenXrRuntime::begin_frame(const XrFrameBeginInfo* info) {
     if(!valid(info,XR_TYPE_FRAME_BEGIN_INFO))return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::scoped_lock lock(s.mutex);
     if(XR_FAILED(s.failure))return s.failure;if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
-    if(!s.waits)return XR_ERROR_CALL_ORDER_INVALID;--s.waits;
+    if(!s.waits){s.refused_end(5,GetCurrentThreadId(),s.begun);return XR_ERROR_CALL_ORDER_INVALID;}--s.waits;
     const auto result=s.begun?XR_FRAME_DISCARDED:XR_SUCCESS;s.begun=1;return result;
 }
 XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::shared_ptr<InterfaceDeliveryReceipt>& delivery) {
@@ -1357,7 +1372,8 @@ XrResult PrivateOpenXrRuntime::reserve_end_frame(std::shared_ptr<EndFrameReserva
     output.reset();
     auto reservation=std::make_shared<EndFrameReservation>(impl_);
     auto& s=*impl_;
-    {std::scoped_lock lock(s.mutex);if(XR_FAILED(s.failure))return s.failure;if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;if(!s.begun)return XR_ERROR_CALL_ORDER_INVALID;}
+    {std::scoped_lock lock(s.mutex);if(XR_FAILED(s.failure))return s.failure;if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
+     if(!s.begun){s.refused_end(1,GetCurrentThreadId(),s.waits);return XR_ERROR_CALL_ORDER_INVALID;}}
     {std::scoped_lock lock(s.mutex);++s.outstanding_reservations;reservation->counted=true;}
     if(!s.fifo->reserve()){std::scoped_lock lock(s.mutex);return XR_FAILED(s.failure)?s.failure:XR_ERROR_SESSION_NOT_RUNNING;}
     reservation->reserved=true;
@@ -1368,11 +1384,17 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
     const std::shared_ptr<InterfaceDeliveryReceipt>& delivery,
     const std::shared_ptr<EndFrameReservation>& reservation) {
     if(!reservation || reservation->owner!=impl_ || reservation->thread!=GetCurrentThreadId() ||
-        !reservation->reserved || !reservation->acceptance.owns_lock())return XR_ERROR_CALL_ORDER_INVALID;
+        !reservation->reserved || !reservation->acceptance.owns_lock()) {
+        impl_->refused_end(2,GetCurrentThreadId(),(!reservation?1:0)|(reservation && reservation->owner!=impl_?2:0)|
+            (reservation && reservation->thread!=GetCurrentThreadId()?4:0)|(reservation && !reservation->reserved?8:0)|
+            (reservation && !reservation->acceptance.owns_lock()?16:0));
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
     struct CancelUnused {const std::shared_ptr<EndFrameReservation>& value;~CancelUnused(){value->cancel();}} cancel{reservation};
     if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;
-    {std::scoped_lock lock(s.mutex);if(XR_FAILED(s.failure))return s.failure;if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;if(!s.begun)return XR_ERROR_CALL_ORDER_INVALID;}
+    {std::scoped_lock lock(s.mutex);if(XR_FAILED(s.failure))return s.failure;if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
+     if(!s.begun){s.refused_end(3,GetCurrentThreadId(),s.waits);return XR_ERROR_CALL_ORDER_INVALID;}}
     std::shared_ptr<Impl::Packet> packet;
     struct Reservation {
         Impl& s;std::shared_ptr<Impl::Packet>& packet;bool accepted{},counted{};
@@ -1386,7 +1408,7 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
     packet=std::make_shared<Impl::Packet>();packet->delivery=delivery;
     packet->director=s.director_enabled.load();packet->adaptive_buffer=s.buffered.load();packet->policy_epoch=s.policy_epoch;XrResult result;
     {std::scoped_lock lock(s.mutex);result=s.own(*packet,*info);
-     if(XR_FAILED(result))return result;
+     if(XR_FAILED(result)){if(result==XR_ERROR_CALL_ORDER_INVALID)s.refused_end(4,s.refused_lease,s.refused_lease_state);return result;}
      packet->sequence=++s.sequence;if(!s.options.d11_release_readiness || s.d12())packet->ready=s.ready_serial+1;}
     if(!s.options.d11_release_readiness || s.d12()) {
         const auto ready=s.d12()?s.producer_queue12->Signal(s.ready12.Get(),packet->ready):s.context11->Signal(s.ready11.Get(),packet->ready);
