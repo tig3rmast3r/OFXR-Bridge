@@ -497,16 +497,17 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     }
     if(state.benchmark.message[0])ImGui::TextWrapped("%s",state.benchmark.message);
     if(state.benchmark.csv_path[0])ImGui::TextWrapped("CSV: %s",state.benchmark.csv_path);
-    const bool modern=pacing_comparison_runtime(state.runtime);
-    ImGui::TextWrapped("Up to %zu optical or %zu complete tests, including one OFXR Off reference.",
-        benchmark_plan(false,false,modern,draft.advanced_mode).size(),
-        benchmark_plan(true,false,modern,draft.advanced_mode).size());
-    ImGui::TextWrapped(modern
-        ? "Framework and Director, Normal/Fast and buffer comparison; Advanced also includes combined pacing."
-        : "Legacy VDXR: Framework Normal/Fast, including RIFE Medium and High.");
-    ImGui::TextWrapped("Luke Ross: up to %zu tests. AFW/OSR 1x1 only, plus RIFE Medium and High. No 2x2 or 4x4 quality passes.",
-        benchmark_plan(false,true,modern,draft.advanced_mode).size());
-    ImGui::TextWrapped("RIFE 4.4: Medium and High at 2X first. Test all 3X configurations only if no preceding result holds full refresh, then 4X if needed. Higher multipliers require session support. TensorRT optimization is setup, not measured time.");
+    if(pacing_comparison_runtime(state.runtime)) {
+        ImGui::TextWrapped(draft.advanced_mode
+            ? "Framework, Director, Framework+director for every route. Normal and Fast mode: up to 25 optical or 43 complete tests including one OFXR Off reference."
+            : "Framework and Director for every route, each with buffer 2 and 3. Normal and Fast mode: up to 33 optical or 57 complete tests including one OFXR Off reference.");
+        ImGui::TextWrapped(draft.advanced_mode
+            ? "Luke Ross: up to 30 tests through OFXR 0.3.0, no 3X. Three AFW qualities: 1x1, 2x2, 4x4; each route with all three pacing modes."
+            : "Luke Ross: up to 39 tests through OFXR 0.3.0, no 3X. Three AFW qualities: 1x1, 2x2, 4x4; each route with Framework and Director, buffer 2 and 3.");
+        ImGui::TextWrapped("AFW alone once per quality, without a buffer comparison. Fast mode has no Luke effect. CSV groups each route/pacing/buffer's three qualities.");
+    } else {
+        ImGui::TextWrapped("Legacy VDXR: up to 9 optical or 15 complete tests. Every route compares Normal/Fast. Luke: up to 12 tests, three AFW qualities through 0.3.0, no Fast or 3X.");
+    }
     ImGui::TextWrapped("Suite length adjusts to measured results and headset resolution. Skipped configurations remain n.a. in CSV.");
     ImGui::TextWrapped("Close the menu and keep the same test scene. Stop restores original settings. Completion restores them unless Auto pick best one selects a valid result. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
     if(draft.advanced_mode && ImGui::CollapsingHeader("Experimental features")) {

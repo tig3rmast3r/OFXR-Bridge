@@ -1739,15 +1739,6 @@ bool rife_multiframe_capable(const SessionState& state) noexcept {
     return state.graphics_binding==SessionGraphicsBinding::d3d12 &&
         !state.d3d11_bridge && !state.vulkan_bridge;
 }
-unsigned rife_benchmark_max_multiplier(const SessionState& state) noexcept {
-    if(rife_multiframe_capable(state))return 4;
-    // Selecting private D12 RIFE retires the optical route's legacy overlap
-    // owner before bootstrapping. That transient owner is not a session limit.
-    if(state.private_runtime && !state.luke_afw_enabled &&
-        state.graphics_binding==SessionGraphicsBinding::d3d12 &&
-        !state.d3d11_bridge && !state.vulkan_bridge)return 4;
-    return 2;
-}
 unsigned rife_frames(const SessionState& state) noexcept {
     return state.nvidia_options.rife_model>=0 && rife_multiframe_capable(state)
         ? static_cast<unsigned>(std::clamp(state.nvidia_options.rife_multiplier,2,4)):2U;
@@ -6328,7 +6319,7 @@ XrResult layer_create_session_impl(
         state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && state->luke_shared_swapchains,
         false, // no title forces the INI-only sharing policy
-        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,0,session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state));
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,0,session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0);
     return result;
 }
 
@@ -16724,7 +16715,7 @@ XrResult layer_end_frame_impl(
             state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && state->luke_shared_swapchains,
         false, // no title forces the INI-only sharing policy
-        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state)); }
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0); }
     } runtime_report_scope{state,end_info};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =
