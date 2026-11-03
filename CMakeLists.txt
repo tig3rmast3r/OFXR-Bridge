@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.846.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.847.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -190,6 +190,11 @@ if(XRFG_BUILD_TESTS)
         target_compile_features(xrfg_osr_full_warp_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_osr_full_warp_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         add_test(NAME xrfg_osr_full_warp COMMAND xrfg_osr_full_warp_tests)
+        add_executable(xrfg_uevr_afr_osr_tests tests/uevr_afr_osr_tests.cpp)
+        target_include_directories(xrfg_uevr_afr_osr_tests PRIVATE include)
+        target_compile_features(xrfg_uevr_afr_osr_tests PRIVATE cxx_std_20)
+        target_compile_definitions(xrfg_uevr_afr_osr_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        add_test(NAME xrfg_uevr_afr_osr COMMAND xrfg_uevr_afr_osr_tests)
     endif()
     add_executable(xrfg_fps_overlay_tests tests/fps_overlay_tests.cpp)
     target_link_libraries(xrfg_fps_overlay_tests PRIVATE xrfg_core)
@@ -276,6 +281,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_OSR_FULL_SPLAT_OFFSET_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_splat_offset_shader.hpp")
     set(XRFG_OSR_FULL_RESOLVE_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_shader.hpp")
     set(XRFG_OSR_FULL_INPAINT_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_full_inpaint_shader.hpp")
+    set(XRFG_UEVR_OSR_INPUT_HEADER "${XRFG_GENERATED_SHADER_DIR}/uevr_osr_input_shader.hpp")
+    set(XRFG_UEVR_OSR_GUIDE_HEADER "${XRFG_GENERATED_SHADER_DIR}/uevr_osr_guide_shader.hpp")
     set(XRFG_VULKAN_D24_DECODE_HEADER "${XRFG_GENERATED_SHADER_DIR}/vulkan_d24_decode_shader.hpp")
     set(XRFG_D3D11_DEPTH_UNPACK_HEADER "${XRFG_GENERATED_SHADER_DIR}/d3d11_depth_unpack_shader.hpp")
     add_custom_command(
@@ -311,6 +318,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_OSR_FULL_SPLAT_OFFSET_HEADER}"
             "${XRFG_OSR_FULL_RESOLVE_HEADER}"
             "${XRFG_OSR_FULL_INPAINT_HEADER}"
+            "${XRFG_UEVR_OSR_INPUT_HEADER}"
+            "${XRFG_UEVR_OSR_GUIDE_HEADER}"
             "${XRFG_VULKAN_D24_DECODE_HEADER}"
             "${XRFG_D3D11_DEPTH_UNPACK_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
@@ -442,6 +451,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_OSR_FULL_INPAINT_HEADER}" /Vn g_xrfg_osr_full_inpaint_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E UevrOsrInputs
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_UEVR_OSR_INPUT_HEADER}" /Vn g_xrfg_uevr_osr_input_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/uevr_osr_input.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E UevrOsrGuide
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_UEVR_OSR_GUIDE_HEADER}" /Vn g_xrfg_uevr_osr_guide_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/uevr_osr_guide.hlsl"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_0 /E UnpackDepth
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_D3D11_DEPTH_UNPACK_HEADER}" /Vn g_xrfg_d3d11_depth_unpack_shader
@@ -453,6 +470,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_compose_motion.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/uevr_osr_input.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/uevr_osr_guide.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/ingress/vulkan_d24_decode.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d11/d3d11_depth_unpack.hlsl"
         VERBATIM)
@@ -475,6 +494,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         ${XRFG_SYNTHESIS_SOURCE}
         src/d3d12/luke_afw.cpp
         src/d3d12/luke_color_origin.cpp
+        src/d3d12/uevr_osr.cpp
         "${XRFG_PACK_INPUT_HEADER}"
 
         "${XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER}"
@@ -504,6 +524,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_OSR_FULL_SPLAT_OFFSET_HEADER}"
         "${XRFG_OSR_FULL_RESOLVE_HEADER}"
         "${XRFG_OSR_FULL_INPAINT_HEADER}"
+        "${XRFG_UEVR_OSR_INPUT_HEADER}"
+        "${XRFG_UEVR_OSR_GUIDE_HEADER}"
         "${XRFG_VULKAN_D24_DECODE_HEADER}"
         "${XRFG_D3D11_DEPTH_UNPACK_HEADER}")
     foreach(stage decide compose)

@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <initializer_list>
 #include <iterator>
 #include <cmath>
 #include <cstdio>
@@ -197,7 +198,7 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     if(state.connected && state.runtime.buffer_capacity)
         ImGui::Text("Active bridge buffer: %u deliveries",state.runtime.buffer_capacity);
     if(state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode) {
-        ImGui::TextWrapped("Frame Reconstruction only: direct OpenXR delivery, no frame generation. Disable it in the Luke Ross tab and restart the game to restore OFXR frame generation. Neural Rendering remains available.");
+        ImGui::TextWrapped("Frame Reconstruction only: direct OpenXR delivery, no frame generation. Disable it in the Frame Reconstruction tab and restart the game to restore OFXR frame generation. Neural Rendering remains available.");
         return changed;
     }
     int selected_generation = generation_ui_index(draft.frame_generation);
@@ -332,16 +333,34 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     return changed;
 }
 
+// Setup notes for one source of eyes, open while that source is attached.
+void reconstruction_setup(const char* title,bool attached,std::initializer_list<const char*> lines) {
+    if(attached)ImGui::SetNextItemOpen(true,ImGuiCond_Appearing);
+    if(!ImGui::CollapsingHeader(title))return;
+    for(const char* line:lines)ImGui::TextWrapped("%s",line);
+}
+
 bool framewarp(Settings& draft, const Snapshot& state) {
-    ImGui::TextWrapped("For Luke Ross: in the mod menu, set the render mode to Legacy AER.");
-    ImGui::TextWrapped("For Luke Ross: turn off Camera rotation compensation where offered. With it on, turns in vehicles happen in steps.");
+    // Which source of eyes is attached and what reconstruction does with it,
+    // as the headset meter reports them.
+    const auto& r=state.runtime;
+    const auto now=GetTickCount64();
+    const bool fresh=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
+    const bool osr=draft.luke_osr==2;
+    const char* source=!state.connected ? "no active game" : r.luke_detected ? "Luke Ross detected" :
+        r.uevr_osr ? "UEVR Alternating detected" : "none detected";
+    const bool active=state.connected && draft.afw_mode!=0 && fresh && r.afw_running && !r.afw_flat_scene;
+    const char* activity=draft.afw_mode==0 ? "Off" : active ? "Active" :
+        state.connected && fresh && r.afw_flat_scene ? "2D scene (no stereo source)" :
+        reconstruction_source(r) ? "Waiting" : "N/A";
+    ImGui::Text("Source: %s",source);
+    ImGui::SameLine();
+    if(active)ImGui::TextColored(ImVec4(.4F,.9F,.6F,1),"%s: %s",osr?"OSR":"AFW",activity);
+    else ImGui::TextDisabled("%s: %s",osr?"OSR":"AFW",activity);
     ImGui::Separator();
-    bool changed=ImGui::Checkbox("Frame Reconstruction only (AFW or OSR, restart game)",&draft.afw_only);
-    ImGui::TextWrapped("Removes OFXR frame generation from the pipeline: each application frame goes straight to the headset, and only the missing eye is reconstructed, by AFW or OSR below. The best choice for latency.");
-    if(state.connected && (state.runtime.pacing_mode==kAfwOnlyPacingMode)!=draft.afw_only)
-        ImGui::TextWrapped("Frame Reconstruction only change saved. Restart the game to apply it.");
-    int reconstruction = draft.afw_mode==0 ? 0 : draft.luke_osr==2 ? 1 : 2;
-    if (ImGui::Combo("Reconstruction", &reconstruction, "Off\0OSR\0AFW\0")) {
+    bool changed=false;
+    int reconstruction = draft.afw_mode==0 ? 0 : osr ? 1 : 2;
+    if (ImGui::Combo("Reconstruction", &reconstruction, "Off\0OSR\0AFW (Luke Ross only)\0")) {
         if(reconstruction==0)draft.afw_mode=0;
         else {
             draft.luke_osr=reconstruction==1 ? 2 : 0;
@@ -349,19 +368,33 @@ bool framewarp(Settings& draft, const Snapshot& state) {
         }
         changed = true;
     }
-    if(draft.afw_mode==0) {
-        ImGui::TextWrapped("Stereo reconstruction is off. Frame generation and Neural Rendering remain independent.");
-        return changed;
+    if(draft.afw_mode==0)
+        ImGui::TextWrapped("Reconstruction is off for every game, Luke Ross and UEVR alike. Frame generation and Neural Rendering remain independent.");
+    else {
+        ImGui::TextWrapped(draft.luke_osr==2
+            ? "OSR (OFXR Stereo Reconstruction): OFXR renders the missing eye itself from the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame for what the real eye cannot see. Used with Luke Ross and UEVR. Applies live."
+            : "AFW (legacy): reconstructs the missing eye with the AFW provider. Luke Ross only. Applies live.");
+        if(draft.luke_osr!=2 && r.uevr_osr)
+            ImGui::TextWrapped("UEVR is reconstructed by OSR only: select OSR to reconstruct its missing eye.");
     }
-    ImGui::TextWrapped(draft.luke_osr==2
-        ? "OSR (OFXR Stereo Reconstruction): OFXR renders the other eye itself from the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame for what the real eye cannot see. Applies live."
-        : "AFW (legacy): reconstructs the other eye with the AFW provider. Applies live.");
+    changed|=ImGui::Checkbox("Frame Reconstruction only (AFW or OSR, restart game)",&draft.afw_only);
+    ImGui::TextWrapped("Removes OFXR frame generation from the pipeline: each application frame goes straight to the headset, and only the missing eye is reconstructed. The best choice for latency.");
+    if(state.connected && (state.runtime.pacing_mode==kAfwOnlyPacingMode)!=draft.afw_only)
+        ImGui::TextWrapped("Frame Reconstruction only change saved. Restart the game to apply it.");
+    reconstruction_setup("Setup: Luke Ross",r.luke_detected,{
+        "In the mod menu, set the render mode to Legacy AER.",
+        "Turn off Camera rotation compensation where offered. With it on, turns in vehicles happen in steps."});
+    reconstruction_setup("Setup: UEVR (Alternating / AFR)",r.uevr_osr,{
+        "In UEVR, set the Rendering Method to Alternating/AFR and Synchronization to Very Late. The game must run on D3D12 with DLSS: OSR takes each eye's depth and motion vectors from DLSS. FSR and XeSS games are not supported yet.",
+        "Ghosting Fix on (required): it gives each eye its own history. Without it the reconstructed eye ghosts everywhere.",
+        "If UEVR's Ghosting status stays learning or reads failed closed, turn on Bootstrap Separate View States and restart the game; do not toggle it live. Some games need it, such as Hogwarts Legacy and Atomic Heart. Only some UEVR builds offer this option."});
+    if(draft.afw_mode==0)return changed;
     if(draft.luke_osr==2){
         int quality=draft.luke_osr_lower_quality?1:0;
         if(ImGui::Combo("OSR quality",&quality,"OSR (normal)\0OSR (lower quality, faster)\0")){
             draft.luke_osr_lower_quality=quality!=0;changed=true;
         }
-        ImGui::TextWrapped("Lower quality reduces reconstruction work and may soften object edges. Colour stays full resolution. Applies live.");
+        ImGui::TextWrapped("Lower quality reduces reconstruction work and may soften object edges. Colour stays full resolution. Applies to Luke Ross and UEVR, live.");
     }
     changed |= ImGui::Checkbox("Advanced parameters", &draft.luke_advanced);
     if (draft.luke_advanced) {
@@ -394,7 +427,7 @@ bool framewarp(Settings& draft, const Snapshot& state) {
                 ImGui::TextWrapped("Quality change pending the next successful AFW evaluation. Current index: %d",state.runtime.afw_shading_rate);
         }
         changed |= ImGui::Checkbox("Debug framewarp", &draft.afw_debug);
-        ImGui::TextWrapped("Requires compatible source colour, depth and camera data. Luke Ross uses RealVR.ini; other compatible mods are reported as Other.");
+        ImGui::TextWrapped("Requires compatible source colour, depth and camera data. Luke Ross is read from RealVR.ini, UEVR from its own settings; other compatible mods are reported as Other.");
         if (!full_osr) {
             if(draft.advanced_mode)changed |= ImGui::Checkbox("Clear before framewarp", &draft.afw_clear_before_warping);
             changed |= ImGui::SliderFloat("Ignore motion", &draft.afw_ignore_motion_threshold, 0, 16, "%.2f");
@@ -633,11 +666,11 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& initial,
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Luke Ross")) {
+        if (ImGui::BeginTabItem("Frame Reconstruction")) {
             ImGui::BeginChild("Framewarp", ImVec2(0, 0));
             ImGui::PushItemWidth(std::clamp(ImGui::GetContentRegionAvail().x * .56F, 180.F, 580.F));
             changed |= framewarp(ui.draft, state);
-            if (ImGui::CollapsingHeader("Details",ImGuiTreeNodeFlags_NoAutoOpenOnLog)) luke_swapchain_budget(state);
+            if (ImGui::CollapsingHeader("Details (Luke Ross swapchains)",ImGuiTreeNodeFlags_NoAutoOpenOnLog)) luke_swapchain_budget(state);
             ImGui::PopItemWidth();
             ImGui::EndChild();
             ImGui::EndTabItem();

@@ -311,10 +311,13 @@ void release_controls() {
     require(desktop.rendered_text.find("Experimental features")==std::string::npos &&
         desktop.rendered_text.find("Output CSV")==std::string::npos &&
         desktop.rendered_text.find("Open ofxr-bridge.ini")==std::string::npos,"basic Display removes experimental and redundant controls");
-    desktop.select_tab("Luke Ross");desktop.draw(true);
+    desktop.select_tab("Frame Reconstruction");desktop.draw(true);
     require(snapshot().desired.luke_osr==2 && desktop.rendered_text.find("OSR (OFXR Stereo Reconstruction)")!=std::string::npos,
         "reset selects OSR in the actual desktop Reconstruction combo");
-    desktop.choose("Reconstruction",2,"AFW","/Framewarp_");
+    require(desktop.rendered_text.find("Setup: Luke Ross")!=std::string::npos &&
+        desktop.rendered_text.find("Setup: UEVR (Alternating / AFR)")!=std::string::npos &&
+        desktop.rendered_text.find("Source: ")!=std::string::npos,"Frame Reconstruction names its sources and their setup");
+    desktop.choose("Reconstruction",2,"AFW (Luke Ross only)","/Framewarp_");
     require(snapshot().desired.luke_osr==0,"second reconstruction choice selects legacy AFW");
     desktop.choose("Reconstruction",1,"OSR","/Framewarp_");
     require(snapshot().desired.luke_osr==2,"first reconstruction choice selects OSR");
@@ -377,7 +380,7 @@ void actual_widgets() {
     tray.activate("/Neural_","2x NR");tray.draw();headset.draw();
     require(snapshot().desired==before_second && headset.widgets.draft.nr_second_pass==before_second.nr_second_pass,
         "desktop second-pass edit reaches F10 without changing model, scale or frame generation");
-    headset.select_tab("Luke Ross");
+    headset.select_tab("Frame Reconstruction");
     // The provider controls sit behind the persisted Advanced parameters checkbox.
     headset.activate("/Framewarp_", "Advanced parameters");
     headset.draw();
@@ -417,7 +420,7 @@ void actual_widgets() {
     require(snapshot().desired.r19_camera!=previous_camera,"experimental camera setting remains live in Display");
     headset.select_tab("Frame generation");
     tray.select_tab("Neural Rendering");
-    tray.select_tab("Luke Ross");
+    tray.select_tab("Frame Reconstruction");
     tray.select_tab("Display");
     auto status = snapshot().runtime;
     status.applied_revision = snapshot().revision;
@@ -445,7 +448,7 @@ void actual_widgets() {
     status.swapchains.auxiliary_outputs=1;status.swapchains.private_snapshots=3;
     std::strcpy(status.swapchains.details,"App UNCLASSIFIED: 0x823, 16x16, array 1, format 28");
     report_runtime(status);
-    tray.select_tab("Luke Ross");headset.select_tab("Luke Ross");
+    tray.select_tab("Frame Reconstruction");headset.select_tab("Frame Reconstruction");
     tray.draw(true);headset.draw(true);
     for(const auto* view:{&tray,&headset}) {
         require(view->rendered_text.find("Framewarp mode")!=std::string::npos &&
@@ -454,7 +457,7 @@ void actual_widgets() {
         require(view->rendered_text.find("Swapchain fallback")!=std::string::npos,
             "status warns even with ownership Details collapsed");
     }
-    tray.activate("/Framewarp_","Details");headset.activate("/Framewarp_","Details");
+    tray.activate("/Framewarp_","Details (Luke Ross swapchains)");headset.activate("/Framewarp_","Details (Luke Ross swapchains)");
     tray.draw(true);headset.draw(true);
     for(const auto* view:{&tray,&headset}) {
         require(view->rendered_text.find("Framewarp mode")<view->rendered_text.find("Total swapchains:"),
@@ -476,7 +479,7 @@ void actual_widgets() {
     tray.draw();tray.draw();
     tray.choose("Reconstruction",0,"Off","/Framewarp_");
     require(snapshot().desired.afw_mode==0 && snapshot().desired.luke_osr==0,"primary Off also stops legacy AFW");
-    tray.choose("Reconstruction",2,"AFW","/Framewarp_");
+    tray.choose("Reconstruction",2,"AFW (Luke Ross only)","/Framewarp_");
     require(snapshot().desired.afw_mode==3 && snapshot().desired.luke_osr==0,"primary AFW restores the legacy engine");
     tray.choose("Framewarp mode",0,"Alternate eye (for debug)","/Framewarp_");
     require(snapshot().desired.afw_mode==1,"AFW mode first entry is Alternate eye, not Off");
@@ -498,7 +501,7 @@ void actual_widgets() {
     tray.choose("OSR quality",0,"OSR (normal)","/Framewarp_");
     require(!snapshot().desired.luke_osr_lower_quality,"desktop restores normal OSR live");
     headset.draw();headset.draw();
-    headset.choose("Reconstruction",2,"AFW","/Framewarp_");
+    headset.choose("Reconstruction",2,"AFW (Luke Ross only)","/Framewarp_");
     require(snapshot().desired.luke_osr==0,"headset selects the second legacy AFW entry");
     headset.choose("Reconstruction",1,"OSR","/Framewarp_");
     require(snapshot().desired.luke_osr==2,"headset selects the first OSR entry");

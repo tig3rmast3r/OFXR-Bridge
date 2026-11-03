@@ -98,6 +98,8 @@ struct PrivateOpenXrRuntime::Impl {
         bool director{true};
         bool adaptive_buffer{};
         std::uint64_t policy_epoch{};
+        bool pair_previous{}; // submit for the previous frame's slot time (pair_next_end_with_previous)
+        XrTime content_time{}; // submit for this display time (set_next_end_content_time)
     };
     struct WaitResult {
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
@@ -138,6 +140,10 @@ struct PrivateOpenXrRuntime::Impl {
     std::size_t requested_capacity{}; // preserve Framework2/3 selection across Director switches
     std::deque<std::shared_ptr<Packet>> prepared;
     std::atomic_bool stopping{true};
+    std::atomic_bool pair_next{};
+    std::atomic<XrTime> next_content_time{};
+    std::atomic<XrTime> last_end_display{}; // written by the consumer thread: the slot time of the last native End
+    XrTime last_end_prediction{}; // consumer thread: the runtime's prediction for the last native End
     XrResult failure{XR_SUCCESS};
     XrFrameState anchor{XR_TYPE_FRAME_STATE};
     std::int64_t anchor_at{};
@@ -711,6 +717,8 @@ struct PrivateOpenXrRuntime::Impl {
     void run() noexcept {
         if(options.native_frame_contract && !options.native_director_only){run_native_contract();return;}
         bool waited=false,begun=false;
+        last_end_display.store(0);
+        last_end_prediction=0;
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
         try {
             PrivateOutputSchedule schedule;
@@ -1091,6 +1099,14 @@ struct PrivateOpenXrRuntime::Impl {
                     if(directed)end.displayTime=display_time(prediction,packet->delivery?&observed_display:nullptr);
                     else {
                         end.displayTime=prediction.predictedDisplayTime;
+                        // Same content instant as the previous frame: the same
+                        // slot time, so the runtime reprojects both from one pose.
+                        if(packet->pair_previous && last_end_display.load())end.displayTime=last_end_display.load();
+                        // A content time no later than the previous frame's predicted
+                        // display time is refused by SteamVR (XR_ERROR_TIME_INVALID,
+                        // Dead Island 2 2026-11-02 22:11, 4 us before it): such a late
+                        // frame keeps its own slot.
+                        if(packet->content_time>0 && packet->content_time>last_end_prediction)end.displayTime=packet->content_time;
                         if(packet->delivery)observed_display=prediction_qpc(prediction).value_or(0);
                     }
                     if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
@@ -1127,6 +1143,18 @@ struct PrivateOpenXrRuntime::Impl {
                         last_buffer_target=deadline;
                         if(diagnostic && added)options.trace(29,packet->sequence,buffer.reserve(),added);
                     }
+                    if(XR_FAILED(result) && (packet->pair_previous || packet->content_time) && end.displayTime!=prediction.predictedDisplayTime &&
+                        result!=XR_ERROR_SESSION_LOST && result!=XR_ERROR_INSTANCE_LOST) {
+                        // The runtime refused the time this frame was made for. The
+                        // failed End already closed the frame (ending it again is a
+                        // call-order error, which stopped the session in r23): drop
+                        // this one frame and carry on with the next.
+                        if(options.trace)options.trace(43,packet->sequence,static_cast<std::int64_t>(result),0);
+                        result=XR_SUCCESS;
+                    } else if(XR_SUCCEEDED(result)) {
+                        last_end_display.store(end.displayTime);
+                    }
+                    last_end_prediction=prediction.predictedDisplayTime;
                     // Optional receipt only after native End: no observer lock,
                     // callback or clock query is added to the handoff edge.
                     if(packet->delivery)packet->delivery->completed(result==XR_SUCCESS && end.layerCount!=0,
@@ -1139,6 +1167,14 @@ struct PrivateOpenXrRuntime::Impl {
                     // wait already guarantees eligibility on monotonic QPC.
                     if(directed && !(slots.valid()?slots.delivered(at_end):schedule.delivered(at_end)))result=XR_ERROR_RUNTIME_FAILURE;
                     if(options.trace)options.trace(8,packet->sequence,at_end,0);
+                    // 42: a frame submitted for a content time (UEVR OSR), logged
+                    // after its End. Logged before every End, it delayed each native
+                    // End and left Luke Ross's menus on a queue one frame shallower,
+                    // which staggered (Cyberpunk 2077, 2026-11-03). b = display time,
+                    // c = 1 previous frame's slot | 2 content time | 4 content time
+                    // other than the prediction.
+                    if(options.trace && (packet->pair_previous || packet->content_time))options.trace(42,packet->sequence,end.displayTime,
+                        (packet->pair_previous?1:0)|(packet->content_time?2:0)|(packet->content_time && packet->content_time!=prediction.predictedDisplayTime?4:0));
                     if(XR_SUCCEEDED(result))trace(2,packet->sequence,directed?(slots.valid()?slots.delay():schedule.delay()):0);
                 }
                 // Publish a failed End before freeing a producer credit; a
@@ -1362,6 +1398,9 @@ XrResult PrivateOpenXrRuntime::begin_frame(const XrFrameBeginInfo* info) {
     if(!s.waits){s.refused_end(5,GetCurrentThreadId(),s.begun);return XR_ERROR_CALL_ORDER_INVALID;}--s.waits;
     const auto result=s.begun?XR_FRAME_DISCARDED:XR_SUCCESS;s.begun=1;return result;
 }
+void PrivateOpenXrRuntime::pair_next_end_with_previous() noexcept {impl_->pair_next.store(true);}
+XrTime PrivateOpenXrRuntime::last_native_display_time() const noexcept {return impl_->last_end_display.load();}
+void PrivateOpenXrRuntime::set_next_end_content_time(XrTime time) noexcept {impl_->next_content_time.store(time);}
 XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::shared_ptr<InterfaceDeliveryReceipt>& delivery) {
     if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
     std::shared_ptr<EndFrameReservation> reservation;
@@ -1407,6 +1446,8 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
     } transaction{s,packet};
     packet=std::make_shared<Impl::Packet>();packet->delivery=delivery;
     packet->director=s.director_enabled.load();packet->adaptive_buffer=s.buffered.load();packet->policy_epoch=s.policy_epoch;XrResult result;
+    packet->pair_previous=s.pair_next.exchange(false);
+    packet->content_time=s.next_content_time.exchange(0);
     {std::scoped_lock lock(s.mutex);result=s.own(*packet,*info);
      if(XR_FAILED(result)){if(result==XR_ERROR_CALL_ORDER_INVALID)s.refused_end(4,s.refused_lease,s.refused_lease_state);return result;}
      packet->sequence=++s.sequence;if(!s.options.d11_release_readiness || s.d12())packet->ready=s.ready_serial+1;}

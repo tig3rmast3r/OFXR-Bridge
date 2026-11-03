@@ -230,6 +230,16 @@ void wording() {
     check(interface_status_text(s)=="OFXR: Waiting | OSR: Off | Neural Render: Off", "clean non-Luke session reports default OSR not applicable");
     s.desired.afw_mode=3;
     check(interface_status_text(s).find("OSR: Luke Ross")==std::string::npos, "Luke selection cannot fake OSR activity");
+    {
+        // UEVR's Alternating/AFR as OSR's eye source: shown as Luke Ross OSR is.
+        Snapshot u=s;
+        u.desired.enabled=false;u.runtime.uevr_osr=true;
+        check(interface_reconstruction_text(u,GetTickCount64())=="OSR: Off", "UEVR OSR attached, nothing reconstructed yet");
+        u.runtime.heartbeat_ms=GetTickCount64();u.runtime.afw_running=true;
+        check(interface_state_text(u)=="OSR" && interface_afw_only_active(u,GetTickCount64()), "UEVR OSR running reads as OSR");
+        check(interface_reconstruction_text(u,GetTickCount64())=="OSR: UEVR", "UEVR named as OSR's source");
+        check(interface_status_text(u).find("UEVR Alternating detected")!=std::string::npos, "UEVR detection in the status line");
+    }
     s.runtime.luke_detected=s.runtime.vulkan_detected=true;
     s.runtime.generation_state=GenerationState::invalid_stereo;
     const auto text=interface_status_text(s);

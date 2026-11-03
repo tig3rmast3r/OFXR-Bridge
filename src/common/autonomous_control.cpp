@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 84601;
+constexpr std::uint32_t kAbi = 84701;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1081,7 +1081,7 @@ bool start_benchmark(bool full,bool luke) noexcept {
         }
         if(s.runtime.pacing_mode==kAfwOnlyPacingMode) {
             b={};b.phase=BenchmarkPhase::error;
-            std::snprintf(b.message,sizeof(b.message),"Frame Reconstruction only is active. Disable it in the Luke Ross tab and restart the game for the OFXR matrix.");return false;
+            std::snprintf(b.message,sizeof(b.message),"Frame Reconstruction only is active. Disable it in the Frame Reconstruction tab and restart the game for the OFXR matrix.");return false;
         }
         if(luke && !s.runtime.luke_detected) {
             b={};b.phase=BenchmarkPhase::error;
@@ -1399,8 +1399,8 @@ std::string_view interface_reconstruction_text(const Snapshot& s,std::uint64_t n
     const bool active=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000 &&
         r.afw_running && !r.afw_flat_scene;
     if(!active)return osr?"OSR: Off":"AFW: Off";
-    if(osr)return r.luke_detected?"OSR: Luke Ross":"OSR: Other";
-    return r.luke_detected?"AFW: Luke Ross":"AFW: Other";
+    if(osr)return r.luke_detected?"OSR: Luke Ross":r.uevr_osr?"OSR: UEVR":"OSR: Other";
+    return r.luke_detected?"AFW: Luke Ross":r.uevr_osr?"AFW: UEVR":"AFW: Other";
 }
 std::string interface_status_text(const Snapshot& s,bool include_reconstruction) {
     if (!s.connected) return "No active game";
@@ -1446,6 +1446,7 @@ std::string interface_status_text(const Snapshot& s,bool include_reconstruction)
     if (r.swapchains.other) add("Unclassified app swapchain");
     if (r.overlay_limit_mask) add("Overlay swapchain limit reached");
     if (r.luke_detected) add("Luke Ross detected");
+    if (r.uevr_osr) add("UEVR Alternating detected");
     if (r.vulkan_detected) add("Vulkan detected");
     if (r.vulkan_capture_suspended) add((r.generation_mode == 0 || r.generation_mode == 3)
         ? "Vulkan game-vector capture suspended: OFXR uses optical flow"

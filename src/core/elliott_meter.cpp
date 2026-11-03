@@ -336,12 +336,13 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const bool current=state.connected && m.updated_ms && now_ms>=m.updated_ms && now_ms-m.updated_ms<2000;
     const auto status=autonomous::interface_state_text(state);
     // State labels include the actual generator and active optional stages.
-    // An enabled optional stage must run; AFW has no work outside Luke Ross.
+    // An enabled optional stage must run; AFW/OSR has work only with Luke Ross
+    // or UEVR's Alternating/AFR.
     const auto& r=state.runtime;
     const bool optimizing=status=="Optimizing, please wait";
     const bool fresh=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000;
     const bool optional_ready=(!state.desired.nr_enabled || (fresh && r.nr_running)) &&
-        (!r.luke_detected || state.desired.afw_mode==0 || (fresh && r.afw_running));
+        (!autonomous::reconstruction_source(r) || state.desired.afw_mode==0 || (fresh && r.afw_running));
     const bool ofxr_active=m.generating && state.desired.enabled && autonomous::interface_generation_active(state) && !r.provider_error;
     const bool healthy=current && (ofxr_active || autonomous::interface_afw_only_active(state,now_ms)) && optional_ready;
     const auto tone=healthy ? PanelTone::good : PanelTone::bad;

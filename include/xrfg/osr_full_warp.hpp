@@ -126,6 +126,18 @@ constexpr std::uint32_t kOsrFullFlagHistory = 2u;
 // The previous frame of this eye is the primary source everywhere it shows the
 // same surface, not only at silhouettes, bands and sky (osr_full_warp.hlsl).
 constexpr std::uint32_t kOsrFullFlagHistoryFirst = 4u;
+// History splat only: a camera-attached texel follows the camera it is attached
+// to, through the matrix in the BackwardSource slot (history clip -> destination
+// clip with that camera held), instead of keeping its screen place. UEVR: the
+// weapon hangs on the game camera, which the head turns away from.
+constexpr std::uint32_t kOsrFullFlagLockedFollows = 64u;
+// Resolve: where the warp shows a camera-attached surface it stays (V766), the
+// previous frame filling only the side the other eye cannot see; without the
+// flag the previous frame takes it (V768, Kingdom Come Deliverance II's
+// crossbow, attached to the view). UEVR's weapon hangs on the game camera,
+// which the head turns away from: taken from the previous frame it lagged the
+// head and ghosted (Dead Island 2, 2026-11-02; the UEVR fork, on V766, did not).
+constexpr std::uint32_t kOsrFullFlagWarpKeepsAttached = 128u;
 
 inline std::uint32_t osr_full_flags(bool debug, bool history, bool history_first = true) noexcept {
     return (debug ? kOsrFullFlagDebug : 0u) | (history ? kOsrFullFlagHistory : 0u) |

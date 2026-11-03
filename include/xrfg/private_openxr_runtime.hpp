@@ -148,6 +148,24 @@ public:
     XrResult end_frame_reserved(const XrFrameEndInfo*,
         const std::shared_ptr<InterfaceDeliveryReceipt>&,
         const std::shared_ptr<EndFrameReservation>&);
+    // The next end_frame shows content rendered for the same instant as the
+    // previous one (UEVR AFR under OSR: both frames of a pair use one head
+    // pose). SteamVR reprojects a frame from the pose it predicted for the
+    // frame's display time, not from the submitted view poses, so that frame
+    // is submitted for the previous frame's slot time; a slot apart, the two
+    // would be rotated from poses a period apart and double under head
+    // rotation. Native-paced (non-director) delivery only.
+    void pair_next_end_with_previous() noexcept;
+    // The next end_frame's content was rendered (or relocated) for the head
+    // pose at that time: the native End carries that display time, so the
+    // runtime reprojects the frame from the pose it was made for even when it
+    // reaches a later slot than planned. Native-paced delivery only.
+    void set_next_end_content_time(XrTime time) noexcept;
+    // The display time of the last frame handed to the native runtime (0
+    // before the first). The application's predicted display time runs ahead
+    // of it by the queue depth; a frame prepared now is shown one period after
+    // this, so content aimed at a head pose belongs to that slot.
+    [[nodiscard]] XrTime last_native_display_time() const noexcept;
     XrResult create_swapchain(const XrSwapchainCreateInfo*, XrSwapchain*,
         D3D12_RESOURCE_STATES image_state=D3D12_RESOURCE_STATE_RENDER_TARGET,
         std::uint32_t image_count=3,

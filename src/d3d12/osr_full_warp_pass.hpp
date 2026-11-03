@@ -236,6 +236,12 @@ public:
         float forward_stereo[16]{};           // source clip -> destination clip
         float forward_history[16]{};          // history clip -> destination clip
         float forward_history_previous[16]{}; // history clip -> clip of that eye's frame before it
+        // Camera-attached history texels: history clip -> destination clip with
+        // the camera they hang on held (kOsrFullFlagLockedFollows); unset, they
+        // keep their screen place.
+        bool locked_follows{};
+        bool warp_keeps_attached{}; // kOsrFullFlagWarpKeepsAttached
+        float forward_history_locked[16]{};
         float backward_source[16]{};
         float backward_history[16]{};
         float history_motion_scale[2]{};
@@ -312,6 +318,7 @@ public:
         constants.color_width = color_width_; constants.color_height = color_height_;
         constants.flags = osr_full_flags(in.debug, in.use_history);
         constants.flags |= (source_eye << 4) | ((!scene_initialized_ || in.reset_history) ? 8u : 0u);
+        if (in.warp_keeps_attached) constants.flags |= kOsrFullFlagWarpKeepsAttached;
         std::memcpy(constants.forward, in.forward_stereo, sizeof(constants.forward));
         std::memcpy(constants.backward_source, in.backward_source, sizeof(constants.backward_source));
         std::memcpy(constants.backward_history, in.backward_history, sizeof(constants.backward_history));
@@ -360,6 +367,10 @@ public:
             OsrFullConstants history_constants = constants;
             std::memcpy(history_constants.forward, in.forward_history, sizeof(history_constants.forward));
             std::memcpy(history_constants.backward_history, in.forward_history_previous, sizeof(history_constants.backward_history));
+            if (in.locked_follows) {
+                std::memcpy(history_constants.backward_source, in.forward_history_locked, sizeof(history_constants.backward_source));
+                history_constants.flags |= kOsrFullFlagLockedFollows;
+            }
             if (in.use_history_motion) {
                 history_constants.motion_scale[0] = in.history_motion_scale[0];
                 history_constants.motion_scale[1] = in.history_motion_scale[1];

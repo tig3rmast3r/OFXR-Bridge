@@ -260,6 +260,16 @@ bool history_landing(uint2 id, out float2 p, out uint word, out float2 origin) {
             p = now - 0.5;
             word = asuint(z) | HistoryLockedBit;
             ok = all(isfinite(p));
+            // Attached to a camera the head moves within (UEVR's game camera):
+            // it lands where that camera puts it in the destination eye. In the
+            // history splat BackwardSource holds that transform.
+            if ((Flags & 64u) != 0) {
+                const float4 l = mul(float4(ndc, z, 1.0), BackwardSource);
+                const float2 at = float2((l.x / l.w + 1.0) * 0.5 * DepthSize.x - 0.5, (1.0 - l.y / l.w) * 0.5 * DepthSize.y - 0.5);
+                const float zl = l.z / l.w;
+                ok = l.w > 1e-8 && all(isfinite(at)) && isfinite(zl) && zl <= 1.0;
+                if (ok) { p = at; word = asuint(max(zl, FarDepth)) | HistoryLockedBit; }
+            }
         } else if (all(isfinite(q)) && q.w > 1e-8) {
             float2 landing = float2((q.x / q.w + 1.0) * 0.5 * DepthSize.x - 0.5, (1.0 - q.y / q.w) * 0.5 * DepthSize.y - 0.5);
             float zd = q.z / q.w;
@@ -798,7 +808,7 @@ void resolve_pixel(uint3 id) {
                     // surface the previous frame is taken; it also covers the
                     // strip of background the misplaced warp drew over.
                     const bool attached = (previous_word & HistoryLockedBit) != 0;
-                    const bool warp_attached = zs >= LockedDepth;
+                    const bool warp_attached = (Flags & 128u) == 0 && zs >= LockedDepth;
                     // At a fringe, depth cannot tell a stale surface from a
                     // strand the other eye happens to miss: hair and foliage
                     // edges cover different strands in each eye and frame, and

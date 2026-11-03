@@ -175,9 +175,14 @@ struct RuntimeStatus {
     unsigned rife_max_multiplier{2}; // actual active session capability, independent of requested engine
     bool rife_execution_active{}; // a fresh, live worker receipt exists (false is not proof of Torch)
     int osr_mode{-1},osr_lower_quality{-1}; // last successfully submitted reconstruction
+    bool uevr_osr{}; // UEVR Alternating/AFR attached as OSR's eye source, as Luke Ross is
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
     return !r.vdxr_legacy;
+}
+// A source of eyes for AFW/OSR to reconstruct: Luke Ross, or UEVR's Alternating/AFR.
+inline bool reconstruction_source(const RuntimeStatus& r) noexcept {
+    return r.luke_detected || r.uevr_osr;
 }
 
 enum class BenchmarkPhase : unsigned { idle, applying, running, complete, stopped, error, restart_required };

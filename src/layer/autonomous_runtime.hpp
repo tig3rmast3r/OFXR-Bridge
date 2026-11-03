@@ -16,6 +16,8 @@
 #include "xrfg/d3d12_rife.hpp"
 
 namespace xrfg::autonomous {
+// UEVR's Alternating/AFR is attached as OSR's eye source (uevr_afr_osr.inc).
+inline std::atomic_bool uevr_osr_attached{};
 inline std::atomic_uint64_t applied_runtime_revision{};
 inline std::atomic_bool r19_camera_enabled{};
 inline void apply_toggle_shortcuts(bool log_pressed,bool nr_pressed,bool counter_pressed) {
@@ -121,6 +123,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     if (nr.enabled && !nr.reason.empty()) snprintf(out.message,sizeof(out.message),"%s",nr.reason.c_str());
     const auto ingress=native_ingress::statistics();
     out.luke_detected = ingress.luke != 0;
+    out.uevr_osr = uevr_osr_attached.load(std::memory_order_acquire);
     out.vulkan_detected = vulkan_detected || (ingress.luke && native_vulkan::luke_vulkan_process());
     out.provider_error = control.desired.frame_generation == 2 ? provider_error : 0;
     if (ingress.luke && ingress.camera_rejected && !ingress.camera_accepted)

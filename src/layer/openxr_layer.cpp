@@ -56,6 +56,10 @@
 #include "xrfg/private_openxr_runtime.hpp"
 #include "xrfg/runtime_acceptance_rate.hpp"
 #include "xrfg/private_delivery_queue.hpp"
+#include "xrfg/third_party/uevr_api.h"
+#include "xrfg/osr_full_warp.hpp"
+#include "xrfg/uevr_afr_osr.hpp"
+#include "xrfg/uevr_osr.hpp"
 
 #include <windows.h>
 #include <psapi.h>
@@ -743,10 +747,16 @@ enum class GenerationQuarantineReason : std::int64_t {
 
 struct CompositionImageSlot;
 
+struct UevrAfrOsrState;
+std::shared_ptr<UevrAfrOsrState> make_uevr_afr_osr_state() noexcept;
 struct SessionState {
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> panel_synthesis_queue;
     std::vector<std::pair<XrSwapchain,XrTime>> panel_generated;
     bool uevr_application{}; // captured once at session creation, never inferred from game name
+    // OSR for UEVR's Alternating/AFR rendering (uevr_afr_osr.inc); set at
+    // session creation when UEVR is loaded, never replaced.
+    std::shared_ptr<UevrAfrOsrState> uevr_afr;
+    std::atomic_bool uevr_osr_active{};
     bool steamvr_separate_queue{true}; // immutable session preference, tray-only
     bool afw_only{}; // immutable session transport; does not disable Neural Rendering
     bool vdxr_legacy{true}; // immutable native/Legacy transport (VDXR and Pimax Auto)
@@ -2638,6 +2648,7 @@ void configure_session_guide_capture(const SessionState& state) {
     const bool outputs_needed=xrfg::embedded::snapshot().desired.enabled ||
         (state.luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode!=0);
     const bool enabled=xrfg::neural_rendering::status().enabled ||
+        state.uevr_osr_active.load(std::memory_order_acquire) ||
         (outputs_needed && !raw_luke_ofxr && state.dlss_motion_vectors && (!state.luke_fresh_only ||
             (!state.afw_only && xrfg::embedded::snapshot().desired.enabled) || xrfg::embedded::afw_snapshot().desired.mode!=0));
     if(!enabled)
@@ -4529,6 +4540,10 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_set_presentation_transform_ofxr(
     return XR_SUCCESS;
 }
 
+void uevr_afr_observe_locate(SessionState& session, const XrViewLocateInfo& info,
+    const XrViewState& view_state, std::uint32_t count, const XrView* views);
+bool uevr_afr_osr_overlay_active(const SessionState& session) noexcept;
+
 XRAPI_ATTR XrResult XRAPI_CALL layer_locate_views(
     XrSession session, const XrViewLocateInfo* info, XrViewState* view_state,
     std::uint32_t capacity, std::uint32_t* count, XrView* views) {
@@ -4540,6 +4555,8 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_locate_views(
         if (XR_SUCCEEDED(result) && info && views && count && *count && capacity &&
             view_state && (view_state->viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT))
             blackbar_record_locate(*state,*info,views[0].pose);
+        if (XR_SUCCEEDED(result) && info && view_state && count && state->uevr_afr)
+            uevr_afr_observe_locate(*state, *info, *view_state, *count, views);
         if (XR_SUCCEEDED(result) && info &&
             info->viewConfigurationType == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO &&
             view_state && count && *count == 2 &&
@@ -6181,6 +6198,8 @@ XrResult layer_create_session_impl(
     state->steamvr_delivery = std::make_unique<xrfg::SteamVrDelivery>(dispatch->steamvr_runtime);
     const auto private_result=install_private_runtime(state);
     if(FAILED(private_result)){dispatch->destroy_session(created_session);return XR_ERROR_INITIALIZATION_FAILED;}
+    // Before any frame call can reach the UEVR AFR hooks from another thread.
+    if (GetModuleHandleW(L"UEVRBackend.dll")) state->uevr_afr = make_uevr_afr_osr_state();
     log_video_memory(*state, VideoMemoryStage::session, 0);
     log_view_configuration(*dispatch, instance, create_info ? create_info->systemId : XR_NULL_SYSTEM_ID);
 
@@ -11162,6 +11181,11 @@ void refresh_release_bound_projection_guides(
     const ProjectionMappingResult& mappings) noexcept {
     if (!release_bound_projection_guides(session) ||
         mappings.reason != ProjectionMappingReason::ready) return;
+    // UEVR OSR binds each eye's own guide stream when it releases the eyes
+    // (uevr_afr_osr.inc): the game's evaluations cover only the real eye, and
+    // re-resolved from them here the reconstructed eye's guide broke DLSS-G's
+    // per-eye history (skip detail 5, r49).
+    if (session.uevr_osr_active.load(std::memory_order_acquire)) return;
     std::array<std::shared_ptr<SwapchainState>, 2> chains{};
     const auto reject = [&]() noexcept {
         for (const auto& chain : chains) {
@@ -17119,12 +17143,16 @@ XrResult layer_end_frame_impl(
             XrFrameEndInfo physical_slot{};
             const auto* physical_end=use_continuous_presenter?end_info:
                 blackbar_inline_submission(*state,end_info,physical_slot);
+            // UEVR AFR with OSR reaches here with one eye reconstructed in
+            // every frame: the counter shows it as Luke Ross OSR is shown.
+            const bool uevr_osr = state->uevr_afr && uevr_afr_osr_overlay_active(*state);
+            if (state->uevr_afr && state->fps_overlay) state->fps_overlay->set_afw_active(uevr_osr);
             const XrResult end_result = use_continuous_presenter
                 ? submit_borrowed_to_presenter()
                 : with_runtime_entry(state, [&] {
                       join_runtime_queue_to_application(state.get(), state->app_end_frame_release_value);
                       return state->fps_overlay
-                          ? state->fps_overlay->end_frame(physical_end, false, true, {}, 0, interface_stamp)
+                          ? state->fps_overlay->end_frame(physical_end, uevr_osr, true, {}, 0, interface_stamp)
                           : content_end_frame(session, physical_end);
                   });
             xrfg::bridge_flight_logger().end(
@@ -17704,8 +17732,8 @@ XrResult layer_end_frame_impl(
         ? xrfg::autonomous::GenerationState::ready : prepared.kind == PreparedGenerationKind::prime
         ? xrfg::autonomous::GenerationState::recovering : xrfg::autonomous::GenerationState::waiting;
     if (state->fps_overlay) {
-        state->fps_overlay->set_afw_active(
-            afw_selected && prepared.kind != PreparedGenerationKind::none);
+        state->fps_overlay->set_afw_active(uevr_afr_osr_overlay_active(*state) ||
+            (afw_selected && prepared.kind != PreparedGenerationKind::none));
     }
 
     if ((state->graphics_binding_capabilities & 8ULL) != 0) {
@@ -18484,6 +18512,8 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_end_session(XrSession session) {
     return result;
 }
 
+#include "uevr_afr_osr.inc"
+
 XRAPI_ATTR XrResult XRAPI_CALL layer_wait_frame(
     XrSession session,
     const XrFrameWaitInfo* wait_info,
@@ -18494,7 +18524,11 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_wait_frame(
         xrfg::BridgeFlightOperation::application_wait_frame,
         handle_value(session));
     const XrResult result = guard_c_api_boundary([&] {
-        return layer_wait_frame_impl(session, wait_info, frame_state, &interface_call);
+        const XrResult waited = layer_wait_frame_impl(session, wait_info, frame_state, &interface_call);
+        if (XR_SUCCEEDED(waited))
+            if (const auto state = find_session(session); state && state->uevr_afr)
+                uevr_afr_observe_wait(*state, frame_state);
+        return waited;
     });
     xrfg::bridge_flight_logger().end(
         token,
@@ -18696,7 +18730,13 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_release_swapchain_image(
         xrfg::BridgeFlightOperation::application_swapchain_release,
         handle_value(swapchain));
     const XrResult result = guard_c_api_boundary([&] {
-        return layer_release_swapchain_image_impl(swapchain, release_info, &interface_call);
+        // UEVR Alternating/AFR: OSR around the release of an eye image.
+        const auto chain = find_swapchain(swapchain);
+        const bool uevr = chain && chain->session && chain->session->uevr_afr;
+        if (uevr) uevr_afr_before_release(chain);
+        const XrResult released = layer_release_swapchain_image_impl(swapchain, release_info, &interface_call);
+        if (uevr) uevr_afr_after_release(chain, released);
+        return released;
     });
     xrfg::bridge_flight_logger().end(
         token,
@@ -18717,7 +18757,13 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_end_frame(
         end_info ? static_cast<std::uint64_t>(end_info->displayTime) : 0,
         end_info ? end_info->layerCount : 0);
     const XrResult result = guard_c_api_boundary([&] {
-        return layer_end_frame_impl(session, end_info, &interface_call);
+        // UEVR Alternating/AFR: a frame was inserted after the first eye, so
+        // this one carries the display time of the frame begun for it.
+        UevrEndFrameRewrite rewritten;
+        const XrFrameEndInfo* info = end_info;
+        if (const auto state = find_session(session); state && state->uevr_afr)
+            if (uevr_afr_observe_end_frame(*state, end_info, rewritten)) info = &rewritten.info;
+        return layer_end_frame_impl(session, info, &interface_call);
     });
     xrfg::bridge_flight_logger().end(
         token,
