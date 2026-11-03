@@ -44,6 +44,8 @@ RWTexture2D<uint>   OffsetOut   : register(u5);
 // OSR-private receipt: history allowed, valid/motion eye masks, cut, votes,
 // history motion allowed. Never read back by the production frame thread.
 RWTexture2D<uint>   SceneState  : register(u6);
+Texture2D<float4> LowerMap : register(t10);
+RWTexture2D<float4> LowerMapOut : register(u7);
 SamplerState LinearClamp : register(s0);
 
 cbuffer Osr : register(b0) {
@@ -687,8 +689,12 @@ bool hidden_from_source(float2 ndc, float z) {
     return hidden;
 }
 
-[numthreads(8, 8, 1)]
-void OsrFullResolve(uint3 id : SV_DispatchThreadID) {
+static uint g_pick = 0;
+static uint g_pick_word = 0;
+static uint g_pick_tag = 0;
+static float2 g_pick_at = 0;
+void resolve_pixel(uint3 id) {
+    g_pick = 0;
     if (any(id.xy >= ColorSize)) return;
     float2 pixel = float2(id.xy) + 0.5;
     float2 ndc = float2(pixel.x / ColorSize.x * 2.0 - 1.0, 1.0 - pixel.y / ColorSize.y * 2.0);
@@ -760,6 +766,7 @@ void OsrFullResolve(uint3 id : SV_DispatchThreadID) {
                     // eye (F8 of 2026-11-01 14:28:11). Where the moved and the
                     // camera-only previous frame differ, the other eye's warp,
                     // which shows this very instant, decides which is right.
+                    float2 picked_history_at = g_history_position;
                     float4 still = 0; uint still_word = 0;
                     if ((previous_word & HistoryLockedBit) == 0 && HistoryOffset.Load(int3(c, 0)) != 0 &&
                         resolve_history(c, depth_pixel, ndc, false, still, still_word)) {
@@ -768,6 +775,7 @@ void OsrFullResolve(uint3 id : SV_DispatchThreadID) {
                         if (gap > ArbiterGap &&
                             dot(abs(still.rgb - color.rgb), third) < dot(abs(previous.rgb - color.rgb), third)) {
                             previous = still; previous_word = still_word;
+                            picked_history_at = g_history_position;
                         }
                     }
                     const float2 previous_at = g_history_position;
@@ -805,6 +813,7 @@ void OsrFullResolve(uint3 id : SV_DispatchThreadID) {
                     // strand, the generated frame 34% further from its real
                     // neighbours than they are from each other.
                     if (warp_attached || (same && !attached) || nearer_unseen || (fringe && !attached)) {
+                        g_pick=2;g_pick_at=picked_history_at;g_pick_word=previous_word;g_pick_tag=TagStereo;
                         WarpedOut[id.xy] = previous;
                         ResolvedOut[id.xy] = (previous_word & ~3u) | TagStereo;
                         return;
@@ -817,6 +826,7 @@ void OsrFullResolve(uint3 id : SV_DispatchThreadID) {
             ResolvedOut[id.xy] = 0; // a band pixel: the inpaint mirrors clean background
             return;
         }
+        g_pick=1;g_pick_at=stereo_at;g_pick_word=word;g_pick_tag=TagStereo;
         WarpedOut[id.xy] = color;
         ResolvedOut[id.xy] = (word & ~3u) | TagStereo;
         return;
@@ -831,12 +841,49 @@ void OsrFullResolve(uint3 id : SV_DispatchThreadID) {
         const bool legitimate = (word & HistoryLockedBit) != 0 ||
             hidden_from_source(ndc, asfloat(word & ~3u)) ||
             history_ray_unchanged(ndc, asfloat(word & ~3u));
+        if(legitimate){g_pick=2;g_pick_at=g_history_position;g_pick_word=word;g_pick_tag=TagHistory;}
         WarpedOut[id.xy] = legitimate ? color : 0;
         ResolvedOut[id.xy] = (word & ~3u) | (legitimate ? TagHistory : TagMoved);
         return;
     }
     WarpedOut[id.xy] = 0;
     ResolvedOut[id.xy] = 0;
+}
+
+[numthreads(8, 8, 1)]
+void OsrFullResolve(uint3 id : SV_DispatchThreadID) { resolve_pixel(id); }
+
+// One geometric decision per2x2 block, followed by native-resolution colour
+// gathers. This deliberately lowers silhouette/disocclusion decision precision;
+// the original image is neither resized nor used as a low-resolution output.
+float2 lower_project(float2 pixel,float z,bool history) {
+    float2 ndc=float2(pixel.x/ColorSize.x*2.0-1.0,1.0-pixel.y/ColorSize.y*2.0);
+    float4 p=history?mul(float4(ndc,z,1),BackwardHistory):mul(float4(ndc,z,1),BackwardSource);
+    return float2((p.x/p.w+1)*.5*DepthSize.x,(1-p.y/p.w)*.5*DepthSize.y);
+}
+[numthreads(8,8,1)]
+void OsrFullResolveMap(uint3 id:SV_DispatchThreadID) {
+    uint2 base=id.xy*2;if(any(base>=ColorSize))return;
+    resolve_pixel(uint3(base,0));
+    uint metadata=g_pick+4*g_pick_tag;
+    LowerMapOut[id.xy]=float4(g_pick_at,asfloat(g_pick_word),float(metadata));
+}
+[numthreads(8,8,1)]
+void OsrFullResolveLower(uint3 id:SV_DispatchThreadID) {
+    if(any(id.xy>=ColorSize))return;
+    float4 map=LowerMap.Load(int3(id.xy/2,0));
+    uint metadata=uint(map.w);uint pick=metadata&3;uint word=asuint(map.z);
+    float2 at=map.xy;
+    uint2 base=(id.xy/2)*2;
+    if(pick==0){WarpedOut[id.xy]=0;ResolvedOut[id.xy]=0;return;}
+    if(pick==2 && (word&HistoryLockedBit)!=0)
+        at+=float2(id.xy-base)*float2(DepthSize)/float2(ColorSize);
+    else at+=lower_project(float2(id.xy)+.5,asfloat(word&~3u),pick==2)-lower_project(float2(base)+.5,asfloat(word&~3u),pick==2);
+    if(!all(isfinite(at)) || any(at<0) || any(at>=float2(DepthSize))){WarpedOut[id.xy]=0;ResolvedOut[id.xy]=0;return;}
+
+    [branch] if(pick==2)WarpedOut[id.xy]=sample_nearest(HistoryColor,at/float2(DepthSize));
+    else WarpedOut[id.xy]=sample_sharp(SourceColor,at/float2(DepthSize));
+    ResolvedOut[id.xy]=(word&~3u)|((metadata>>2)&3);
 }
 
 float4 tint(float4 color, float3 mark, float amount) {

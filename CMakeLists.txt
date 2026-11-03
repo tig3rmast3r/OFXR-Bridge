@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.843.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.845.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2012,6 +2012,12 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/gta-headlock-quality" -DTITLE=GTAVE
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
   set_tests_properties(xrfg_luke_gta_headlock_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1")
+  add_test(NAME xrfg_osr_cheap_gpu COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/osr-cheap-gpu" -DTITLE=KCD2
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_osr_cheap_gpu PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_OSR_HEADLOCK_POSE=1;XRFG_TEST_OSR_CHEAP=1")
   foreach(headlock 0 1)
     set(osr_pose_title KCD2)
     if(headlock)
@@ -2270,4 +2276,28 @@ if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_d3d12_history)
  add_dependencies(xrfg_osr_inpaint_tests xrfg_d3d12_history)
  add_test(NAME xrfg_osr_inpaint_gpu COMMAND xrfg_osr_inpaint_tests)
  set_tests_properties(xrfg_osr_inpaint_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
+if(WIN32 AND TARGET xrfg_d3d12_history)
+ add_custom_command(OUTPUT "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_lower_shader.hpp"
+  COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullResolveLower /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+   /Fh "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_lower_shader.hpp" /Vn g_xrfg_osr_full_resolve_lower_shader "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl")
+ add_custom_target(xrfg_osr_lower_shader DEPENDS "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_lower_shader.hpp")
+ add_dependencies(xrfg_d3d12_history xrfg_osr_lower_shader)
+
+ add_custom_command(OUTPUT "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_map_shader.hpp"
+  COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullResolveMap /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+   /Fh "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_map_shader.hpp" /Vn g_xrfg_osr_full_resolve_map_shader "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl")
+ add_custom_target(xrfg_osr_map_shader DEPENDS "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_map_shader.hpp")
+ add_dependencies(xrfg_d3d12_history xrfg_osr_map_shader)
+ if(XRFG_BUILD_TESTS)
+ add_executable(xrfg_osr_quality_bench tests/osr_quality_bench.cpp)
+ target_include_directories(xrfg_osr_quality_bench PRIVATE include src/d3d12 "${XRFG_GENERATED_SHADER_DIR}")
+ target_compile_features(xrfg_osr_quality_bench PRIVATE cxx_std_20)
+ target_compile_definitions(xrfg_osr_quality_bench PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+ target_link_libraries(xrfg_osr_quality_bench PRIVATE d3d12 dxgi)
+ add_dependencies(xrfg_osr_quality_bench xrfg_d3d12_history)
+ endif()
 endif()

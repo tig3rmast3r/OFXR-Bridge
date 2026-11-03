@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 84301;
+constexpr std::uint32_t kAbi = 84501;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -391,6 +391,7 @@ Settings sanitize(Settings value) noexcept {
     value.afw_ignore_motion_threshold = bounded(value.afw_ignore_motion_threshold, 0.F, 16.F, 2.5F);
     value.afw_depth_dilate_mode = std::clamp(value.afw_depth_dilate_mode, 0, 2);
     value.afw_shading_rate = std::clamp(value.afw_shading_rate, 0, 8);
+    if(value.afw_shading_rate==8)value.afw_shading_rate=4; // retired4x4 profiles migrate to2x2
     value.luke_osr = normalize_osr_reconstruction(value.luke_osr);
     value.luke_osr_cover = std::clamp(value.luke_osr_cover, 0, 8);
     value.luke_osr_trim = std::clamp(value.luke_osr_trim, 0, 2);
@@ -501,7 +502,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(r19_camera)
         READ_FIELD(afw_mode) READ_FIELD(afw_debug) READ_FIELD(afw_clear_before_warping)
         READ_FIELD(afw_ignore_motion_threshold) READ_FIELD(afw_depth_dilate_mode) READ_FIELD(afw_shading_rate)
-        READ_FIELD(luke_osr) READ_FIELD(luke_osr_cover) READ_FIELD(luke_osr_trim) READ_FIELD(luke_osr_fill) READ_FIELD(luke_advanced)
+        READ_FIELD(luke_osr) READ_FIELD(luke_osr_lower_quality) READ_FIELD(luke_osr_cover) READ_FIELD(luke_osr_trim) READ_FIELD(luke_osr_fill) READ_FIELD(luke_advanced)
         READ_FIELD(nr_enabled) READ_FIELD(nr_second_pass) READ_FIELD(nr_before_sr) READ_FIELD(nr_intensity)
         READ_FIELD(nr_preset) READ_FIELD(nr_style) READ_FIELD(nr_local_structure)
         READ_FIELD(nr_local_tone) READ_FIELD(nr_skin_structure) READ_FIELD(nr_auto_mask)
@@ -541,7 +542,7 @@ std::string serialize_settings(const Settings& settings,bool include_global_ui) 
     WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(r19_camera)
     WRITE_FIELD(afw_mode) WRITE_FIELD(afw_debug) WRITE_FIELD(afw_clear_before_warping)
     WRITE_FIELD(afw_ignore_motion_threshold) WRITE_FIELD(afw_depth_dilate_mode) WRITE_FIELD(afw_shading_rate)
-    WRITE_FIELD(luke_osr) WRITE_FIELD(luke_osr_cover) WRITE_FIELD(luke_osr_trim) WRITE_FIELD(luke_osr_fill) WRITE_FIELD(luke_advanced)
+    WRITE_FIELD(luke_osr) WRITE_FIELD(luke_osr_lower_quality) WRITE_FIELD(luke_osr_cover) WRITE_FIELD(luke_osr_trim) WRITE_FIELD(luke_osr_fill) WRITE_FIELD(luke_advanced)
     WRITE_FIELD(nr_enabled) WRITE_FIELD(nr_second_pass) WRITE_FIELD(nr_before_sr) WRITE_FIELD(nr_intensity)
     WRITE_FIELD(nr_preset) WRITE_FIELD(nr_style) WRITE_FIELD(nr_local_structure)
     WRITE_FIELD(nr_local_tone) WRITE_FIELD(nr_skin_structure) WRITE_FIELD(nr_auto_mask)
@@ -788,7 +789,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
     MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(rife_resolution) MERGE_FIELD(rife_multiplier) MERGE_FIELD(rife_model) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
     MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
-    MERGE_FIELD(luke_osr) MERGE_FIELD(luke_osr_cover) MERGE_FIELD(luke_osr_trim) MERGE_FIELD(luke_osr_fill) MERGE_FIELD(luke_advanced)
+    MERGE_FIELD(luke_osr) MERGE_FIELD(luke_osr_lower_quality) MERGE_FIELD(luke_osr_cover) MERGE_FIELD(luke_osr_trim) MERGE_FIELD(luke_osr_fill) MERGE_FIELD(luke_advanced)
     MERGE_FIELD(nr_enabled) MERGE_FIELD(nr_second_pass) MERGE_FIELD(nr_before_sr) MERGE_FIELD(nr_intensity)
     MERGE_FIELD(nr_preset) MERGE_FIELD(nr_style) MERGE_FIELD(nr_local_structure)
     MERGE_FIELD(nr_local_tone) MERGE_FIELD(nr_skin_structure) MERGE_FIELD(nr_auto_mask)
@@ -836,7 +837,7 @@ struct SuiteResult {
     std::string label;
     bool complete{};
     std::uint32_t eye_long_side{};
-    bool vectors{};
+    bool vectors{},afw_success{};
 };
 struct SuiteRecorder {
     Channel* controller{};
@@ -851,6 +852,7 @@ struct SuiteRecorder {
     std::vector<SuiteResult> results;
     std::vector<BenchmarkStep> plan;
     bool afw_success{};
+    bool rife_success{};
     bool vector_success{};
     std::uint32_t eye_long_side{};
     std::uint32_t bridge_buffer_capacity{};
@@ -911,7 +913,8 @@ bool same_trial(const Settings& a,const Settings& b) {
     return a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation && a.rife_resolution==b.rife_resolution && a.rife_model==b.rife_model && a.rife_multiplier==b.rife_multiplier &&
         a.triple_frame_gen==b.triple_frame_gen && a.prefer_fps==b.prefer_fps &&
         a.separate_synthesis==b.separate_synthesis && a.lower_vram==b.lower_vram &&
-        a.afw_mode==b.afw_mode && (!a.afw_mode || a.afw_shading_rate==b.afw_shading_rate);
+        a.afw_mode==b.afw_mode && (!a.afw_mode || (a.afw_shading_rate==b.afw_shading_rate &&
+        a.luke_osr==b.luke_osr && (a.luke_osr!=2 || a.luke_osr_lower_quality==b.luke_osr_lower_quality)));
 }
 void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
     if(rec.layout_path.empty())return;
@@ -920,8 +923,7 @@ void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
     if(!output)throw std::runtime_error("Cannot write layout CSV");
     output<<"Game,Build,Metric";
     for(const auto& step:steps) {
-        auto label=step.disabled ? std::string("OFXR Off") : step.label;
-        if(b.luke)label+=" / "+std::string(!step.afw ? "blank" : step.shading==0 ? "1x1" : step.shading==4 ? "2x2" : "4x4");
+        auto label=step.disabled && !b.luke ? std::string("OFXR Off") : step.label;
         output<<','<<quoted(label);
     }
     output<<'\n'<<std::fixed<<std::setprecision(3);
@@ -954,7 +956,7 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
     if(rec.stream.is_open()) {
         const auto& s=rec.settings;
         rec.stream<<XRFG_IMPLEMENTATION_VERSION<<','<<b.run_id<<','<<b.game_pid<<','<<quoted(rec.game)<<','<<rec.index+1<<','<<quoted(rec.label)<<','
-            <<s.separate_synthesis<<','<<s.lower_vram<<','<<(s.triple_frame_gen ? 3 : 2)<<','<<s.prefer_fps<<','
+            <<s.separate_synthesis<<','<<s.lower_vram<<','<<(s.frame_generation==4 ? s.rife_multiplier : s.triple_frame_gen ? 3 : 2)<<','<<s.prefer_fps<<','
             <<s.nr_enabled<<','<<s.afw_mode<<','<<s.afw_shading_rate<<','<<(s.frame_generation!=2 ? "N/A" :
                 rec.dlssg_preset==1 ? "A startup request" : rec.dlssg_preset==3 ? "C startup request" : "Game default / unverified")
             <<','<<double(kBenchmarkSettleMs)/1000.0<<','
@@ -968,11 +970,11 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
         csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_working_set_bytes);rec.stream<<',';
         csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_private_commit_bytes);rec.stream<<','<<quoted(verdict)<<','<<s.pacing_mode<<','<<rec.runtime<<','<<rec.legacy_vdxr<<','<<rec.eye_long_side<<',';
         if(rec.samples.refresh_hz.empty())rec.stream<<"N/A";else rec.stream<<benchmark_median(rec.samples.refresh_hz);
-        rec.stream<<','<<rec.vector_success<<','<<rec.bridge_buffer_capacity<<'\n';
+        rec.stream<<','<<rec.vector_success<<','<<rec.bridge_buffer_capacity<<','<<s.luke_osr<<','<<s.luke_osr_lower_quality<<'\n';
         rec.stream.flush();
         if(!rec.stream)throw std::runtime_error("CSV write failed");
     }
-    rec.results.push_back({rec.settings,rec.samples,rec.memory,rec.label,std::string_view(verdict)=="complete",rec.eye_long_side,rec.vector_success});
+    rec.results.push_back({rec.settings,rec.samples,rec.memory,rec.label,std::string_view(verdict)=="complete",rec.eye_long_side,rec.vector_success,rec.afw_success});
     csv_layout(rec,b);
     rec.revision=0;rec.samples={};
 }
@@ -982,7 +984,7 @@ void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const Runtim
     rec.legacy_vdxr=runtime.vdxr_legacy;
     rec.runtime=runtime.vdxr_runtime?"VDXR":runtime.steamvr_runtime?"SteamVR":"Other";
     rec.dlssg_preset=preset;
-    rec.plan=benchmark_execution_plan(b.full,b.luke,rec.steamvr,b.advanced,runtime.eye_long_side);
+    rec.plan=benchmark_execution_plan(b.full,b.luke,rec.steamvr,b.advanced,runtime.eye_long_side,runtime.rife_max_multiplier);
     rec.game=utf8_path(benchmark_game_path(b.game_pid).filename());
     if(!b.csv)return;
     const auto folder=common_folder()/L"Benchmarks";
@@ -993,7 +995,7 @@ void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const Runtim
     rec.stream.open(path,std::ios::out|std::ios::trunc);
     rec.stream.imbue(std::locale::classic());rec.stream<<std::fixed<<std::setprecision(3);
     if(!rec.stream)throw std::runtime_error("Cannot create benchmark CSV");
-    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleMinimumMinMs,CycleMinimumMedianMs,CycleMinimumMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors,BridgeBuffer\n";
+    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleMinimumMinMs,CycleMinimumMedianMs,CycleMinimumMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors,BridgeBuffer,OSRMode,OSRLowerQuality\n";
     rec.stream.flush();if(!rec.stream)throw std::runtime_error("Cannot write benchmark CSV header");
     std::snprintf(b.csv_path,sizeof(b.csv_path),"%s",utf8_path(rec.layout_path).c_str());
 }
@@ -1005,7 +1007,9 @@ std::vector<BenchmarkScore> suite_scores(const SuiteRecorder& rec,bool luke) {
         // Hybrid has its own native-guide contract; Off/AFW-only are references.
         const bool fidelity=settings.enabled && settings.frame_generation==0 && settings.backend==0;
         auto score=benchmark_score(result.samples,result.complete && !fidelity);
-        score.vectors=result.vectors;score.afw_only=luke && !settings.enabled && settings.afw_mode!=0;
+        score.vectors=result.vectors;score.afw_only=!settings.enabled && settings.afw_mode!=0 && result.afw_success;
+        score.rife=settings.enabled && settings.frame_generation==4;
+        score.osr=settings.luke_osr==2;score.osr_lower_quality=score.osr && settings.luke_osr_lower_quality;
         score.shading=settings.afw_shading_rate;score.eye_long_side=result.eye_long_side;
         score.triple=settings.enabled && settings.triple_frame_gen;
         score.display_hz=benchmark_median(result.samples.refresh_hz);scores.push_back(score);
@@ -1026,8 +1030,8 @@ void suite_complete(Shared& shared,const SuiteRecorder& rec,std::uint64_t now) {
     auto selected=result.settings;
     // AFW-only trials run through the ordinary bridge to keep the matrix live.
     // Only the completed winner arms the direct AFW startup path for next launch.
-    if(b.luke)selected.afw_only=score.afw_only;
-    const bool restart_afw_only=b.luke && selected.afw_only &&
+    if(b.luke || std::any_of(scores.begin(),scores.end(),[](const auto& value){return value.afw_only;}))selected.afw_only=score.afw_only;
+    const bool restart_afw_only=selected.afw_only &&
         shared.snapshot.runtime.pacing_mode!=kAfwOnlyPacingMode;
     if(!suite_publish(shared,selected,now)) {
         suite_restore(shared,BenchmarkPhase::error,"Could not save automatic choice; original settings restored.",now);return;
@@ -1035,13 +1039,34 @@ void suite_complete(Shared& shared,const SuiteRecorder& rec,std::uint64_t now) {
     b.phase=BenchmarkPhase::complete;
     std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(0,std::memory_order_release);
     auto label=result.label;
-    if(b.luke)label+=" / "+std::string(result.settings.afw_shading_rate==0?"1x1":result.settings.afw_shading_rate==4?"2x2":"4x4");
     const auto fps=std::minmax_element(result.samples.fps.begin(),result.samples.fps.end());
     const auto latency=std::minmax_element(result.samples.latency.begin(),result.samples.latency.end());
     std::snprintf(b.message,sizeof(b.message),"Complete. Selected %s: %.1f FPS (%.1f-%.1f), %.1f ms (%.1f-%.1f).%s",
         label.c_str(),score.fps,*fps.first,*fps.second,score.latency,*latency.first,*latency.second,
         restart_afw_only ? " Restart the game to activate Frame Reconstruction only." : "");
 }
+void suite_advance(Shared& shared,SuiteRecorder& rec,std::uint64_t now) {
+    auto& b=shared.snapshot.benchmark;
+    const auto scores=suite_scores(rec,b.luke);
+    if(!b.luke) {
+        bool sufficient=false;
+        for(std::size_t i=0;i<rec.results.size();++i)
+            sufficient |= benchmark_2x_sufficient(rec.results[i].settings,scores[i]);
+        if(sufficient)rec.plan.erase(std::remove_if(rec.plan.begin()+b.index+1,rec.plan.end(),
+            [](const auto& step){return step.triple;}),rec.plan.end());
+        b.count=static_cast<unsigned>(rec.plan.size());
+    }
+    benchmark_prune_rife(rec.plan,b.index+1,scores);
+    b.count=static_cast<unsigned>(rec.plan.size());
+    if(++b.index>=rec.plan.size()) {
+        suite_complete(shared,rec,now);rec.stream.close();return;
+    }
+    b.phase=BenchmarkPhase::applying;
+    std::snprintf(b.label,sizeof(b.label),"%s",rec.plan[b.index].label.c_str());
+    if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,rec.plan[b.index]),now))
+        suite_restore(shared,BenchmarkPhase::error,"Could not apply the next test; stopped.",now);
+}
+
 } // namespace
 
 bool start_benchmark(bool full,bool luke) noexcept {
@@ -1067,7 +1092,7 @@ bool start_benchmark(bool full,bool luke) noexcept {
         const auto run=std::max(b.run_id+1,(now<<16)^GetCurrentProcessId());
         b={};b.full=full;b.luke=luke;b.advanced=s.desired.advanced_mode;b.auto_pick=s.desired.benchmark_auto_pick;b.csv=s.desired.benchmark_csv;b.game_pid=s.runtime.process_id;
         b.run_id=run;
-        const auto plan=benchmark_execution_plan(full,luke,pacing_comparison_runtime(s.runtime),b.advanced,s.runtime.eye_long_side);b.count=static_cast<unsigned>(plan.size());
+        const auto plan=benchmark_execution_plan(full,luke,pacing_comparison_runtime(s.runtime),b.advanced,s.runtime.eye_long_side,s.runtime.rife_max_multiplier);b.count=static_cast<unsigned>(plan.size());
         b.phase=BenchmarkPhase::applying;
         std::snprintf(b.label,sizeof(b.label),"%s",plan[0].label.c_str());
         if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,plan[0]),now)) {
@@ -1117,24 +1142,44 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 std::snprintf(b.message,sizeof(b.message),"Settings changed outside the suite; stopped.");return;
             }
             if(b.phase==BenchmarkPhase::applying) {
-                const bool quality_pending=b.luke && s.desired.afw_mode &&
-                    s.runtime.afw_shading_rate!=s.desired.afw_shading_rate;
+                const bool quality_pending=(b.luke || s.runtime.luke_detected || s.runtime.afw_running) && s.desired.afw_mode &&
+                    (s.runtime.afw_shading_rate!=s.desired.afw_shading_rate ||
+                    (s.runtime.osr_mode>=0 && s.runtime.osr_mode!=s.desired.luke_osr) ||
+                    (s.desired.luke_osr==2 && s.runtime.osr_lower_quality>=0 && s.runtime.osr_lower_quality!=int(s.desired.luke_osr_lower_quality)));
                 const bool pacing_pending=rec.steamvr && s.runtime.pacing_mode!=static_cast<unsigned>(s.desired.pacing_mode);
                 const bool buffer_pending=rec.steamvr && !b.advanced &&
                     s.runtime.buffer_capacity!=static_cast<unsigned>(s.desired.enabled && s.desired.pacing_mode!=0
                         ? (s.desired.increase_buffer?4:3):s.desired.increase_buffer?3:2);
+                const bool rife=s.desired.frame_generation==4;
+                const bool optimizing=rife && s.runtime.rife_optimizing;
+                if(optimizing){b.requested_ms=now;return;} // wait until completion, Stop/disconnect remain available
                 if(s.runtime.applied_revision!=b.revision || s.runtime.pending || quality_pending || pacing_pending || buffer_pending) {
-                    if(now>=b.requested_ms+30000)
-                        suite_restore(shared,BenchmarkPhase::error,"Settings not applied within 30 seconds; stopped.",now);
+                    if(now>=b.requested_ms+30000) {
+                        if(!rife)suite_restore(shared,BenchmarkPhase::error,"Settings not applied within 30 seconds; stopped.",now);
+                        else {
+                            rec.revision=b.revision;rec.index=b.index;rec.started=now;rec.settings=s.desired;
+                            rec.label=b.label;rec.samples={};rec.memory={};rec.vector_success=false;rec.afw_success=false;
+                            csv_finish(rec,b,now,"RIFE setup unavailable / skipped");
+                            rec.plan.erase(std::remove_if(rec.plan.begin()+b.index+1,rec.plan.end(),[](const auto& step){return step.generation==4;}),rec.plan.end());
+                            suite_advance(shared,rec,now);
+                        }
+                    }
                     return;
                 }
                 b.phase=BenchmarkPhase::running;b.started_ms=now;
                 rec.revision=b.revision;rec.index=b.index;rec.started=now;
                 rec.settings=s.desired;rec.label=b.label;rec.samples={};
-                rec.afw_success=false;rec.vector_success=false;rec.eye_long_side=0;
+                rec.afw_success=false;rec.rife_success=false;rec.vector_success=false;rec.eye_long_side=0;
                 rec.bridge_buffer_capacity=s.runtime.buffer_capacity;
                 rec.memory_requested=false;rec.memory={};
                 rec.next_sample=now;
+            }
+            if(s.desired.frame_generation==4 && s.runtime.rife_optimizing) {
+                // Optimization started after the first inference. Discard warm-up
+                // samples and begin a fresh measured interval after compilation.
+                b.phase=BenchmarkPhase::applying;b.requested_ms=now;b.started_ms=0;
+                std::atomic_ref<std::uint64_t>(shared.benchmark_memory_request).store(0,std::memory_order_release);
+                shared.benchmark_memory={};rec.revision=0;rec.samples={};rec.memory={};return;
             }
             if(now>=rec.next_sample) {
                 rec.next_sample=now+250;
@@ -1144,11 +1189,12 @@ void tick_benchmark(std::uint64_t now) noexcept {
                     rec.samples.observe(s.runtime.telemetry,b.started_ms,std::min(now+1,b.started_ms+kBenchmarkDurationMs));
                     if(rec.samples.last_ms!=previous) {
                         if(const auto side=s.runtime.eye_long_side)rec.eye_long_side=rec.eye_long_side?std::min(rec.eye_long_side,side):side;
-                        rec.vector_success |= s.desired.enabled && s.runtime.telemetry.generating && s.runtime.motion_source==1 &&
+                        rec.vector_success |= s.desired.enabled && s.desired.frame_generation!=4 && s.runtime.telemetry.generating && s.runtime.motion_source==1 &&
                             (s.runtime.generation_state==GenerationState::ready || s.runtime.generation_state==GenerationState::multi_frame_unsupported);
                     }
                 }
                 rec.afw_success |= s.runtime.afw_running;
+                rec.rife_success |= s.runtime.rife_execution_active && s.runtime.telemetry.generating;
             }
             if(!rec.memory_requested && now>=b.started_ms+kBenchmarkMemoryRequestMs) {
                 shared.benchmark_memory={};
@@ -1158,31 +1204,9 @@ void tick_benchmark(std::uint64_t now) noexcept {
             if(shared.benchmark_memory.revision==b.revision && shared.benchmark_memory.updated_ms>=rec.started)
                 rec.memory=shared.benchmark_memory;
             if(now<b.started_ms+kBenchmarkDurationMs)return;
-            csv_finish(rec,b,now,b.luke && s.desired.afw_mode && !rec.afw_success ? "no confirmed AFW output" : rec.samples.fps.empty() ? "no measured presentation rate" :
+            csv_finish(rec,b,now,s.desired.frame_generation==4 && !rec.rife_success ? "no confirmed RIFE output" : b.luke && s.desired.afw_mode && !rec.afw_success ? "no confirmed AFW output" : rec.samples.fps.empty() ? "no measured presentation rate" :
                 s.desired.enabled && !rec.samples.generated ? "no confirmed generation" : "complete");
-            const auto scores=suite_scores(rec,b.luke);
-            if(!b.luke) {
-                bool sufficient=false;
-                for(std::size_t i=0;i<rec.results.size();++i)
-                    sufficient |= benchmark_2x_sufficient(rec.results[i].settings,scores[i]);
-                if(sufficient)rec.plan.erase(std::remove_if(rec.plan.begin()+b.index+1,rec.plan.end(),
-                    [](const auto& step){return step.triple;}),rec.plan.end());
-                b.count=static_cast<unsigned>(rec.plan.size());
-            }
-            // Finish the complete full-quality pass and compare the first half-quality
-            // AFW-only reference before deciding whether reduced-quality trials add value.
-            const bool luke_checkpoint=b.luke && b.index>0 && !rec.settings.enabled &&
-                rec.settings.afw_shading_rate==4;
-            if(luke_checkpoint && benchmark_luke_early_complete(scores)) {
-                b.count=b.index+1;suite_complete(shared,rec,now);rec.stream.close();return;
-            }
-            if(++b.index>=rec.plan.size()) {
-                suite_complete(shared,rec,now);rec.stream.close();return;
-            }
-            b.phase=BenchmarkPhase::applying;
-            std::snprintf(b.label,sizeof(b.label),"%s",rec.plan[b.index].label.c_str());
-            if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,rec.plan[b.index]),now))
-                suite_restore(shared,BenchmarkPhase::error,"Could not apply the next test; stopped.",now);
+            suite_advance(shared,rec,now);
         } catch(...) {
             rec.stream.close();suite_restore(shared,BenchmarkPhase::error,"CSV output failed; suite stopped. Check the Benchmarks folder.",now);
         }

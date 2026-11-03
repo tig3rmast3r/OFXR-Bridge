@@ -62,6 +62,7 @@ struct Settings {
     int afw_depth_dilate_mode{};
     int afw_shading_rate{}; // beta6 Combined; 0 full resolution, 4=2x2, 8=4x4
     int luke_osr{2};       // 2 OSR (default), 0 AFW (legacy); retired value 1 migrates to OSR
+    bool luke_osr_lower_quality{}; // lower-rate geometry, native-resolution colour
     int luke_osr_cover{};  // OSR: band cover in depth texels beyond the hole, 0..8
     int luke_osr_trim{};   // OSR: object-edge texels replaced too, 0..2
     int luke_osr_fill{2};  // OSR: band fill gain, 1..8
@@ -171,7 +172,9 @@ struct RuntimeStatus {
     bool afw_flat_scene{};
     bool rife_optimizing{}; // asynchronous engine compilation; existing generation can continue
     bool rife_tensorrt{}; // backend used by the latest RIFE inference, independent of desired state
+    unsigned rife_max_multiplier{2}; // actual active session capability, independent of requested engine
     bool rife_execution_active{}; // a fresh, live worker receipt exists (false is not proof of Torch)
+    int osr_mode{-1},osr_lower_quality{-1}; // last successfully submitted reconstruction
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
     return !r.vdxr_legacy;

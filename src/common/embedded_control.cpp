@@ -96,11 +96,13 @@ struct AfwControl {
             0.0F, 64.0F);
         settings.shading_rate = std::clamp(static_cast<int>(GetPrivateProfileIntW(
             L"experimental", L"luke_afw_shading_rate", 0, ini().c_str())), 0, 8);
+        if(settings.shading_rate==8)settings.shading_rate=4; // retired4x4
         settings.depth_dilate_mode = std::clamp(static_cast<int>(
             GetPrivateProfileIntW(L"experimental", L"luke_afw_depth_dilate_mode",
                 0, ini().c_str())), 0, 2);
         settings.osr = normalize_osr_reconstruction(static_cast<int>(GetPrivateProfileIntW(
             L"experimental", L"luke_osr", 2, ini().c_str())));
+        settings.osr_lower_quality=GetPrivateProfileIntW(L"experimental",L"luke_osr_lower_quality",0,ini().c_str())!=0;
         settings.osr_cover = std::clamp(static_cast<int>(GetPrivateProfileIntW(
             L"experimental", L"luke_osr_cover", 0, ini().c_str())), 0, 8);
         settings.osr_trim = std::clamp(static_cast<int>(GetPrivateProfileIntW(
@@ -171,6 +173,8 @@ AfwSnapshot afw_snapshot() {
     auto& c = afw_control();
     std::scoped_lock lock(c.mutex);
     auto result=c.snapshot;
+    result.active_osr_mode=active_osr_mode.load(std::memory_order_relaxed);
+    result.active_osr_lower_quality=active_osr_lower_quality.load(std::memory_order_relaxed);
     result.active_shading_rate=active_afw_shading_rate.load(std::memory_order_relaxed);
     return result;
 }
@@ -186,6 +190,7 @@ bool request_afw(AfwSettings settings) {
         !std::isfinite(settings.ignore_motion_threshold) ||
         settings.ignore_motion_threshold < 0.0F ||
         settings.ignore_motion_threshold > 64.0F) return false;
+    if(settings.shading_rate==8)settings.shading_rate=4; // retired4x4 requests
     settings.osr = normalize_osr_reconstruction(settings.osr);
     auto& c = afw_control();
     std::scoped_lock lock(c.mutex);
@@ -219,6 +224,8 @@ bool request_afw(AfwSettings settings) {
         const wchar_t* modes[]{L"0", L"1", L"2"};
         ok &= write(L"experimental", L"luke_osr", modes[settings.osr]);
     }
+    if(old.osr_lower_quality!=settings.osr_lower_quality)
+        ok &= write(L"experimental",L"luke_osr_lower_quality",settings.osr_lower_quality?L"1":L"0");
     if (old.osr_cover != settings.osr_cover) {
         wchar_t value[16]{}; swprintf_s(value, L"%d", settings.osr_cover);
         ok &= write(L"experimental", L"luke_osr_cover", value);

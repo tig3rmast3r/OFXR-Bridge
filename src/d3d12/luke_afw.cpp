@@ -2637,6 +2637,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             in.source_motion_state = D3D12_RESOURCE_STATE_COMMON;
             in.source_eye = source_eye;
             in.use_history = history_usable;
+            in.lower_quality=settings.osr_lower_quality;
             in.reset_history = guide.reset;
             // The history frame's own motion needs that eye's frame before it
             // for the camera's share: the two publications back it points to.
@@ -2894,6 +2895,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         }
         if (SUCCEEDED(result)) {
             embedded::report_afw_shading_rate(impl_->active_shading_rate);
+            embedded::report_osr_configuration(full_osr?2:0,full_osr && impl_->osr_full.lower_quality_active());
             if (full_osr) impl_->osr_full.commit();
             if(full_osr && reconstructed_position) {
                 float game_baseline{};

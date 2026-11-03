@@ -105,6 +105,10 @@ struct Context {
                 std::strstr(window->Name, "##Combo")) popup = window;
         if(!popup)throw std::runtime_error(std::string("combo did not open: ")+label+" in "+child+
             " generation="+std::to_string(snapshot().desired.frame_generation)+" backend="+std::to_string(snapshot().desired.backend));
+        if(std::strcmp(label,"AFW shading rate")==0){
+            draw(true);
+            require(rendered_text.find("4x4 (quarter per axis)")==std::string::npos,"AFW dropdown offers only1x1 and2x2");
+        }
         const auto seed = ImHashData(&index, sizeof(index), popup->IDStack.back());
         ImGui::ActivateItemByID(ImHashStr(item, 0, seed));
         draw();
@@ -489,6 +493,10 @@ void actual_widgets() {
         "successful active quality update clears pending explanation");
     tray.choose("Reconstruction",1,"OSR","/Framewarp_");
     require(snapshot().desired.luke_osr==2,"desktop selects OSR from legacy AFW");
+    tray.choose("OSR quality",1,"OSR (lower quality, faster)","/Framewarp_");
+    require(snapshot().desired.luke_osr_lower_quality,"desktop selects OSR cheap live");
+    tray.choose("OSR quality",0,"OSR (normal)","/Framewarp_");
+    require(!snapshot().desired.luke_osr_lower_quality,"desktop restores normal OSR live");
     headset.draw();headset.draw();
     headset.choose("Reconstruction",2,"AFW","/Framewarp_");
     require(snapshot().desired.luke_osr==0,"headset selects the second legacy AFW entry");
@@ -571,42 +579,42 @@ void automatic_buttons() {
     require(request(initial),"explicit unchecked state for auto-pick interaction fixture");
     RuntimeStatus runtime{};runtime.sessions=1;runtime.luke_detected=true;
     runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;
-    runtime.dlssg_preset_request=3;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+    runtime.rife_max_multiplier=4;runtime.dlssg_preset_request=3;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
     const auto prior=snapshot().desired;
     Context tray({690,900},false);tray.draw();tray.draw();tray.select_tab("Display");tray.draw(true);
     for(const auto label:{"Tests without vectors","Complete tests","Test Luke Ross"})
         require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Display");
     require(tray.rendered_text.find("Open benchmark folder")==std::string::npos,"shared settings no longer opens shell folders");
-    require(tray.rendered_text.find("25 optical or 43 complete")!=std::string::npos &&
-        tray.rendered_text.find("Luke Ross: up to 30 tests")!=std::string::npos,
+    require(tray.rendered_text.find("61 optical or 79 complete")!=std::string::npos &&
+        tray.rendered_text.find("Luke Ross: up to 112 tests")!=std::string::npos,
         "SteamVR Display describes its actual pacing and AFW matrix");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==25,
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==61,
         "Display button starts the actual SteamVR optical matrix");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==prior,"Display Stop restores original settings");
     runtime.steamvr_runtime=false;runtime.vdxr_runtime=true;runtime.vdxr_legacy=true;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("Legacy VDXR: up to 9 optical or 15 complete")!=std::string::npos,
+    require(tray.rendered_text.find("13 optical or 19 complete")!=std::string::npos,
         "VDXR Display describes the Legacy spreadsheet suite");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==9,
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==13,
         "Legacy Display starts Normal/Fast for every optical route");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     runtime.vdxr_legacy=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("25 optical or 43 complete")!=std::string::npos,
+    require(tray.rendered_text.find("61 optical or 79 complete")!=std::string::npos,
         "opt-in VDXR exposes the full comparison in the actual Display surface");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==25,
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==61,
         "VDXR Display button starts all three pacing variants");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     auto simple=snapshot().desired;simple.advanced_mode=false;require(request(simple),"return to basic UI policy");
     runtime.applied_revision=snapshot().revision;runtime.pacing_mode=1;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("33 optical or 57 complete")!=std::string::npos && tray.rendered_text.find("Luke Ross: up to 39 tests")!=std::string::npos,"basic Display shows current two/three-buffer counts");
+    require(tray.rendered_text.find("81 optical or 105 complete")!=std::string::npos && tray.rendered_text.find("Luke Ross: up to 148 tests")!=std::string::npos,"basic Display shows current two/three-buffer counts");
     require(tray.rendered_text.find("7.5 seconds per configuration")!=std::string::npos &&
         tray.rendered_text.find("2.5 seconds settling, then 5 seconds measured")!=std::string::npos,
         "Display describes the actual shorter benchmark timing");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
-    require(snapshot().benchmark.count==33 && !snapshot().benchmark.advanced,"basic Display starts current buffer matrix");
+    require(snapshot().benchmark.count==81 && !snapshot().benchmark.advanced,"basic Display starts current buffer matrix");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     require(tray.rendered_text.find("Auto pick best one")!=std::string::npos,"auto-pick checkbox is in Display");
     require(tray.rendered_text.find("On completion: within")==std::string::npos &&

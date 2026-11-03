@@ -231,6 +231,7 @@ int main(int argc,char** argv) {try {
     using namespace quality;
     require(argc>=2 && argc<=4,"provider path argument missing");
     native_peer_camera=GetEnvironmentVariableW(L"XRFG_TEST_GTA_HEADLOCK",nullptr,0)!=0;
+    const bool osr_cheap_test=GetEnvironmentVariableW(L"XRFG_TEST_OSR_CHEAP",nullptr,0)!=0;
     const bool osr_pose_test=GetEnvironmentVariableW(L"XRFG_TEST_OSR_HEADLOCK_POSE",nullptr,0)!=0;
     current_scene_test=GetEnvironmentVariableW(L"XRFG_TEST_GTA_CURRENT_SCENE",nullptr,0)!=0;
     calibration_recovery_test=GetEnvironmentVariableW(L"XRFG_TEST_GTA_CALIBRATION_RECOVERY",nullptr,0)!=0;
@@ -424,6 +425,7 @@ int main(int argc,char** argv) {try {
             // OSR became the UI default after they were written; select the
             // intended renderer explicitly rather than silently changing them.
             settings.osr=osr_pose_test?2:0;
+            settings.osr_lower_quality=osr_cheap_test && n>=5 && n<=12;
             const unsigned divisor=mode==3 ? (settings.shading_rate==4?2u:settings.shading_rate==8?4u:1u):1u;
             provider.expected_shading_rate=upstream_rates[divisor>1 ? 0 : (mode==3 ? settings.shading_rate : 0)];
             provider.calls=0;provider.valid=true;
@@ -442,6 +444,11 @@ int main(int argc,char** argv) {try {
             wait();
             if(osr_pose_test) {
                 require(provider.calls==0,"OSR pose case must use the shipping native renderer");
+                require(xrfg::embedded::active_osr_mode.load()==2,"successful native OSR engine receipt");
+                if(osr_cheap_test && n>=7 && n<=12)
+                    require(xrfg::embedded::active_osr_lower_quality.load()==1,"cheap mode must execute on both eyes after history warmup");
+                if(osr_cheap_test && n>=13)
+                    require(xrfg::embedded::active_osr_lower_quality.load()==0,"live return to normal must retire cheap map and acknowledge normal");
                 require(reconstructed_position.has_value()!=native_peer_camera,
                     "headlock must retain the original XR pose; normal OSR must report its reconstructed position");
                 continue;
@@ -532,7 +539,7 @@ int main(int argc,char** argv) {try {
     CloseHandle(event);
     if(osr_pose_test) {
         std::cout<<"Shipping OSR both eyes: headlock="<<native_peer_camera
-            <<" original AER pose preserved under lock; ordinary reconstruction receipt retained; GPU validation PASS\n";
+            <<" cheapToggle="<<osr_cheap_test<<" original AER pose preserved under lock; ordinary reconstruction receipt retained; GPU validation PASS\n";
         return 0;
     }
     if(publication_gap) {

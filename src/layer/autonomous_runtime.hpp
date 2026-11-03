@@ -58,6 +58,7 @@ inline void apply_runtime_settings() {
     a.clear_before_warping=s.afw_clear_before_warping;
     a.ignore_motion_threshold=s.afw_ignore_motion_threshold;
     a.depth_dilate_mode=s.afw_depth_dilate_mode; a.shading_rate=s.afw_shading_rate;
+    a.osr_lower_quality=s.luke_osr_lower_quality;
     a.osr=s.luke_osr; a.osr_cover=s.luke_osr_cover; a.osr_trim=s.luke_osr_trim; a.osr_fill=s.luke_osr_fill;
     if (!embedded::request_afw(a)) return;
     if (!embedded::set_djules_triple_frame_gen(s.triple_frame_gen)) return;
@@ -89,11 +90,11 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     GenerationState generation=GenerationState::waiting, HRESULT initialization_result=S_OK,
     bool vulkan_detected=false, std::uint32_t provider_error=0,
     const SwapchainBudgetStatus* swapchains=nullptr,int pacing_mode=-1,bool steamvr=false,bool afw_only=false,
-    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false,unsigned buffer_capacity=0) {
+    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false,unsigned buffer_capacity=0,unsigned rife_max_multiplier=2) {
     const auto control=embedded::snapshot();
     const auto afw=embedded::afw_snapshot();
     const auto nr=neural_rendering::status();
-    RuntimeStatus out{};
+    RuntimeStatus out{};out.rife_max_multiplier=rife_max_multiplier;
     out.pacing_mode=afw_only?kAfwOnlyPacingMode:pacing_mode;out.steamvr_runtime=steamvr;
     out.vdxr_runtime=vdxr;out.vdxr_legacy=legacy_vdxr;
     out.buffer_capacity=buffer_capacity;
@@ -103,6 +104,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.dlssg_preset_request=xrfg::standalone::process_dlssg_preset();
     if (swapchains) out.swapchains=*swapchains;
     out.process_id=GetCurrentProcessId();
+    out.osr_mode=afw.active_osr_mode;out.osr_lower_quality=afw.active_osr_lower_quality;
     out.afw_shading_rate=afw.active_shading_rate;
     out.applied_revision=applied_runtime_revision.load(std::memory_order_acquire);
     out.sessions=control.sessions; out.ready=control.ready;

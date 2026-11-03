@@ -47,7 +47,7 @@ Building the tray alone does **not** supply the installer overlay, scripts or CR
 After building matching binaries and source, run:
 
 ```powershell
-.\tools\Package-RifeBuild.ps1 -BuildDir .\build-rife -OutDir .\packages -Version 843
+.\tools\Package-RifeBuild.ps1 -BuildDir .\build-rife -OutDir .\packages -Version 845
 ```
 
 The script discovers the pinned Microsoft.VC143.CRT **14.44.35112** folder in the
@@ -55,7 +55,7 @@ installed Visual Studio redist directory, or accepts it explicitly:
 
 ```powershell
 .\tools\Package-RifeBuild.ps1 -BuildDir .\build-rife -OutDir .\packages `
-  -Version 843 -CrtSource "C:/pinned-redist/x64/Microsoft.VC143.CRT"
+  -Version 845 -CrtSource "C:/pinned-redist/x64/Microsoft.VC143.CRT"
 ```
 
 Every CRT DLL is checked against the existing runtime lock. A missing pinned

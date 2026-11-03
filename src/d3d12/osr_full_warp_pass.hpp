@@ -12,6 +12,8 @@
 #include "osr_full_splat_offset_shader.hpp"
 #include "osr_full_resolve_shader.hpp"
 #include "osr_full_inpaint_shader.hpp"
+#include "osr_full_resolve_lower_shader.hpp"
+#include "osr_full_resolve_map_shader.hpp"
 #include "xrfg/osr_full_warp.hpp"
 
 namespace xrfg {
@@ -60,10 +62,11 @@ class OsrFullWarp {
         D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
     };
     Microsoft::WRL::ComPtr<ID3D12RootSignature> root_;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> clear_, splat_, splat_history_, splat_offset_, resolve_, inpaint_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> clear_, splat_, splat_history_, splat_offset_, resolve_, resolve_lower_, resolve_map_, inpaint_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> heap_;
-    Tracked stereo_, history_splat_, history_offset_, warped_, resolved_, output_, scene_state_;
+    Tracked stereo_, history_splat_, history_offset_, warped_, resolved_, output_, scene_state_, lower_map_;
     bool scene_initialized_{};
+    bool lower_active_{};
     std::array<Tracked, 2> history_color_{}, history_depth_{}, history_motion_{};
     std::array<OsrFullHistory, 2> history_{};
     OsrFullHistory pending_{};
@@ -72,10 +75,10 @@ class OsrFullWarp {
     UINT depth_width_{}, depth_height_{}, color_width_{}, color_height_{};
     DXGI_FORMAT format_{DXGI_FORMAT_UNKNOWN};
     static constexpr DXGI_FORMAT kMotionFormat = DXGI_FORMAT_R16G16_FLOAT; // kLukeAfwMotionFormat
-    static constexpr UINT kSrvCount = 10, kUavCount = 7;
+    static constexpr UINT kSrvCount = 11, kUavCount = 8;
     static constexpr UINT kDescriptorsPerBlock = kSrvCount + kUavCount;
     enum Block : UINT { block_clear, block_splat_stereo, block_splat_history, block_splat_offset,
-        block_resolve, block_inpaint, block_count };
+        block_resolve, block_inpaint, block_resolve_map, block_count };
 
     HRESULT create_pipelines(ID3D12Device* device) {
         if (root_) return S_OK;
@@ -183,9 +186,9 @@ class OsrFullWarp {
         // u4 output, u5 history offset, u6 scene state.
         const DXGI_FORMAT srv_formats[kSrvCount]{DXGI_FORMAT_R32_FLOAT, format_, DXGI_FORMAT_R32_UINT,
             DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_FLOAT, format_, DXGI_FORMAT_R32_UINT, format_,
-            kMotionFormat, DXGI_FORMAT_R32_UINT};
+            kMotionFormat, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT};
         const DXGI_FORMAT uav_formats[kUavCount]{DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, format_,
-            DXGI_FORMAT_R32_UINT, format_, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT};
+            DXGI_FORMAT_R32_UINT, format_, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT};
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -206,14 +209,14 @@ class OsrFullWarp {
     }
 
     void dispatch(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pipeline,
-        D3D12_GPU_DESCRIPTOR_HANDLE table, const OsrFullConstants& constants, UINT width, UINT height) {
+        D3D12_GPU_DESCRIPTOR_HANDLE table, const OsrFullConstants& constants, UINT width, UINT height, UINT threads = 8) {
         ID3D12DescriptorHeap* heaps[]{heap_.Get()};
         list->SetDescriptorHeaps(1, heaps);
         list->SetComputeRootSignature(root_.Get());
         list->SetComputeRootDescriptorTable(0, table);
         list->SetComputeRoot32BitConstants(1, sizeof(OsrFullConstants) / 4, &constants, 0);
         list->SetPipelineState(pipeline);
-        list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        list->Dispatch((width + threads - 1) / threads, (height + threads - 1) / threads, 1);
     }
 
 public:
@@ -240,8 +243,10 @@ public:
         float history_dejitter[2]{};
         float locked_depth{2.0F}; // osr_full_depth_at(kOsrFullLockedDistanceMetres)
         bool debug{};
+        bool lower_quality{};
     };
 
+    bool lower_quality_active() const noexcept {return lower_active_;}
     ID3D12Resource* output() const noexcept { return output_.resource.Get(); }
     ID3D12Resource* stereo_depth() const noexcept { return stereo_.resource.Get(); }
     D3D12_RESOURCE_STATES stereo_depth_state() const noexcept { return stereo_.state; }
@@ -261,6 +266,7 @@ public:
         if (output_.resource && depth_width == depth_width_ && depth_height == depth_height_ &&
             color_width == color_width_ && color_height == color_height_ && color_format == format_)
             return S_OK;
+        lower_map_.resource.Reset(); lower_map_.state=D3D12_RESOURCE_STATE_COMMON;
         history_ = {};
         scene_initialized_ = false;
         pending_eye_ = 2;
@@ -286,7 +292,20 @@ public:
 
     // Records the passes. Every private resource ends in COMMON; the borrowed
     // depth and colour return to their incoming states.
-    void record(ID3D12Device* device, ID3D12GraphicsCommandList* list, const Inputs& in) {
+    void record(ID3D12Device* device, ID3D12GraphicsCommandList* list, const Inputs& in,ID3D12QueryHeap* timing=nullptr,UINT query_base=0) {
+        const auto mark=[&](UINT index){if(timing)list->EndQuery(timing,D3D12_QUERY_TYPE_TIMESTAMP,query_base+index);};
+        if(!in.lower_quality){lower_map_.resource.Reset();lower_map_.state=D3D12_RESOURCE_STATE_COMMON;}
+        bool lower=in.lower_quality && in.use_history;
+        if(lower && (!resolve_lower_ || !resolve_map_)){
+            D3D12_COMPUTE_PIPELINE_STATE_DESC ps{};ps.pRootSignature=root_.Get();
+            if(!resolve_lower_){ps.CS={g_xrfg_osr_full_resolve_lower_shader,sizeof(g_xrfg_osr_full_resolve_lower_shader)};
+                lower=SUCCEEDED(device->CreateComputePipelineState(&ps,IID_PPV_ARGS(&resolve_lower_)));}
+            if(lower && !resolve_map_){ps.CS={g_xrfg_osr_full_resolve_map_shader,sizeof(g_xrfg_osr_full_resolve_map_shader)};
+                lower=SUCCEEDED(device->CreateComputePipelineState(&ps,IID_PPV_ARGS(&resolve_map_)));}
+        }
+        if(lower && !lower_map_.resource)lower=SUCCEEDED(create_texture(device,(color_width_+1)/2,(color_height_+1)/2,DXGI_FORMAT_R32G32B32A32_FLOAT,true,lower_map_));
+        lower_active_=lower;
+        mark(0);
         const unsigned source_eye = in.source_eye & 1, destination_eye = 1 - source_eye;
         OsrFullConstants constants{};
         constants.depth_width = depth_width_; constants.depth_height = depth_height_;
@@ -329,10 +348,12 @@ public:
         barriers.uav(history_offset_.resource.Get());
         barriers.uav(scene_state_.resource.Get());
         barriers.flush(list);
+        mark(1);
         // 2. splats
         std::memcpy(constants.forward, in.forward_stereo, sizeof(constants.forward));
         dispatch(list, splat_.Get(), bind(device, block_splat_stereo, {in.source_depth}, {stereo_.resource.Get()}),
             constants, depth_width_, depth_height_);
+        mark(2);
         if (in.use_history) {
             // History splat: Forward = history -> destination, BackwardHistory
             // = history -> the frame before it (camera share of the motion).
@@ -353,6 +374,7 @@ public:
                 {history_splat_.resource.Get(), nullptr, nullptr, nullptr, nullptr, history_offset_.resource.Get()}),
                 history_constants, depth_width_, depth_height_);
         }
+        mark(3);
         // 3. resolve
         barriers.track(stereo_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         barriers.track(history_splat_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -360,13 +382,20 @@ public:
         barriers.track(warped_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         barriers.track(resolved_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         barriers.flush(list);
-        dispatch(list, resolve_.Get(), bind(device, block_resolve,
-            {in.source_depth, in.source_color, stereo_.resource.Get(), history_splat_.resource.Get(),
-             in.use_history ? history_depth.resource.Get() : nullptr,
-             in.use_history ? history_color.resource.Get() : nullptr,
-             nullptr, nullptr, nullptr, history_offset_.resource.Get()},
-            {nullptr, nullptr, warped_.resource.Get(), resolved_.resource.Get()}),
-            constants, color_width_, color_height_);
+        const std::array<ID3D12Resource*,kSrvCount> resolve_srvs{in.source_depth,in.source_color,stereo_.resource.Get(),history_splat_.resource.Get(),
+             in.use_history?history_depth.resource.Get():nullptr,in.use_history?history_color.resource.Get():nullptr,
+             nullptr,nullptr,nullptr,history_offset_.resource.Get(),lower?lower_map_.resource.Get():nullptr};
+        if(lower){
+            barriers.track(lower_map_,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);barriers.flush(list);
+            auto map_srvs=resolve_srvs;map_srvs[10]=nullptr;
+            dispatch(list,resolve_map_.Get(),bind(device,block_resolve_map,map_srvs,
+                {nullptr,nullptr,warped_.resource.Get(),resolved_.resource.Get(),nullptr,nullptr,nullptr,lower_map_.resource.Get()}),constants,(color_width_+1)/2,(color_height_+1)/2);
+            barriers.uav(warped_.resource.Get());barriers.uav(resolved_.resource.Get());
+            barriers.track(lower_map_,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);barriers.flush(list);
+        }
+        dispatch(list,lower?resolve_lower_.Get():resolve_.Get(),bind(device,block_resolve,resolve_srvs,
+            {nullptr,nullptr,warped_.resource.Get(),resolved_.resource.Get()}),constants,color_width_,color_height_);
+        mark(4);
         // 4. inpaint
         barriers.track(warped_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         barriers.track(resolved_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -384,11 +413,13 @@ public:
         barriers.track(warped_, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(resolved_, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(output_, D3D12_RESOURCE_STATE_COMMON);
+        barriers.track(lower_map_, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(scene_state_, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(history_depth, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(history_color, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(history_motion, D3D12_RESOURCE_STATE_COMMON);
         barriers.flush(list);
+        mark(5);
     }
 
     // Keeps this frame's source eye as that eye's history: colour, depth,
@@ -444,7 +475,7 @@ public:
     // A recording that is closed but never executed leaves the GPU state as
     // the last executed recording ended it: COMMON, with the old history.
     void discard() noexcept {
-        for (Tracked* t : {&stereo_, &history_splat_, &history_offset_, &warped_, &resolved_, &output_, &scene_state_,
+        for (Tracked* t : {&stereo_, &history_splat_, &history_offset_, &warped_, &resolved_, &output_, &scene_state_, &lower_map_,
             &history_color_[0], &history_color_[1], &history_depth_[0], &history_depth_[1],
             &history_motion_[0], &history_motion_[1]})
             t->state = D3D12_RESOURCE_STATE_COMMON;

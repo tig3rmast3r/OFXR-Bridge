@@ -44,6 +44,7 @@ struct AfwSettings {
     int shading_rate{}; // beta6 Combined: 0=1x1, 1=1x2, ... 8=4x4
     int depth_dilate_mode{}; // 0 off, 1 horizontal 1x3, 2 square 3x3
     int osr{2}; // 2 OSR (default), 0 AFW (legacy); retired value 1 migrates to OSR
+    bool osr_lower_quality{};
     int osr_cover{};  // OSR: band cover in depth texels beyond the hole on the background side, 0..8
     int osr_trim{};   // OSR: depth texels of the object's smeared edge replaced too, 0..2
     int osr_fill{2};  // OSR: band fill gain on (1 - t), 1..8; 1 = history model only
@@ -59,6 +60,7 @@ constexpr std::uint32_t afw_shading_rate(int index) noexcept {
 struct AfwSnapshot {
     bool flat_scene{};
     AfwSettings desired{};
+    int active_osr_mode{-1},active_osr_lower_quality{-1};
     int active_shading_rate{-1};
     std::uint64_t revision{1};
     std::uint64_t projection_frames{};
@@ -89,6 +91,11 @@ Snapshot snapshot();
 bool request(Settings settings); // persists only owned keys; false means INI write failed
 AfwSnapshot afw_snapshot();
 bool request_afw(AfwSettings settings);
+inline std::atomic_int active_osr_mode{-1},active_osr_lower_quality{-1};
+inline void report_osr_configuration(int mode,bool lower) noexcept {
+    active_osr_mode.store(mode,std::memory_order_relaxed);
+    active_osr_lower_quality.store(lower,std::memory_order_relaxed);
+}
 inline std::atomic_int active_afw_shading_rate{-1};
 inline void report_afw_shading_rate(int index) noexcept {
     active_afw_shading_rate.store(index,std::memory_order_relaxed);

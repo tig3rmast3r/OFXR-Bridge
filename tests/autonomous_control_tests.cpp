@@ -158,7 +158,7 @@ void codec() {
     for (int rate : {0,4,8,99,-1}) {
         auto settings = desired; settings.afw_shading_rate = rate;
         const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(settings));
-        require(restored.afw_shading_rate == std::clamp(rate,0,8), "AFW shading rate persistence and bounds");
+        require(restored.afw_shading_rate == (std::clamp(rate,0,8)==8 ? 4 : std::clamp(rate,0,8)), "AFW shading rate persistence and bounds");
     }
     for(int scale=0;scale<4;++scale) {
         auto quarter=desired;quarter.scale=scale;
@@ -167,6 +167,7 @@ void codec() {
     }
     desired.backend = 3;
     desired.triple_frame_gen = true;
+    desired.luke_osr_lower_quality=true;
     desired.afw_mode = 2; desired.afw_shading_rate = 8;
     desired.nr_enabled = true;
     desired.nr_second_pass = true;
@@ -368,7 +369,7 @@ int wmain(int count, wchar_t** arguments) {
         for (int rate : {0,4,8,99,-1}) {
         auto settings = desired; settings.afw_shading_rate = rate;
         const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(settings));
-        require(restored.afw_shading_rate == std::clamp(rate,0,8), "AFW shading rate persistence and bounds");
+        require(restored.afw_shading_rate == (std::clamp(rate,0,8)==8 ? 4 : std::clamp(rate,0,8)), "AFW shading rate persistence and bounds");
     }
     desired.backend = 3;
         desired.nr_enabled = true;
