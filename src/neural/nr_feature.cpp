@@ -18,6 +18,7 @@
 
 #include "nr_codec.hpp"
 #include "DlssNr_Capture.h"
+#include "xrfg/two_frame_capture.hpp"
 
 
 
@@ -177,6 +178,8 @@ struct NrPerHandle : NrModelFeature
     std::array<unsigned,6> inputOrigins{};
     bool inputOriginsKnown=false;
     unsigned long long resolvedFrames=0,skippedLayouts=0;
+    std::uint64_t captureSerial{};
+    bool captureBeforeSr{};
 
     // The frame as the upscaler wrote it. The resolve adds the model's edit to this rather than
     // reconstructing it by inverting the tone curve, which is what turned every light in the frame into
@@ -1134,6 +1137,63 @@ SecondPassPreparation PrepareSecondPass(NrPerHandle& nr, unsigned int sourceHand
     return SecondPassPreparation::created;
 }
 
+// Copies are recorded on the exact model list, with the known state restored.
+// The existing F8 recorder attaches its completion fence AFTER actual submission.
+void NrCaptureImage(std::uint64_t serial,unsigned handle,const char* stage,
+    ID3D12Device* device,ID3D12GraphicsCommandList* list,ID3D12Resource* image,
+    D3D12_RESOURCE_STATES state,unsigned x=0,unsigned y=0,unsigned w=0,unsigned h=0)
+{
+    if(!serial || !image)return;
+    xrfg::TwoFrameImageInfo info{};info.stage=stage;info.stream=handle;info.capture_serial=serial;
+    info.swapchain=reinterpret_cast<std::uint64_t>(image);info.x=x;info.y=y;
+    const auto desc=image->GetDesc();info.width=w?w:static_cast<unsigned>(desc.Width);info.height=h?h:desc.Height;
+    xrfg::two_frame_capture_record_ng_x(info,device,list,image,state);
+}
+int EvaluateNrCaptured(std::uint64_t serial,unsigned handle,bool before,unsigned pass,
+    const NrConfiguration& cfg,ID3D12Device* device,bool hdr,
+    ID3D12GraphicsCommandList* list,void* feature,NVSDK_NGX_Parameter* parameters,
+    ID3D12Resource* color,ID3D12Resource* depth,ID3D12Resource* motion,ID3D12Resource* output,
+    unsigned width,unsigned height,unsigned guideWidth,unsigned guideHeight,int inverted,int reset,
+    float intensity,int style,float structure,float tone,float skin,int mask,float scaleX,float scaleY)
+{
+    const auto readable=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    NrCaptureImage(serial,handle,pass==1?"nr_pass1_color":"nr_pass2_color",device,list,color,readable);
+    NrCaptureImage(serial,handle,pass==1?"nr_pass1_depth":"nr_pass2_depth",device,list,depth,readable);
+    NrCaptureImage(serial,handle,pass==1?"nr_pass1_motion":"nr_pass2_motion",device,list,motion,readable);
+    const int result=g_runtime.evaluate(list,feature,parameters,color,depth,motion,output,width,height,
+        guideWidth,guideHeight,inverted,reset,intensity,style,structure,tone,skin,mask,scaleX,scaleY);
+    if(serial) {
+        if(result==NVSDK_NGX_Result_Success)
+            NrCaptureImage(serial,handle,pass==1?"nr_pass1_output":"nr_pass2_output",device,list,output,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        xrfg::TwoFrameNrEvaluation info{};info.serial=serial;info.handle=handle;info.pass=pass;
+        info.before_sr=before;info.feature=reinterpret_cast<std::uint64_t>(feature);info.parameters=reinterpret_cast<std::uint64_t>(parameters);
+        info.width=width;info.height=height;info.guide_width=guideWidth;info.guide_height=guideHeight;
+        unsigned flags{};parameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,&flags);info.flags=flags;
+        info.hdr=hdr;
+        info.result=static_cast<unsigned>(result);info.reset=reset!=0;info.depth_inverted=inverted!=0;
+        info.resources={reinterpret_cast<std::uint64_t>(color),reinterpret_cast<std::uint64_t>(depth),reinterpret_cast<std::uint64_t>(motion),reinterpret_cast<std::uint64_t>(output)};
+        const char* names[]={"DLSSNR.Color","DLSSNR.Depth","DLSSNR.MVec","DLSSNR.Output"};
+        const char* tuning[]={"DLSSNR.Intensity","DLSSNR.LocalStructureStrength","DLSSNR.LocalToneStrength","DLSSNR.SkinStructureStrength"};
+        info.tuning={intensity,structure,tone,skin};
+        for(unsigned i=0;i<4;++i) {
+            ID3D12Resource* resource{};auto readResult=parameters->Get(names[i],&resource);
+            if(readResult==NVSDK_NGX_Result_Success)info.parameter_resources[i]=reinterpret_cast<std::uint64_t>(resource);
+            else {void* pointer{};readResult=parameters->Get(names[i],&pointer);
+                if(readResult==NVSDK_NGX_Result_Success)info.parameter_resources[i]=reinterpret_cast<std::uint64_t>(pointer);
+                else {unsigned long long value{};readResult=parameters->Get(names[i],&value);info.parameter_resources[i]=value;}}
+            info.parameter_resource_results[i]=static_cast<unsigned>(readResult);
+            info.parameter_tuning_results[i]=static_cast<unsigned>(parameters->Get(tuning[i],&info.parameter_tuning[i]));
+        }
+        info.motion_scale_x=scaleX;info.motion_scale_y=scaleY;info.working_scale=cfg.DlssNrWorkingScale.value_or_default();
+        info.white_point=cfg.DlssNrWhitePointScale.value_or_default();info.transfer=cfg.DlssNrTransferStrength.value_or_default();
+        info.colour=cfg.DlssNrColourStrength.value_or_default();info.preset=cfg.DlssNrPreset.value_or_default();info.style=style;
+        info.debug_view=cfg.DlssNrDebugView.value_or_default();info.compare=cfg.DlssNrCompare.value_or_default();
+        info.auto_mask=mask!=0;info.second_pass=cfg.DlssNrSecondPass.value_or_default();
+        xrfg::two_frame_capture_nr_evaluation(info);
+    }
+    return result;
+}
+
 bool EvaluateSecondPass(NrPerHandle& nr, unsigned int sourceHandleId,
     ID3D12Device* device, ID3D12GraphicsCommandList* list,
     ID3D12Resource* depth, ID3D12Resource* motion,
@@ -1150,6 +1210,7 @@ bool EvaluateSecondPass(NrPerHandle& nr, unsigned int sourceHandleId,
     second.reset = second.reset || nr.reset;
     struct Operations {
         NrPerHandle& nr;
+        ID3D12Device* device;
         NrModelFeature& second;
         unsigned int handle;
         ID3D12GraphicsCommandList* list;
@@ -1193,7 +1254,8 @@ bool EvaluateSecondPass(NrPerHandle& nr, unsigned int sourceHandleId,
                 NrFlightTrace::Write("NR_MODEL_PASS2", list, receipt);
             }
             DredScope stage(list, L"OFXR NR independent second model");
-            const auto result = g_runtime.evaluate(list, second.feature, parameters, nr.secondClamp,
+            const auto result = EvaluateNrCaptured(nr.captureSerial,handle,nr.captureBeforeSr,2,cfg,device,FormatCanHoldLinearHdr(nr.colorCopy->GetDesc().Format),
+                list, second.feature, parameters, nr.secondClamp,
                 depth, motion, second.output, width, height, guideWidth, guideHeight,
                 nr.guideDepthInverted ? 1 : 0, second.reset ? 1 : 0,
                 cfg.DlssNrIntensity.value_or_default(), (int)cfg.DlssNrStyle.value_or_default(),
@@ -1206,7 +1268,7 @@ bool EvaluateSecondPass(NrPerHandle& nr, unsigned int sourceHandleId,
             second.reset = false;
             return true;
         }
-    } operations{nr, second, sourceHandleId, list, parameters, depth, motion,
+    } operations{nr, device, second, sourceHandleId, list, parameters, depth, motion,
         workWidth, workHeight, guideWidth, guideHeight, mvScaleX, mvScaleY, cfg};
     nr.secondSucceeded = DlssNr::RunOptionalSecondPass(true, operations);
     return nr.secondSucceeded;
@@ -1763,6 +1825,9 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     encodeParams.Height = height;
 
     MarkNrRecorded(sourceHandleId, submissionList.Get());
+    nr.captureSerial=xrfg::two_frame_capture_claim_nr(sourceHandleId);nr.captureBeforeSr=true;
+    NrCaptureImage(nr.captureSerial,sourceHandleId,"nr_source_color",device,cmdList,target,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,colorX,colorY,width,height);
     ID3D12Resource* encodeSource=target;
     if(colorRegion) {
         Barrier(cmdList,target,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE,L"NR colour ROI source");
@@ -1792,6 +1857,8 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
 
     // Below full resolution the model is shown a filtered shrink of the proxy; the edit it returns is
     // enlarged during the resolve while the frame underneath stays full size and untouched.
+    NrCaptureImage(nr.captureSerial,sourceHandleId,"nr_encoded_color",device,cmdList,nr.colorCopy,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     ID3D12Resource* modelInput = nr.colorCopy;
 
     if (reduced && nr.colorSmall != nullptr)
@@ -1856,7 +1923,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         NrFlightTrace::Write("NR_MODEL", cmdList, modelReceipt);
         }
         DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR pre-SR model");
-        result = g_runtime.evaluate(
+        result = EvaluateNrCaptured(nr.captureSerial,sourceHandleId,nr.captureBeforeSr,1,cfg,device,isHdrBuffer,
             cmdList, nr.feature, evaluateParams, modelInput, depthIn, motionIn, nr.output,
             workWidth, workHeight, modelGuideWidth, modelGuideHeight, nr.guideDepthInverted ? 1 : 0,
             nr.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
@@ -1980,6 +2047,8 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"pre-SR-resolve-copy-source-restore");
         }
 
+        NrCaptureImage(nr.captureSerial,sourceHandleId,"nr_resolved_color",device,cmdList,target,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,colorX,colorY,width,height);
         ++nr.resolvedFrames;
         if(NrFlightTrace::Enabled() && (nr.resolvedFrames<=4 || nr.resolvedFrames%128==0))
             LOG_INFO("NR_VIEW resolved handle={} count={} color={}x{} origin={},{} depth_origin={},{} motion_origin={},{} work={}x{} guides={}x{} second={} depth_array={} depth_slice=0",
@@ -2407,6 +2476,9 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
     Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"post-SR-encode-source-ready");
     MarkNrRecorded(sourceHandleId, submissionList.Get());
+    nr.captureSerial=xrfg::two_frame_capture_claim_nr(sourceHandleId);nr.captureBeforeSr=false;
+    NrCaptureImage(nr.captureSerial,sourceHandleId,"nr_source_color",device,cmdList,target,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     {
         DredScope stage(cmdList, L"OFXR standalone NR post-SR encode");
         nr.compose->Dispatch(cmdList, encodeParams, target, nullptr, nullptr, nullptr, nullptr,
@@ -2423,6 +2495,8 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
 
     // Below full resolution the model is shown a filtered shrink of the proxy; the edit it returns is
     // enlarged during the resolve while the frame underneath stays full size and untouched.
+    NrCaptureImage(nr.captureSerial,sourceHandleId,"nr_encoded_color",device,cmdList,nr.colorCopy,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     ID3D12Resource* modelInput = nr.colorCopy;
 
     if (reduced && nr.colorSmall != nullptr)
@@ -2487,7 +2561,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
         NrFlightTrace::Write("NR_MODEL", cmdList, modelReceipt);
         }
         DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR post-SR model");
-        result = g_runtime.evaluate(
+        result = EvaluateNrCaptured(nr.captureSerial,sourceHandleId,nr.captureBeforeSr,1,cfg,device,isHdrBuffer,
             cmdList, nr.feature, evaluateParams, modelInput, depthIn, motionIn, nr.output,
             workWidth, workHeight, modelGuideWidth, modelGuideHeight, nr.guideDepthInverted ? 1 : 0,
             nr.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
@@ -2581,6 +2655,8 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
         Barrier(cmdList, finalModelOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"post-SR-model-output-restore");
 
+        NrCaptureImage(nr.captureSerial,sourceHandleId,"nr_resolved_color",device,cmdList,target,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         // On-demand matched captures map only after all exact submission tokens retire.
         if (g_capture.isActive())
         {

@@ -22,7 +22,7 @@ set_target_properties(xrfg_neural_forwarder PROPERTIES
     OUTPUT_NAME "nvngx.dll_dlssnr" PREFIX "" SUFFIX ".dll")
 
 if(XRFG_BUILD_TESTS)
-    add_executable(xrfg_neural_device_removal_tests tests/neural_device_removal_tests.cpp)
+    add_executable(xrfg_neural_device_removal_tests tests/neural_device_removal_tests.cpp tests/neural_capture_stubs.cpp)
     target_include_directories(xrfg_neural_device_removal_tests PRIVATE src/neural)
     target_compile_features(xrfg_neural_device_removal_tests PRIVATE cxx_std_20)
     target_compile_definitions(xrfg_neural_device_removal_tests PRIVATE WIN32_LEAN_AND_MEAN _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)

@@ -329,6 +329,33 @@ int main() {
         xrfg::bridge_flight_logger().shutdown();
         require(!xrfg::two_frame_capture_request_origin_loss(),"automatic request survived F9 OFF");
         std::error_code cleanup;std::filesystem::remove_all(diagnostic,cleanup);
+        manager.session=std::make_shared<xrfg::Session>();manager.active_frame=1;
+        const auto nr_session=manager.session;
+        const auto nr_directory=std::filesystem::temp_directory_path()/(L"xrfg-nr-witness-"+std::to_wstring(GetCurrentProcessId()));
+        nr_session->directory=nr_directory;
+        std::filesystem::create_directories(nr_directory);
+        {std::ofstream blocked(nr_directory/L"blocked");blocked << "not a directory";}
+        require(xrfg::writable_capture_directory(nr_directory/L"blocked",nr_directory/L"fallback",L"test")==nr_directory/L"fallback"/L"test","protected game directory uses writable fallback");
+        require(xrfg::two_frame_capture_claim_nr(101)==1,"NR first view claim");
+        require(!xrfg::two_frame_capture_claim_nr(101),"NR duplicate view claim");
+        for(unsigned i=102;i<105;++i)require(xrfg::two_frame_capture_claim_nr(i)==i-100,"NR quad views");
+        require(!xrfg::two_frame_capture_claim_nr(105),"NR bounded view count");
+        nr_session->allocated=xrfg::kMaximumBytes;
+        info.stage="nr_pass1_color";info.stream=101;info.capture_serial=1;info.slice=0;
+        success(xrfg::two_frame_capture_record_queue(info,d12.Get(),queue.Get(),mirror,D3D12_RESOURCE_STATE_COMMON),"NR reserve survives full ordinary budget");
+        require(nr_session->shots.size()==1&&SUCCEEDED(nr_session->shots[0]->status),"NR GPU copy enqueued");
+        xrfg::TwoFrameNrEvaluation nr{};nr.serial=1;nr.handle=101;nr.pass=1;nr.before_sr=true;nr.result=1;nr.width=256;nr.height=64;
+        nr.resources={10,20,30,40};nr.parameter_resources=nr.resources;nr.tuning={.5f,.75f,1.f,-1.f};
+        xrfg::two_frame_capture_nr_evaluation(nr);
+        nr.before_sr=false;nr.pass=2;nr.result=0xBAD00001;xrfg::two_frame_capture_nr_evaluation(nr);
+        nr_session->sealed=true;manager.active_frame=0;xrfg::write_session(nr_session);
+        require(nr_session->safe_to_release&&nr_session->write_finished,"NR exact queue fence retired");
+        {std::ifstream table(nr_directory/L"nr-evaluations.tsv");std::string header,a,b;std::getline(table,header);std::getline(table,a);std::getline(table,b);
+            require(header.find("parameter_color_result")!=std::string::npos && a.starts_with("1\t1\t101\t1\t1\t") && b.starts_with("1\t1\t101\t2\t0\t"),"NR mode/pass/parameter metadata serialized");}
+        require(std::filesystem::file_size(nr_directory/L"image-0.raw")==nr_session->shots[0]->bytes,"NR raw image bytes preserved");
+        manager.session.reset();manager.has_session=false;
+        require(!xrfg::two_frame_capture_claim_nr(106),"NR inactive bypass");
+        std::filesystem::remove_all(nr_directory,cleanup);
         success(d12->GetDeviceRemovedReason(), "device retained");
         std::cout << "F8 terminal pixels: exact original D11 publication in both slices despite poisoned D12 mirror; inactive/ring bypass, allocator retention and budget retirement pass\n";
         return 0;

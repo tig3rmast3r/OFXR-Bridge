@@ -780,6 +780,7 @@ struct Submission {HRESULT result{};bool executed{};};
 Submission submit_d12(Device& d,Slot& s,unsigned phase,std::uint64_t native_ready,std::uint64_t d12_ready) {
     auto result=d.queue->Wait(s.fence.Get(),native_ready);if(FAILED(result))return {result,false};
     ID3D12CommandList* lists[]{s.lists[phase].Get()};d.queue->ExecuteCommandLists(1,lists);
+    two_frame_capture_submission(d.queue.Get(),1,lists);
     const auto ready=d.queue->Signal(s.fence.Get(),d12_ready);
     const auto done=d.queue->Signal(s.d12_done.Get(),++s.d12_value);
     return {FAILED(ready)?ready:done,true};

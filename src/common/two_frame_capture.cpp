@@ -31,6 +31,8 @@ namespace {
 using Microsoft::WRL::ComPtr;
 constexpr std::uint64_t kMaximumBytes = 1280ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaximumImages = 48;
+constexpr std::size_t kMaximumNrImages = 48;
+constexpr std::uint64_t kMaximumNrBytes = 768ULL * 1024ULL * 1024ULL;
 
 struct Shot {
     TwoFrameImageInfo info{};
@@ -68,12 +70,14 @@ struct Session {
     std::vector<std::shared_ptr<Shot>> shots;
     std::vector<ContractShot> contracts;
     std::vector<TwoFrameNativeDlssgEvaluation> native_dlssg_evaluations;
+    std::vector<TwoFrameNrEvaluation> nr_evaluations;
+    std::vector<std::uint64_t> nr_handles;
     std::vector<TimelineShot> timeline;
     std::vector<std::uint64_t> dlssg_streams;
     std::vector<std::uint64_t> application_swapchains;
     std::filesystem::path directory;
     std::string settings;
-    std::uint64_t allocated{};
+    std::uint64_t allocated{}, nr_allocated{};
     std::uint32_t dropped_images{};
     std::uint32_t suppressed_upstream_images{};
     TwoFrameCaptureStageBudget stage_budget;
@@ -114,6 +118,11 @@ std::string capture_settings() {
     const auto game=luke_host_game_directory();
     const auto provider=luke_host_provider(game,root/L"PDAFWPlugin.dll");
     std::string result="AFW provider selected: "+provider.string()+"\n";
+    wchar_t nr_path[32768]{};if(auto model=GetModuleHandleW(L"nvngx_dlssnr.dll")) {
+        const auto n=GetModuleFileNameW(model,nr_path,32768);
+        if(n && n<32768)result+="Loaded NR model: "+std::filesystem::path(nr_path).string()+"\n";
+    }
+    result+="OFXR runtime: "+root.string()+"\n";
     result+="Actual per-evaluation AFW debug/mode: guide-contracts.tsv\n";
     result+="Odd serial is left: "+std::to_string(luke_host_odd_serial_is_left(game,root/L"ofxr_bridge.ini"))+"\n";
     for(const auto& path:{root/L"ofxr_bridge.ini",game/L"ofxr_bridge.ini",game/L"RealVR.ini"}) {
@@ -169,6 +178,12 @@ ComPtr<IUnknown> identity(IUnknown* object) noexcept {
     return result;
 }
 
+std::filesystem::path writable_capture_directory(const std::filesystem::path& preferred,
+    const std::filesystem::path& fallback,const std::filesystem::path& name) {
+    std::error_code ec;auto result=preferred/name;std::filesystem::create_directories(result,ec);
+    if(!ec)return result;
+    result=fallback/name;std::filesystem::create_directories(result,ec);return result;
+}
 std::filesystem::path capture_directory() {
     std::array<wchar_t, 32768> path{};
     const DWORD length = GetModuleFileNameW(nullptr, path.data(),
@@ -184,7 +199,9 @@ std::filesystem::path capture_directory() {
         GetCurrentProcessId(), time.wYear, time.wMonth, time.wDay,
         time.wHour, time.wMinute, time.wSecond, time.wMilliseconds,
         ++sequence);
-    return root / name;
+    wchar_t appdata[32768]{};const auto n=GetEnvironmentVariableW(L"LOCALAPPDATA",appdata,32768);
+    const auto fallback=n && n<32768 ? std::filesystem::path(appdata)/L"ofxr-bridge"/L"Captures" : std::filesystem::temp_directory_path();
+    return writable_capture_directory(root,fallback,name);
 }
 
 std::shared_ptr<Shot> prepare_shot(
@@ -210,6 +227,7 @@ std::shared_ptr<Shot> prepare_shot(
         format == DXGI_FORMAT_R32G32B32A32_FLOAT ||
         format == DXGI_FORMAT_R16G16B16A16_FLOAT ||
         format == DXGI_FORMAT_R32G32_FLOAT ||
+        format == DXGI_FORMAT_R11G11B10_FLOAT ||
         format == DXGI_FORMAT_R10G10B10A2_UNORM ||
         format == DXGI_FORMAT_R8G8B8A8_UNORM ||
         format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
@@ -238,10 +256,11 @@ std::shared_ptr<Shot> prepare_shot(
             shot->status = E_OUTOFMEMORY;
         } else {
             std::scoped_lock lock(session->mutex);
-            if (session->allocated + shot->bytes > kMaximumBytes) {
+            if ((std::string_view(info.stage).starts_with("nr_") ? session->nr_allocated : session->allocated) + shot->bytes >
+                (std::string_view(info.stage).starts_with("nr_") ? kMaximumNrBytes : kMaximumBytes)) {
                 shot->status = E_OUTOFMEMORY;
             } else {
-                session->allocated += shot->bytes;
+                (std::string_view(info.stage).starts_with("nr_") ? session->nr_allocated : session->allocated) += shot->bytes;
             }
         }
         if (SUCCEEDED(shot->status) && cpu_description) {
@@ -264,7 +283,9 @@ std::shared_ptr<Shot> prepare_shot(
     }
     {
         std::scoped_lock lock(session->mutex);
-        if (!session->sealed && session->shots.size() < kMaximumImages)
+        if (!session->sealed && std::count_if(session->shots.begin(),session->shots.end(),[&](const auto& existing){
+                return std::string_view(existing->info.stage).starts_with("nr_")==std::string_view(info.stage).starts_with("nr_");
+            }) < (std::string_view(info.stage).starts_with("nr_") ? kMaximumNrImages : kMaximumImages))
             session->shots.push_back(shot);
         else {
             ++session->dropped_images;
@@ -319,10 +340,12 @@ void write_session(const std::shared_ptr<Session>& session) {
     std::vector<std::shared_ptr<Shot>> shots;
     std::vector<ContractShot> contracts;
     std::vector<TwoFrameNativeDlssgEvaluation> native_dlssg_evaluations;
+    std::vector<TwoFrameNrEvaluation> nr_evaluations;
     std::vector<TimelineShot> timeline;
     {
         std::scoped_lock lock(session->mutex);
         shots = session->shots;
+        nr_evaluations = session->nr_evaluations;
         contracts = session->contracts;
         native_dlssg_evaluations = session->native_dlssg_evaluations;
         timeline = session->timeline;
@@ -474,6 +497,21 @@ void write_session(const std::shared_ptr<Session>& session) {
         }
         guide_manifest << '\n';
     }
+    std::ofstream nr_manifest(session->directory / L"nr-evaluations.tsv", std::ios::binary);
+    nr_manifest << "frame\tserial\thandle\tpass\tbefore_sr\thdr\treset\tdepth_inverted\twidth\theight\tguide_width\tguide_height\tflags\tresult\tfeature\tparameters\tcolor\tdepth\tmotion\toutput\tmotion_scale_x\tmotion_scale_y\tworking_scale\twhite_point\ttransfer\tcolour\tpreset\tstyle\tdebug_view\tcompare\tauto_mask\tsecond_pass";
+    for(const char* n:{"color","depth","motion","output"})nr_manifest << "\tparameter_" << n << "\tparameter_" << n << "_result";
+    for(const char* n:{"intensity","structure","tone","skin"})nr_manifest << "\t" << n << "\tparameter_" << n << "\tparameter_" << n << "_result";
+    nr_manifest << '\n' << std::setprecision(9);
+    for(const auto& c:nr_evaluations) {
+        nr_manifest << c.frame << '\t' << c.serial << '\t' << c.handle << '\t' << c.pass << '\t' << c.before_sr << '\t' << c.hdr << '\t' << c.reset << '\t' << c.depth_inverted
+            << '\t' << c.width << '\t' << c.height << '\t' << c.guide_width << '\t' << c.guide_height << '\t' << c.flags << '\t' << c.result << '\t' << c.feature << '\t' << c.parameters;
+        for(auto v:c.resources)nr_manifest << '\t' << v;
+        nr_manifest << '\t' << c.motion_scale_x << '\t' << c.motion_scale_y << '\t' << c.working_scale << '\t' << c.white_point << '\t' << c.transfer << '\t' << c.colour
+            << '\t' << c.preset << '\t' << c.style << '\t' << c.debug_view << '\t' << c.compare << '\t' << c.auto_mask << '\t' << c.second_pass;
+        for(unsigned i=0;i<4;++i)nr_manifest << '\t' << c.parameter_resources[i] << '\t' << c.parameter_resource_results[i];
+        for(unsigned i=0;i<4;++i)nr_manifest << '\t' << c.tuning[i] << '\t' << c.parameter_tuning[i] << '\t' << c.parameter_tuning_results[i];
+        nr_manifest << '\n';
+    }
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::seconds(15);
     for (std::size_t index = 0; index < shots.size(); ++index) {
@@ -549,6 +587,10 @@ void write_session(const std::shared_ptr<Session>& session) {
         << "Raw images include D3D12 row padding; see manifest.tsv.\n"
         << "Max images=48, max total readback=1.25 GiB. Dropped images="
         << session->dropped_images << "\n";
+    summary << "V849 NR: nr_source_color before encoding; nr_encoded_color full proxy; nr_pass1/2_color, depth, motion copied immediately BEFORE the exact model call; nr_pass1/2_output immediately AFTER success; nr_resolved_color after composition.\n"
+        << "NR images join nr-evaluations.tsv by stream=handle and serial, pass identified by stage. before_sr selects PRE/POST SR. No NR rows means no model call was captured; success alone does not validate image content.\n"
+        << "Separate NR reserve: max48images/768MiB, one evaluation per view, max4views. Same 128MiB per-image bound. Failures/unsupported formats/timeouts explicit in manifest.tsv. Raw bytes unmodified, row padding retained.\n"
+        << "Parameter readbacks occur after the forwarder has written bindings/called model; result1 means accepted readback, not proof of semantic/model correctness.\n";
     summary << "AFW capture focus: later upstream NGX images omitted="
         << session->suppressed_upstream_images
         << "; exact consumed guides remain in afw_ngx_*_before_crop.\n";
@@ -676,6 +718,27 @@ bool two_frame_capture_images_active() noexcept {
     return manager().active_frame.load() != 0;
 }
 
+std::uint64_t two_frame_capture_claim_nr(std::uint64_t handle) noexcept {
+    if(!handle || !two_frame_capture_images_active())return 0;
+    try {
+        auto& state=manager();std::scoped_lock lock(state.mutex);
+        if(!state.session || !state.active_frame)return 0;
+        auto& s=*state.session;std::scoped_lock session_lock(s.mutex);
+        if(s.sealed || s.automatic_origin_loss || s.nr_handles.size()>=4 || std::find(s.nr_handles.begin(),s.nr_handles.end(),handle)!=s.nr_handles.end())return 0;
+        s.nr_handles.push_back(handle);return s.nr_handles.size();
+    }catch(...){return 0;}
+}
+void two_frame_capture_nr_evaluation(const TwoFrameNrEvaluation& info) noexcept {
+    if(!info.serial || !two_frame_capture_images_active())return;
+    try {
+        auto& state=manager();std::scoped_lock lock(state.mutex);
+        if(!state.session || !state.active_frame)return;
+        auto& s=*state.session;std::scoped_lock session_lock(s.mutex);
+        if(s.sealed || s.nr_evaluations.size()>=8)return;
+        auto value=info;value.frame=state.active_frame;s.nr_evaluations.push_back(value);
+    }catch(...){}
+}
+
 bool two_frame_capture_claim_application(std::uint64_t swapchain) noexcept {
     if (!swapchain || !two_frame_capture_images_active()) return false;
     try {
@@ -793,7 +856,9 @@ void two_frame_capture_note(
         shot->frame = frame;
         shot->status = status;
         std::scoped_lock lock(session->mutex);
-        if (!session->sealed && session->shots.size() < kMaximumImages)
+        if (!session->sealed && std::count_if(session->shots.begin(),session->shots.end(),[&](const auto& existing){
+                return std::string_view(existing->info.stage).starts_with("nr_")==std::string_view(info.stage).starts_with("nr_");
+            }) < (std::string_view(info.stage).starts_with("nr_") ? kMaximumNrImages : kMaximumImages))
             session->shots.push_back(std::move(shot));
         else
             ++session->dropped_images;

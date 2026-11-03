@@ -138,6 +138,23 @@ struct TwoFrameNativeDlssgEvaluation {
 };
 void two_frame_capture_native_dlssg_evaluation(const TwoFrameNativeDlssgEvaluation& info) noexcept;
 
+// F8-only NR witness: one exact evaluation per native view (up to four),
+// both independent passes if enabled. Zero means inactive/already claimed.
+std::uint64_t two_frame_capture_claim_nr(std::uint64_t handle) noexcept;
+struct TwoFrameNrEvaluation {
+    std::uint64_t serial{}, handle{}, feature{}, parameters{};
+    std::uint32_t frame{}, pass{}, width{}, height{}, guide_width{}, guide_height{}, flags{}, result{};
+    bool before_sr{}, hdr{}, reset{}, depth_inverted{};
+    std::array<std::uint64_t,4> resources{}, parameter_resources{}; // Color, Depth, MVec, Output
+    std::array<std::uint32_t,4> parameter_resource_results{};
+    std::array<float,4> tuning{}, parameter_tuning{}; // intensity, structure, tone, skin
+    std::array<std::uint32_t,4> parameter_tuning_results{};
+    float motion_scale_x{}, motion_scale_y{}, working_scale{}, white_point{}, transfer{}, colour{};
+    std::uint32_t preset{}, style{}, debug_view{}, compare{};
+    bool auto_mask{}, second_pass{};
+};
+void two_frame_capture_nr_evaluation(const TwoFrameNrEvaluation& info) noexcept;
+
 void two_frame_capture_note(
     const TwoFrameImageInfo& info, HRESULT status) noexcept;
 

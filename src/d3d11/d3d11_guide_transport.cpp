@@ -1,3 +1,4 @@
+#include "xrfg/two_frame_capture.hpp"
 #include "xrfg/d3d11_guide_transport.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "d3d11_depth_unpack_shader.hpp"
@@ -209,6 +210,7 @@ HRESULT D3D11GuideTransport::submit() noexcept {
     if (!impl_ || !impl_->recording) return E_UNEXPECTED;
     HRESULT result=impl_->list->Close(); impl_->recording=false; if (FAILED(result)) return result;
     ID3D12CommandList* lists[]{impl_->list.Get()}; impl_->queue->ExecuteCommandLists(1,lists);
+    two_frame_capture_submission(impl_->queue.Get(),1,lists);
     result=impl_->queue->Signal(impl_->done12.Get(),++impl_->submitted);
     report_dlss_motion_vector_submission(impl_->queue.Get(),1,lists);
     return result;

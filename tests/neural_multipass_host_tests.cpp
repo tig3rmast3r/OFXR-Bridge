@@ -8,6 +8,8 @@
 #include <map>
 #include <set>
 
+namespace nr_test {struct Gpu;}
+namespace nr_witness {void verify(nr_test::Gpu&,bool,unsigned);}
 namespace nr_test {
 using Microsoft::WRL::ComPtr;
 void need(bool ok,const char* text){if(!ok)throw std::runtime_error(text);}
@@ -187,11 +189,43 @@ void quad_run(nr_test::Gpu& gpu,float scale,bool noUav=false,bool arrayDepth=fal
         need(g_nrByHandle.at(views[i].id).resolvedFrames==1,"receipt counts successful resolve, not entry");
     }
     need(std::abs(gpu.pixel(result,110,90)[0]-.03f)<.00001f,"outside ALL view rectangles remains untouched");
+    nr_witness::verify(gpu,true,4);
     gpu.reset();record();gpu.submit();for(auto& e:gpu.evaluations)need(!e.reset,"four histories remain independently stable");
     gpu.reset();views[0].params.Set(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X,128U);views[0].params.Set(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y,96U);
     record();gpu.submit();for(auto& e:gpu.evaluations)need(bool(e.reset)==(e.source==views[0].id),"a changed guide region resets only its own two model histories");
     for(auto& v:views)xrfg::neural_rendering::retire_handle(v.id);TickNrRetired();xrfg::neural_rendering::shutdown();need(live.empty(),"all quad-view histories retire");
     std::printf("NR QUAD %.0f%%: four histories, independent colour/depth/MV regions, exact resolve and guard pixels PASS\n",scale*100);
+}
+
+namespace nr_witness {
+bool enabled=true;
+std::set<std::uint64_t> handles;
+struct Image {xrfg::TwoFrameImageInfo info;nr_test::Readback pixels;};
+std::vector<Image> images;
+std::vector<xrfg::TwoFrameNrEvaluation> rows;
+void verify(nr_test::Gpu& gpu,bool before,unsigned views) {
+    nr_test::need(rows.size()==views*2,"F8 captures both exact model calls for every view");
+    nr_test::need(images.size()==views*11,"F8 source/proxy/input/guides/output/resolve witnesses complete");
+    for(const auto& row:rows)nr_test::need(row.before_sr==before && row.result==1 && row.resources[0]!=row.resources[1],"F8 mode/result/resources match actual model call");
+    for(const auto& image:images) {
+        const auto stage=std::string_view(image.info.stage);
+        if(stage=="nr_pass1_color") {const auto rgb=gpu.pixel(image.pixels);nr_test::need(std::max({rgb[0],rgb[1],rgb[2]})-std::min({rgb[0],rgb[1],rgb[2]})>.01f,"captured model input retains known chroma, never depth");}
+        if(stage=="nr_pass1_depth")nr_test::need(image.pixels.layout.Footprint.Format==DXGI_FORMAT_R32_FLOAT,"actual model depth format preserved");
+    }
+    const auto count=images.size();enabled=false;
+    nr_test::need(xrfg::two_frame_capture_claim_nr(999)==0 && images.size()==count,"no request means no readback work");
+    std::printf("NR F8 %s: %u views, %zu exact GPU images, %zu model records PASS\n",before?"pre-SR":"post-SR",views,images.size(),rows.size());
+}
+}
+namespace xrfg {
+std::uint64_t two_frame_capture_claim_nr(std::uint64_t handle) noexcept {
+    if(!nr_witness::enabled || !nr_witness::handles.insert(handle).second)return 0;
+    return nr_witness::handles.size();
+}
+void two_frame_capture_nr_evaluation(const TwoFrameNrEvaluation& value) noexcept {nr_witness::rows.push_back(value);}
+void two_frame_capture_record_ng_x(const TwoFrameImageInfo& info,ID3D12Device*,ID3D12GraphicsCommandList*,ID3D12Resource* source,D3D12_RESOURCE_STATES state) noexcept {
+    nr_witness::images.push_back({info,nr_test::active->capture(source,state)});
+}
 }
 
 int main(int argc,char** argv)try{
@@ -233,6 +267,7 @@ int main(int argc,char** argv)try{
         for(unsigned c=0;c<3;++c)need(std::abs(b[c]-std::clamp(a[c]+.125f,0.f,1.f))<.00001f,"second input is the clamped GPU result of first model, not the original colour");
         need(a[3]==b[3],"intermediate clamp preserves alpha");need(first.reset&&second.reset,"fresh histories reset independently");
     }
+    nr_witness::verify(gpu,before,2);
     need(xrfg::neural_rendering::status().running,"NR running requires successful second pass");
     gpu.reset();record();gpu.submit();for(auto& e:gpu.evaluations)need(!e.reset,"steady histories retained on both passes");
     gpu.reset();for(auto& eye:eyes)eye.params.Set(NVSDK_NGX_Parameter_Reset,1);record();gpu.submit();for(auto& e:gpu.evaluations)need(e.reset,"source reset reaches both model histories");for(auto& eye:eyes)eye.params.Set(NVSDK_NGX_Parameter_Reset,0);
