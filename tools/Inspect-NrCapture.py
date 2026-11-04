@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Inspect V849 F8 NR raw witnesses without dependencies; never modify raw data."""
 import argparse, csv, json, math, struct, zlib
 from pathlib import Path
@@ -42,7 +42,7 @@ def inspect(directory):
             raw=(directory/entry['file']).read_bytes();fmt=int(entry['format']);size,read=decoder(fmt)
             pitch=int(entry['row_pitch']);rw=int(entry['resource_width']);rh=int(entry['resource_height'])
             x=int(entry['x']);y=int(entry['y']);w=int(entry['width']) or rw;h=int(entry['height']) or rh
-            if x+w>rw or y+h>rh or len(raw)<pitch*rh:raise ValueError('Invalid extent/footprint')
+            if x+w>rw or y+h>rh or len(raw)<pitch*(y+h-1)+(x+w)*size:raise ValueError('Invalid extent/footprint')
             step=max(1,math.ceil(max(w,h)/1024));xs=range(x,x+w,step);ys=range(y,y+h,step)
             pixels=[[read(raw,yy*pitch+xx*size) for xx in xs] for yy in ys]
             values=[v for row in pixels for pixel in row for v in pixel[:3] if math.isfinite(v)]

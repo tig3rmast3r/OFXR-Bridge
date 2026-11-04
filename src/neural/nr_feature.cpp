@@ -180,6 +180,8 @@ struct NrPerHandle : NrModelFeature
     unsigned long long resolvedFrames=0,skippedLayouts=0;
     std::uint64_t captureSerial{};
     bool captureBeforeSr{};
+    ID3D12Resource* exposure=nullptr;
+    bool exposureInitialized=false;
 
     // The frame as the upscaler wrote it. The resolve adds the model's edit to this rather than
     // reconstructing it by inverting the tone curve, which is what turned every light in the frame into
@@ -397,6 +399,7 @@ bool RetirePreviousNrEvaluate(unsigned int sourceHandleId)
         if (found->second.awaitingSubmission)
         {
             observation.pending = true;
+            g_runtime.failed=true;g_runtime.reason="NR previous recording was not submitted; toggle NR to retry";
             const auto skipped = ++g_nrRetirementSkips;
             if (skipped == 1 || (skipped % 120) == 0)
                 LOG_WARN("OFXR-BRIDGE V449 DLSS-NR skipped handle {}: its previous command list has not been submitted yet (skip {})",
@@ -415,14 +418,14 @@ bool RetirePreviousNrEvaluate(unsigned int sourceHandleId)
                    sourceHandleId, fence.Get(), fenceValue, completed);
         NrFlightTrace::Write("NR_REUSE", nullptr, retirementLabel);
     }
-    if (completed == UINT64_MAX)
-        return false;
+    if (completed == UINT64_MAX) {g_runtime.failed=true;g_runtime.reason="NR device was removed while retiring its previous evaluation";return false;}
     if (fence == nullptr || fenceValue == 0 || DlssNr::NrFenceRetired(completed, fenceValue))
         return observation.admitted = true;
 
     // Same-eye evaluates are normally about two game frames apart, so the fence is already complete.
-    // Give a temporarily deep queue a small chance to drain; if it does not, skip this NR evaluate
-    // instead of either stalling the render thread or reusing in-flight NVIDIA state.
+    // Retire the real evaluation before reusing it: bypass/resume was visibly toggling NR.
+    // The 100ms limit is a safety watchdog, not an added delay. A failed watchdog latches NR
+    // unavailable instead of repeatedly alternating unprocessed/processed frames.
     observation.waited = true;
     HANDLE eventHandle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (eventHandle != nullptr)
@@ -430,7 +433,7 @@ bool RetirePreviousNrEvaluate(unsigned int sourceHandleId)
         const HRESULT setResult = fence->SetEventOnCompletion(fenceValue, eventHandle);
         if (SUCCEEDED(setResult))
         {
-            const DWORD waitResult = WaitForSingleObject(eventHandle, 8);
+            const DWORD waitResult = WaitForSingleObject(eventHandle, 100);
             CloseHandle(eventHandle);
             if (waitResult == WAIT_OBJECT_0 && DlssNr::NrFenceRetired(fence->GetCompletedValue(), fenceValue))
                 return observation.admitted = true;
@@ -441,9 +444,11 @@ bool RetirePreviousNrEvaluate(unsigned int sourceHandleId)
         }
     }
 
+    g_runtime.failed=true;
+    g_runtime.reason="NR previous GPU evaluation exceeded its 100ms safety watchdog; toggle NR to retry";
     const auto skipped = ++g_nrRetirementSkips;
     if (skipped == 1 || (skipped % 120) == 0)
-        LOG_WARN("OFXR-BRIDGE V449 DLSS-NR skipped handle {}: previous GPU evaluate has not retired (skip {})",
+        LOG_WARN("OFXR-BRIDGE V850 DLSS-NR stopped handle {}: previous GPU evaluate has not retired (stop {})",
                  sourceHandleId, skipped);
     return false;
 }
@@ -865,9 +870,10 @@ void ReleaseSurfacesIfFormatChanged(NrPerHandle& nr, DXGI_FORMAT needed)
     ParkSecondPass(nr);
 
     for (ID3D12Resource** r :
-         { &nr.output, &nr.colorCopy, &nr.colorRegion, &nr.hdrCopy, &nr.colorSmall, &nr.depthSmall, &nr.motionSmall, &nr.resolveCopy })
+         { &nr.output, &nr.colorCopy, &nr.colorRegion, &nr.hdrCopy, &nr.colorSmall, &nr.exposure, &nr.depthSmall, &nr.motionSmall, &nr.resolveCopy })
         ParkNrResource(*r);
 
+    nr.exposureInitialized=false;
     nr.reset = true;
 }
 
@@ -1148,6 +1154,24 @@ void NrCaptureImage(std::uint64_t serial,unsigned handle,const char* stage,
     info.swapchain=reinterpret_cast<std::uint64_t>(image);info.x=x;info.y=y;
     const auto desc=image->GetDesc();info.width=w?w:static_cast<unsigned>(desc.Width);info.height=h?h:desc.Height;
     xrfg::two_frame_capture_record_ng_x(info,device,list,image,state);
+}
+bool FailNrStage(const char* stage,unsigned handle) {
+    static std::string reason;reason=std::format("NR {} failed for view {}; no model result applied",stage,handle);
+    g_runtime.failed=true;g_runtime.reason=reason.c_str();
+    LOG_ERROR("{}",g_runtime.reason);return false;
+}
+bool PrepareNrExposure(NrPerHandle& nr,unsigned handle,ID3D12Device* device,
+    ID3D12GraphicsCommandList* list,ID3D12Resource* source,bool active) {
+    if(!active)return true;
+    if(!nr.exposure) {nr.exposure=CreateScratch(device,DXGI_FORMAT_R32_FLOAT,1,1);nr.exposureInitialized=false;}
+    if(!nr.exposure)return FailNrStage("HDR exposure allocation",handle);
+    DlssNrConstants c{};c.Mode=DlssNrMode_MeasureExposure;c.Width=c.Height=1;
+    c.Passthrough=(!nr.exposureInitialized || nr.reset)?1:0;
+    if(!nr.compose->Dispatch(list,c,source,nullptr,nullptr,nullptr,nullptr,nr.exposure,nullptr))return FailNrStage("HDR exposure measurement",handle);
+    Barrier(list,nr.exposure,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,L"NR measured HDR exposure ready");
+    nr.exposureInitialized=true;
+    NrCaptureImage(nr.captureSerial,handle,"nr_exposure_scale",device,list,nr.exposure,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    return true;
 }
 int EvaluateNrCaptured(std::uint64_t serial,unsigned handle,bool before,unsigned pass,
     const NrConfiguration& cfg,ID3D12Device* device,bool hdr,
@@ -1627,6 +1651,8 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
             ParkNrResource(nr.colorCopy);
             ParkNrResource(nr.colorRegion);
             ParkNrResource(nr.hdrCopy);
+            ParkNrResource(nr.colorRegion);
+            ParkNrResource(nr.resolveCopy);
             ParkNrResource(nr.colorSmall);
             ParkNrResource(nr.resolveCopy);
         }
@@ -1828,6 +1854,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     nr.captureSerial=xrfg::two_frame_capture_claim_nr(sourceHandleId);nr.captureBeforeSr=true;
     NrCaptureImage(nr.captureSerial,sourceHandleId,"nr_source_color",device,cmdList,target,
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,colorX,colorY,width,height);
+    const bool autoExposure=isHdrBuffer && desc.Format==DXGI_FORMAT_R11G11B10_FLOAT;
     ID3D12Resource* encodeSource=target;
     if(colorRegion) {
         Barrier(cmdList,target,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE,L"NR colour ROI source");
@@ -1840,14 +1867,21 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         Barrier(cmdList,nr.colorRegion,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,L"NR colour ROI ready");
         encodeSource=nr.colorRegion;
     }
+    if(!PrepareNrExposure(nr,sourceHandleId,device,cmdList,encodeSource,autoExposure)) {
+        if(colorRegion)Barrier(cmdList,nr.colorRegion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"NR failed colour ROI reusable");
+        device->Release();return;
+    }
+    bool encoded{};
     {
         DredScope stage(cmdList, L"OFXR standalone NR pre-SR encode");
-        nr.compose->Dispatch(cmdList, encodeParams, encodeSource, nullptr, nullptr, nullptr, nullptr,
+        encoded=nr.compose->Dispatch(cmdList, encodeParams, encodeSource, nullptr, nullptr, nullptr, autoExposure?nr.exposure:nullptr,
                             nr.colorCopy, nr.hdrCopy);
     }
 
     if(colorRegion)Barrier(cmdList,nr.colorRegion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"NR colour ROI reusable");
+
+    if(!encoded){FailNrStage("colour encode",sourceHandleId);device->Release();return;}
 
     // The transitions double as the wait for the encode's writes.
     Barrier(cmdList, nr.colorCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -1869,8 +1903,8 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         down.Height = workHeight;
         {
             DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR pre-SR downsample");
-            nr.compose->Dispatch(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr,
-                                nr.colorSmall, nullptr);
+            if(!nr.compose->Dispatch(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr,
+                                nr.colorSmall, nullptr)){FailNrStage("model input downsample",sourceHandleId);device->Release();return;}
         }
         Barrier(cmdList, nr.colorSmall, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"pre-SR-downsample-ready");
@@ -1987,8 +2021,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
 
     if (result == NVSDK_NGX_Result_Success && secondAccepted)
     {
-        ++g_successfulEvaluations;
-        MarkSuccessfulNrEvaluation();
+
         // Resolve takes the difference between what the model returned and what it was shown, and adds
         // that back to the frame. At strength zero the result is what the upscaler produced, exactly, and
         // anything the model left alone is untouched rather than round-tripped through the curve.
@@ -2014,14 +2047,19 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         if (directTarget)
             Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"pre-SR-resolve-target-write");
+        bool resolved{};
         {
             DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR pre-SR resolve");
-            nr.compose->Dispatch(cmdList, resolveParams, modelInput, finalModelOutput, nr.hdrCopy, motionIn,
-                                nullptr, resolveTarget, nullptr);
+            resolved=nr.compose->Dispatch(cmdList, resolveParams, modelInput, finalModelOutput, nr.hdrCopy, motionIn,
+                                autoExposure?nr.exposure:nullptr, resolveTarget, nullptr);
         }
         Barrier(cmdList, finalModelOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"pre-SR-model-output-restore");
 
+        if(!resolved){
+            if(directTarget)Barrier(cmdList,target,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,L"NR failed resolve restore");
+            FailNrStage("pre-SR resolve",sourceHandleId);device->Release();return;
+        }
         if (directTarget)
         {
             Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -2047,6 +2085,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"pre-SR-resolve-copy-source-restore");
         }
 
+        ++g_successfulEvaluations;MarkSuccessfulNrEvaluation();
         NrCaptureImage(nr.captureSerial,sourceHandleId,"nr_resolved_color",device,cmdList,target,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,colorX,colorY,width,height);
         ++nr.resolvedFrames;
@@ -2091,6 +2130,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     // Leave the staging copy as the next frame expects to find it.
     Barrier(cmdList, nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"pre-SR-color-restore");
+    if(autoExposure)Barrier(cmdList,nr.exposure,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"NR HDR exposure reusable");
 
     device->Release();
 }
@@ -2169,6 +2209,11 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
     const D3D12_RESOURCE_DESC desc = target->GetDesc();
     const auto width = (unsigned int) desc.Width;
     const auto height = desc.Height;
+    if(desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.SampleDesc.Count!=1 || !desc.DepthOrArraySize) {
+        FailNrStage("unsupported output surface",sourceHandleId);device->Release();return;
+    }
+    const bool stagedOutput=desc.DepthOrArraySize!=1 || (desc.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) ||
+        !(desc.Flags&D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
     // Depth and motion vectors are the upscaler's inputs and so are at render resolution, while colour
     // and output are at display resolution. The authoritative guide extent is the immutable DLSS render
@@ -2295,6 +2340,8 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
             ParkNrResource(nr.output);
             ParkNrResource(nr.colorCopy);
             ParkNrResource(nr.hdrCopy);
+            ParkNrResource(nr.colorRegion);
+            ParkNrResource(nr.resolveCopy);
             ParkNrResource(nr.colorSmall);
         }
     }
@@ -2310,6 +2357,10 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
 
     if (reduced && nr.colorSmall == nullptr)
         nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
+    if(stagedOutput && !nr.colorRegion)nr.colorRegion=CreateScratch(device,desc.Format,width,height);
+    if(stagedOutput && !nr.resolveCopy)nr.resolveCopy=CreateScratch(device,desc.Format,width,height);
+    if(stagedOutput && (!nr.colorRegion || !nr.resolveCopy)){FailNrStage("output staging allocation",sourceHandleId);device->Release();return;}
+
 
     if (nr.output != nullptr && nr.colorCopy != nullptr && nr.hdrCopy != nullptr &&
         !EnsureHandleParams(nr, device))
@@ -2473,20 +2524,30 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
     encodeParams.Width = width;
     encodeParams.Height = height;
 
-    Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"post-SR-encode-source-ready");
     MarkNrRecorded(sourceHandleId, submissionList.Get());
     nr.captureSerial=xrfg::two_frame_capture_claim_nr(sourceHandleId);nr.captureBeforeSr=false;
-    NrCaptureImage(nr.captureSerial,sourceHandleId,"nr_source_color",device,cmdList,target,
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    {
+    NrCaptureImage(nr.captureSerial,sourceHandleId,"nr_source_color",device,cmdList,target,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ID3D12Resource* encodeSource=target;
+    if(stagedOutput) {
+        Barrier(cmdList,target,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE,L"NR output source copy",0);
+        Barrier(cmdList,nr.colorRegion,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_DEST,L"NR output staging write");
+        D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=target;to.pResource=nr.colorRegion;
+        from.Type=to.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        cmdList->CopyTextureRegion(&to,0,0,0,&from,nullptr);
+        Barrier(cmdList,target,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"NR output source restore",0);
+        Barrier(cmdList,nr.colorRegion,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,L"NR output staging ready");
+        encodeSource=nr.colorRegion;
+    } else Barrier(cmdList,target,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,L"post-SR-encode-source-ready");
+    const bool autoExposure=isHdrBuffer && desc.Format==DXGI_FORMAT_R11G11B10_FLOAT;
+    bool encoded=PrepareNrExposure(nr,sourceHandleId,device,cmdList,encodeSource,autoExposure);
+    if(encoded) {
         DredScope stage(cmdList, L"OFXR standalone NR post-SR encode");
-        nr.compose->Dispatch(cmdList, encodeParams, target, nullptr, nullptr, nullptr, nullptr,
+        encoded=nr.compose->Dispatch(cmdList, encodeParams, encodeSource, nullptr, nullptr, nullptr, autoExposure?nr.exposure:nullptr,
                             nr.colorCopy, nr.hdrCopy);
     }
-
-    Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"post-SR-encode-source-restore");
+    if(stagedOutput)Barrier(cmdList,nr.colorRegion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"NR output staging reusable");
+    else Barrier(cmdList,target,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"post-SR-encode-source-restore");
+    if(!encoded){FailNrStage("post-SR colour encode",sourceHandleId);device->Release();return;}
     // The transitions double as the wait for the encode's writes.
     Barrier(cmdList, nr.colorCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"post-SR-encode-color-ready");
@@ -2507,8 +2568,8 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
         down.Height = workHeight;
         {
             DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR post-SR downsample");
-            nr.compose->Dispatch(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr,
-                                nr.colorSmall, nullptr);
+            if(!nr.compose->Dispatch(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr,
+                                nr.colorSmall, nullptr)){FailNrStage("model input downsample",sourceHandleId);device->Release();return;}
         }
         Barrier(cmdList, nr.colorSmall, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"post-SR-downsample-ready");
@@ -2625,8 +2686,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
 
     if (result == NVSDK_NGX_Result_Success && secondAccepted)
     {
-        ++g_successfulEvaluations;
-        MarkSuccessfulNrEvaluation();
+
         // Resolve takes the difference between what the model returned and what it was shown, and adds
         // that back to the frame. At strength zero the result is what the upscaler produced, exactly, and
         // anything the model left alone is untouched rather than round-tripped through the curve.
@@ -2647,14 +2707,26 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
 
         Barrier(cmdList, finalModelOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"post-SR-model-output-ready");
+        bool resolved{};
         {
             DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR post-SR resolve");
-            nr.compose->Dispatch(cmdList, resolveParams, modelInput, finalModelOutput, nr.hdrCopy, motionIn,
-                                nullptr, target, nullptr);
+            resolved=nr.compose->Dispatch(cmdList, resolveParams, modelInput, finalModelOutput, nr.hdrCopy, motionIn,
+                                autoExposure?nr.exposure:nullptr, stagedOutput?nr.resolveCopy:target, nullptr);
         }
         Barrier(cmdList, finalModelOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"post-SR-model-output-restore");
 
+        if(!resolved){FailNrStage("post-SR resolve",sourceHandleId);device->Release();return;}
+        if(stagedOutput) {
+            Barrier(cmdList,nr.resolveCopy,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE,L"NR output resolve copy");
+            Barrier(cmdList,target,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_DEST,L"NR output target copy",0);
+            D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=nr.resolveCopy;to.pResource=target;
+            from.Type=to.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            cmdList->CopyTextureRegion(&to,0,0,0,&from,nullptr);
+            Barrier(cmdList,target,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"NR output target restored",0);
+            Barrier(cmdList,nr.resolveCopy,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"NR output resolve reusable");
+        }
+        ++g_successfulEvaluations;MarkSuccessfulNrEvaluation();
         NrCaptureImage(nr.captureSerial,sourceHandleId,"nr_resolved_color",device,cmdList,target,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         // On-demand matched captures map only after all exact submission tokens retire.
@@ -2694,6 +2766,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
     // Leave the staging copy as the next frame expects to find it.
     Barrier(cmdList, nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"post-SR-color-restore");
+    if(autoExposure)Barrier(cmdList,nr.exposure,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,L"NR HDR exposure reusable");
 
     device->Release();
 }
@@ -2750,7 +2823,7 @@ void ReleaseForHandleLocked(unsigned int sourceHandleId)
     ParkNrEvaluateParams(nr);
     ParkNrCodec(nr.compose);
 
-    for (ID3D12Resource** r : { &nr.output, &nr.colorCopy, &nr.colorRegion, &nr.hdrCopy, &nr.colorSmall, &nr.depthSmall, &nr.motionSmall, &nr.resolveCopy,
+    for (ID3D12Resource** r : { &nr.output, &nr.colorCopy, &nr.colorRegion, &nr.hdrCopy, &nr.colorSmall, &nr.exposure, &nr.depthSmall, &nr.motionSmall, &nr.resolveCopy,
                                 &nr.depthClone, &nr.motionClone })
         ParkNrResource(*r);
 
@@ -2879,6 +2952,12 @@ namespace xrfg::neural_rendering {
 void configure(const Settings& settings) {
     std::scoped_lock lock(DlssNr::g_nrMutex);
     auto& c=*NrConfiguration::Instance();
+    if(settings.enabled && !c.DlssNrEnabled.value_or_default() && g_runtime.failed) {
+        // Explicit OFF->ON retry creates fresh scratch in known states. Park old
+        // resources on their exact GPU receipts; never release in-flight work.
+        while(!g_nrByHandle.empty())DlssNr::ReleaseForHandleLocked(g_nrByHandle.begin()->first);
+        DlssNr::RetryAfterFailure();g_nrLastSubmittedMs.store(0,std::memory_order_release);
+    }
     c.DlssNrEnabled=settings.enabled;
     c.DlssNrRunBeforeSr=settings.before_sr;
     c.DlssNrSecondPass=settings.second_pass;

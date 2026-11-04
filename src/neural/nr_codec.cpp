@@ -4,6 +4,7 @@
 #include "DlssNr_Shader.h"
 #include "NrResizeGuides.h"
 #include "NrClampEncoded.h"
+#include "NrExposure.h"
 #include <d3dcompiler.h>
 
 using Microsoft::WRL::ComPtr;
@@ -35,7 +36,8 @@ bool equal_constants(const DlssNrConstants& a,const DlssNrConstants& b) {
 }
 struct DlssNr_Dx12::DispatchBinding {
     ComPtr<ID3D12DescriptorHeap> heap;
-    ComPtr<ID3D12Resource> constants_buffer;
+    ComPtr<ID3D12Resource> constants_buffer, seed_buffer;
+    bool dynamic_exposure{};
     std::array<ComPtr<ID3D12Resource>,5> srvs;
     std::array<ComPtr<ID3D12Resource>,2> uavs;
     DlssNrConstants constants{};
@@ -74,6 +76,23 @@ DlssNr_Dx12::DlssNr_Dx12(std::string,ID3D12Device* device):_device(device) {
         "main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&guides,&errors))){_init=false;return;}
     pipeline.CS={guides->GetBufferPointer(),guides->GetBufferSize()};
     _init=SUCCEEDED(device->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&_guidePipelineState)));
+    if(!_init)return;
+    ComPtr<ID3DBlob> exposure;
+    if(FAILED(D3DCompile(kNrExposureShader,sizeof(kNrExposureShader)-1,"NR HDR exposure",nullptr,nullptr,
+        "main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&exposure,&errors))){_init=false;return;}
+    pipeline.CS={exposure->GetBufferPointer(),exposure->GetBufferSize()};
+    if(FAILED(device->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&_exposurePipelineState)))){_init=false;return;}
+    D3D12_DESCRIPTOR_RANGE dynamicRanges[3]{};
+    dynamicRanges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_CBV,1,0,0,9};
+    dynamicRanges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,1,0,0,4};
+    dynamicRanges[2]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,0,0,8};
+    parameter.DescriptorTable={3,dynamicRanges};root.pParameters=&parameter;
+    if(FAILED(D3D12SerializeRootSignature(&root,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors))||
+        FAILED(device->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&_exposureConstantsRoot)))){_init=false;return;}
+    if(FAILED(D3DCompile(kNrExposureConstantsShader,sizeof(kNrExposureConstantsShader)-1,"NR GPU constants",nullptr,nullptr,
+        "main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&exposure,&errors))){_init=false;return;}
+    pipeline.pRootSignature=_exposureConstantsRoot.Get();pipeline.CS={exposure->GetBufferPointer(),exposure->GetBufferSize()};
+    _init=SUCCEEDED(device->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&_exposureConstantsPipeline)));
 }
 DlssNr_Dx12::~DlssNr_Dx12()=default;
 void DlssNr_Dx12::begin_recording(){std::scoped_lock lock(_bindingsMutex);++_recording;}
@@ -81,9 +100,16 @@ void DlssNr_Dx12::end_recording(){
     std::scoped_lock lock(_bindingsMutex);
     std::erase_if(_bindings,[&](const auto& binding){return binding->recording!=_recording;});
 }
-bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* list,const DlssNrConstants& constants,
+bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* list,const DlssNrConstants& requested,
     ID3D12Resource* source,ID3D12Resource* model,ID3D12Resource* original,ID3D12Resource* motion,
     ID3D12Resource* previous_edit,ID3D12Resource* target,ID3D12Resource* keep) {
+    auto constants=requested;
+    // Zero transfer is an exact copy, avoiding packed-float round-trip loss.
+    if(constants.Mode==DlssNrMode_Resolve && constants.TransferStrength==0 &&
+        !constants.DebugView && !constants.CompareMode && original) {
+        constants.Mode=DlssNrMode_Encode;constants.Passthrough=1;
+        source=original;model=motion=previous_edit=nullptr;keep=target;
+    }
     if(!_init||!list||!source||!target)return false;
     if(constants.Mode==DlssNrMode_ClampEncoded) {
         const auto input=source->GetDesc(),output=target->GetDesc();
@@ -109,6 +135,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* list,const DlssNrConstants
     for(auto& candidate:_bindings)if(candidate->matches(constants,reads,writes)){binding=candidate.get();break;}
     if(!binding) {
         auto candidate=std::make_unique<DispatchBinding>();candidate->constants=constants;
+        candidate->dynamic_exposure=previous_edit && (constants.Mode==DlssNrMode_Encode || constants.Mode==DlssNrMode_Resolve);
         D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
         buffer.Width=sizeof(DlssNrConstants);buffer.Height=1;buffer.DepthOrArraySize=1;
         buffer.MipLevels=1;buffer.SampleDesc.Count=1;buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -119,7 +146,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* list,const DlssNrConstants
         if(FAILED(candidate->constants_buffer->Map(0,&empty,&mapped)))return false;
         memcpy(mapped,&constants,sizeof(constants));candidate->constants_buffer->Unmap(0,nullptr);
         D3D12_DESCRIPTOR_HEAP_DESC heap{};heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        heap.NumDescriptors=8;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        heap.NumDescriptors=10;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if(FAILED(_device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&candidate->heap))))return false;
         const auto increment=_device->GetDescriptorHandleIncrementSize(heap.Type);
         auto slot=candidate->heap->GetCPUDescriptorHandleForHeapStart();
@@ -140,15 +167,42 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* list,const DlssNrConstants
             view.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
             _device->CreateUnorderedAccessView(writes[i],nullptr,&view,slot);slot.ptr+=increment;
         }
+        if(candidate->dynamic_exposure) {
+            candidate->seed_buffer=candidate->constants_buffer;candidate->constants_buffer.Reset();
+            D3D12_HEAP_PROPERTIES gpu{};gpu.Type=D3D12_HEAP_TYPE_DEFAULT;
+            buffer.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            if(FAILED(_device->CreateCommittedResource(&gpu,D3D12_HEAP_FLAG_NONE,&buffer,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(&candidate->constants_buffer))))return false;
+        }
         D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{};cbv.BufferLocation=candidate->constants_buffer->GetGPUVirtualAddress();
         cbv.SizeInBytes=sizeof(DlssNrConstants);_device->CreateConstantBufferView(&cbv,slot);
+        if(candidate->dynamic_exposure) {
+            slot.ptr+=increment;D3D12_UNORDERED_ACCESS_VIEW_DESC raw{};
+            raw.Format=DXGI_FORMAT_R32_TYPELESS;raw.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;
+            raw.Buffer.NumElements=sizeof(DlssNrConstants)/4;raw.Buffer.Flags=D3D12_BUFFER_UAV_FLAG_RAW;
+            _device->CreateUnorderedAccessView(candidate->constants_buffer.Get(),nullptr,&raw,slot);
+            slot.ptr+=increment;cbv.BufferLocation=candidate->seed_buffer->GetGPUVirtualAddress();
+            _device->CreateConstantBufferView(&cbv,slot);
+        }
         binding=candidate.get();_bindings.emplace_back(std::move(candidate));
     }
     ID3D12DescriptorHeap* heaps[]={binding->heap.Get()};list->SetDescriptorHeaps(1,heaps);
     binding->recording=_recording;
+    D3D12_RESOURCE_BARRIER cbBarrier{};
+    if(binding->dynamic_exposure) {
+        list->SetComputeRootSignature(_exposureConstantsRoot.Get());list->SetPipelineState(_exposureConstantsPipeline.Get());
+        list->SetComputeRootDescriptorTable(0,binding->heap->GetGPUDescriptorHandleForHeapStart());list->Dispatch(1,1,1);
+        cbBarrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        cbBarrier.Transition={binding->constants_buffer.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER};
+        list->ResourceBarrier(1,&cbBarrier);
+    }
     list->SetComputeRootSignature(_rootSignature.Get());
     list->SetPipelineState(constants.Mode==DlssNrMode_ClampEncoded?_clampPipelineState.Get():
-        constants.Mode==DlssNrMode_ResizePrivateGuides?_guidePipelineState.Get():_pipelineState.Get());
+        constants.Mode==DlssNrMode_ResizePrivateGuides?_guidePipelineState.Get():
+        constants.Mode==DlssNrMode_MeasureExposure?_exposurePipelineState.Get():_pipelineState.Get());
     list->SetComputeRootDescriptorTable(0,binding->heap->GetGPUDescriptorHandleForHeapStart());
-    list->Dispatch((constants.Width+7)/8,(constants.Height+7)/8,1);return true;
+    list->Dispatch((constants.Width+7)/8,(constants.Height+7)/8,1);
+    if(binding->dynamic_exposure){std::swap(cbBarrier.Transition.StateBefore,cbBarrier.Transition.StateAfter);list->ResourceBarrier(1,&cbBarrier);}
+    return true;
 }

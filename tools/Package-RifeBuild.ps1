@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$BuildDir,
     [Parameter(Mandatory=$true)][string]$OutDir,
-    [int]$Version=849,
+    [int]$Version=850,
     [string]$SourceDir,
     [string]$CrtSource
 )
@@ -87,7 +87,7 @@ foreach($item in $lock.msvc_crt.files){
 }
 $crtLicense=Join-Path $SourceDir 'licenses/MSVC_CRT_LICENSE.rtf'
 if((NormalizedHash $crtLicense) -ne '8facd2af82a812f1107b5ef0362b28ff0648ff8d8eb237e888a9b1a0ed21847c'){throw 'The pinned Microsoft redistributable license is missing or modified.'}
-$documents=@('README.md','LICENSE','licenses/ATTRIBUTION.md','licenses/MSVC_CRT_LICENSE.rtf','docs/RIFE.md','docs/BUILDING_RIFE.md','docs/V849_NR_CAPTURE.md','scripts/Set-CrashDebug.ps1')
+$documents=@('README.md','LICENSE','licenses/ATTRIBUTION.md','licenses/MSVC_CRT_LICENSE.rtf','docs/RIFE.md','docs/BUILDING_RIFE.md','docs/V849_NR_CAPTURE.md','docs/V850_MSFS_NR.md','scripts/Set-CrashDebug.ps1')
 foreach($optional in @('CREDITS.md','THIRD_PARTY.md')){if(Test-Path -LiteralPath (Join-Path $SourceDir $optional)){$documents+=$optional}}
 $licenseRoot=Join-Path $SourceDir 'licenses'
 foreach($file in Get-ChildItem -LiteralPath $licenseRoot -Recurse -File){$documents+='licenses/'+$file.FullName.Substring($licenseRoot.Length+1).Replace('\','/')}

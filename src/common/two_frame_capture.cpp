@@ -336,7 +336,7 @@ void write_session(const std::shared_ptr<Session>& session) {
     std::error_code ec;
     std::filesystem::create_directories(session->directory, ec);
     std::ofstream manifest(session->directory / L"manifest.tsv", std::ios::binary);
-    manifest << "index\tframe\tstage\tstatus\tstream\tdisplay_time\tswapchain\tserial\teye\tslice\tx\ty\twidth\theight\tresource_width\tresource_height\tformat\tsource_format\trow_pitch\trow_bytes\tbytes\tscale_x\tscale_y\tjitter_x\tjitter_y\tfile\n";
+    manifest << "index\tframe\tstage\tstatus\tstream\tdisplay_time\tswapchain\tserial\teye\tslice\tx\ty\twidth\theight\tresource_width\tresource_height\tformat\tsource_format\trow_pitch\trow_bytes\tbytes\tscale_x\tscale_y\tjitter_x\tjitter_y\tfile\tresource_flags\tarray_size\tmip_levels\tsample_count\n";
     std::vector<std::shared_ptr<Shot>> shots;
     std::vector<ContractShot> contracts;
     std::vector<TwoFrameNativeDlssgEvaluation> native_dlssg_evaluations;
@@ -569,7 +569,7 @@ void write_session(const std::shared_ptr<Session>& session) {
             << '\t' << shot.row_bytes << '\t' << shot.bytes
             << '\t' << shot.info.scale_x << '\t' << shot.info.scale_y
             << '\t' << shot.info.jitter_x << '\t' << shot.info.jitter_y
-            << '\t' << file << '\n';
+            << '\t' << file << '\t' << static_cast<unsigned>(shot.description.Flags) << '\t' << shot.description.DepthOrArraySize << '\t' << shot.description.MipLevels << '\t' << shot.description.SampleDesc.Count << '\n';
     }
     const std::string message = "OFXR V23286 capture: " +
         session->directory.string() + "\n";

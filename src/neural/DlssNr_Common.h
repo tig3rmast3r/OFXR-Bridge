@@ -19,6 +19,7 @@ enum DlssNrMode : uint32_t
     DlssNrMode_Resolve = 1,   // proxy + the model's answer + the untouched copy -> the edited frame
     DlssNrMode_ResizePrivateGuides = 3,
     DlssNrMode_Downsample = 2, // the proxy -> a smaller proxy, when the model works below full size
+    DlssNrMode_MeasureExposure = 5, // packed HDR proxy calibration, GPU only
     DlssNrMode_ClampEncoded = 4 // bounded encoded RGB between independent model passes
 };
 

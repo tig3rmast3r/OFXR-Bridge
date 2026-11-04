@@ -13,6 +13,9 @@ class DlssNr_Dx12 {
     Microsoft::WRL::ComPtr<ID3D12PipelineState> _pipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> _guidePipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> _clampPipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> _exposurePipelineState;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> _exposureConstantsRoot;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> _exposureConstantsPipeline;
     bool _clampAttempted=false; // bindings mutex; failure never invalidates the accepted codec
     bool _init=false;
     uint64_t _recording{};

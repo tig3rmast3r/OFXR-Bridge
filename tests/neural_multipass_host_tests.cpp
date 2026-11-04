@@ -97,10 +97,10 @@ struct Gpu {
         D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=u.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;src.PlacedFootprint=fp;dst.pResource=r;dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;dst.SubresourceIndex=slice;
         list->CopyTextureRegion(&dst,ox,oy,0,&src,nullptr);move(list.Get(),r,D3D12_RESOURCE_STATE_COPY_DEST,state);uploads.push_back(u);
     }
-    Readback capture(ID3D12Resource* r,D3D12_RESOURCE_STATES state){
+    Readback capture(ID3D12Resource* r,D3D12_RESOURCE_STATES state,unsigned slice=0){
         Readback out;auto d=r->GetDesc();device->GetCopyableFootprints(&d,0,1,0,&out.layout,nullptr,nullptr,&out.bytes);out.buffer=buffer(out.bytes,D3D12_HEAP_TYPE_READBACK);
         move(list.Get(),r,state,D3D12_RESOURCE_STATE_COPY_SOURCE);
-        D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=r;src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;dst.pResource=out.buffer.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint=out.layout;
+        D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=r;src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;src.SubresourceIndex=slice;dst.pResource=out.buffer.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint=out.layout;
         list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);move(list.Get(),r,D3D12_RESOURCE_STATE_COPY_SOURCE,state);return out;
     }
     void model(Model* m,ID3D12Resource* input,ID3D12Resource* output){
@@ -230,7 +230,9 @@ void two_frame_capture_record_ng_x(const TwoFrameImageInfo& info,ID3D12Device*,I
 
 int main(int argc,char** argv)try{
     using namespace nr_test;
-    const bool before=argc<2||std::string_view(argv[1])!="post";
+    const std::string_view mode=argc<2?"pre":argv[1];
+    const bool before=!mode.starts_with("post");
+    const bool arrayOutput=mode=="post-array";
     ComPtr<ID3D12Debug> debug;if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     Gpu gpu;active=&gpu;
     auto folder=std::filesystem::temp_directory_path()/(L"ofxr-nr2-host-"+std::to_wstring(GetCurrentProcessId()));std::filesystem::create_directories(folder);
@@ -247,7 +249,9 @@ int main(int argc,char** argv)try{
     std::array<Eye,2> eyes{{{101},{202}}};
     for(auto& eye:eyes){
         eye.color=gpu.texture(100,80,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        eye.output=gpu.texture(200,160,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        eye.output=gpu.texture(200,160,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,arrayOutput?2:1,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if(arrayOutput)gpu.fill(eye.output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,{.125f,.25f,.5f,1.f},0,0,0,0,1);
         eye.params.Set(NVSDK_NGX_Parameter_Color,eye.color.Get());eye.params.Set(NVSDK_NGX_Parameter_Output,eye.output.Get());eye.params.Set(NVSDK_NGX_Parameter_Depth,depth.Get());eye.params.Set(NVSDK_NGX_Parameter_MotionVectors,motion.Get());
         eye.params.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width,100U);eye.params.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height,80U);eye.params.Set(NVSDK_NGX_Parameter_Width,100U);eye.params.Set(NVSDK_NGX_Parameter_Height,80U);eye.params.Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,static_cast<unsigned>(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes));
         eye.params.Set(NVSDK_NGX_Parameter_MV_Scale_X,1.f);eye.params.Set(NVSDK_NGX_Parameter_MV_Scale_Y,1.f);
@@ -268,6 +272,11 @@ int main(int argc,char** argv)try{
         need(a[3]==b[3],"intermediate clamp preserves alpha");need(first.reset&&second.reset,"fresh histories reset independently");
     }
     nr_witness::verify(gpu,before,2);
+    if(arrayOutput){gpu.reset();auto guard=gpu.capture(eyes[0].output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,1);gpu.submit();need(gpu.pixel(guard)[0]==.125f,"post-SR only edits the model base slice, unrelated eye slice preserved");}
+    ComPtr<ID3D12Fence> retireGate;hr(gpu.device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&retireGate)));
+    {std::lock_guard lock(g_nrFlightMutex);auto& f=g_nrFlights[eyes[0].id];f.fence=retireGate;f.fenceValue=1;f.awaitingSubmission=false;}
+    std::thread complete([&]{Sleep(24);retireGate->Signal(1);});
+    const auto admitted=RetirePreviousNrEvaluate(eyes[0].id);complete.join();need(admitted&&!g_runtime.failed,"24ms real fence delay must retain NR instead of bypass/reset after8ms");
     need(xrfg::neural_rendering::status().running,"NR running requires successful second pass");
     gpu.reset();record();gpu.submit();for(auto& e:gpu.evaluations)need(!e.reset,"steady histories retained on both passes");
     gpu.reset();for(auto& eye:eyes)eye.params.Set(NVSDK_NGX_Parameter_Reset,1);record();gpu.submit();for(auto& e:gpu.evaluations)need(e.reset,"source reset reaches both model histories");for(auto& eye:eyes)eye.params.Set(NVSDK_NGX_Parameter_Reset,0);
@@ -283,6 +292,14 @@ int main(int argc,char** argv)try{
     gpu.reset();refuse_second=true;settings.second_pass=true;xrfg::neural_rendering::configure(settings);record();gpu.submit();
     need(!g_runtime.failed&&!xrfg::neural_rendering::status().running&&!xrfg::neural_rendering::status().reason.empty(),"second model refusal is isolated and visible");
     gpu.reset();settings.second_pass=false;xrfg::neural_rendering::configure(settings);record();gpu.submit();need(gpu.evaluations.size()==2&&xrfg::neural_rendering::status().running,"disable restores first NR pass after optional refusal");
+    // A true watchdog failure latches unavailable; it cannot oscillate every
+    // frame. Explicit OFF->ON parks failed scratch and creates clean histories.
+    ComPtr<ID3D12Fence> timeoutGate;hr(gpu.device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&timeoutGate)));
+    {std::lock_guard lock(g_nrFlightMutex);auto& f=g_nrFlights[eyes[0].id];f.fence=timeoutGate;f.fenceValue=1;f.awaitingSubmission=false;}
+    need(!RetirePreviousNrEvaluate(eyes[0].id)&&g_runtime.failed,"real timeout latches unavailable instead of alternating NR");
+    timeoutGate->Signal(1);settings.enabled=false;xrfg::neural_rendering::configure(settings);
+    settings.enabled=true;xrfg::neural_rendering::configure(settings);need(!g_runtime.failed&&g_nrByHandle.empty(),"explicit retry creates clean known-state scratch");
+    gpu.reset();record();gpu.submit();gpu.reset();record();gpu.submit();need(xrfg::neural_rendering::status().running,"NR returns after explicit retry");
     for(auto& eye:eyes)xrfg::neural_rendering::retire_handle(eye.id);TickNrRetired();xrfg::neural_rendering::shutdown();need(live.empty(),"all model features retired once");
     unsigned errors{};if(gpu.messages)for(UINT64 i=0;i<gpu.messages->GetNumStoredMessages();++i){SIZE_T size{};gpu.messages->GetMessage(i,nullptr,&size);std::vector<char> b(size);auto* m=reinterpret_cast<D3D12_MESSAGE*>(b.data());hr(gpu.messages->GetMessage(i,m,&size));if(m->Severity==D3D12_MESSAGE_SEVERITY_ERROR||m->Severity==D3D12_MESSAGE_SEVERITY_CORRUPTION){++errors;std::printf("D3D12: %s\n",m->pDescription);}}
     need(!errors,"NR host chain has no D3D12 validation errors");std::filesystem::remove(folder/L"nvngx_dlssnr.dll");std::filesystem::remove(folder);
