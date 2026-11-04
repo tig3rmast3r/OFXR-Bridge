@@ -42,8 +42,8 @@ using namespace DirectX;
 constexpr UINT kSlots = D3D12SwapchainHistory::kSlotCount;
 constexpr UINT kSrvs = 7;
 constexpr UINT kBlock = kSrvs + 3; // seven SRVs, three UAVs
-constexpr UINT kBlocksPerEye = 4; // A, B, and two outputs
-constexpr UINT kMaxOutputs = 2;
+constexpr UINT kBlocksPerEye = 5; // A, B, and up to three outputs (4X)
+constexpr UINT kMaxOutputs = D3D12NativeFrameResult::kMaxOutputs;
 constexpr auto kRead = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 constexpr auto kPixelRead = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 constexpr auto kAnyRead = kRead | kPixelRead;
@@ -672,17 +672,18 @@ struct D3D12NativeDlssG::Impl {
             const auto completed = readback.fence->GetCompletedValue();
             if (completed == std::numeric_limits<std::uint64_t>::max() ||
                 completed < readback.value) continue;
-            const D3D12_RANGE range{0, 4 * sizeof(UINT)};
+            const D3D12_RANGE range{0, 2 * kMaxOutputs * sizeof(UINT)};
             void *mapped{};
             if (SUCCEEDED(readback.buffer->Map(0, &range, &mapped))) {
                 const auto *flags = static_cast<const UINT *>(mapped);
                 if (logging && decision_log) {
                     std::fprintf(decision_log,
-                        "%llu publication=%llu eyes=%u outputs=%u disable=%u,%u,%u,%u\n",
+                        "%llu publication=%llu eyes=%u outputs=%u disable=%u,%u,%u,%u,%u,%u\n",
                         GetTickCount64(), readback.publication, readback.eyes, readback.outputs,
-                        flags[0], readback.outputs > 1 ? flags[1] : 0,
-                        readback.eyes > 1 ? flags[2] : 0,
-                        readback.eyes > 1 && readback.outputs > 1 ? flags[3] : 0);
+                        flags[0], readback.outputs > 1 ? flags[1] : 0, readback.outputs > 2 ? flags[2] : 0,
+                        readback.eyes > 1 ? flags[kMaxOutputs] : 0,
+                        readback.eyes > 1 && readback.outputs > 1 ? flags[kMaxOutputs + 1] : 0,
+                        readback.eyes > 1 && readback.outputs > 2 ? flags[kMaxOutputs + 2] : 0);
                     std::fflush(decision_log);
                 }
                 const D3D12_RANGE no_write{0, 0};
@@ -1243,7 +1244,7 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
                 hp.CreationNodeMask = hp.VisibleNodeMask = 1;
                 D3D12_RESOURCE_DESC bd{};
                 bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-                bd.Width = 4 * sizeof(UINT);
+                bd.Width = 2 * kMaxOutputs * sizeof(UINT);
                 bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
                 bd.SampleDesc.Count = 1;
                 bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -1802,7 +1803,7 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             for (UINT i = 0; i < bv.size(); ++i) {
                 for (UINT output = 0; output < outputs.size(); ++output) {
                     list->CopyBufferRegion(p.decisions[slot].buffer.Get(),
-                        (i * 2 + output) * sizeof(UINT),
+                        (i * kMaxOutputs + output) * sizeof(UINT),
                         p.features[place[i].feature].disable[output].Get(), 0, sizeof(UINT));
                 }
             }

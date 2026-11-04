@@ -3969,6 +3969,22 @@ void test_view_placed_dlss_guides(D3D12WarpFixture& fixture) {
     require(mr == left.placed_motion_rect, "a placed guide's vectors are not its placed rectangle");
     require(placed[0]->eyes[0]->serial == 2 && placed[1]->eyes[0]->serial == 2,
         "the newest evaluation by the release was not taken");
+    {
+        // The eye's own image matches no stream by size. The lookup xrEndFrame
+        // revisits by camera is tentative: its failure must not replace the
+        // status the last pair reported (Hybrid 3X/4X showed red although it
+        // used the placed guides); an ordinary lookup still reports it.
+        const auto eye_image = texture(200, 220);
+        xrfg::report_dlss_motion_vector_use();
+        const auto tentative = xrfg::resolve_dlss_motion_vectors(eye_image.Get(), fixture.queue(),
+            0, release, release, {}, true);
+        require(!tentative && xrfg::dlss_motion_vector_statistics().status == xrfg::DlssMotionVectorStatus::used,
+            "a tentative lookup by size replaced the guide status");
+        const auto reported = xrfg::resolve_dlss_motion_vectors(eye_image.Get(), fixture.queue(),
+            0, release, release);
+        require(!reported && xrfg::dlss_motion_vector_statistics().status != xrfg::DlssMotionVectorStatus::used,
+            "an ordinary lookup by size no longer reports its failure");
+    }
     // A release before this frame's evaluations takes the stream's previous.
     const auto earlier = xrfg::resolve_view_placed_dlss_guides(fixture.queue(), eyes, {release - 4, release - 4});
     require(earlier[0] && earlier[0]->eyes[0]->serial == 1, "a release did not bound its eye's evaluation");
@@ -6123,6 +6139,9 @@ int main(int argc, char** argv) {
                 test_synthetic_camera_follows_display_pose(camera_fixture,path,false);
                 if (path!=SyntheticCameraPath::native || xrfg::native_dlssg_max_generated_frames(camera_fixture.device())>=2)
                     test_synthetic_camera_follows_display_pose(camera_fixture,path,true);
+                // 4X: three generated outputs a pair; native where the GPU makes three.
+                if (path!=SyntheticCameraPath::native || xrfg::native_dlssg_max_generated_frames(camera_fixture.device())>=3)
+                    test_synthetic_camera_follows_display_pose(camera_fixture,path,false,100,true);
             }
             test_synthetic_camera_follows_display_pose(camera_fixture,SyntheticCameraPath::native,false,67);
             test_synthetic_camera_follows_display_pose(camera_fixture,SyntheticCameraPath::fsr,false);

@@ -393,6 +393,15 @@ int main(int argc,char** argv) {
     const bool rife_fast=route.find("fast")!=std::string::npos;
     const unsigned rife_factor=rife_msfs?2:rife_luke?(rife_switch?2:rife_luke_factor):rife_overlap?rife_overlap_factor:rife_tail?rife_tail_factor:rife_latency?rife_latency_factor:(rife_report||rife_replay)?4:rife_switch?2:route=="rife3"?3:route=="rife4"?4:route=="rife2"?2:0;
     if(rife_factor)route=rife_luke?(rife_pacing?"hfw-solo-luke-d11-new":"hfw-luke-d11-new"):rife_overlap?"solo-new":"new";
+    // OFXR/Hybrid at 3X/4X on RIFE's ordered route: multi3-new, multi4-fidelity, ...
+    // multiswitch-<route> changes the multiplier live, 2-3-4-3-2, as rife-switch;
+    // a -director suffix runs Director pacing.
+    const bool ofxr_switch=route.starts_with("multiswitch-");
+    const unsigned ofxr_factor=ofxr_switch?2:route.starts_with("multi3-")?3:route.starts_with("multi4-")?4:0;
+    if(ofxr_switch)route=route.substr(12);else if(ofxr_factor)route=route.substr(7);
+    const int ofxr_pacing=ofxr_factor && route.ends_with("-director")?1:0;
+    if(ofxr_pacing)route.resize(route.size()-9);
+    const bool phase_switch=rife_switch || ofxr_switch;
 
     if(route=="vram-budget")return steamvr_vram_budget_test(argc,argv);
     if(route=="unbridged-vulkan-session")return unbridged_vulkan_session_test();
@@ -461,6 +470,18 @@ int main(int argc,char** argv) {
         xrfg::autonomous::apply_runtime_settings();
     }
 
+    if(ofxr_factor){
+        auto desired=xrfg::autonomous::snapshot().desired;
+        const bool hybrid_route=route=="hybrid",dlssg_route=route=="dlssg";
+        xrfg::autonomous::select_generation(desired,dlssg_route?2:hybrid_route?3:0,route=="fidelity"?0:route=="ref"?1:2);
+        if(hybrid_route)desired.hybrid_backend=0;
+        if(dlssg_route)desired.triple_frame_gen=true; // DLSS-G 4X holds 3X's switch
+        desired.frame_multiplier=int(ofxr_factor);desired.enabled=true;desired.pacing_mode=ofxr_pacing;
+        check(xrfg::autonomous::request(desired),"OFXR multiplier production UI request");
+        xrfg::autonomous::apply_runtime_settings();
+        check(xrfg::embedded::snapshot().desired.rife_multiplier==(route=="dlssg" && ofxr_factor<4?2:int(ofxr_factor)) &&
+            xrfg::embedded::snapshot().desired.rife_model<0,"OFXR multiplier reaches the layer without RIFE");
+    }
     if(large_buffer) {
         auto desired=xrfg::autonomous::snapshot().desired;desired.increase_buffer=true;
         check(xrfg::autonomous::request(desired),"saved larger buffer before session");xrfg::autonomous::apply_runtime_settings();
@@ -784,6 +805,7 @@ int main(int argc,char** argv) {
         state->nvidia_options.rife_async=true;state->nvidia_options.input_scale=xrfg::D3D12NvidiaInputScale::sixth;
     }
 
+    if(ofxr_factor)state->nvidia_options.rife_multiplier=int(ofxr_factor);
     if(benchmark_sequence)state->djules_pipeline_switchable=true; // shipping xrCreateSession enables live multiplier polling
     const bool vectors=route=="fsr" || route=="hybrid" || route=="dlssg";
     if(vectors)state->dlss_motion_vectors=true;
@@ -805,6 +827,11 @@ int main(int argc,char** argv) {
     {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;g_instances[dispatch->instance]=dispatch;}
     ok(install_private_runtime(state),"install real SteamVR private dispatch");
     if(rife_factor){state->control_revision=0;ok(apply_embedded_control(state),"actual RIFE production control after private session installation");}
+    if(ofxr_factor){if(route=="dlssg")refresh_native_generation_capacity(*state); // as xrCreateSession
+        state->control_revision=0;ok(apply_embedded_control(state),"actual OFXR multiplier control after private session installation");
+        check(ofxr_factor<3 || route=="dlssg" || (optical_multiframe_requested(*state) && rife_frames(*state)==ofxr_factor),"OFXR multiplier admitted on the private route");
+        check(route!="dlssg" || ofxr_factor<4 || state->native_dlss_generated_frames<3 ||
+            (native_multiframe_requested(*state) && rife_frames(*state)==4),"DLSS-G 4X admitted on the private route");}
     if(benchmark_dlssg_sequence) {
         // Manual SessionState fixtures must make the same real SDK capacity
         // query as xrCreateSession. Never grant a synthetic 3X capability.
@@ -1073,7 +1100,7 @@ int main(int argc,char** argv) {
     // SDK limited to one generated frame it would instead test an unrelated
     // prefer_fps scheduling change while repeating the same 2X Fast policy.
     const unsigned benchmark_policy_phases=benchmark_dlssg_sequence && !benchmark_dlssg_transition && state->native_dlss_generated_frames<2?6:7;
-    const unsigned input_count=rife_latency?64:rife_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:rife_msfs?64:8;
+    const unsigned input_count=rife_latency?64:phase_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:rife_msfs?64:8;
     if(benchmark_sequence) {
         std::fprintf(stderr,"BENCH policies=%u real_inputs=%u actual_3x_to_2x_transition=%u explicit_prefer_fps_transition_diagnostic=%u memory_sampling=%s\n",
             benchmark_policy_phases,input_count,unsigned(benchmark_policy_phases==7 &&
@@ -1085,7 +1112,7 @@ int main(int argc,char** argv) {
     std::vector<std::int64_t> rife_source_ends;
     std::optional<XrTime> rife_replay_time;
     unsigned rife_phase_start{};
-    unsigned rife_phase_factor=rife_factor;
+    unsigned rife_phase_factor=rife_factor?rife_factor:ofxr_factor;
     bool hfw_gate_proven=false;
     bool rife_overlap_proven=false;
     std::uint64_t rife_overlap_b_sequence{};
@@ -1102,11 +1129,12 @@ int main(int argc,char** argv) {
             f.end_entered=false;
             rife_overlap_hold_after=f.real_ends.load()+rife_factor-3;
         }
-        if(rife_switch && (n-1)%rife_phase_frames==0) {
+        if(phase_switch && (n-1)%rife_phase_frames==0) {
             constexpr unsigned factors[]{2,3,4,3,2};
             rife_phase_factor=factors[(n-1)/rife_phase_frames];
             auto desired=xrfg::autonomous::snapshot().desired;
-            desired.rife_multiplier=rife_phase_factor;
+            if(ofxr_switch)desired.frame_multiplier=int(rife_phase_factor);
+            else desired.rife_multiplier=rife_phase_factor;
             if(rife_luke){constexpr int percentages[]{10,15,21,30,15};desired.rife_resolution=percentages[(n-1)/rife_phase_frames];}
             check(xrfg::autonomous::request(desired),"live RIFE multiplier request");
             xrfg::autonomous::apply_runtime_settings();
@@ -1499,7 +1527,7 @@ int main(int argc,char** argv) {
                     control.lower_vram,control.separate_synthesis,unsigned(control.triple_frame_gen),actual_triple?3U:2U,memory_phase_peaks[phase]);std::fflush(stdout);
             }
         }
-        if(rife_switch && n%rife_phase_frames==0) {
+        if(phase_switch && n%rife_phase_frames==0) {
             xr_ok(wait_for_synthesis_handoff(state),"RIFE phase worker complete");
             if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"RIFE phase presenter drained");
             xr_ok(f.transport->drain(),"RIFE phase physical output drained");
@@ -1565,6 +1593,13 @@ int main(int argc,char** argv) {
         std::fprintf(stderr,"RIFE transport factor=%u outputs=%u state=%u private=%u slotcap=%zu worker=%u\n",
             rife_factor,f.real_ends.load(),unsigned(state->generation_status.load()),bool(state->private_runtime),state->three_slots.capacity(),state->three_slot_director);
         check(f.real_ends>=1+5*rife_factor,"RIFE full transport lost one or more intermediate/real outputs");
+    }
+    if(ofxr_factor){
+        std::fprintf(stderr,"OFXR multiframe route=%s factor=%u outputs=%u state=%u slotcap=%zu worker=%u ready_clock=%u\n",
+            route.c_str(),ofxr_factor,f.real_ends.load(),unsigned(state->generation_status.load()),state->three_slots.capacity(),
+            state->three_slot_director,state->private_runtime->ready_clock_enabled());
+        // The worker has stopped by now (three_slot_director is cleared): judge by the frames.
+        if(!ofxr_switch)check(f.real_ends==2+(input_count-2)*ofxr_factor,"OFXR multiplier lost, duplicated or skipped intermediate/real outputs");
     }
     check(generated,"actual generator must produce synthetic outputs beyond accepted real inputs");
     if(sole) {

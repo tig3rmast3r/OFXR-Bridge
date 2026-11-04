@@ -23,6 +23,7 @@ struct GenerationPreferences {
     bool prefer_fps{true};
     bool triple_frame_gen{};
     int native_scale{100};
+    int frame_multiplier{2}; // OFXR engines but 0.2.13, and Hybrid: 2X, 3X or 4X
     bool operator==(const GenerationPreferences&) const = default;
 };
 constexpr std::size_t kGenerationProfileCount = 8; // four OFXR engines, FSR, DLSS-G, Hybrid, RIFE
@@ -55,6 +56,7 @@ struct Settings {
     bool prefer_fps{true};
     bool triple_frame_gen{};
     int native_scale{100};
+    int frame_multiplier{2}; // OFXR engines but 0.2.13, and Hybrid: 2X, 3X or 4X
     int afw_mode{3}; // 0 off, 1 alternate, 2 previous, 3 combined
     bool afw_debug{};
     bool afw_clear_before_warping{};
@@ -264,6 +266,14 @@ constexpr int generation_ui_index(int mode) noexcept { return mode==4 ? 1 : mode
 constexpr int generation_from_ui(int index) noexcept { return index==1 ? 4 : index==2 ? 3 : index==3 ? 1 : index==4 ? 2 : 0; }
 void select_generation(Settings& value, int generation, int ofxr_engine) noexcept;
 Settings sanitize(Settings value) noexcept;
+// OFXR's FidelityFX, 0.2.1 and 0.3.0 engines and Hybrid: the routes whose
+// frame_multiplier (2X-4X) applies. 0.2.13 and DLSS-G keep triple_frame_gen.
+[[nodiscard]] bool optical_multiplier_route(const Settings& s) noexcept;
+// The output multiplier the selected route asks for.
+[[nodiscard]] int generation_multiplier(const Settings& s) noexcept;
+// The multiplier the layer receives as rife_multiplier: RIFE's, OFXR/Hybrid's
+// 2X-4X, or DLSS-G's 4X (its 3X stays on triple_frame_gen).
+[[nodiscard]] int runtime_multiplier(const Settings& s) noexcept;
 Settings parse_settings(std::string_view text);
 std::string serialize_settings(const Settings& value,bool include_global_ui=false);
 

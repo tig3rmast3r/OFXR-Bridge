@@ -225,6 +225,19 @@ void route_profiles() {
         "profiles from before Hybrid's flow resolution keep the quarter they ran at, and only Hybrid's");
     older.scale=2;older=parse_settings(serialize_settings(older));
     require(older.scale==2,"Hybrid's chosen flow resolution survives a save");
+    Settings multiplied;select_generation(multiplied,0,2);multiplied.frame_multiplier=4;multiplied=sanitize(multiplied);
+    select_generation(multiplied,3,0);multiplied.frame_multiplier=3;multiplied=sanitize(multiplied);
+    select_generation(multiplied,0,3);multiplied.frame_multiplier=4;multiplied=sanitize(multiplied);
+    multiplied=parse_settings(serialize_settings(multiplied));
+    require(multiplied.frame_multiplier==2 && generation_multiplier(multiplied)==2,"0.2.13 keeps its own 3X, never the OFXR multiplier");
+    select_generation(multiplied,0,2);require(multiplied.frame_multiplier==4 && generation_multiplier(multiplied)==4,"OFXR 0.3.0 keeps its 4X");
+    select_generation(multiplied,3,2);require(multiplied.frame_multiplier==3,"Hybrid keeps its own multiplier");
+    select_generation(multiplied,0,0);require(multiplied.frame_multiplier==2,"an untouched engine stays at 2X");
+    Settings dlssg;select_generation(dlssg,2,0);dlssg.triple_frame_gen=true;dlssg=sanitize(dlssg);
+    require(runtime_multiplier(dlssg)==2 && generation_multiplier(dlssg)==3,"DLSS-G 3X stays on triple_frame_gen");
+    dlssg.frame_multiplier=4;dlssg.triple_frame_gen=false;dlssg=parse_settings(serialize_settings(dlssg));
+    require(dlssg.triple_frame_gen && runtime_multiplier(dlssg)==4 && generation_multiplier(dlssg)==4,
+        "DLSS-G 4X holds 3X's switch on and reaches the layer as 4");
     select_generation(hybrid,0,2);
     require(hybrid.scale==0 && hybrid.lower_vram==0 && hybrid.motion_vectors==0,"Hybrid leaves existing OFXR profile unchanged");
     require(generation_status_text(3,1,GenerationState::missing_motion).starts_with("Fallback to optical flow:"),"Hybrid missing guides reports fallback");

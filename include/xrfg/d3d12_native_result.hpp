@@ -13,6 +13,9 @@ namespace xrfg {
 // Only completed GPU readback is counted as interpolation. Never CPU-wait.
 struct D3D12NativeFrameResult {
     static constexpr std::uint32_t pending = UINT32_MAX;
+    // Generated outputs a pair can carry (4X), and so the readback's stride:
+    // its interpolation-disable flags are eye * kMaxOutputs + output.
+    static constexpr std::uint32_t kMaxOutputs = 3;
     std::atomic_uint32_t mask{pending};
     Microsoft::WRL::ComPtr<ID3D12Resource> readback;
     Microsoft::WRL::ComPtr<ID3D12Fence> fence;

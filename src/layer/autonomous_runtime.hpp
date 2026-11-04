@@ -49,7 +49,8 @@ inline void apply_runtime_settings() {
     e.backward=s.backward; e.separate_synthesis=s.separate_synthesis; e.lower_vram=s.lower_vram;
     e.motion_vectors=s.motion_vectors; e.frame_generation=s.frame_generation>=3 ? 0 : s.frame_generation;
     e.hybrid=s.frame_generation==3;
-    e.rife_multiplier=s.rife_multiplier;
+    // RIFE's multiplier, or OFXR/Hybrid's 2X-4X; the layer tells them apart by rife_model.
+    e.rife_multiplier=runtime_multiplier(s);
     e.rife_model=s.frame_generation==4?s.rife_model:-1;
     e.rife_resolution=s.rife_resolution;
     if(e.hybrid) e.backend=s.hybrid_backend; // Hybrid's own engine, independent of OFXR's.

@@ -386,13 +386,18 @@ struct DlssReleasedEyeIdentity {
     bool both_eyes{};
     std::uint32_t view_half{};
 };
+// tentative: a per-eye lookup that xrEndFrame's placement by camera revisits
+// (MSFS 2024's foveated streams are never the eye's size). Its failure leaves
+// the guide status as it was; the caller reports one if the frame ends
+// without guides.
 std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
     ID3D12Resource* output,
     ID3D12CommandQueue* consumer_queue,
     int eye = -1,
     std::uint64_t released_at = 0,
     std::uint64_t other_released_at = 0,
-    DlssReleasedEyeIdentity identity = {}) noexcept;
+    DlssReleasedEyeIdentity identity = {},
+    bool tentative = false) noexcept;
 // Process-monotonic publication watermark, unaffected by tracking toggles.
 // Nonzero release watermarks select exact released snapshots. Strict ordinary
 // D3D12 FSR joins are opt-in; existing OFXR/DLSS-G and AFW contracts are preserved.

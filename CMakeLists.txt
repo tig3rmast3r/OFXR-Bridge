@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.856.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.857.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1311,6 +1311,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 COMMAND xrfg_private_runtime_layer_tests auxiliary-slot-${auxiliary_case})
             set_tests_properties(xrfg_private_auxiliary_slot_${auxiliary_case}
                 PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
+        endforeach()
+        # OFXR and Hybrid at 3X/4X on RIFE's ordered private route.
+        foreach(multi_case multi3-new multi4-new multi3-fidelity multi4-fidelity multi3-ref multi4-ref multi3-hybrid multi4-hybrid)
+            add_test(NAME xrfg_private_${multi_case}_gpu COMMAND xrfg_private_runtime_layer_tests ${multi_case})
+            set_tests_properties(xrfg_private_${multi_case}_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         endforeach()
         if(XRFG_TEST_RIFE_GPU)
             foreach(rife_case rife-luke2 rife-luke2-director rife-luke2-buffer3 rife-luke2-buffer3-director rife-overlap3 rife-overlap3-director rife-overlap4 rife-overlap4-director rife-overlap3-retire rife-overlap3-retire-director rife-overlap4-retire rife-overlap4-retire-director rife-luke3 rife-luke4 rife-luke3-director rife-luke4-director rife-luke3-fast-buffer3 rife-luke4-fast-buffer3 rife-luke3-fast-buffer3-director rife-luke4-fast-buffer3-director rife-luke-switch rife-luke-switch-director rife2 rife3 rife4 rife-tail3 rife-tail4 rife-tail3-fast-buffer3 rife-tail4-fast-buffer3 rife-report rife-replay rife-switch rife-switch-director rife-switch-fast rife-switch-fast-director)

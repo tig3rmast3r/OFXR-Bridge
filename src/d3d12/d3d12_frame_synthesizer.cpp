@@ -5105,7 +5105,7 @@ struct D3D12FrameSynthesizer::Impl {
                     transition_barrier(destination, D3D12_RESOURCE_STATE_COPY_DEST, release_state)};
                 list->ResourceBarrier(2, after.data());
             };
-            std::array<D3D12NativeDlssG::Output, 2> outputs{};
+            std::array<D3D12NativeDlssG::Output, 3> outputs{};
             for (UINT output=0; output<synthetic_output_count(); ++output) {
                 outputs[output].image = synthetic_destinations[
                     synthetic_output_destination(output, synthetic_destination_index)].resource.Get();
@@ -5181,6 +5181,26 @@ struct D3D12FrameSynthesizer::Impl {
             valid_game_motion_pair(previous_source, current_source, std::min<UINT>(std::max<UINT>(image_description.DepthOrArraySize, current_source.view_count), kDlssMotionVectorEyeCount)) &&
             current_source.motion_vectors &&
             current_source.motion_vectors->eye_count == target_views.size();
+        if (nvidia_options.hybrid) {
+            // 1196: Hybrid's guide pair, result = its failure code (0 composed
+            // with the game's vectors, 1 no previous, 2 no current guides),
+            // b the current first eye's serial, c the previous one's. The
+            // first sixteen pairs, every change of code and every 256th.
+            const auto code = game_motion_pair_failure_code(previous_source, current_source,
+                std::min<UINT>(std::max<UINT>(image_description.DepthOrArraySize, current_source.view_count),
+                    kDlssMotionVectorEyeCount));
+            static std::atomic<unsigned> records{0};
+            static std::atomic<std::uint64_t> last_code{~0ULL};
+            const unsigned n = records.fetch_add(1, std::memory_order_relaxed);
+            if (n < 16 || last_code.exchange(code, std::memory_order_relaxed) != code || (n & 255U) == 0) {
+                const auto serial = [](const RollingSource& source) -> std::uint64_t {
+                    return source.motion_vectors && source.motion_vectors->eye_count != 0 &&
+                        source.motion_vectors->eyes[0] ? source.motion_vectors->eyes[0]->serial : 0;
+                };
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                    static_cast<std::int64_t>(code), 1196, serial(current_source), serial(previous_source));
+            }
+        }
         if (!hybrid && valid_game_motion_pair(previous_source, current_source, std::min<UINT>(std::max<UINT>(image_description.DepthOrArraySize, current_source.view_count), kDlssMotionVectorEyeCount))) {
             const HRESULT result = record_game_motion_pair(slot, previous_source,
                 current_source, target_views, synthetic_destination_index,
@@ -6450,23 +6470,36 @@ struct D3D12FrameSynthesizer::Impl {
         std::span<const D3D12ReprojectionView> extra_target_views = current_source_views;
         extra_output.reset();
         if (extra_synthetic) {
-            if (generation_mode == D3D12FrameGenerationMode::fsr3 ||
-                extra_synthetic->destination_index >= synthetic_destinations.size() ||
-                extra_synthetic->destination_index == synthetic_destination_index ||
-                !std::isfinite(extra_synthetic->interpolation_fraction) ||
+            // Which check refused the extra outputs (synthesis_pair, result
+            // 9000 + check): destinations, count and fractions.
+            const auto refuse = [&](std::int64_t check) noexcept {
+                bridge_flight_logger().event(BridgeFlightOperation::synthesis_pair, 9000 + check,
+                    extra_synthetic->destination_index |
+                        (std::uint64_t(extra_synthetic->third_destination_index) << 32),
+                    synthetic_destination_index | (std::uint64_t(synthetic_destinations.size()) << 32),
+                    (std::uint64_t(std::bit_cast<std::uint32_t>(extra_synthetic->interpolation_fraction)) << 32) |
+                        std::bit_cast<std::uint32_t>(extra_synthetic->third_fraction));
+                return E_INVALIDARG;
+            };
+            if (generation_mode == D3D12FrameGenerationMode::fsr3) return refuse(1);
+            if (extra_synthetic->destination_index >= synthetic_destinations.size()) return refuse(2);
+            if (extra_synthetic->destination_index == synthetic_destination_index) return refuse(3);
+            if (!std::isfinite(extra_synthetic->interpolation_fraction) ||
                 extra_synthetic->interpolation_fraction <= 0.05F ||
-                extra_synthetic->interpolation_fraction >= 0.95F) return E_INVALIDARG;
+                extra_synthetic->interpolation_fraction >= 0.95F) return refuse(4);
             if(extra_synthetic->third_destination_index!=UINT32_MAX){
-                if((!rife && !flat_panel) || extra_synthetic->third_destination_index>=synthetic_destinations.size() ||
-                    extra_synthetic->third_destination_index==synthetic_destination_index ||
-                    extra_synthetic->third_destination_index==extra_synthetic->destination_index ||
-                    !std::isfinite(extra_synthetic->third_fraction) || extra_synthetic->third_fraction<=extra_synthetic->interpolation_fraction ||
-                    extra_synthetic->third_fraction>=.95F)return E_INVALIDARG;
+                // A third output (4X): RIFE, panels, OFXR/Hybrid, and native
+                // DLSS-G, whose provider refuses more than the GPU generates.
+                if(extra_synthetic->third_destination_index>=synthetic_destinations.size())return refuse(6);
+                if(extra_synthetic->third_destination_index==synthetic_destination_index ||
+                    extra_synthetic->third_destination_index==extra_synthetic->destination_index)return refuse(7);
+                if(!std::isfinite(extra_synthetic->third_fraction) || extra_synthetic->third_fraction<=extra_synthetic->interpolation_fraction ||
+                    extra_synthetic->third_fraction>=.95F)return refuse(8);
                 if(!extra_synthetic->third_views.empty() && (!valid_view_layout(extra_synthetic->third_views,
                     static_cast<UINT>(image_description.Width),image_description.Height,image_description.DepthOrArraySize) ||
-                    extra_synthetic->third_views.size()!=current_source_views.size() || !same_view_layout(current_source_views,extra_synthetic->third_views,image_description.DepthOrArraySize)))return E_INVALIDARG;
+                    extra_synthetic->third_views.size()!=current_source_views.size() || !same_view_layout(current_source_views,extra_synthetic->third_views,image_description.DepthOrArraySize)))return refuse(9);
             }
-            if(rife && extra_synthetic->interpolation_fraction<=synthetic_fraction)return E_INVALIDARG;
+            if(rife && extra_synthetic->interpolation_fraction<=synthetic_fraction)return refuse(10);
             extra_output = extra_synthetic;
             if (!extra_synthetic->target_views.empty()) extra_target_views = extra_synthetic->target_views;
         }

@@ -1691,6 +1691,32 @@ private:
 // delivery policy. Ordinary OFXR Framework eligibility is unchanged.
 // Native VDXR uses the existing ordered three-slot worker, without a private
 // OpenXR endpoint. Limit the new native path to D12, unsplit loops and3X.
+// OFXR and Hybrid at 3X/4X take RIFE's ordered multi-output route - its
+// worker, extra outputs and native pacing - with their own synthesis. 0.2.13
+// keeps its own 3X (djules_triple_requested); 2X is unchanged.
+[[nodiscard]] bool optical_multiframe_requested(const SessionState& state) noexcept {
+    return state.nvidia_options.rife_model<0 && state.nvidia_options.rife_multiplier>2 &&
+        state.frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr && !state.djules_route;
+}
+// DLSS-G at 4X takes the same ordered route, on the private SteamVR route
+// where the GPU generates three frames. Its 3X keeps triple_frame_gen's.
+[[nodiscard]] bool native_multiframe_requested(const SessionState& state) noexcept {
+    return state.nvidia_options.rife_model<0 && state.nvidia_options.rife_multiplier>3 &&
+        state.frame_generation_mode==xrfg::D3D12FrameGenerationMode::native_dlss &&
+        state.private_runtime && state.native_dlss_generated_frames>=3;
+}
+// RIFE at any multiplier, OFXR/Hybrid at 3X/4X, or DLSS-G at 4X.
+[[nodiscard]] bool ordered_multiframe(const SessionState& state) noexcept {
+    return state.nvidia_options.rife_model>=0 || optical_multiframe_requested(state) ||
+        native_multiframe_requested(state);
+}
+// The same, from requested settings (embedded frame_generation 0 is OFXR,
+// Hybrid and RIFE alike; Hybrid's engine is never 0.2.13).
+[[nodiscard]] bool requested_ordered_multiframe(const xrfg::embedded::Settings& desired) noexcept {
+    return desired.rife_model>=0 ||
+        (desired.rife_multiplier>2 && desired.frame_generation==0 && desired.backend!=3) ||
+        (desired.rife_multiplier>3 && desired.frame_generation==2);
+}
 [[nodiscard]] bool native_vdxr_rife_three(const SessionState& state) noexcept {
     return !state.private_runtime && state.dispatch->virtual_desktop_runtime && state.vdxr_legacy &&
         !state.afw_only && !state.split_frame_loop && !state.d3d11_bridge && !state.vulkan_bridge &&
@@ -1700,8 +1726,8 @@ private:
 [[nodiscard]] bool fresh_luke_director_worker(const SessionState& state) noexcept {
     return state.luke_fresh_only && !state.afw_only &&
         (single_director_pacing(state) || (state.private_runtime &&
-         state.nvidia_options.rife_model>=0) || (native_vdxr_rife_three(state) &&
-         state.nvidia_options.rife_model>=0 && state.nvidia_options.rife_multiplier==3)) &&
+         ordered_multiframe(state)) || (native_vdxr_rife_three(state) &&
+         ordered_multiframe(state) && state.nvidia_options.rife_multiplier==3)) &&
         (state.dispatch->steamvr_runtime || native_vdxr_rife_three(state)) && state.luke_synthesis_queue &&
         state.optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
         state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr;
@@ -1772,7 +1798,7 @@ unsigned rife_benchmark_max_multiplier(const SessionState& state) noexcept {
     return 2;
 }
 unsigned rife_frames(const SessionState& state) noexcept {
-    return state.nvidia_options.rife_model>=0 && rife_multiframe_capable(state)
+    return ordered_multiframe(state) && rife_multiframe_capable(state)
         ? static_cast<unsigned>(std::clamp(state.nvidia_options.rife_multiplier,2,native_vdxr_rife_three(state)?3:4)):2U;
 }
 // RIFE owns its temporal history independently of the output descriptor.
@@ -1794,7 +1820,7 @@ unsigned rife_frames(const SessionState& state) noexcept {
     return reduced_native_outputs(state) && !private_triple ? 1U : 2U;
 }
 [[nodiscard]] unsigned source_synthetic_rings(const SessionState& state,bool panel) noexcept {
-    return panel && state.nvidia_options.rife_model>=0 && rife_frames(state)>2
+    return panel && ordered_multiframe(state) && rife_frames(state)>2
         ? 2U*(rife_frames(state)-1) : native_synthetic_rings(state);
 }
 [[nodiscard]] unsigned native_current_rings(const SessionState& state) noexcept {
@@ -1806,7 +1832,7 @@ unsigned rife_frames(const SessionState& state) noexcept {
 }
 
 [[nodiscard]] bool djules_triple_active(const SessionState& state) noexcept {
-    if(state.nvidia_options.rife_model>=0)return state.menu_enabled && rife_frames(state)>2;
+    if(ordered_multiframe(state))return state.menu_enabled && rife_frames(state)>2;
     if(direct_reduced_outputs(state) && !extra_output_capacity(state)) return false;
     if (state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::native_dlss)
         return state.djules_triple_requested && state.menu_enabled &&
@@ -3584,7 +3610,7 @@ create_d3d12_frame_generation_swapchains(
         // descriptor through physical submission before the next pair reuses it.
         generation->current_runtime_rings = output_slots;
         generation->synthetic_runtime_rings = source_synthetic_rings(*state->session,state->panel_source);
-        if(state->panel_source && state->session->nvidia_options.rife_model>=0 && rife_frames(*state->session)>2)
+        if(state->panel_source && ordered_multiframe(*state->session) && rife_frames(*state->session)>2)
             generation->panel_batch_width=rife_frames(*state->session)-1;
         generation->direct_extra_outputs = !generation->staged_outputs && extra_output_capacity(*state->session);
         if(generation->direct_extra_outputs)
@@ -6611,7 +6637,7 @@ XrResult layer_wait_frame_impl(
         // Preserve overlap bookkeeping, but do not promote its application
         // tickets into the legacy presenter: that makes 3X/4X appear unsupported
         // and can reject a live multiplier change before synthesis starts.
-        const bool private_rife=state->private_runtime && state->nvidia_options.rife_model>=0;
+        const bool private_rife=state->private_runtime && ordered_multiframe(*state);
         if (!private_rife && !presenter_forbidden(*state) && !state->luke_afw_enabled && state->pipelined_wait_streak >= 2 &&
             state->last_inline_frame_state_valid) {
             // The current runtime frame is still owned by the render thread,
@@ -8116,7 +8142,7 @@ XrResult release_swapchain_image_locked(
             std::scoped_lock lock(state->mutex);
             auto* application_d3d11_device = state->session->d3d11_bridge
                 ? state->session->d3d11_bridge->device.Get() : state->session->d3d11_device.Get();
-            const auto resolve_by_size = [&] {
+            const auto resolve_by_size = [&](bool revisited_at_end) {
                 const int eye = state->session->luke_afw_enabled ? -1 :
                     state->projection_eye.load(std::memory_order_relaxed);
                 return xrfg::resolve_dlss_motion_vectors(
@@ -8128,7 +8154,9 @@ XrResult release_swapchain_image_locked(
                               std::memory_order_relaxed) : 0,
                     strict_release_eye_identity(*state->session)
                         ? both_eyes_identity(*state, {true, state->fsr_eye_identity.stream, state->fsr_eye_identity.epoch})
-                        : both_eyes_identity(*state, {}));
+                        : both_eyes_identity(*state, {}),
+                    revisited_at_end && release_bound_guides && (eye == 0 || eye == 1) &&
+                        !state->session->uevr_osr_active.load(std::memory_order_acquire));
             };
             if ((d3d11_interop || bridge) && xrfg::d3d11_guides_claimed(application_d3d11_device)) {
                 // Resolve this actual eye texture. The returned one-eye set is
@@ -8150,7 +8178,7 @@ XrResult release_swapchain_image_locked(
                 const bool receipt = pending_motion_vectors != nullptr;
                 if (!receipt && *candidate_index < state->enumerated_d3d12_images.size() &&
                     state->enumerated_d3d12_images[*candidate_index]->GetDesc().DepthOrArraySize == 1) {
-                    auto side_by_side = resolve_by_size();
+                    auto side_by_side = resolve_by_size(false);
                     if (side_by_side && side_by_side->eye_count == xrfg::kDlssMotionVectorEyeCount)
                         pending_motion_vectors = std::move(side_by_side);
                 }
@@ -8168,7 +8196,9 @@ XrResult release_swapchain_image_locked(
                         frame?(frame->publication|(static_cast<std::uint64_t>(pending_motion_vectors->eye_count)<<56)):0);
                 }
             } else if (*candidate_index < state->enumerated_d3d12_images.size()) {
-                pending_motion_vectors = resolve_by_size();
+                // An eye's own image: xrEndFrame resolves it again and places
+                // by camera what no size matched, then reports the outcome.
+                pending_motion_vectors = resolve_by_size(true);
             } else if (d3d11_interop) {
                 std::shared_ptr<const xrfg::DlssMotionVectorSet> resolved;
                 if (luke_split_eye) {
@@ -10250,7 +10280,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_clock_anchor,
                         5572,probe_sequence,std::chrono::duration_cast<std::chrono::nanoseconds>(submission_slot.time_since_epoch()).count(),period.count());
                 const auto* probe=selected?selected->frame.get():borrowed->owned_frame.get();
-                if(state->nvidia_options.rife_model<0 && djules_triple_active(*state) && probe && probe->djules_leader) {
+                if(!ordered_multiframe(*state) && djules_triple_active(*state) && probe && probe->djules_leader) {
                     const auto deadline=submission_slot-std::chrono::milliseconds(4);
                     if(deadline>std::chrono::steady_clock::now()) std::this_thread::sleep_until(deadline);
                     bool ready=!probe->pending_outputs.empty();
@@ -10639,8 +10669,10 @@ void stop_continuous_presenter(
     const std::shared_ptr<SessionState>& state) noexcept {
     return !presenter_forbidden(*state) && !djules_inline_runtime(*state) && state->menu_enabled && state->frame_generation_mode !=
                xrfg::D3D12FrameGenerationMode::fsr3 &&
-           state->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
-           (state->nvidia_new_route || fresh_luke_director_worker(*state)) &&
+           ((state->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
+             (state->nvidia_new_route || fresh_luke_director_worker(*state))) ||
+            ((optical_multiframe_requested(*state) || native_multiframe_requested(*state)) &&
+             rife_frames(*state)>2)) &&
            (!direct_reduced_outputs(*state) || extra_output_capacity(*state)) &&
            (state->graphics_binding == SessionGraphicsBinding::d3d11 ||
             state->graphics_binding == SessionGraphicsBinding::d3d12) &&
@@ -10666,7 +10698,7 @@ void delay_djules_application_release(const std::shared_ptr<SessionState>& state
     if(state->private_runtime)return;
     std::chrono::nanoseconds delay{};
     { std::scoped_lock lock(state->presenter_mutex);
-      if(state->nvidia_options.rife_model<0 && djules_triple_active(*state)) delay=state->djules_triple_release.delay; }
+      if(!ordered_multiframe(*state) && djules_triple_active(*state)) delay=state->djules_triple_release.delay; }
     if(delay>std::chrono::nanoseconds::zero()) {
         std::unique_lock lock(state->presenter_mutex);
         state->presenter_condition.wait_until(lock,std::chrono::steady_clock::now()+delay,[&] {
@@ -11250,19 +11282,28 @@ void refresh_release_bound_projection_guides(
         }
         if (ambiguous) { reject(); return; }
         std::array<std::shared_ptr<const xrfg::DlssMotionVectorSet>, 2> resolved{};
-        for (std::size_t eye = 0; eye < chains.size(); ++eye) {
-            session.eye_release_publication[eye].store(releases[eye], std::memory_order_relaxed);
-            if (!chains[eye]) continue;
+        // By size, tentatively: a failure is reported below only if placing
+        // by camera finds nothing either. Under MSFS 2024's foveated rendering
+        // every lookup by size fails, and that failure, the last status
+        // written before this EndFrame published it, showed Hybrid 3X/4X red
+        // although the placed guides were used (at 2X the pair inside the
+        // EndFrame reported its use after it).
+        const auto resolve_eye = [&](std::size_t eye, bool tentative) {
             std::scoped_lock lock(chains[eye]->mutex);
             // No watermark means no valid release association, not a request
             // to reuse the legacy newest/odd-even matching on an R15 route.
-            resolved[eye] = releases[eye] ? xrfg::resolve_dlss_motion_vectors(
+            return releases[eye] ? xrfg::resolve_dlss_motion_vectors(
                 chains[eye]->enumerated_d3d12_images[*chains[eye]->last_released_index].Get(),
                 session.d3d12_queue.Get(), static_cast<int>(eye), releases[eye], releases[1 - eye],
                 strict_release_eye_identity(session)
                     ? both_eyes_identity(*chains[eye], {true, chains[eye]->fsr_eye_identity.stream,
                         chains[eye]->fsr_eye_identity.epoch})
-                    : both_eyes_identity(*chains[eye], {})) : nullptr;
+                    : both_eyes_identity(*chains[eye], {}), tentative) : nullptr;
+        };
+        for (std::size_t eye = 0; eye < chains.size(); ++eye) {
+            session.eye_release_publication[eye].store(releases[eye], std::memory_order_relaxed);
+            if (!chains[eye]) continue;
+            resolved[eye] = resolve_eye(eye, true);
         }
         // No evaluation the eye images' size: MSFS 2024's foveated rendering
         // evaluates DLSS once per view - per eye a periphery over the whole
@@ -11309,6 +11350,10 @@ void refresh_release_bound_projection_guides(
                     755, 0, tangents(views[0]), tangents(views[1]));
             }
         }
+        // Neither found this eye's guides: report why, as the lookup by size
+        // always did.
+        for (std::size_t eye = 0; eye < chains.size(); ++eye)
+            if (chains[eye] && releases[eye] && !resolved[eye]) resolved[eye] = resolve_eye(eye, false);
         const bool log_placement = by_view &&
             (session.view_placements < 16 || session.view_placements % 512 == 0);
         if (by_view) ++session.view_placements;
@@ -12447,7 +12492,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 motion_vectors = state->last_released_motion_vectors;
             }
         }
-        if(request_pair && state->session->nvidia_options.rife_model>=0 && rife_frames(*state->session)>2 && !worker_submission){
+        if(request_pair && ordered_multiframe(*state->session) && rife_frames(*state->session)>2 && !worker_submission){
             output.reason=GenerationPrepareReason::synthesis_busy;return output;
         }
         const auto synthesizer = afw_source && generation && generation->afw_source_synthesizer
@@ -13010,7 +13055,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     // RIFE multi-output batches sample fixed model times. A short irregular
     // XR interval can place S1 below0.05; the provider sanitizes it to0.5,
     // crossing S2 in4X and correctly rejecting the now-unordered request.
-    if(state && state->nvidia_options.rife_model>=0 && frames>2)
+    if(state && ordered_multiframe(*state) && frames>2)
         return kFixedMidpoint;
     if (state && state->frame_generation_mode == xrfg::D3D12FrameGenerationMode::native_dlss)
         return kFixedMidpoint;
@@ -16037,7 +16082,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     if (continuous_presenter_active(state))
         static_cast<void>(wait_for_presenter_idle(state));
     if(state->private_runtime && state->pipelined_presenter_mode && control.desired.enabled &&
-        control.desired.rife_model>=0 && !state->luke_afw_enabled &&
+        requested_ordered_multiframe(control.desired) && !state->luke_afw_enabled &&
         state->graphics_binding==SessionGraphicsBinding::d3d12 && !state->d3d11_bridge && !state->vulkan_bridge) {
         // An optical route may have promoted before RIFE was selected. Its
         // legacy overlap owner is not a hardware restriction on private RIFE.
@@ -16412,7 +16457,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     // held phase or sole-director framework policy may remain effective OFF.
     state->menu_enabled = SUCCEEDED(result) && control.desired.enabled;
     if(state->private_runtime) {
-        state->private_runtime->set_ready_clock(state->menu_enabled && options.rife_model>=0);
+        state->private_runtime->set_ready_clock(state->menu_enabled && ordered_multiframe(*state));
         const auto buffer=state->private_runtime->set_buffer_capacity(control.desired.increase_buffer?3:2,state->menu_enabled,true);
         if(XR_FAILED(buffer)) {result=E_FAIL;state->menu_enabled=false;}
         const auto policy=state->private_runtime->set_director_enabled(
@@ -16971,7 +17016,7 @@ XrResult layer_end_frame_impl(
             S_OK, 126,
             startup_request->stream, startup_request->epoch);
     const HRESULT control_result = apply_embedded_control(state, startup_request.has_value(), end_info);
-    if(state->private_runtime && desired_control.desired.rife_model>=0 &&
+    if(state->private_runtime && requested_ordered_multiframe(desired_control.desired) &&
         pipelined_presenter_mode && !state->pipelined_presenter_mode) {
         // Reconfiguration may have retired an inherited legacy owner. Do not
         // enqueue this boundary through a stale pre-transaction mode snapshot.

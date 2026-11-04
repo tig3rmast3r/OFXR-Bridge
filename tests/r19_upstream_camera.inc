@@ -40,7 +40,8 @@ void test_synthetic_camera_follows_display_pose(
     D3D12WarpFixture& fixture,
     SyntheticCameraPath path,
     bool triple,
-    std::uint32_t native_scale = 100) {
+    std::uint32_t native_scale = 100,
+    bool quad = false) {
     constexpr UINT kCameraWidth = 160;
     constexpr UINT kCameraHeight = 80;
     constexpr float kYawRadians = 0.2094395102393195F;
@@ -53,21 +54,23 @@ void test_synthetic_camera_follows_display_pose(
     // As the layer places them: interpolating, (index + 1) / frames of the
     // way; extrapolating, the real frame first and each synthetic a display
     // period further on, the first synthetic shown last.
-    const std::array<float, 2> fractions = extrapolating
-        ? (triple ? std::array<float, 2>{5.0F / 3.0F, 4.0F / 3.0F}
-                  : std::array<float, 2>{1.5F, 1.5F})
-        : (triple ? std::array<float, 2>{1.0F / 3.0F, 2.0F / 3.0F}
-                  : std::array<float, 2>{0.5F, 0.5F});
-    const UINT outputs = triple ? 2U : 1U;
+    require(!quad || !extrapolating, "4X is interpolation only");
+    const std::array<float, 3> fractions = extrapolating
+        ? (triple ? std::array<float, 3>{5.0F / 3.0F, 4.0F / 3.0F, 4.0F / 3.0F}
+                  : std::array<float, 3>{1.5F, 1.5F, 1.5F})
+        : quad ? std::array<float, 3>{0.25F, 0.5F, 0.75F}
+        : (triple ? std::array<float, 3>{1.0F / 3.0F, 2.0F / 3.0F, 2.0F / 3.0F}
+                  : std::array<float, 3>{0.5F, 0.5F, 0.5F});
+    const UINT outputs = quad ? 3U : triple ? 2U : 1U;
     const std::string label = std::string("synthetic camera ") +
         synthetic_camera_path_name(path) +
         (path == SyntheticCameraPath::native ? " " + std::to_string(native_scale) + "%" : "") +
-        (triple ? " 3X" : " 2X");
+        (quad ? " 4X" : triple ? " 3X" : " 2X");
 
     const ReprojectionViews views_a = make_reprojection_views(0.0F);
     const ReprojectionViews views_b = make_reprojection_views(kYawRadians);
-    std::array<ReprojectionViews, 2> views_c{};
-    for (UINT output = 0; output < 2; ++output) {
+    std::array<ReprojectionViews, 3> views_c{};
+    for (UINT output = 0; output < 3; ++output) {
         for (UINT eye = 0; eye < kEyeCount; ++eye) {
             views_c[output][eye] = views_b[eye];
             views_c[output][eye].pose = xrfg::pose_at_fraction(
@@ -131,7 +134,8 @@ void test_synthetic_camera_follows_display_pose(
     std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
         create_source_texture(fixture, kCameraWidth, kCameraHeight),
         create_source_texture(fixture, kCameraWidth, kCameraHeight)};
-    std::array<ComPtr<ID3D12Resource>, 2> synthetic_destinations{
+    std::array<ComPtr<ID3D12Resource>, 3> synthetic_destinations{
+        create_source_texture(fixture, kCameraWidth, kCameraHeight),
         create_source_texture(fixture, kCameraWidth, kCameraHeight),
         create_source_texture(fixture, kCameraWidth, kCameraHeight)};
     upload_pattern(fixture, sources[0].Get(), previous);
@@ -139,8 +143,9 @@ void test_synthetic_camera_follows_display_pose(
     std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
     std::array<ID3D12Resource*, 2> current_pointers{
         current_destinations[0].Get(), current_destinations[1].Get()};
-    std::array<ID3D12Resource*, 2> synthetic_pointers{
-        synthetic_destinations[0].Get(), synthetic_destinations[1].Get()};
+    std::array<ID3D12Resource*, 3> synthetic_pointers{
+        synthetic_destinations[0].Get(), synthetic_destinations[1].Get(),
+        synthetic_destinations[2].Get()};
     auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
     require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
                 source_pointers, D3D12_RESOURCE_STATE_RENDER_TARGET)),
@@ -175,9 +180,12 @@ void test_synthetic_camera_follows_display_pose(
     require(operation_succeeded(history->capture(1, &capture_b)) &&
                 operation_succeeded(history->commit(capture_b)),
         label + " capture B failed");
-    const auto extra = triple
+    const auto extra = triple || quad
         ? std::optional<xrfg::D3D12ExtraSynthetic>(xrfg::D3D12ExtraSynthetic{
-              1, fractions[1], std::span<const xrfg::D3D12ReprojectionView>(views_c[1])})
+              1, fractions[1], std::span<const xrfg::D3D12ReprojectionView>(views_c[1]),
+              quad ? 2U : UINT32_MAX, fractions[2],
+              quad ? std::span<const xrfg::D3D12ReprojectionView>(views_c[2])
+                   : std::span<const xrfg::D3D12ReprojectionView>{}})
         : std::nullopt;
     require(synthesizer.submit_pair(capture_b, views_b, views_c[0], 0, 1, &pair, std::nullopt,
                 motion_b, false, fractions[0], {}, extra, true) == S_OK,

@@ -287,13 +287,28 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     const bool djules = draft.frame_generation == 0 && draft.backend == 3;
     const bool dlssg = draft.frame_generation == 2;
     if (djules || dlssg) {
-        int multiplier = draft.triple_frame_gen ? 1 : 0;
+        // DLSS-G also offers 4X (multi-frame generation), saved as its
+        // frame_multiplier; 0.2.13 stops at 3X.
+        int multiplier = dlssg && draft.frame_multiplier == 4 ? 2 : draft.triple_frame_gen ? 1 : 0;
         ImGui::BeginDisabled(draft.lower_vram && !draft.separate_synthesis);
-        if (ImGui::Combo("Multiplier", &multiplier, "2X\0" "3X\0")) {
-            draft.triple_frame_gen = multiplier == 1;
+        if (ImGui::Combo("Multiplier", &multiplier, dlssg ? "2X\0" "3X\0" "4X\0" : "2X\0" "3X\0")) {
+            draft.triple_frame_gen = multiplier >= 1;
+            if (dlssg) draft.frame_multiplier = multiplier == 2 ? 4 : 2;
             changed = true;
         }
         ImGui::EndDisabled();
+        if (dlssg && multiplier == 2)
+            ImGui::TextWrapped("4X needs a GPU with DLSS multi-frame generation and the private SteamVR route with a D3D12 game; otherwise it runs at the highest multiplier the session supports.");
+    }
+    if (optical_multiplier_route(draft)) {
+        // Saved per route: each OFXR engine and Hybrid keep their own.
+        int multiplier = std::clamp(draft.frame_multiplier, 2, 4) - 2;
+        if (ImGui::Combo("Multiplier", &multiplier, "2X\0" "3X\0" "4X\0")) {
+            draft.frame_multiplier = multiplier + 2;
+            changed = true;
+        }
+        if (draft.frame_multiplier > 2)
+            ImGui::TextWrapped("3X and 4X need the private SteamVR route and a D3D12 game (Luke Ross included); native VDXR and Pimax run D3D12 games up to 3X. Other sessions stay at 2X.");
     }
     if (dlssg) {
         dlssg_preset(ui, state, compact);
@@ -310,8 +325,8 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     ImGui::EndDisabled();
     ImGui::TextWrapped(state.runtime.luke_detected ? "Fast mode has no effect with Luke Ross."
         : "Uses private synthesis textures and fewer XR swapchains.");
-    if(pacing_comparison_runtime(state.runtime) && draft.triple_frame_gen && !state.runtime.luke_detected)
-        ImGui::TextWrapped("Fast mode preserves the output capacity needed for 3X; VRAM reduction may be limited.");
+    if(pacing_comparison_runtime(state.runtime) && generation_multiplier(draft) > 2 && !state.runtime.luke_detected)
+        ImGui::TextWrapped("Fast mode preserves the output capacity needed for 3X and 4X; VRAM reduction may be limited.");
     ImGui::Separator();
     if (!ImGui::CollapsingHeader("Details")) return changed;
     if (state.runtime.shared_queue)

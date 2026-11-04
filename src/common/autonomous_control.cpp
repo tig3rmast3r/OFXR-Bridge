@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 84801;
+constexpr std::uint32_t kAbi = 85701;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -123,13 +123,14 @@ std::size_t selected_profile(const Settings& s) noexcept {
 }
 GenerationPreferences active_preferences(const Settings& s) noexcept {
     return {s.motion_vectors, s.preset, s.scale, s.backward, s.separate_synthesis, s.lower_vram,
-        s.prefer_fps, s.triple_frame_gen, s.native_scale};
+        s.prefer_fps, s.triple_frame_gen, s.native_scale, s.frame_multiplier};
 }
 void restore_preferences(Settings& s) noexcept {
     const auto& p = s.generation_profiles[selected_profile(s)];
     s.motion_vectors = p.motion_vectors; s.preset = p.preset; s.scale = p.scale;
     s.backward = p.backward; s.separate_synthesis = p.separate_synthesis; s.lower_vram = p.lower_vram; s.prefer_fps = p.prefer_fps;
     s.triple_frame_gen = p.triple_frame_gen; s.native_scale = p.native_scale;
+    s.frame_multiplier = p.frame_multiplier;
 }
 std::string configuration_text(const std::filesystem::path& path) {
     std::ifstream input(path,std::ios::binary);
@@ -370,6 +371,21 @@ bool suspend_keybinds(bool value) noexcept {
     } catch(...) {return false;}
 }
 
+bool optical_multiplier_route(const Settings& s) noexcept {
+    return (s.frame_generation == 0 && s.backend != 3) || s.frame_generation == 3;
+}
+int generation_multiplier(const Settings& s) noexcept {
+    if (s.frame_generation == 4) return s.rife_multiplier;
+    if (optical_multiplier_route(s)) return s.frame_multiplier;
+    if (s.frame_generation == 2 && s.frame_multiplier == 4) return 4;
+    return s.triple_frame_gen ? 3 : 2;
+}
+int runtime_multiplier(const Settings& s) noexcept {
+    if (s.frame_generation == 4) return s.rife_multiplier;
+    if (optical_multiplier_route(s)) return s.frame_multiplier;
+    // DLSS-G 3X keeps its own triple_frame_gen route; only 4X is passed on.
+    return s.frame_generation == 2 && s.frame_multiplier == 4 ? 4 : 2;
+}
 Settings sanitize(Settings value) noexcept {
     value.pacing_mode=std::clamp(value.pacing_mode,0,value.advanced_mode?2:1);
     value.benchmark_csv=true;
@@ -389,6 +405,10 @@ Settings sanitize(Settings value) noexcept {
     value.lower_vram = std::clamp(value.lower_vram, 0, 1);
     value.separate_synthesis = value.lower_vram;
     value.native_scale = std::clamp(value.native_scale, 25, 100);
+    value.frame_multiplier = optical_multiplier_route(value) || value.frame_generation == 2
+        ? std::clamp(value.frame_multiplier, 2, 4) : 2;
+    // DLSS-G 4X holds 3X's switch on: a session that cannot run 4X runs 3X.
+    if (value.frame_generation == 2 && value.frame_multiplier == 4) value.triple_frame_gen = true;
     value.afw_mode = std::clamp(value.afw_mode, 0, 3);
     value.afw_ignore_motion_threshold = bounded(value.afw_ignore_motion_threshold, 0.F, 16.F, 2.5F);
     value.afw_depth_dilate_mode = std::clamp(value.afw_depth_dilate_mode, 0, 2);
@@ -443,6 +463,9 @@ Settings sanitize(Settings value) noexcept {
         p.lower_vram = std::clamp(p.lower_vram, 0, 1);
         p.separate_synthesis = p.lower_vram;
         p.native_scale = std::clamp(p.native_scale, 25, 100);
+        // OFXR FidelityFX, 0.2.1 and 0.3.0, Hybrid, and DLSS-G's 4X. 0.2.13
+        // keeps its own 3X.
+        p.frame_multiplier = i <= 2 || i == 5 || i == 6 ? std::clamp(p.frame_multiplier, 2, 4) : 2;
     }
     restore_preferences(value);
     return value;
@@ -492,7 +515,7 @@ Settings parse_settings(std::string_view text) {
 #define READ_PROFILE(name) if (key == #name) profile.name = static_cast<decltype(profile.name)>(number);
             READ_PROFILE(motion_vectors) READ_PROFILE(preset) READ_PROFILE(scale)
             READ_PROFILE(backward) READ_PROFILE(separate_synthesis) READ_PROFILE(lower_vram) READ_PROFILE(prefer_fps)
-            READ_PROFILE(triple_frame_gen) READ_PROFILE(native_scale)
+            READ_PROFILE(triple_frame_gen) READ_PROFILE(native_scale) READ_PROFILE(frame_multiplier)
 #undef READ_PROFILE
             continue;
         }
@@ -506,7 +529,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(increase_buffer) READ_FIELD(enabled) READ_FIELD(afw_only) READ_FIELD(backend) READ_FIELD(motion_vectors)
         READ_FIELD(frame_generation) READ_FIELD(rife_resolution) READ_FIELD(rife_multiplier) READ_FIELD(rife_model) READ_FIELD(hybrid_backend) READ_FIELD(preset) READ_FIELD(scale)
         READ_FIELD(pacing_mode) READ_FIELD(backward) READ_FIELD(separate_synthesis) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
-        READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(r19_camera)
+        READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(frame_multiplier) READ_FIELD(r19_camera)
         READ_FIELD(afw_mode) READ_FIELD(afw_debug) READ_FIELD(afw_clear_before_warping)
         READ_FIELD(afw_ignore_motion_threshold) READ_FIELD(afw_depth_dilate_mode) READ_FIELD(afw_shading_rate)
         READ_FIELD(luke_osr) READ_FIELD(luke_osr_lower_quality) READ_FIELD(luke_osr_cover) READ_FIELD(luke_osr_trim) READ_FIELD(luke_osr_fill) READ_FIELD(luke_advanced)
@@ -551,7 +574,7 @@ std::string serialize_settings(const Settings& settings,bool include_global_ui) 
     WRITE_FIELD(increase_buffer) WRITE_FIELD(enabled) WRITE_FIELD(afw_only) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
     WRITE_FIELD(frame_generation) WRITE_FIELD(rife_resolution) WRITE_FIELD(rife_multiplier) WRITE_FIELD(rife_model) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
     WRITE_FIELD(pacing_mode) WRITE_FIELD(backward) WRITE_FIELD(separate_synthesis) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
-    WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(r19_camera)
+    WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(frame_multiplier) WRITE_FIELD(r19_camera)
     WRITE_FIELD(afw_mode) WRITE_FIELD(afw_debug) WRITE_FIELD(afw_clear_before_warping)
     WRITE_FIELD(afw_ignore_motion_threshold) WRITE_FIELD(afw_depth_dilate_mode) WRITE_FIELD(afw_shading_rate)
     WRITE_FIELD(luke_osr) WRITE_FIELD(luke_osr_lower_quality) WRITE_FIELD(luke_osr_cover) WRITE_FIELD(luke_osr_trim) WRITE_FIELD(luke_osr_fill) WRITE_FIELD(luke_advanced)
@@ -573,7 +596,7 @@ std::string serialize_settings(const Settings& settings,bool include_global_ui) 
 #define WRITE_PROFILE(name) output << #name << '=' << p.name << '\n';
         WRITE_PROFILE(motion_vectors) WRITE_PROFILE(preset) WRITE_PROFILE(scale)
         WRITE_PROFILE(backward) WRITE_PROFILE(separate_synthesis) WRITE_PROFILE(lower_vram) WRITE_PROFILE(prefer_fps)
-        WRITE_PROFILE(triple_frame_gen) WRITE_PROFILE(native_scale)
+        WRITE_PROFILE(triple_frame_gen) WRITE_PROFILE(native_scale) WRITE_PROFILE(frame_multiplier)
 #undef WRITE_PROFILE
     }
     return output.str();
@@ -795,7 +818,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
 #define MERGE_PROFILE(name) if (b.name != d.name) p.name = d.name;
         MERGE_PROFILE(motion_vectors) MERGE_PROFILE(preset) MERGE_PROFILE(scale)
         MERGE_PROFILE(backward) MERGE_PROFILE(separate_synthesis) MERGE_PROFILE(lower_vram) MERGE_PROFILE(prefer_fps)
-        MERGE_PROFILE(triple_frame_gen) MERGE_PROFILE(native_scale)
+        MERGE_PROFILE(triple_frame_gen) MERGE_PROFILE(native_scale) MERGE_PROFILE(frame_multiplier)
 #undef MERGE_PROFILE
     }
 #define MERGE_FIELD(name) if (base.name != desired.name) current.name = desired.name;
@@ -924,7 +947,7 @@ void csv_mib(std::ostream& stream,bool valid,std::uint64_t bytes) {
 }
 bool same_trial(const Settings& a,const Settings& b) {
     return a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation && a.rife_resolution==b.rife_resolution && a.rife_model==b.rife_model && a.rife_multiplier==b.rife_multiplier &&
-        a.triple_frame_gen==b.triple_frame_gen && a.prefer_fps==b.prefer_fps &&
+        a.triple_frame_gen==b.triple_frame_gen && a.frame_multiplier==b.frame_multiplier && a.prefer_fps==b.prefer_fps &&
         a.separate_synthesis==b.separate_synthesis && a.lower_vram==b.lower_vram &&
         a.afw_mode==b.afw_mode && (!a.afw_mode || (a.afw_shading_rate==b.afw_shading_rate &&
         a.luke_osr==b.luke_osr && (a.luke_osr!=2 || a.luke_osr_lower_quality==b.luke_osr_lower_quality)));
@@ -969,7 +992,7 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
     if(rec.stream.is_open()) {
         const auto& s=rec.settings;
         rec.stream<<XRFG_IMPLEMENTATION_VERSION<<','<<b.run_id<<','<<b.game_pid<<','<<quoted(rec.game)<<','<<rec.index+1<<','<<quoted(rec.label)<<','
-            <<s.separate_synthesis<<','<<s.lower_vram<<','<<(s.frame_generation==4 ? s.rife_multiplier : s.triple_frame_gen ? 3 : 2)<<','<<s.prefer_fps<<','
+            <<s.separate_synthesis<<','<<s.lower_vram<<','<<generation_multiplier(s)<<','<<s.prefer_fps<<','
             <<s.nr_enabled<<','<<s.afw_mode<<','<<s.afw_shading_rate<<','<<(s.frame_generation!=2 ? "N/A" :
                 rec.dlssg_preset==1 ? "A startup request" : rec.dlssg_preset==3 ? "C startup request" : "Game default / unverified")
             <<','<<double(kBenchmarkSettleMs)/1000.0<<','

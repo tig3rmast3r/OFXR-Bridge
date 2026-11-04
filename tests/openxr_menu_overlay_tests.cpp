@@ -265,21 +265,23 @@ int main(int argc,char** argv) {
             auto settings = xrfg::autonomous::snapshot().desired;
             settings.menu_scale = .5F; settings.menu_offset_x = settings.menu_offset_y = 0;
             check(xrfg::autonomous::request(settings), "centre smaller menu for actual blank-space drag");
-            input.mouse_x = 400; input.mouse_y = 600; submit_menu();
+            // Below the last control of the default (OFXR 0.3.0) page, which
+            // has a Multiplier row since V857.
+            input.mouse_x = 400; input.mouse_y = 700; submit_menu();
             const auto before_drag = menu_pose; const auto drag_size = menu_size;
             input.mouse_down[0] = true;
             input.events = {{xrfg::OverlayMenuInputEventKind::mouse_button, 0, 0, 0, true}};
             submit_menu();
-            input.mouse_x = 420; input.mouse_y = 612;
-            input.events = {{xrfg::OverlayMenuInputEventKind::mouse_position, 420, 612}};
+            input.mouse_x = 420; input.mouse_y = 712;
+            input.events = {{xrfg::OverlayMenuInputEventKind::mouse_position, 420, 712}};
             submit_menu();
             check(std::abs(menu_pose.position.x - before_drag.position.x - 20 * drag_size.width / 1024) < 1e-5F &&
                 std::abs(menu_pose.position.y - before_drag.position.y + 12 * drag_size.height / 768) < 1e-5F,
                 "production blank-child drag moves the composed quad by exact grabbed texel distances");
             // A real producer is countershifted by offset_pointer. This narrow
             // deterministic source rebases itself to the grabbed coordinates.
-            input.mouse_x = 400; input.mouse_y = 600; input.mouse_down[0] = false;
-            input.events = {{xrfg::OverlayMenuInputEventKind::mouse_position, 400, 600},
+            input.mouse_x = 400; input.mouse_y = 700; input.mouse_down[0] = false;
+            input.events = {{xrfg::OverlayMenuInputEventKind::mouse_position, 400, 700},
                 {xrfg::OverlayMenuInputEventKind::mouse_button, 0, 0, 0, false}};
             submit_menu();
             const auto saved = xrfg::autonomous::snapshot().desired;

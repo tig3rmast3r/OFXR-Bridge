@@ -1723,7 +1723,8 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
     int eye,
     std::uint64_t released_at,
     std::uint64_t other_released_at,
-    DlssReleasedEyeIdentity identity) noexcept {
+    DlssReleasedEyeIdentity identity,
+    bool tentative) noexcept {
     try {
         if (!g_tracking_enabled.load(std::memory_order_acquire)) {
             report_dlss_motion_vector_status(DlssMotionVectorStatus::disabled);
@@ -1731,6 +1732,14 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         }
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
+        // A tentative lookup only counts its failure: every status this
+        // function writes is one. Restored before the lock is released.
+        struct StatusRestore {
+            DlssMotionVectorStatus& status;
+            DlssMotionVectorStatus prior;
+            bool active;
+            ~StatusRestore() { if (active) status = prior; }
+        } const restore{state.statistics.status, state.statistics.status, tentative};
         ++state.statistics.resolve_calls;
         if (output == nullptr || consumer_queue == nullptr) {
             ++state.statistics.invalid_rejections;
