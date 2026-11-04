@@ -250,8 +250,12 @@ static int panel_metadata_contract() {
     std::puts("Shipping panel metadata ownership, atlas rects, 2X/3X/4X fractions and REAL VR passthrough PASS");return 0;
 }
 
+#include "rife_output_banks_tests.inc"
+
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route=="rife-output-banks")return rife_output_banks_test(false);
+    if(route=="rife-output-bank-policy")return rife_output_banks_test(true);
     if(route=="rife-source-handoff") {
         auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
         XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -388,6 +392,8 @@ int main(int argc,char** argv) {
         std::puts("Unsupported RIFE3: explicit acknowledgement/error, no perpetual Applying settings, previous2X preserved PASS");
         return 0;
     }
+    const bool rife_bank_switch=route.starts_with("rife-bank-switch");
+    if(rife_bank_switch)route.replace(0,std::string("rife-bank-switch").size(),"rife-switch");
     const bool rife_msfs=route.starts_with("rife-msfs");
     const bool rife_inherited=rife_msfs && route.find("inherited")!=std::string::npos;
     const auto overlap_tag=route.find("-app-overlap");
@@ -1144,7 +1150,7 @@ int main(int argc,char** argv) {
     std::vector<std::shared_ptr<xrfg::InterfaceCycle>> measured_cycles;
     std::vector<std::int64_t> rife_source_ends;
     std::optional<XrTime> rife_replay_time;
-    unsigned rife_phase_start{};
+    unsigned rife_phase_start{},rife_bank_epoch_start{};
     unsigned rife_phase_factor=rife_factor?rife_factor:ofxr_factor;
     bool hfw_gate_proven=false;
     bool rife_overlap_proven=false;
@@ -1176,6 +1182,29 @@ int main(int argc,char** argv) {
             if(rife_luke)check(state->nvidia_options.rife_resolution_percent==desired.rife_resolution,
                 "RIFE percentage change did not reach the native model setup");
             rife_phase_start=f.real_ends.load();
+        }
+        if(rife_bank_switch && ((n-1)%rife_phase_frames==0 || (n-1)%rife_phase_frames==4 || (n-1)%rife_phase_frames==8)) {
+            const unsigned epoch_offset=(n-1)%rife_phase_frames;
+            const bool fast=epoch_offset==4;
+            if(epoch_offset) {
+                xr_ok(wait_for_synthesis_handoff(state),"previous bank epoch GPU complete");
+                const auto g=find_swapchain(chain)->frame_generation;const auto factor=rife_frames(*state);
+                const bool old_fast=state->lower_vram>0;
+                const unsigned expected=factor>2?(factor-1)*(old_fast?1U:2U):(old_fast?1U:2U);
+                check(g && g->synthetic_runtime_rings==expected,"actual prior Normal/Fast bank allocation");
+                for(unsigned i=0;i<expected;++i){check(g->synthetic[i].handle!=XR_NULL_HANDLE,"missing allocated bank image");
+                    for(unsigned j=0;j<i;++j)check(g->synthetic[i].handle!=g->synthetic[j].handle,"allocated bank handles alias");}
+            }
+            auto desired=xrfg::autonomous::snapshot().desired;desired.lower_vram=desired.separate_synthesis=fast;
+            check(xrfg::autonomous::request(desired),"live Normal/Fast output-bank request");
+            xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(state),"drained Normal/Fast bank replacement");
+            xr_ok(f.transport->drain(),"old bank epoch physical delivery drained");
+            if(epoch_offset) {
+                const auto delivered=f.real_ends.load()-rife_bank_epoch_start;
+                check(delivered>=4+(rife_frames(*state)-1),"each four-source Normal/Fast epoch must deliver a complete generated batch after warmup");
+                std::fprintf(stderr,"RIFE_BANK_EPOCH factor=%u sources=4 delivered=%u new_fast=%u PASS\n",rife_frames(*state),delivered,unsigned(fast));
+            }
+            rife_bank_epoch_start=f.real_ends.load();
         }
         if(rife_report && n==5) {
             xr_ok(wait_for_synthesis_handoff(state),"fault injection waits for old worker");
@@ -1595,12 +1624,26 @@ int main(int argc,char** argv) {
             xr_ok(f.transport->drain(),"RIFE phase physical output drained");
             const auto delivered=f.real_ends.load()-rife_phase_start;
             std::fprintf(stderr,"RIFE_PHASE factor=%u pacing=%d fast=%u inputs=%u delivered=%u\n",rife_phase_factor,rife_pacing,unsigned(rife_fast),rife_phase_frames,delivered);
-            check(delivered>=1+(rife_phase_frames-4)*rife_phase_factor,"RIFE live phase lost its intermediate outputs");
+            if(rife_bank_switch) {
+                // Three four-source epochs, each restarting history through an
+                // explicit Normal/Fast switch. Judge complete output batches
+                // in every epoch rather than steady-state FPS across restarts.
+                check(f.real_ends.load()-rife_bank_epoch_start>=4+(rife_phase_factor-1),"last bank epoch did not deliver a complete generated batch");
+                check(delivered>=rife_phase_frames+3*(rife_phase_factor-1),"bank switches lost a complete epoch of generated outputs");
+            } else check(delivered>=1+(rife_phase_frames-4)*rife_phase_factor,"RIFE live phase lost its intermediate outputs");
+            if(rife_bank_switch) {
+                const auto g=find_swapchain(chain)->frame_generation;const auto factor=rife_frames(*state);
+                const auto count=factor>2?2*(factor-1):2;
+                check(g && g->synthetic_runtime_rings==count && g->synthetic_batch_width==(factor>2?factor-1:1),
+                    "Normal bank allocation/stride lost after Fast or multiplier switch");
+                for(unsigned i=0;i<count;++i){check(g->synthetic[i].handle!=XR_NULL_HANDLE,"missing actual bank handle");
+                    for(unsigned j=0;j<i;++j)check(g->synthetic[i].handle!=g->synthetic[j].handle,"bank handles alias");}
+            }
             if(panel_test) {
                 const auto panels=find_swapchain(panel_chain)->frame_generation;
                 check(panels && panels->synthetic_runtime_rings==source_synthetic_rings(*state,true),
                     "panel bank count did not follow live RIFE multiplier");
-                check(panels->panel_batch_width==(rife_phase_factor>2?rife_phase_factor-1:1),
+                check(panels->synthetic_batch_width==(rife_phase_factor>2?rife_phase_factor-1:1),
                     "panel batch stride did not follow live RIFE multiplier");
             }
         }

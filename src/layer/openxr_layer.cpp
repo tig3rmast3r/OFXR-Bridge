@@ -1839,7 +1839,14 @@ unsigned rife_frames(const SessionState& state) noexcept {
     return reduced_native_outputs(state) && !private_triple ? 1U : 2U;
 }
 [[nodiscard]] unsigned source_synthetic_rings(const SessionState& state,bool panel) noexcept {
-    return panel && ordered_multiframe(state) && rife_frames(state)>2
+    // Private RIFE Normal keeps the next complete batch independent of S1/S2/S3
+    // still being copied by the endpoint. Fast retains the minimal allocation.
+    // Distinct handles preserve the exact image behind each queued descriptor.
+    const bool native_rife_bank=state.private_runtime && state.dispatch->steamvr_runtime &&
+        state.graphics_binding==SessionGraphicsBinding::d3d12 && !state.luke_afw_enabled &&
+        !state.d3d11_bridge && !state.vulkan_bridge && state.nvidia_options.rife_model>=0 &&
+        !reduced_native_outputs(state);
+    return (panel || native_rife_bank) && ordered_multiframe(state) && rife_frames(state)>2
         ? 2U*(rife_frames(state)-1) : native_synthetic_rings(state);
 }
 [[nodiscard]] unsigned native_current_rings(const SessionState& state) noexcept {
@@ -2127,8 +2134,8 @@ struct FrameGenerationSwapchainState {
     std::uint32_t current_runtime_rings{2}, synthetic_runtime_rings{2};
     std::uint32_t current_runtime_images_per_ring{}, synthetic_runtime_images_per_ring{};
     std::uint32_t staging_stride{1};
-    // RIFE panels retain one complete synthetic bank per admitted real source.
-    std::uint32_t panel_batch_width{1};
+    // Independent synthetic banks retain a complete batch per admitted source.
+    std::uint32_t synthetic_batch_width{1};
     std::array<std::shared_ptr<DjulesOutputStaging>,2> current_staging;
     std::array<std::shared_ptr<DjulesOutputStaging>,4> synthetic_staging;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> current_runtime_images, synthetic_runtime_images;
@@ -3627,12 +3634,12 @@ create_d3d12_frame_generation_swapchains(
         auto generation = std::make_shared<FrameGenerationSwapchainState>();
         generation->staged_outputs = staged_native_outputs(*state->session);
         const auto output_slots = native_current_rings(*state->session);
-        // Two runtime S handles serve both 2X and 3X. Direct 3X retains each
-        // descriptor through physical submission before the next pair reuses it.
+        // Banked RIFE Normal alternates complete output sets; minimal routes
+        // retain their existing per-descriptor and per-image reuse waits.
         generation->current_runtime_rings = output_slots;
         generation->synthetic_runtime_rings = source_synthetic_rings(*state->session,state->panel_source);
-        if(state->panel_source && ordered_multiframe(*state->session) && rife_frames(*state->session)>2)
-            generation->panel_batch_width=rife_frames(*state->session)-1;
+        if(generation->synthetic_runtime_rings>native_synthetic_rings(*state->session))
+            generation->synthetic_batch_width=rife_frames(*state->session)-1;
         generation->direct_extra_outputs = !generation->staged_outputs && extra_output_capacity(*state->session);
         if(generation->direct_extra_outputs)
             for(auto& lease:generation->direct_synthetic_leases) lease=std::make_shared<DirectSyntheticLease>();
@@ -12394,7 +12401,7 @@ void attach_djules_outputs(PreparedProjectionFrame& prepared,
             static_cast<std::uint32_t>(output.synthetic_slot % generation->synthetic_runtime_rings)});
         if(panel_extra) panel_extra->pending_outputs.push_back({generation,generation->synthetic_staging[output.synthetic_slot*generation->staging_stride+1],
             output.synthesizer,output.staging_ticket,true,
-            static_cast<std::uint32_t>((output.synthetic_slot + (generation->panel_batch_width==1 && generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings)});
+            static_cast<std::uint32_t>((output.synthetic_slot + (generation->synthetic_batch_width==1 && generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings)});
     }
 }
 
@@ -12664,10 +12671,10 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 (state->session->presenter_active || !state->session->private_runtime ||
                  !comparison_delivery_runtime(*state->session));
         };
-        auto& extra_image = generation->synthetic[(synthetic_slot + (generation->panel_batch_width==1 && generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings];
+        auto& extra_image = generation->synthetic[(synthetic_slot + (generation->synthetic_batch_width==1 && generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings];
         auto& third_image=generation->synthetic[(synthetic_slot+2)%generation->synthetic_runtime_rings];
         if(request_extra && !generation->staged_outputs) {
-            const auto lease_base=generation->panel_batch_width>1?synthetic_runtime_slot:0;
+            const auto lease_base=generation->synthetic_batch_width>1?synthetic_runtime_slot:0;
             std::unique_lock lock(state->session->presenter_mutex);
             state->session->presenter_condition.wait(lock,[&] {
                 return (generation->direct_synthetic_leases[lease_base].use_count()==1 &&
@@ -13059,8 +13066,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             output.reason = GenerationPrepareReason::ready;
             generation->current_slot = (current_slot + 1) % kCurrentSlotCount;
             if (request_pair)
-                generation->synthetic_slot = generation->panel_batch_width>1
-                    ? (synthetic_slot+generation->panel_batch_width)%generation->synthetic_runtime_rings
+                generation->synthetic_slot = generation->synthetic_batch_width>1
+                    ? (synthetic_slot+generation->synthetic_batch_width)%generation->synthetic_runtime_rings
                     : (synthetic_slot + 1) % kSyntheticSlotCount;
             return output;
         }
@@ -13118,8 +13125,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             // Only a pair defers its current copy; a prime submits it inline.
             if (request_pair) {
                 generation->synthetic_slot =
-                    generation->panel_batch_width>1
-                    ? (synthetic_slot+generation->panel_batch_width)%generation->synthetic_runtime_rings
+                    generation->synthetic_batch_width>1
+                    ? (synthetic_slot+generation->synthetic_batch_width)%generation->synthetic_runtime_rings
                     : (synthetic_slot + 1) % kSyntheticSlotCount;
                 output.synthesizer = synthesizer;
             }
