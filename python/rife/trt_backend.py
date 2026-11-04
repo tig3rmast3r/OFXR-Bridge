@@ -13,7 +13,7 @@ import time
 
 import torch
 
-from trt_cache import ADAPTER_VERSION, SCHEMA, atomic_json, cache_directory, cache_key, file_sha256, validate_entry
+from trt_cache import ADAPTER_VERSION, BUILD_TIMEOUT, SCHEMA, atomic_json, cache_directory, cache_key, file_sha256, validate_entry
 
 _dll_directories = []
 _trt = None
@@ -112,7 +112,7 @@ class Engine:
 
 
 class Backend:
-    BUILD_TIMEOUT = 180.0
+    BUILD_TIMEOUT = BUILD_TIMEOUT
     FAILURE_BACKOFF = 3600.0
     SETTLE_SECONDS = .5
 

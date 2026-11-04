@@ -16,7 +16,7 @@ import time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from trt_cache import SCHEMA, atomic_json, cache_key, file_sha256, validate_entry
+from trt_cache import BUILD_TIMEOUT, SCHEMA, atomic_json, cache_key, file_sha256, validate_entry
 
 if os.name == "nt":
     import msvcrt
@@ -46,7 +46,7 @@ def watch_parent():
 
 
 def deadline(result_path):
-    time.sleep(180)
+    time.sleep(BUILD_TIMEOUT)
     try:
         atomic_json(result_path, {"ok": False, "error": "TensorRT optimization timed out"})
     finally:
@@ -54,7 +54,7 @@ def deadline(result_path):
 
 
 @contextlib.contextmanager
-def builder_lock(directory, identity, timeout=175.0):
+def builder_lock(directory, identity, timeout=BUILD_TIMEOUT - 5.0):
     """An OS-owned lock serializes builders from different games/workers."""
     import msvcrt
     gpu = cache_key({k: identity[k] for k in ("gpu", "gpu_uuid", "compute_capability")})

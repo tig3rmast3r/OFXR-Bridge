@@ -83,7 +83,7 @@ Not working, or not feeling smoother? See the [troubleshooting guide](https://gi
 - Automated benchmarks that can pick the best settings for each game.
 - An in-headset FPS counter and an information overlay.
 - Optional DLSS 5 Neural Rendering (model DLL supplied separately).
-  Nightly includes [HDR colour corrections and NR capture diagnostics](docs/V852_NR_COLOUR.md).
+  Nightly includes [NR capture diagnostics](docs/V849_NR_CAPTURE.md) and [the V862 RIFE compilation correction](docs/V862_RIFE_TIMEOUT.md).
 - A `status.json` export for tools such as MSFS AutoFPS.
 
 The default is **NVIDIA OFXR 0.3.0, Medium, 50% flow resolution**. Flow

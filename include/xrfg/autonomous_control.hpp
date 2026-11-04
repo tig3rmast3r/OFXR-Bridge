@@ -177,6 +177,7 @@ struct RuntimeStatus {
     bool rife_tensorrt{}; // backend used by the latest RIFE inference, independent of desired state
     unsigned rife_max_multiplier{2}; // actual active session capability, independent of requested engine
     bool rife_execution_active{}; // a fresh, live worker receipt exists (false is not proof of Torch)
+    unsigned rife_error{}; // fresh receipt: 1 timeout, 2 unavailable, 3 optimization failure
     int osr_mode{-1},osr_lower_quality{-1}; // last successfully submitted reconstruction
     bool uevr_osr{}; // UEVR Alternating/AFR attached as OSR's eye source, as Luke Ross is
 };

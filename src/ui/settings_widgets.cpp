@@ -35,7 +35,7 @@ void status(const Snapshot& state) {
     const auto now = GetTickCount64();
     const bool current = state.connected && m.updated_ms && now >= m.updated_ms && now - m.updated_ms < 2000;
     const float header_x=ImGui::GetCursorPosX(),header_width=ImGui::GetContentRegionAvail().x;
-    ImGui::TextDisabled("OFXR-BRIDGE 0.3.2 (v%d)",XRFG_IMPLEMENTATION_VERSION);
+    ImGui::TextDisabled("OFXR-BRIDGE 0.3.3 (v%d)",XRFG_IMPLEMENTATION_VERSION);
     const auto vram=interface_vram_text(state);
     const auto gpu=interface_gpu_text(state,now);
     const auto vram_width=ImGui::CalcTextSize(vram.c_str()).x;
@@ -86,7 +86,9 @@ void status(const Snapshot& state) {
             ImGui::EndTable();
         }
         const auto text = interface_state_text(state);
-        const auto color = interface_generation_active(state) || interface_afw_only_active(state,now) ? ImVec4(.36F,.88F,.56F,1) :
+        const bool rife_error=state.desired.enabled && state.desired.frame_generation==4 && state.runtime.rife_error;
+        const auto color = rife_error ? ImVec4(1,.38F,.38F,1) :
+            interface_generation_active(state) || interface_afw_only_active(state,now) ? ImVec4(.36F,.88F,.56F,1) :
             text == "Fallback" || text == "Applying settings" ? ImVec4(1,.75F,.28F,1) : ImVec4(.75F,.8F,.88F,1);
         ImGui::PushStyleColor(ImGuiCol_Text, color);
         ImGui::PushTextWrapPos();

@@ -100,6 +100,16 @@ int main(int argc,char** argv){try{
         count(rasterize_elliott_meter(optimization_pending,now,false,false),yellow)==0,
         "pending settings keep their normal header while an engine compiles");
     auto optimized=optimizing;optimized.runtime.rife_optimizing=false;
+    auto failed=optimized;failed.runtime.rife_error=1;failed.runtime.rife_execution_active=true;
+    check(autonomous::interface_state_text(failed)=="RIFE optimization error" &&
+        autonomous::interface_status_text(failed).find("timed out")!=std::string::npos,
+        "failed compilation reports its cause instead of silently labelling Torch healthy");
+    const auto failed_pixels=rasterize_elliott_meter(failed,now,false,false);
+    check(count_top(failed_pixels,red)>100 && count_top(failed_pixels,green)==0,
+        "RIFE timeout turns the meter header and counters red even while fallback generates");
+    auto failed_other=failed;failed_other.desired.frame_generation=0;
+    check(count_top(rasterize_elliott_meter(failed_other,now,false,false),red)==0,
+        "old RIFE failure cannot turn another route red");
     check(autonomous::interface_state_text(optimized)!="Optimizing, please wait" &&
         count(rasterize_elliott_meter(optimized,now,false,false),yellow)==0,
         "completed optimization restores the normal framework header");

@@ -25,7 +25,8 @@ enum class BridgeFlightOperation : std::uint32_t {
     rife_infer = 10004,
     rife_compose_execute = 10005,
     rife_compose_wait = 10006,
-    // Same a/b/c; result bit0=TensorRT, bit1=optimizing, bit2=valid receipt.
+    // Same a/b/c; result bit0=TensorRT, bit1=optimizing, bit2=valid receipt,
+    // bit3=worker reported an optimization error (details in cache build log).
     rife_backend = 10007,
     logger = 0,
     negotiation,

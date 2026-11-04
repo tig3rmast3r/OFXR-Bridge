@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.861.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.862.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1744,7 +1744,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                     -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_runtime_setup_tests.py")
                 add_test(NAME xrfg_rife_tensorrt_status COMMAND xrfg_rife_tensorrt_status_tests
                     "${XRFG_TEST_RIFE_RUNTIME}" "${CMAKE_CURRENT_BINARY_DIR}/rife-tensorrt-status")
-                set_tests_properties(xrfg_rife_tensorrt_status PROPERTIES TIMEOUT 240 RUN_SERIAL TRUE)
+                set_tests_properties(xrfg_rife_tensorrt_status PROPERTIES TIMEOUT 340 RUN_SERIAL TRUE)
             endif()
             add_test(NAME xrfg_rife_stereo_gpu COMMAND xrfg_d3d12_history_tests rife)
             add_test(NAME xrfg_rife_async_gpu COMMAND xrfg_d3d12_history_tests rife-async)

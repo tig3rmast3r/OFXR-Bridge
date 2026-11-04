@@ -51,6 +51,7 @@ class Worker {
     std::string line_;
     std::atomic<bool> live_{};
     std::atomic<bool> optimizing_{}, tensorrt_{};
+    std::atomic<unsigned> optimization_error_{};
     std::atomic<std::uint64_t> execution_updated_ms_{};
     std::atomic<std::uint64_t> memory_until_{};
     std::mutex memory_mutex_;
@@ -171,7 +172,8 @@ public:
         const auto now=GetTickCount64();
         const bool active=alive() && updated && now>=updated && now-updated<5000;
         return {updated,active,active && optimizing_.load(std::memory_order_relaxed),
-            active && tensorrt_.load(std::memory_order_relaxed)};
+            active && tensorrt_.load(std::memory_order_relaxed),
+            active?optimization_error_.load(std::memory_order_relaxed):0U};
     }
     RifeMemoryStatus memory(bool request) noexcept {
         const auto now=GetTickCount64();
@@ -184,7 +186,7 @@ public:
         return result;
     }
     HANDLE process()const{return process_.value;}
-    HRESULT request(const std::string& message,RifeExecutionStatus* receipt=nullptr) noexcept {
+    HRESULT request(const std::string& message,std::int32_t* backend_flags=nullptr) noexcept {
         std::scoped_lock lock(mutex_);
         if(!live_)return E_FAIL;
         try{
@@ -206,9 +208,16 @@ public:
                 const auto value=backend==std::string::npos?backend:reply.find('"',backend+1);
                 const bool tensorrt=value!=std::string::npos && reply.compare(value,10,"\"tensorrt\"")==0;
                 tensorrt_.store(tensorrt,std::memory_order_relaxed);
+                const auto error_at=reply.find("\"optimization_error\"");
+                const unsigned error=error_at==std::string::npos?0U:
+                    reply.find("timed out",error_at)!=std::string::npos?1U:
+                    reply.find("not installed",error_at)!=std::string::npos ||
+                    reply.find("unavailable",error_at)!=std::string::npos?2U:3U;
+                optimization_error_.store(error,std::memory_order_relaxed);
                 const auto updated=GetTickCount64();
                 execution_updated_ms_.store(updated,std::memory_order_release);
-                if(receipt)*receipt={updated,true,optimizing,tensorrt};
+                if(backend_flags)*backend_flags=(tensorrt?1:0)|(optimizing?2:0)|4|
+                    (error?8:0);
             }
             std::uint64_t usage{},reserved{};
             if(number(reply,"\"vram_private\"",usage) && number(reply,"\"torch_reserved\"",reserved)){
@@ -261,6 +270,7 @@ RifeExecutionStatus rife_execution_status() noexcept {
                 if(!value.active)continue;
                 result.updated_ms=std::max(result.updated_ms,value.updated_ms);
                 result.active=true;result.optimizing|=value.optimizing;result.tensorrt|=value.tensorrt;
+                result.error=std::max(result.error,value.error);
             }
         }
         return result;
@@ -426,13 +436,13 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
             p.commands->ResourceBarrier(1,&before);p.commands->ResourceBarrier(1,&input);
         }
         if(timing.first)mark(1);p.execute(diagnostic,fraction_eyes);
-        RifeExecutionStatus receipt;
+        std::int32_t backend_flags{};
         const auto dimensions=(static_cast<std::uint64_t>(w)<<32)|h;
         rife_phase(diagnostic,BridgeFlightOperation::rife_infer,p.id,dimensions,fraction_eyes,[&]{
-            check(p.worker->request("{\"op\":\"infer\",\"id\":"+std::to_string(p.id)+",\"model\":"+std::to_string(p.model)+",\"fraction\":"+std::to_string(fraction)+"}",diagnostic?&receipt:nullptr));
+            check(p.worker->request("{\"op\":\"infer\",\"id\":"+std::to_string(p.id)+",\"model\":"+std::to_string(p.model)+",\"fraction\":"+std::to_string(fraction)+"}",diagnostic?&backend_flags:nullptr));
         });
         if(diagnostic)diagnostic->event(BridgeFlightOperation::rife_backend,
-            (receipt.tensorrt?1:0)|(receipt.optimizing?2:0)|(receipt.active?4:0),p.id,dimensions,fraction_eyes);
+            backend_flags,p.id,dimensions,fraction_eyes);
         // Restore full-resolution A/B descriptors after both reduced-input
         // packs have retired. Only flow/mask planes return from Python.
         for(UINT source_index=0;source_index<2;++source_index){

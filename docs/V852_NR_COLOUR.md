@@ -1,3 +1,5 @@
+> Superseded in V862: the owner reported no visible improvement. The additional relative-colour shader was removed; NR capture, exposure, post-SR staging and initialization fixes remain.
+
 # V852: preserve original HDR colour when the NR model makes no edit
 
 An unchanged blue HDR patch changed colour when only the surrounding image changed: with an identity-model output, the V851 resolve returned approximately(3.60,14.39,14.52) from original RGB(3,12,40) in a dark context, but returned the original blue in a bright context. Colour strength0 preserved it in both contexts. The absolute model-colour transfer was importing proxy clipping/desaturation into the final HDR picture.

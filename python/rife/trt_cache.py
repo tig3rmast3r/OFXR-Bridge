@@ -7,6 +7,9 @@ import tempfile
 
 SCHEMA = 1
 ADAPTER_VERSION = "rife44-flow-mask-op19-batch-v1"
+# Includes lock contention and profiling alongside a running game. This is a
+# safety ceiling for the asynchronous compiler, never an inference deadline.
+BUILD_TIMEOUT = 300.0
 
 
 def file_sha256(path):

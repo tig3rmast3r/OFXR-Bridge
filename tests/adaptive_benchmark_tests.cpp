@@ -90,7 +90,7 @@ void controller(bool modern,bool full,bool luke,double base,double two,double th
     require(r.dlssg_preset_request==1,"suite never changes the startup NVIDIA preset");
     std::cout<<"suite modern="<<modern<<" full="<<full<<" luke="<<luke<<" trials="<<done<<" RIFE="<<multipliers[2]<<'/'<<multipliers[3]<<'/'<<multipliers[4]<<" PASS\n";
 }
-void setup_edge_cases(bool optimizing){
+void setup_edge_cases(bool optimizing,bool failed=false){
     auto saved=snapshot().desired;saved.benchmark_auto_pick=true;saved.benchmark_csv=true;
     require(request(saved),"save setup-edge settings");saved=snapshot().desired;
     RuntimeStatus r{};r.process_id=GetCurrentProcessId();r.sessions=1;r.steamvr_runtime=true;
@@ -101,8 +101,12 @@ void setup_edge_cases(bool optimizing){
     }
     require(benchmark_active(snapshot().benchmark),"reach RIFE setup");
     r.pending=optimizing?0:1;r.rife_optimizing=optimizing;report(r);
+    if(failed){r.rife_optimizing=false;r.rife_error=1;report(r);}
     tick_benchmark(snapshot().benchmark.requested_ms+31000);
-    if(optimizing){
+    if(failed){
+        require(snapshot().benchmark.phase==BenchmarkPhase::error && snapshot().desired==saved,
+            "compiler failure stops the test, restores settings and never measures Torch as optimized RIFE");
+    }else if(optimizing){
         require(snapshot().benchmark.phase==BenchmarkPhase::applying,"optimization never consumes normal setup timeout");
         stop_benchmark();tick_benchmark();
         require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==saved,"Stop remains available while optimizing");
@@ -139,7 +143,7 @@ int main(){
         controller(true,false,false,70,90,90,90,4,true,false,false,true);
         controller(false,false,false,95,105,120,120,3,true,false,false,false,120);
         controller(false,false,true,95,120,120,120,3,true,false,false,false,120);
-        setup_edge_cases(false);setup_edge_cases(true);
+        setup_edge_cases(false);setup_edge_cases(true);setup_edge_cases(true,true);
         cancellation();std::cout<<"Adaptive RIFE live-controller, stable refresh, optimization, CSV, capability and cancellation PASS\n";return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

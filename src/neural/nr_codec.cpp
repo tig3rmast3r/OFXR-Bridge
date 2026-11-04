@@ -5,7 +5,6 @@
 #include "NrResizeGuides.h"
 #include "NrClampEncoded.h"
 #include "NrExposure.h"
-#include "NrRelativeColour.h"
 #include <d3dcompiler.h>
 
 using Microsoft::WRL::ComPtr;
@@ -78,11 +77,6 @@ DlssNr_Dx12::DlssNr_Dx12(std::string,ID3D12Device* device):_device(device) {
     pipeline.CS={guides->GetBufferPointer(),guides->GetBufferSize()};
     _init=SUCCEEDED(device->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&_guidePipelineState)));
     if(!_init)return;
-    ComPtr<ID3DBlob> relative;
-    if(FAILED(D3DCompile(kNrRelativeColourShader,sizeof(kNrRelativeColourShader)-1,"NR relative HDR colour",nullptr,nullptr,
-        "main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&relative,&errors))){_init=false;return;}
-    pipeline.CS={relative->GetBufferPointer(),relative->GetBufferSize()};
-    if(FAILED(device->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&_relativeColourPipeline)))){_init=false;return;}
     ComPtr<ID3DBlob> exposure;
     if(FAILED(D3DCompile(kNrExposureShader,sizeof(kNrExposureShader)-1,"NR HDR exposure",nullptr,nullptr,
         "main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&exposure,&errors))){_init=false;return;}
@@ -206,9 +200,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* list,const DlssNrConstants
     list->SetComputeRootSignature(_rootSignature.Get());
     list->SetPipelineState(constants.Mode==DlssNrMode_ClampEncoded?_clampPipelineState.Get():
         constants.Mode==DlssNrMode_ResizePrivateGuides?_guidePipelineState.Get():
-        constants.Mode==DlssNrMode_MeasureExposure?_exposurePipelineState.Get():
-        constants.Mode==DlssNrMode_Resolve && previous_edit && !constants.Passthrough &&
-        constants.ColourStrength>0 && !constants.DebugView ? _relativeColourPipeline.Get():_pipelineState.Get());
+        constants.Mode==DlssNrMode_MeasureExposure?_exposurePipelineState.Get():_pipelineState.Get());
     list->SetComputeRootDescriptorTable(0,binding->heap->GetGPUDescriptorHandleForHeapStart());
     list->Dispatch((constants.Width+7)/8,(constants.Height+7)/8,1);
     if(binding->dynamic_exposure){std::swap(cbBarrier.Transition.StateBefore,cbBarrier.Transition.StateAfter);list->ResourceBarrier(1,&cbBarrier);}

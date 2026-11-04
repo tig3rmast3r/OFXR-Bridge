@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 85901;
+constexpr std::uint32_t kAbi = 86201;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1187,6 +1187,10 @@ void tick_benchmark(std::uint64_t now) noexcept {
                     s.runtime.buffer_capacity!=static_cast<unsigned>(s.desired.enabled && s.desired.pacing_mode!=0
                         ? (s.desired.increase_buffer?4:3):s.desired.increase_buffer?3:2);
                 const bool rife=s.desired.frame_generation==4;
+                if(rife && s.runtime.rife_error) {
+                    suite_restore(shared,BenchmarkPhase::error,"RIFE optimization failed; see the meter and RIFECache build log. No fallback result measured.",now);
+                    return;
+                }
                 const bool optimizing=rife && s.runtime.rife_optimizing;
                 if(optimizing){b.requested_ms=now;return;} // wait until completion, Stop/disconnect remain available
                 if(s.runtime.applied_revision!=b.revision || s.runtime.pending || quality_pending || pacing_pending || buffer_pending) {
@@ -1209,6 +1213,10 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 rec.bridge_buffer_capacity=s.runtime.buffer_capacity;
                 rec.memory_requested=false;rec.memory={};
                 rec.next_sample=now;
+            }
+            if(s.desired.frame_generation==4 && s.runtime.rife_error) {
+                suite_restore(shared,BenchmarkPhase::error,"RIFE optimization failed; see the meter and RIFECache build log. No fallback result measured.",now);
+                return;
             }
             if(s.desired.frame_generation==4 && s.runtime.rife_optimizing) {
                 // Optimization started after the first inference. Discard warm-up
@@ -1376,6 +1384,8 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
     }
     if (r.generation_state == GenerationState::paused) return "Paused";
     if (r.pending || r.applied_revision != s.revision) return "Applying settings";
+    if(s.desired.enabled && s.desired.frame_generation==4 && r.rife_error)
+        return "RIFE optimization error";
     if(s.desired.enabled && s.desired.frame_generation==4 && r.rife_optimizing)
         return "Optimizing, please wait";
     const bool active = r.telemetry.updated_ms && GetTickCount64() - r.telemetry.updated_ms < 2000 && r.telemetry.generating;
@@ -1447,7 +1457,10 @@ std::string interface_status_text(const Snapshot& s,bool include_reconstruction)
     };
     const auto& r = s.runtime;
     if(s.desired.enabled && s.desired.frame_generation==4) {
-        if(r.rife_optimizing)add("Optimizing, please wait");
+        if(r.rife_error==1)add("TensorRT compilation timed out; PyTorch fallback");
+        else if(r.rife_error==2)add("TensorRT unavailable; PyTorch fallback");
+        else if(r.rife_error)add("TensorRT optimization failed; PyTorch fallback (see RIFECache build log)");
+        else if(r.rife_optimizing)add("Optimizing, please wait");
         else if(r.rife_tensorrt)add("TensorRT FP16");
     }
     if (r.shared_queue) add("Shared queue");

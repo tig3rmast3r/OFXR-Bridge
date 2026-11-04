@@ -72,7 +72,7 @@ void require_native_stereo(D3D12WarpFixture& fixture,ID3D12Resource* output) {
     }
 }
 
-void test_async_optimization_receipts(D3D12WarpFixture& fixture) {
+void test_async_optimization_receipts(D3D12WarpFixture& fixture,const std::filesystem::path& cache) {
     constexpr UINT width=512,height=256;
     auto a=create_source_texture(fixture,width,height),b=create_source_texture(fixture,width,height);
     auto output=create_source_texture(fixture,width,height);
@@ -101,7 +101,7 @@ void test_async_optimization_receipts(D3D12WarpFixture& fixture) {
         xrfg::D3D12Rife generator;
         require_hresult(generator.initialize(fixture.device(),fixture.queue(),kFormat,3,.15F),
             "initialize portable RIFE4.4 optimization test");
-        const auto deadline=GetTickCount64()+90'000;
+        const auto deadline=GetTickCount64()+310'000;
         do {
             const auto started=std::chrono::steady_clock::now();
             require_hresult(generator.generate(a.Get(),b.Get(),output.Get(),views,views,views,
@@ -147,6 +147,27 @@ void test_async_optimization_receipts(D3D12WarpFixture& fixture) {
         require_native_stereo(fixture,output.Get());
     }
     fixture.require_no_debug_errors();
+    // This cache belongs solely to the test. Simulate the logged compiler
+    // timeout after a successful run, then start a fresh protocol worker.
+    std::filesystem::path engine;
+    for(const auto& entry:std::filesystem::directory_iterator(cache))
+        if(entry.path().extension()==L".engine")engine=entry.path();
+    require(!engine.empty(),"compiled engine is present in the owned test cache");
+    const auto backup=engine.wstring()+L".test-backup";
+    std::filesystem::rename(engine,backup);
+    const auto failure=cache/(engine.stem().wstring()+L".failed.json");
+    {std::ofstream file(failure);file<<"{\"reason\":\"TensorRT optimization timed out\",\"retry_after\":4102444800}";}
+    {
+        xrfg::D3D12Rife failed;
+        require_hresult(failed.initialize(fixture.device(),fixture.queue(),kFormat,3,.15F),"initialize failed-cache worker");
+        require_hresult(failed.generate(a.Get(),b.Get(),output.Get(),views,views,views,rotations,rotations,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,.5F),"failed compilation still has safe fallback output");
+        const auto state=xrfg::rife_execution_status();
+        require(state.active && !state.optimizing && !state.tensorrt && state.error==1,
+            "compiler timeout crosses the real Python/native protocol as an explicit error");
+        require_native_stereo(fixture,output.Get());
+    }
+    std::filesystem::remove(failure);std::filesystem::rename(backup,engine);
     std::cout<<"RIFE_STATUS cold_fallback_outputs="<<fallback_outputs<<" max_native_call_ms="<<max_call_ms
         <<" compiled_fractions=3 cached_new_worker=1 eyes=2 logging_required=0\n";
 }
@@ -162,7 +183,7 @@ int main(int argc,char** argv) {
         ScopedRuntimeLocator locator(runtime);
         std::cout<<"RIFE_STATUS owned_appdata="<<appdata.directory().string()<<'\n';
         D3D12WarpFixture fixture(true);
-        test_async_optimization_receipts(fixture);
+        test_async_optimization_receipts(fixture,appdata.directory()/L"ofxr-bridge/RIFECache");
         return 0;
     }catch(const std::exception& error) {
         std::cerr<<error.what()<<'\n';return 1;

@@ -129,12 +129,21 @@ class BackendTests(unittest.TestCase):
         process = self.process()
         with patch("trt_backend.subprocess.Popen", return_value=process) as popen:
             self.backend.try_infer(self.a, self.a, .5)
-            self.backend._job["started"] -= 181
+            self.backend._job["started"] -= self.backend.BUILD_TIMEOUT + 1
             self.assertEqual(self.backend.try_infer(self.a, self.a, .5), (None, False))
             self.assertIn("timed out", self.backend.note)
             self.assertEqual(self.backend.try_infer(self.a, self.a, .5), (None, False))
             self.assertEqual(popen.call_count, 1)
             process.terminate.assert_called_once()
+
+    def test_slow_build_survives_old_deadline_and_keeps_single_child(self):
+        process = self.process()
+        with patch("trt_backend.subprocess.Popen", return_value=process) as popen:
+            self.backend.try_infer(self.a, self.a, .5)
+            self.backend._job["started"] -= 181
+            self.assertEqual(self.backend.try_infer(self.a, self.a, .5), (None, True))
+            self.assertEqual(popen.call_count, 1)
+            process.terminate.assert_not_called()
 
     def test_success_without_valid_cache_does_not_recompile_each_frame(self):
         process = self.process()
@@ -247,6 +256,15 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertEqual(result, {"optimizing": False, "backend": "tensorrt"})
         self.assertFalse(self.runner.infer_cached.called)
 
+    def test_optimization_failure_keeps_generation_and_reports_exact_cause(self):
+        self.runner.optimization_enabled = True
+        self.runner.trt = Mock(note="TensorRT optimization timed out")
+        self.runner.trt.try_infer.return_value = (None, False)
+        with patch.object(self.worker.torch.cuda, "current_stream", return_value=Mock()):
+            result = self.runner.command({"op": "infer", "id": 1, "model": 3})
+        self.assertEqual(result, {"optimizing": False, "backend": "torch",
+                                 "optimization_error": "TensorRT optimization timed out"})
+
     def test_other_models_do_not_optimize(self):
         self.runner.optimization_enabled = True
         self.runner.trt = Mock(note="old failure")
@@ -289,8 +307,9 @@ class WorkerProtocolTests(unittest.TestCase):
         from trt_compile import deadline
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "result.json"
-            with patch("trt_compile.time.sleep"), patch("trt_compile.os._exit") as exit_process:
+            with patch("trt_compile.time.sleep") as sleep, patch("trt_compile.os._exit") as exit_process:
                 deadline(path)
+            sleep.assert_called_once_with(Backend.BUILD_TIMEOUT)
             exit_process.assert_called_once_with(124)
             self.assertIn("timed out", json.loads(path.read_text())["error"])
 
