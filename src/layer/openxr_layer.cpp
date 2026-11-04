@@ -883,6 +883,9 @@ struct SessionState {
     // A proven auxiliary XR allocation ceiling selects synchronous Luke/D11
     // delivery for this SteamVR session. Never mutate either transport flag.
     std::atomic<bool> luke_aux_budget_inline{}; // reset by session lifetime
+    // SteamVR refused a three-slot auxiliary copy: generated panels handed
+    // their outputs back and stay on their real images for this session.
+    std::atomic<bool> panel_budget_refused{}; // reset by session lifetime
     xrfg::autonomous::SwapchainBudgetStatus swapchain_budget; // frame_call_mutex
     std::uint64_t next_swapchain_inventory_ms{};
     std::uint64_t next_snapshot_retirement_ms{};
@@ -13307,6 +13310,7 @@ std::vector<PanelSource> panel_sources(const SessionState& state,
     // queue deadlocks on the first panel frame. Until that output path is
     // fixed, Fast mode keeps panels on their real images (poses still move).
     if(state.lower_vram>0||state.separate_synthesis>0)return out;
+    if(state.panel_budget_refused.load(std::memory_order_acquire))return out;
     if(!snapshot.panel_corrections||state.graphics_binding!=SessionGraphicsBinding::d3d12||
         state.d3d11_bridge||state.vulkan_bridge||!state.d3d12_queue)return out;
     for(const auto& panel:snapshot.panels) {
@@ -13345,6 +13349,37 @@ void arm_panel_generation(const std::shared_ptr<SessionState>& state,std::span<c
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
             761,chain->frame_generation?1:0,handle_value(p.swapchain));
     }
+}
+// Generated panels keep independent native outputs per source. When SteamVR
+// then refuses an auxiliary copy (XR_ERROR_LIMIT_REACHED), hand those outputs
+// and their history back. The caller has drained the presenter, holds the
+// content lock and has latched panel_budget_refused. Returns whether any
+// panel source existed.
+bool retire_panel_generation(const std::shared_ptr<SessionState>& state) {
+    bool retired{};
+    for(const auto& chain:find_swapchains(state)) {
+        std::scoped_lock call_lock(chain->call_mutex);
+        bool had_generation{};
+        {std::scoped_lock lock(chain->mutex);
+            if(!chain->panel_source)continue;
+            chain->panel_source=false;had_generation=bool(chain->frame_generation);}
+        if(had_generation) {
+            drain_swapchain_gpu(chain);
+            destroy_frame_generation_swapchains(chain);
+        }
+        chain->generation_eligible_pending=false;
+        chain->generation_declined=true;
+        chain->generation_refusal=SwapchainEligibilityReason::budget_exhausted;
+        chain->generation_refusal_detail=0;
+        std::scoped_lock lock(chain->mutex);
+        if(!chain->d3d12_history || SUCCEEDED(chain->d3d12_history->release_snapshots())) {
+            chain->last_released_capture.reset();
+            chain->last_released_motion_vectors.reset();
+            chain->projection_history_needed.store(false,std::memory_order_release);
+        }
+        retired=true;
+    }
+    return retired;
 }
 std::vector<std::shared_ptr<PanelInput>> freeze_panel_inputs(const SessionState& state,
     const ProjectionSnapshot& snapshot,std::span<const ProjectionResourceMapping> mappings) {
@@ -14446,8 +14481,45 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                 // prepare_frame_generation retires/prime-copies BOTH eyes.
             }
         }
-        const XrResult composition = job->post_afw_frame ? XR_SUCCESS
-            : own_composition_images(state, *job->metadata);
+        XrResult refusal = XR_SUCCESS;
+        XrResult composition = job->post_afw_frame ? XR_SUCCESS
+            : own_composition_images(state, *job->metadata, &refusal);
+        if (XR_FAILED(composition) && refusal == XR_ERROR_LIMIT_REACHED) {
+            // SteamVR caps native swapchains per session. Returning this
+            // refusal from every EndFrame froze the headset for good (Returnal
+            // under UEVR: two generated UI panels left no handle for the quad
+            // copies). Hand the panels' outputs back once and retry; if the
+            // runtime still refuses, hand back the session's generation budget
+            // so later frames go out real instead of failing.
+            const XrResult idle = wait_for_presenter_idle(state);
+            if (XR_FAILED(idle)) return idle;
+            bool panels_retired = false;
+            {
+                std::scoped_lock content(state->presenter_content_mutex);
+                {
+                    std::scoped_lock presenter_lock(state->presenter_mutex);
+                    state->director_anchor_sequence = 0;
+                    state->presenter_last_frame.reset();
+                }
+                if (!state->panel_budget_refused.exchange(true, std::memory_order_acq_rel))
+                    panels_retired = retire_panel_generation(state);
+                if (!panels_retired) {
+                    state->generation_budget_exhausted.store(true, std::memory_order_release);
+                    release_session_generation_budget(state);
+                }
+            }
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                763, panels_retired ? 1 : 2, handle_value(state->handle));
+            if (!panels_retired) return composition;
+            // Rebuild from original metadata: a multi-quad attempt can have
+            // leased/replaced earlier layers before the refusal.
+            GeneratedFrameEndInfo rebuilt;
+            if (!build_generated_frame_end_info(source, snapshot, false, identities, &rebuilt))
+                return XR_ERROR_LAYER_INVALID;
+            job->metadata = make_presenter_owned_frame(std::move(rebuilt));
+            if (!job->metadata) return XR_ERROR_LAYER_INVALID;
+            composition = own_composition_images(state, *job->metadata);
+        }
         if (XR_FAILED(composition)) return composition;
         job->panels=freeze_panel_inputs(*state,job->snapshot,mappings);
         lock.lock();
