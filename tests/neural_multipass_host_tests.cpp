@@ -260,7 +260,11 @@ int main(int argc,char** argv)try{
     xrfg::neural_rendering::configure(settings);
     const auto record=[&]{for(auto& eye:eyes){auto* target=before?eye.color.Get():eye.output.Get();gpu.fill(target,before?D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE:D3D12_RESOURCE_STATE_UNORDERED_ACCESS,{.95f,.2f,.4f,.6f});
         if(before)xrfg::neural_rendering::before_sr(eye.id,gpu.list.Get(),&eye.params,gpu.queue.Get());else xrfg::neural_rendering::after_sr(eye.id,gpu.list.Get(),&eye.params,gpu.queue.Get());}};
-    record();gpu.submit();need(live.size()==4,"two eyes have four independent NR histories");need(gpu.evaluations.empty(),"feature creation retires before first evaluation");gpu.reset();
+    record();
+    need(!g_runtime.failed,"first feature initialization accepted");
+    record(); // Same native handles observed again BEFORE ExecuteCommandLists.
+    need(!g_runtime.failed&&gpu.evaluations.empty(),"unsubmitted initialization defers safely and must not latch NR off");
+    gpu.submit();need(live.size()==4,"two eyes have four independent NR histories");need(gpu.evaluations.empty(),"feature creation retires before first evaluation");gpu.reset();
     record();gpu.submit();need(gpu.evaluations.size()==4,"two NR evaluations per eye");
     for(unsigned i=0;i<4;i+=2){const auto& first=gpu.evaluations[i];const auto& second=gpu.evaluations[i+1];
         need(first.pass==1&&second.pass==2&&first.source==second.source&&first.model!=second.model,"ordered independent pass histories");

@@ -399,7 +399,10 @@ bool RetirePreviousNrEvaluate(unsigned int sourceHandleId)
         if (found->second.awaitingSubmission)
         {
             observation.pending = true;
-            g_runtime.failed=true;g_runtime.reason="NR previous recording was not submitted; toggle NR to retry";
+            // A second observation can arrive while feature initialization or
+            // an earlier evaluation is still being recorded. Do not wait here:
+            // this thread may owe ExecuteCommandLists. Defer without poisoning
+            // the session; never reuse the unsubmitted model/scratch state.
             const auto skipped = ++g_nrRetirementSkips;
             if (skipped == 1 || (skipped % 120) == 0)
                 LOG_WARN("OFXR-BRIDGE V449 DLSS-NR skipped handle {}: its previous command list has not been submitted yet (skip {})",
