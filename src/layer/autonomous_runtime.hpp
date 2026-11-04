@@ -52,7 +52,7 @@ inline void apply_runtime_settings() {
     e.rife_multiplier=s.rife_multiplier;
     e.rife_model=s.frame_generation==4?s.rife_model:-1;
     e.rife_resolution=s.rife_resolution;
-    if(e.hybrid) e.backend=0; // Fixed FidelityFX fallback, independent of OFXR profile.
+    if(e.hybrid) e.backend=s.hybrid_backend; // Hybrid's own engine, independent of OFXR's.
     e.native_scale=static_cast<unsigned>(s.native_scale);
     if (!embedded::request(e)) return;
     embedded::AfwSettings a{};

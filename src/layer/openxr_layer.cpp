@@ -1928,7 +1928,8 @@ void log_benchmark_configuration(SessionState& state) noexcept {
     if (djules_native_scheduler(state) &&
         (state.djules_triple_requested != s.triple_frame_gen ||
          state.djules_deep_pipeline != (s.prefer_fps || s.triple_frame_gen))) return;
-    const std::uint64_t bits = (s.enabled ? 1ULL : 0ULL) | (std::uint64_t(s.backend) << 1) |
+    const int engine = s.frame_generation == 3 ? s.hybrid_backend : s.backend;
+    const std::uint64_t bits = (s.enabled ? 1ULL : 0ULL) | (std::uint64_t(engine) << 1) |
         (std::uint64_t(s.frame_generation==4?0:s.frame_generation) << 3) | (s.frame_generation==4 ? 1ULL<<63 : 0ULL) | (s.separate_synthesis ? 1ULL << 5 : 0ULL) |
         (s.lower_vram ? 1ULL << 6 : 0ULL) | (s.frame_generation == 3 ? 1ULL << 7 : 0ULL) |
         (state.nvidia_options.hybrid ? 1ULL << 8 : 0ULL) | (s.prefer_fps ? 1ULL << 9 : 0ULL) |
@@ -5895,9 +5896,8 @@ XrResult layer_create_session_impl(
     if(state->hybrid_requested &&
         !(state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode != 0) &&
         xrfg::dlss_motion_vector_publications()!=0) {
+        // The flow runs at the Hybrid route's own resolution.
         state->nvidia_options.hybrid=true;
-        state->nvidia_options.input_scale=xrfg::D3D12NvidiaInputScale::quarter;
-        state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;
     }
     state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1 ||
         state->frame_generation_mode != xrfg::D3D12FrameGenerationMode::ofxr;
@@ -16121,8 +16121,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     }
     options.rife_async=options.rife_model>=0 && async_rife_queue(*state);
     if(hybrid_ready) {
-        options.hybrid=true; options.input_scale=xrfg::D3D12NvidiaInputScale::quarter;
-        backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+        options.hybrid=true;
     }
     const int effective_separation = effective_memory_control(*state,control.desired.separate_synthesis);
     const int effective_reduction = effective_memory_control(*state,control.desired.lower_vram);

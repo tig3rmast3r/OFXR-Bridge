@@ -665,7 +665,9 @@ std::string build_runtime_ini(
     bool flush_each_event) {
     const auto desired = autonomous::sanitize(controls);
     LauncherSettings settings = launcher;
-    settings.backend = desired.backend == 0 ? FlowBackend::fidelity_fx : FlowBackend::nvidia;
+    // Hybrid runs on its own engine, never the OFXR one.
+    const int engine = desired.frame_generation == 3 ? desired.hybrid_backend : desired.backend;
+    settings.backend = engine == 0 ? FlowBackend::fidelity_fx : FlowBackend::nvidia;
     settings.frame_generation = desired.frame_generation == 2 ? FrameGeneration::native_dlss : FrameGeneration::ofxr;
     settings.native_scale = desired.native_scale;
     settings.nvidia_preset = desired.preset == 0 ? NvidiaPerformancePreset::slow
@@ -698,14 +700,9 @@ std::string build_runtime_ini(
     replace_value("rife_resolution", std::to_string(desired.rife_resolution));
     replace_value("rife_multiplier", std::to_string(desired.rife_multiplier));
     replace_value("rife_model", std::to_string(desired.frame_generation==4 ? desired.rife_model : -1));
-    if(desired.frame_generation==3) {
-        replace_value("backend", backend_ini_value(FlowBackend::fidelity_fx));
-        replace_value("nvidia_route", "legacy");
-    }
     replace_value("r19_camera", desired.r19_camera ? "1" : "0");
     if (desired.frame_generation == 1) replace_value("frame_generation", "fsr3");
-    const auto chosen_backend=desired.frame_generation==3 ? 0 : desired.backend;
-    const auto route = chosen_backend == 3 ? "djules" : chosen_backend == 2 ? "new" : "legacy";
+    const auto route = engine == 3 ? "djules" : engine == 2 ? "new" : "legacy";
     const auto first_section = result.find("\r\n\r\n[diagnostics]");
     result.insert(first_section,
         "\r\nenabled=" + std::string(desired.enabled ? "1" : "0") +

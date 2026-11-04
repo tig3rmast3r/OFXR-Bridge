@@ -375,7 +375,9 @@ Settings sanitize(Settings value) noexcept {
     value.benchmark_csv=true;
     if(!value.advanced_mode && value.frame_generation==0)value.motion_vectors=0;
     value.backend = std::clamp(value.backend, 0, 3);
-    value.hybrid_backend = 0; // Migrate old selectable fallbacks to FidelityFX.
+    // Hybrid keeps an engine of its own, beside the OFXR one. 0.2.13 is a
+    // pacing route as much as a flow, which Hybrid never takes.
+    value.hybrid_backend = std::clamp(value.hybrid_backend, 0, 2);
     value.motion_vectors = std::clamp(value.motion_vectors, 0, 1);
     value.frame_generation = std::clamp(value.frame_generation, 0, 4);
     // DLSS-G owns its generator. Do not inherit a previous OFXR presenter's
@@ -429,6 +431,7 @@ Settings sanitize(Settings value) noexcept {
     if (!value.profiles_initialized) {
         value.generation_profiles = {};
         value.generation_profiles[7].scale=5; // RIFE defaults to exact1/6 motion inference.
+        value.generation_profiles[6].scale=3; // Hybrid's flow defaults to a quarter per axis.
     }
     value.profiles_initialized = true;
     value.generation_profiles[selected_profile(value)] = active_preferences(value);
@@ -457,6 +460,9 @@ Settings parse_settings(std::string_view text) {
     int section = -2; // -1 ofxr, 0..5 generation profile, -2 ignored
     std::array<bool, kGenerationProfileCount> profile_seen{}, separation_seen{};
     bool flat_separation_seen{},pacing_seen{},flat_scale_seen{};
+    // Before Hybrid had a flow resolution of its own, its FidelityFX flow ran
+    // at a quarter per axis whatever its route said.
+    bool hybrid_flow_revision_seen{};
     int legacy_single_director=-1;
     std::istringstream input{std::string(text)};
     std::string line;
@@ -493,6 +499,7 @@ Settings parse_settings(std::string_view text) {
         if(key=="separate_synthesis") flat_separation_seen=true;
         if(key=="pacing_mode") pacing_seen=true;
         if(key=="scale") flat_scale_seen=true;
+        if(key=="hybrid_flow_revision") hybrid_flow_revision_seen=number>=1;
         if(key=="AdvancedMode")value.advanced_mode=number!=0;
         if(key=="single_director") legacy_single_director=number!=0;
 #define READ_FIELD(name) if (key == #name) value.name = static_cast<decltype(value.name)>(number);
@@ -516,6 +523,11 @@ Settings parse_settings(std::string_view text) {
 #undef READ_FIELD
     }
     if(value.frame_generation==4 && !flat_scale_seen)value.scale=value.generation_profiles[7].scale;
+    if(!hybrid_flow_revision_seen) {
+        // The resolution Hybrid ran at, not the unused one its route held.
+        value.generation_profiles[6].scale=3;
+        if(value.frame_generation==3)value.scale=3;
+    }
     if(!pacing_seen && legacy_single_director>=0)value.pacing_mode=legacy_single_director?1:2;
     if(!flat_separation_seen) value.separate_synthesis=value.lower_vram;
     value.lower_vram = value.lower_vram > 0 || value.separate_synthesis > 0;
@@ -554,6 +566,7 @@ std::string serialize_settings(const Settings& settings,bool include_global_ui) 
     WRITE_FIELD(menu_scale) WRITE_FIELD(menu_offset_x) WRITE_FIELD(menu_offset_y)
     WRITE_FIELD(luke_shared_swapchains)
 #undef WRITE_FIELD
+    output << "hybrid_flow_revision=1\n";
     for (std::size_t i = 0; i < profile_sections.size(); ++i) {
         output << '\n' << profile_sections[i] << '\n';
         const auto& p = value.generation_profiles[i];

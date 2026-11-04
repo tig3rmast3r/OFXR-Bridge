@@ -46,7 +46,7 @@ struct Settings {
     int rife_resolution{18}; // Medium; inference presets10/15/18/21/25/30, native output unchanged
     int rife_model{3}; // 2 4.6, 3 4.4, 4 4.3; retired Lite IDs0/1 map to2
     int frame_generation{}; // 0 OFXR, 1 FSR 3, 2 native DLSS Frame Generation, 3 Hybrid, 4 RIFE
-    int hybrid_backend{}; // legacy profile key; Hybrid fallback is always FidelityFX
+    int hybrid_backend{}; // Hybrid's own OFXR engine: 0 FidelityFX, 1 0.2.1, 2 0.3.0 (never 0.2.13)
     int preset{1}; // 0 slow, 1 medium, 2 fast
     int scale{2}; // 0 full, 1 three-quarter, 2 half, 3 quarter, 4 fifth (RIFE only)
     bool backward{};

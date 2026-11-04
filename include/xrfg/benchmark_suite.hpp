@@ -84,6 +84,7 @@ inline std::vector<BenchmarkStep> benchmark_export_plan(bool full,bool luke,bool
 }
 inline Settings benchmark_settings(Settings saved,const BenchmarkStep& step) {
     select_generation(saved,step.generation,step.backend);
+    if(step.generation==3)saved.hybrid_backend=step.backend;
     saved.enabled=!step.disabled;
     saved.motion_vectors=step.generation>0 && step.generation<4 ? 1 : 0;
     if(step.generation==4){saved.rife_model=3;saved.rife_resolution=step.rife_quality;saved.rife_multiplier=step.rife_multiplier;}

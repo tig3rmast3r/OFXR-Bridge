@@ -1223,6 +1223,38 @@ float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
     return lerp(flow, vectors, saturate(1.0 + (last_disagreement - vectors_disagreement) * 8.0));
 }
 
+// The same composition with NVIDIA's optical flow, under the flow settings of
+// the Hybrid route: the OFXR engine's flow branch, quality and direction.
+float4 synthesize_hybrid_nvidia(FullscreenVertex input, bool bidirectional, bool fast) {
+    hybrid_layout = true;
+    float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
+    float vectors_disagreement = last_disagreement;
+    float4 result = vectors;
+    // Where the vectors explain both frames, the flow need not be asked.
+    [branch] if (vectors_disagreement >= 0.02) {
+        float4 flow = synthesize_midpoint(input, 1.0 / 32.0, true, bidirectional, fast, false,
+            (SynthesisFlags & 4u) != 0u);
+        result = lerp(flow, vectors, saturate(1.0 + (last_disagreement - vectors_disagreement) * 8.0));
+    }
+    return result;
+}
+
+float4 SynthesizeHybridNvidiaMidpointPS(FullscreenVertex input) : SV_Target {
+    return synthesize_hybrid_nvidia(input, false, false);
+}
+
+float4 SynthesizeHybridNvidiaBidirectionalMidpointPS(FullscreenVertex input) : SV_Target {
+    return synthesize_hybrid_nvidia(input, true, false);
+}
+
+float4 SynthesizeHybridNvidiaFastMidpointPS(FullscreenVertex input) : SV_Target {
+    return synthesize_hybrid_nvidia(input, false, true);
+}
+
+float4 SynthesizeHybridNvidiaFastBidirectionalMidpointPS(FullscreenVertex input) : SV_Target {
+    return synthesize_hybrid_nvidia(input, true, true);
+}
+
 // The NVIDIA variants read flow in signed S10.5 fixed point, and from a
 // previous input the pack warped into the current camera (PackNvidiaFlowInput).
 float4 SynthesizeNvidiaMidpointPS(FullscreenVertex input) : SV_Target {

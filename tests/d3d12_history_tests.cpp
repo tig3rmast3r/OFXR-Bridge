@@ -6110,6 +6110,10 @@ int main(int argc, char** argv) {
                 test_hybrid_motion_vector_occlusion_edges(hybrid_fixture,scene,false);
                 test_hybrid_motion_vector_occlusion_edges(hybrid_fixture,scene,true);
                 test_hybrid_motion_vector_occlusion_edges(hybrid_fixture,scene,true,true);
+                for(const auto flow : {HybridFlow::nvidia_legacy,HybridFlow::nvidia_new}) {
+                    test_hybrid_motion_vector_occlusion_edges(hybrid_fixture,scene,true,false,flow);
+                    test_hybrid_motion_vector_occlusion_edges(hybrid_fixture,scene,true,true,flow);
+                }
             }
             hybrid_fixture.require_no_debug_errors();return 0;
         }

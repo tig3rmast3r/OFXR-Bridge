@@ -1,7 +1,11 @@
 enum class HybridVectorScene { occlusion, overlay, fade };
-// hybrid composes with FidelityFX's flow as well as the game's vectors.
+// Which optical flow the hybrid composes with: FidelityFX, or NVIDIA's on the
+// 0.2.1 (legacy) or 0.3.0 (pose-compensated) route.
+enum class HybridFlow { fidelity_fx, nvidia_legacy, nvidia_new };
+// hybrid composes with that flow as well as the game's vectors.
 void test_hybrid_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, HybridVectorScene kind,
-                                             bool hybrid = false, bool quarter = false) {
+                                             bool hybrid = false, bool quarter = false,
+                                             HybridFlow flow = HybridFlow::fidelity_fx) {
     constexpr UINT width = 256, height = 128;
     constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
     constexpr int background_motion = 6;
@@ -70,9 +74,15 @@ void test_hybrid_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, Hybrid
     options.hybrid = hybrid;
     if (hybrid && !quarter) options.input_scale = xrfg::D3D12NvidiaInputScale::half;
     if (quarter) options.input_scale = xrfg::D3D12NvidiaInputScale::quarter;
+    const bool nvidia = flow != HybridFlow::fidelity_fx;
+    if (flow == HybridFlow::nvidia_new) {
+        options.grayscale_input = options.pose_compensated_input = true;
+        options.input_encoding = xrfg::flow_encoding_for_route(true);
+    }
     require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
                 history, current_pointers, synthetic_pointers, kFormat,
-                D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                nvidia ? xrfg::D3D12OpticalFlowBackend::nvidia : xrfg::D3D12OpticalFlowBackend::fidelity_fx,
                 options)),
         "occlusion synthesizer initialization failed");
     const auto guides = [&](std::uint64_t serial) {
@@ -135,7 +145,9 @@ void test_hybrid_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, Hybrid
         }
         const double edge_error = total / static_cast<double>(count);
         const double blend_error = blend_total / static_cast<double>(count);
-        std::cout << "quarter=" << quarter << " blend_mae=" << blend_error << " " << (hybrid ? "hybrid " : "") << "DLSS "
+        std::cout << "quarter=" << quarter << " blend_mae=" << blend_error << " " << (hybrid ? "hybrid " : "")
+                  << (flow == HybridFlow::nvidia_new ? "nvidia-0.3.0 " : flow == HybridFlow::nvidia_legacy ? "nvidia-0.2.1 " : "")
+                  << "DLSS "
                   << (fade ? "fade" : overlay ? "overlay" : "occlusion") << " eye=" << eye
                   << " edge_mae=" << edge_error << '\n';
         // Preserve the existing vectors-only thresholds. Hybrid includes the

@@ -214,7 +214,17 @@ void route_profiles() {
     select_generation(hybrid,3,2);hybrid.scale=1;hybrid.lower_vram=1;hybrid.hybrid_backend=1;hybrid=sanitize(hybrid);
     select_generation(hybrid,1,2);hybrid.native_scale=42;hybrid=sanitize(hybrid);
     hybrid=parse_settings(serialize_settings(hybrid));select_generation(hybrid,3,2);
-    require(hybrid.scale==1 && hybrid.lower_vram==1 && hybrid.hybrid_backend==0,"Hybrid retains own preferences and migrates legacy fallback to FidelityFX");
+    require(hybrid.scale==1 && hybrid.lower_vram==1 && hybrid.hybrid_backend==1,"Hybrid retains own engine and preferences");
+    require(hybrid.backend==2,"Hybrid engine is separate from the OFXR engine");
+    hybrid.hybrid_backend=3;hybrid=sanitize(hybrid);
+    require(hybrid.hybrid_backend==2,"Hybrid never takes the 0.2.13 pacing route");
+    Settings fresh;select_generation(fresh,3,0);
+    require(fresh.scale==3,"Hybrid's flow resolution defaults to a quarter");
+    auto older=parse_settings("[ofxr]\nframe_generation=3\nscale=2\n[route.hybrid]\nscale=2\n[route.ofxr_new]\nscale=1\n");
+    require(older.scale==3 && older.generation_profiles[6].scale==3 && older.generation_profiles[2].scale==1,
+        "profiles from before Hybrid's flow resolution keep the quarter they ran at, and only Hybrid's");
+    older.scale=2;older=parse_settings(serialize_settings(older));
+    require(older.scale==2,"Hybrid's chosen flow resolution survives a save");
     select_generation(hybrid,0,2);
     require(hybrid.scale==0 && hybrid.lower_vram==0 && hybrid.motion_vectors==0,"Hybrid leaves existing OFXR profile unchanged");
     require(generation_status_text(3,1,GenerationState::missing_motion).starts_with("Fallback to optical flow:"),"Hybrid missing guides reports fallback");

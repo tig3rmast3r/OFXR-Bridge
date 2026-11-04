@@ -207,6 +207,17 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         select_generation(draft, generation_from_ui(selected_generation), draft.backend);
         changed = true;
     }
+    // NVIDIA's flow settings, read from and saved to the selected route: OFXR's
+    // engine profile, or Hybrid's own.
+    const auto flow_resolution = [&] {
+        changed |= ImGui::Combo("Flow resolution", &draft.scale, "100%\0" "75%\0" "50%\0" "25% (lower flow detail)\0");
+        ImGui::TextWrapped("Flow resolution changes motion estimation only; output stays at full resolution. At high eye resolutions, 25% reduces OFA work with a detail tradeoff.");
+    };
+    const auto nvidia_flow_controls = [&] {
+        changed |= ImGui::Combo("Flow quality", &draft.preset, "Slow\0Medium\0Fast\0");
+        flow_resolution();
+        changed |= ImGui::Checkbox("Bidirectional flow", &draft.backward);
+    };
     if (draft.frame_generation == 0) {
         // UI order differs from persisted backend IDs: 0.2.13 is backend 3,
         // while 0.3.0 is backend 2. Keep each existing profile on its engine.
@@ -219,12 +230,10 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         }
         if(draft.advanced_mode)changed |= ImGui::Combo("Motion source", &draft.motion_vectors,
             "Optical flow\0Game motion vectors\0");
-        if (draft.backend != 0 && (draft.motion_vectors == 0 ||
-                (state.runtime.luke_detected && draft.afw_mode != 0))) {
-            changed |= ImGui::Combo("Flow quality", &draft.preset, "Slow\0Medium\0Fast\0");
-            changed |= ImGui::Combo("Flow resolution", &draft.scale, "100%\0" "75%\0" "50%\0" "25% (lower flow detail)\0");
-            ImGui::TextWrapped("Flow resolution changes motion estimation only; output stays at full resolution. At high eye resolutions, 25% reduces OFA work with a detail tradeoff.");
-            changed |= ImGui::Checkbox("Bidirectional flow", &draft.backward);
+        if (draft.motion_vectors == 0 || (state.runtime.luke_detected && draft.afw_mode != 0)) {
+            // FidelityFX has no quality preset or second direction, only a resolution.
+            if (draft.backend != 0) nvidia_flow_controls();
+            else flow_resolution();
         }
     } else if (draft.frame_generation==4) {
         if(draft.advanced_mode) {
@@ -259,7 +268,16 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         ImGui::TextWrapped("3X/4X require the private route. Luke Ross also requires the isolated post-AFW synthesis queue. Additional intermediates increase GPU work and memory use.");
         ImGui::TextWrapped("Experimental portable Python/CUDA. RIFE 4.4 processes both eyes together, with automatic TensorRT optimization. Motion inference uses the selected quality preset; output stays at full resolution. Requires the RIFE runtime installed in AppData.");
     } else if (draft.frame_generation==3) {
-        ImGui::TextWrapped("Game motion vectors + FidelityFX optical flow (25% per axis). If game guides are unavailable or rejected, uses FidelityFX optical flow.");
+        // Hybrid's engine is its own (hybrid_backend), never the OFXR one.
+        // 0.2.13 is left out: it is a pacing route as well as a flow.
+        if (ImGui::Combo("Optical flow engine", &draft.hybrid_backend,
+                "FidelityFX (low latency, medium compatibility)\0Nvidia 0.2.1 (low latency, low compatibility)\0Nvidia 0.3.0 (medium latency, medium compatibility)\0"))
+            changed = true;
+        if (draft.hybrid_backend != 0) nvidia_flow_controls();
+        else flow_resolution();
+        ImGui::TextWrapped(draft.hybrid_backend == 0
+            ? "Game motion vectors + FidelityFX optical flow. If game guides are unavailable or rejected, uses FidelityFX optical flow."
+            : "Game motion vectors + NVIDIA optical flow. If game guides are unavailable or rejected, uses NVIDIA optical flow.");
     } else {
         ImGui::TextDisabled("Uses game motion vectors and depth");
     }

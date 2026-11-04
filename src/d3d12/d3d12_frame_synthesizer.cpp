@@ -24,6 +24,10 @@
 #include "cinema_flatten_pixel_shader.hpp"
 #include "hybrid_synthesize_midpoint_pixel_shader.hpp"
 #include "hybrid_pack_flow_input_shader.hpp"
+#include "hybrid_nvidia_synthesize_midpoint_pixel_shader.hpp"
+#include "hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
+#include "hybrid_nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
+#include "hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
@@ -1033,6 +1037,11 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12DescriptorHeap> cinema_flat_rtv_heap;
     ComPtr<ID3D12PipelineState> hybrid_graphics_pipeline;
     ComPtr<ID3D12PipelineState> hybrid_pack_pipeline;
+    // Hybrid with NVIDIA's flow, chosen as the NVIDIA pipelines below are.
+    ComPtr<ID3D12PipelineState> hybrid_nvidia_graphics_pipeline;
+    ComPtr<ID3D12PipelineState> hybrid_nvidia_bidirectional_graphics_pipeline;
+    // The last recorded pair composed NVIDIA's flow with the game's vectors.
+    bool hybrid_guides_used{};
     ComPtr<ID3D12PipelineState> nvidia_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
     DXGI_FORMAT nvidia_input_format{DXGI_FORMAT_B8G8R8A8_UNORM};
@@ -1568,10 +1577,28 @@ struct D3D12FrameSynthesizer::Impl {
                 sizeof(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader),
             };
         }
-        return device->CreateGraphicsPipelineState(
+        result = device->CreateGraphicsPipelineState(
             &graphics_description,
             IID_PPV_ARGS(
                 nvidia_bidirectional_graphics_pipeline.GetAddressOf()));
+        if (FAILED(result) || !nvidia_options.hybrid) return result;
+
+        const bool fast = nvidia_options.preset == D3D12NvidiaPerformancePreset::fast;
+        graphics_description.PS = fast
+            ? D3D12_SHADER_BYTECODE{g_xrfg_hybrid_nvidia_fast_synthesize_midpoint_pixel_shader,
+                  sizeof(g_xrfg_hybrid_nvidia_fast_synthesize_midpoint_pixel_shader)}
+            : D3D12_SHADER_BYTECODE{g_xrfg_hybrid_nvidia_synthesize_midpoint_pixel_shader,
+                  sizeof(g_xrfg_hybrid_nvidia_synthesize_midpoint_pixel_shader)};
+        result = device->CreateGraphicsPipelineState(&graphics_description,
+            IID_PPV_ARGS(hybrid_nvidia_graphics_pipeline.GetAddressOf()));
+        if (FAILED(result)) return result;
+        graphics_description.PS = fast
+            ? D3D12_SHADER_BYTECODE{g_xrfg_hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader,
+                  sizeof(g_xrfg_hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader)}
+            : D3D12_SHADER_BYTECODE{g_xrfg_hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader,
+                  sizeof(g_xrfg_hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader)};
+        return device->CreateGraphicsPipelineState(&graphics_description,
+            IID_PPV_ARGS(hybrid_nvidia_bidirectional_graphics_pipeline.GetAddressOf()));
     }
 
     [[nodiscard]] HRESULT create_fidelityfx_resources(UINT node_mask) {
@@ -4508,9 +4535,23 @@ struct D3D12FrameSynthesizer::Impl {
         std::span<const D3D12ReprojectionView> target_views,
         std::uint32_t synthetic_destination_index,
         std::uint32_t current_destination_index,
-        const std::optional<OverlayPlacement>& debug_marker) noexcept {
+        const std::optional<OverlayPlacement>& debug_marker,
+        // Hybrid: the game's vectors, composed per pixel with NVIDIA's flow.
+        const DlssMotionVectorSet* guides = nullptr) noexcept {
         if (slot.synthesis_command_list == nullptr) {
             return E_UNEXPECTED;
+        }
+        // The guide eye each view reads, as the FidelityFX hybrid picks it.
+        const auto guide_eye = [&](UINT view_index, UINT slice) noexcept {
+            return image_description.DepthOrArraySize == 1 && guides->eye_count == target_views.size()
+                ? view_index : slice;
+        };
+        if (guides) {
+            for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
+                const UINT slice = resolved_array_slice(target_views[view_index], view_index,
+                    target_views.size(), image_description.DepthOrArraySize);
+                if (guide_eye(view_index, slice) >= guides->eye_count) return E_INVALIDARG;
+            }
         }
         dred_marker(slot.command_list.Get(), "OFXR NVIDIA pack begin");
         slot.ram_pair=true;
@@ -4521,7 +4562,36 @@ struct D3D12FrameSynthesizer::Impl {
         ID3D12Resource* const current_resource = current_source.resource.Get();
         ID3D12Resource* const current_destination =
             current_destinations[current_destination_index].resource.Get();
-        create_source_views(slot, previous_resource, current_resource);
+        create_source_views(slot, previous_resource, current_resource, DXGI_FORMAT_UNKNOWN,
+            guides ? guides->eye_count : 0);
+        if (guides) {
+            const HRESULT views = create_game_motion_views(slot, *guides,
+                static_cast<UINT>(target_views.size()));
+            if (FAILED(views)) return views;
+            // A double-wide image has one NVIDIA flow for both eyes, but each
+            // guide eye reads from a block of its own: give the extra blocks
+            // that flow too.
+            D3D12_SHADER_RESOURCE_VIEW_DESC flow_view{};
+            flow_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            flow_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            flow_view.Texture2D.MipLevels = 1;
+            const D3D12_CPU_DESCRIPTOR_HANDLE cpu_start =
+                slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+            for (UINT block = image_description.DepthOrArraySize; block < guides->eye_count; ++block) {
+                const UINT base = block * kDescriptorBlockSize;
+                NvidiaEyeResources& eye = slot.nvidia_eyes[image_description.DepthOrArraySize - 1U];
+                flow_view.Format = DXGI_FORMAT_R16G16_SINT;
+                device->CreateShaderResourceView(eye.flow.Get(), &flow_view,
+                    offset_cpu_handle(cpu_start, base + 2, descriptor_increment));
+                device->CreateShaderResourceView(nvidia_options.bidirectional ? eye.backward_flow.Get() : nullptr,
+                    &flow_view, offset_cpu_handle(cpu_start, base + 4, descriptor_increment));
+                flow_view.Format = DXGI_FORMAT_R8_UINT;
+                device->CreateShaderResourceView(eye.cost.Get(), &flow_view,
+                    offset_cpu_handle(cpu_start, base + 3, descriptor_increment));
+                device->CreateShaderResourceView(nvidia_options.bidirectional ? eye.backward_cost.Get() : nullptr,
+                    &flow_view, offset_cpu_handle(cpu_start, base + 5, descriptor_increment));
+            }
+        }
         if (nvidia_gpu_timing_enabled) {
             slot.timing_metadata = {};
             slot.timing_metadata.previous_serial = previous_source.ticket.serial;
@@ -4720,10 +4790,29 @@ struct D3D12FrameSynthesizer::Impl {
         synthesis->SetDescriptorHeaps(1, heaps);
         synthesis->SetGraphicsRootSignature(root_signature.Get());
         if(flat_panel)parameters.synthesis_flags|=128U;
-        synthesis->SetPipelineState(
-            nvidia_options.bidirectional
+        synthesis->SetPipelineState(guides
+            ? (nvidia_options.bidirectional
+                   ? hybrid_nvidia_bidirectional_graphics_pipeline.Get()
+                   : hybrid_nvidia_graphics_pipeline.Get())
+            : nvidia_options.bidirectional
                 ? nvidia_bidirectional_graphics_pipeline.Get()
                 : nvidia_graphics_pipeline.Get());
+        // The guides' motion is read by the hybrid composition.
+        const auto motion_barriers = [&](bool to_read) {
+            if (!guides) return;
+            for (UINT eye = 0; eye < guides->eye_count; ++eye) {
+                const auto& guide = guides->eyes[eye];
+                if (guide->resource_state == kShaderReadState ||
+                    (eye != 0 && guide->motion_vectors.Get() == guides->eyes[0]->motion_vectors.Get())) {
+                    continue;
+                }
+                const auto barrier = to_read
+                    ? transition_barrier(guide->motion_vectors.Get(), guide->resource_state, kShaderReadState)
+                    : transition_barrier(guide->motion_vectors.Get(), kShaderReadState, guide->resource_state);
+                synthesis->ResourceBarrier(1, &barrier);
+            }
+        };
+        motion_barriers(true);
         dred_marker(synthesis, "OFXR NVIDIA composition draw");
         synthesis->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -4748,9 +4837,27 @@ struct D3D12FrameSynthesizer::Impl {
                 parameters.view_index = view_index;
                 parameters.previous_mappings = view_mappings;
                 apply_synthetic_camera(parameters, output, view_index);
+                const UINT descriptor_block = guides ? guide_eye(view_index, slice) : slice;
+                if (guides) {
+                    // As the FidelityFX hybrid: the output rectangle packed 16
+                    // bits a value, the flow keeping its own constants.
+                    const auto& guide = guides->eyes[descriptor_block];
+                    parameters.use_game_motion = guide->output_x | (guide->output_y << 16U);
+                    parameters.game_motion_padding = guide->output_width | (guide->output_height << 16U);
+                    parameters.game_motion_rect = guide_motion_rect(*guide);
+                    parameters.game_motion_scale = {
+                        guide->scale_x * static_cast<float>(guide->output_width) /
+                            parameters.game_motion_rect[2],
+                        guide->scale_y * static_cast<float>(guide->output_height) /
+                            parameters.game_motion_rect[3]};
+                    parameters.game_motion_jitter_delta = guide->jittered
+                        ? std::array<float, 2>{guide->jitter_x - guide->previous_jitter_x,
+                                               guide->jitter_y - guide->previous_jitter_y}
+                        : std::array<float, 2>{};
+                }
                 const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
                     gpu_start,
-                    slice * kDescriptorBlockSize,
+                    descriptor_block * kDescriptorBlockSize,
                     descriptor_increment);
                 synthesis->SetGraphicsRootDescriptorTable(0, block);
                 synthesis->SetGraphicsRootDescriptorTable(
@@ -4780,6 +4887,7 @@ struct D3D12FrameSynthesizer::Impl {
             }
             synthetic_target_state(synthesis, output_destination, false);
         }
+        motion_barriers(false);
 
         std::array<D3D12_RESOURCE_BARRIER,
                    3U + 4U * kMaxReprojectionViews> before_current_copy{};
@@ -4936,6 +5044,7 @@ struct D3D12FrameSynthesizer::Impl {
         bool* used_game_motion) noexcept {
         if (used_game_motion == nullptr) return E_POINTER;
         *used_game_motion = false;
+        hybrid_guides_used = false;
         if(rife){
             if(target_views.size()!=current_source.view_count || previous_source.view_count!=current_source.view_count)return E_INVALIDARG;
             slot.timing_metadata={};slot.timing_metadata.previous_serial=previous_source.ticket.serial;
@@ -5066,10 +5175,9 @@ struct D3D12FrameSynthesizer::Impl {
             if (SUCCEEDED(result)) *used_game_motion = true;
             return result;
         }
-        // The hybrid runs FidelityFX's flow below and composes with the
+        // The hybrid runs this backend's flow below and composes with the
         // game's vectors as well.
         const bool hybrid = nvidia_options.hybrid &&
-            backend == D3D12OpticalFlowBackend::fidelity_fx &&
             valid_game_motion_pair(previous_source, current_source, std::min<UINT>(std::max<UINT>(image_description.DepthOrArraySize, current_source.view_count), kDlssMotionVectorEyeCount)) &&
             current_source.motion_vectors &&
             current_source.motion_vectors->eye_count == target_views.size();
@@ -5086,14 +5194,20 @@ struct D3D12FrameSynthesizer::Impl {
             report_dlss_motion_vector_status(DlssMotionVectorStatus::temporal_mismatch);
         }
         if (backend == D3D12OpticalFlowBackend::nvidia || native_dlss) {
-            return record_nvidia_pair(
+            const bool nvidia_hybrid = hybrid && !native_dlss;
+            const HRESULT result = record_nvidia_pair(
                 slot,
                 previous_source,
                 current_source,
                 target_views,
                 synthetic_destination_index,
                 current_destination_index,
-                debug_marker);
+                debug_marker,
+                nvidia_hybrid ? current_source.motion_vectors.get() : nullptr);
+            // The OFA still runs, so this pair is not reported as the game's
+            // vectors alone; its use of them is reported on its own.
+            hybrid_guides_used = SUCCEEDED(result) && nvidia_hybrid;
+            return result;
         }
         ID3D12Resource* const previous_resource = previous_source.resource.Get();
         ID3D12Resource* const current_resource = current_source.resource.Get();
@@ -6746,7 +6860,7 @@ struct D3D12FrameSynthesizer::Impl {
             last_fsr_context_fence_values[active_fsr_domain] = fence_value;
         }
         if (native_dlss) native_dlss->submitted(fence.Get(), fence_value, last_synthetic_fence_value);
-        if (!rife && used_game_motion && (!native_dlss || native_pair_generated)) report_dlss_motion_vector_use();
+        if (!rife && (used_game_motion || hybrid_guides_used) && (!native_dlss || native_pair_generated)) report_dlss_motion_vector_use();
 
         next.last_use_fence_value = fence_value;
         result = history->retire_consumer(
