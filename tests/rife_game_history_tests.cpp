@@ -3,6 +3,8 @@
 #include <stdexcept>
 using namespace xrfg;
 void check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
+struct GroupedNumbers:std::numpunct<char>{char do_thousands_sep()const override{return ',';}
+    std::string do_grouping()const override{return "\3";}};
 int main(){try{
     std::array<XrCompositionLayerProjectionView,4> views{};
     for(unsigned i=0;i<4;++i){views[i].type=XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
@@ -32,7 +34,10 @@ int main(){try{
     check(history.observe(single,folder,exe,adapter),"first valid resolution saved without diagnostic logging");
     check(!history.observe(single,folder,exe,adapter) && adapter_calls==1,"unchanged frame never writes or asks GPU adapter again");
     check(history.observe(stereo,folder,exe,adapter),"eye-layout-only change replaces record");
-    check(history.observe(quad,folder,exe,adapter),"new resolution replaces record");
+    const auto previous_locale=std::locale::global(std::locale(std::locale::classic(),new GroupedNumbers));
+    const bool saved=history.observe(quad,folder,exe,adapter);
+    std::locale::global(previous_locale);
+    check(saved,"new resolution replaces record under a game's non-default numeric locale");
     unsigned files=0;std::filesystem::path record;
     for(const auto& entry:std::filesystem::directory_iterator(folder)){++files;record=entry.path();}
     check(files==1,"one game retains only its last layout");

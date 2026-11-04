@@ -8,6 +8,7 @@
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
+#include <locale>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -95,12 +96,13 @@ public:
             auto identity=executable.lexically_normal().wstring();
             std::uint64_t hash=14695981039346656037ULL;
             for(auto c:identity){c=std::towlower(c);hash^=unsigned(c);hash*=1099511628211ULL;}
-            std::ostringstream key;key<<std::hex<<hash;
+            std::ostringstream key;key.imbue(std::locale::classic());key<<std::hex<<hash;
             std::filesystem::create_directories(folder);
             const auto path=folder/(key.str()+".json");
             const auto temporary=folder/(key.str()+"."+std::to_string(GetCurrentProcessId())+".tmp");
             const auto utf8=[](const std::filesystem::path& p){const auto s=p.generic_u8string();return std::string(s.begin(),s.end());};
             std::ofstream file(temporary,std::ios::binary|std::ios::trunc);
+            file.imbue(std::locale::classic()); // games may change the process-wide numeric locale
             file<<"{\"schema\":1,\"game\":"<<rife_json_string(utf8(executable.filename()))
                 <<",\"executable\":"<<rife_json_string(utf8(executable))
                 <<",\"adapter_luid\":"<<rife_json_string(std::to_string(adapter()))<<",\"shapes\":[";
