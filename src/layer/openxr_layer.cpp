@@ -8137,7 +8137,12 @@ XrResult release_swapchain_image_locked(
         // AFW resolves the guide at xrEndFrame against the eye actually
         // released on this application frame. A release-time pair may trail
         // the real colour by one or more NGX publications.
-        if (state->session->dlss_motion_vectors &&
+        // A quad layer (UEVR's UI) or a panel source never takes game guides:
+        // resolving it only failed - no DLSS output its size - and its
+        // queue_mismatch overwrote the projection's status, shown red at 3X.
+        const bool guide_free_layer = state->panel_source ||
+            (state->diagnostic_layer_roles & 3U) == 2U;
+        if (state->session->dlss_motion_vectors && !guide_free_layer &&
             !(luke_split_eye && state->session->luke_afw_enabled)) {
             std::scoped_lock lock(state->mutex);
             auto* application_d3d11_device = state->session->d3d11_bridge

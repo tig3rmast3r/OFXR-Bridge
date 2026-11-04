@@ -19,6 +19,14 @@
 
 namespace xrfg {
 namespace {
+// Which of the queue-mismatch checks refused a guide (luke_afw_stage, result
+// = site 1-9, a = 1195): logged when the site changes and every 256th time.
+void log_queue_mismatch(std::uint32_t site) noexcept {
+    static std::atomic_uint32_t last{}, repeats{};
+    if (last.exchange(site, std::memory_order_relaxed) == site &&
+        (repeats.fetch_add(1, std::memory_order_relaxed) & 255U) != 0) return;
+    bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage, site, 1195);
+}
 
 using Microsoft::WRL::ComPtr;
 
@@ -1543,7 +1551,7 @@ resolve_view_placed_dlss_guides(
                   SUCCEEDED(consumer_queue->Wait(chosen->producer_fence.Get(),
                       chosen->producer_fence_value)))) {
                 ++state.statistics.resolve_queue_mismatches;
-                state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                state.statistics.status = DlssMotionVectorStatus::queue_mismatch; log_queue_mismatch(1);
                 return none;
             }
             auto set = std::make_shared<DlssMotionVectorSet>();
@@ -1635,7 +1643,7 @@ resolve_enlarged_dlss_guides(
                   SUCCEEDED(consumer_queue->Wait(frame->producer_fence.Get(),
                       frame->producer_fence_value)))) {
                 ++state.statistics.resolve_queue_mismatches;
-                state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                state.statistics.status = DlssMotionVectorStatus::queue_mismatch; log_queue_mismatch(2);
                 return none;
             }
             const auto& view = eyes[eye];
@@ -1875,7 +1883,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 // existing precise GUI/fallback reason after route switches.
                 if (streams_with_frames >= eye_count) {
                     ++state.statistics.resolve_queue_mismatches;
-                    state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                    state.statistics.status = DlssMotionVectorStatus::queue_mismatch; log_queue_mismatch(3);
                 } else {
                     ++state.statistics.resolve_missing_streams;
                     state.statistics.status = state.statistics.published == 0
@@ -1975,7 +1983,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             // frame, including older snapshots selected by the watermark.
             if (!synchronize(chosen)) {
                 ++state.statistics.resolve_queue_mismatches;
-                state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                state.statistics.status = DlssMotionVectorStatus::queue_mismatch; log_queue_mismatch(4);
                 return {};
             }
             auto frame = std::make_shared<DlssMotionVectorFrame>(*chosen);
@@ -2035,7 +2043,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 for (const auto& candidate : candidates) {
                     if (!synchronize(candidate.frame)) {
                         ++state.statistics.resolve_queue_mismatches;
-                        state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                        state.statistics.status = DlssMotionVectorStatus::queue_mismatch; log_queue_mismatch(5);
                         return {};
                     }
                 }
@@ -2077,7 +2085,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                     // with the right still to come is this frame's.
                     if (!synchronize(chosen)) {
                         ++state.statistics.resolve_queue_mismatches;
-                        state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                        state.statistics.status = DlssMotionVectorStatus::queue_mismatch; log_queue_mismatch(6);
                         return {};
                     }
                     if (chosen == current || (current->serial & 1U) == 0) {
@@ -2139,7 +2147,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         if (candidates.size() < eye_count) {
             if (streams_with_frames >= eye_count) {
                 ++state.statistics.resolve_queue_mismatches;
-                state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                state.statistics.status = DlssMotionVectorStatus::queue_mismatch; log_queue_mismatch(7);
             } else {
                 ++state.statistics.resolve_missing_streams;
                 state.statistics.status = state.statistics.published == 0
@@ -2281,7 +2289,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         if (candidates.size() < eye_count) {
             if (streams_with_frames >= eye_count) {
                 ++state.statistics.resolve_queue_mismatches;
-                state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                state.statistics.status = DlssMotionVectorStatus::queue_mismatch; log_queue_mismatch(8);
             } else {
                 ++state.statistics.resolve_missing_streams;
                 state.statistics.status = state.statistics.published == 0
@@ -2503,7 +2511,7 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
         };
         if (!compatible(previous) || !compatible(current)) {
             ++state.statistics.resolve_queue_mismatches;
-            state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+            state.statistics.status = DlssMotionVectorStatus::queue_mismatch; log_queue_mismatch(9);
             return {};
         }
         auto resolved = std::make_shared<DlssMotionVectorFrame>(*current);
