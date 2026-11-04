@@ -114,8 +114,9 @@ struct AppState {
         bool installing{};
         ULONGLONG started{};
         std::filesystem::path result_path, console_log;
-        bool precompiling{};
+        bool precompiling{},updating_overlay{};
     } rife;
+    bool startup_arm_pending{};
 };
 
 [[nodiscard]] std::wstring last_error_message(std::wstring_view action) {
@@ -638,6 +639,10 @@ void close_pause_signal(AppState& state) {
 }
 
 [[nodiscard]] bool arm_bridge(AppState& state, std::wstring* error) {
+    if(state.startup_arm_pending && state.rife.process) {
+        if(error)*error=L"RIFE source alignment is still running. Please wait for it to finish.";
+        return false;
+    }
     // Reconcile disk/registry state, not just this tray process's memory.
     if (!disarm_bridge(state, error)) return false;
 
@@ -887,7 +892,7 @@ void close_rife_process(AppState& state) {
 // Desktop subprocess only: the window thread never waits for Python, CUDA,
 // downloads or installation. Check output is retained even on helper startup
 // errors; the install has its own visible console and backend log.
-bool begin_rife_operation(AppState& state,bool installing,std::wstring* error,bool reinstalling=false,bool precompiling=false) {
+bool begin_rife_operation(AppState& state,bool installing,std::wstring* error,bool reinstalling=false,bool precompiling=false,bool updating_overlay=false) {
     const bool visible=installing||precompiling;
     if(state.rife.process){if(error)*error=L"A RIFE operation is already running.";return false;}
     HANDLE output{},input{};
@@ -918,6 +923,7 @@ bool begin_rife_operation(AppState& state,bool installing,std::wstring* error,bo
         const auto powershell=std::filesystem::path(system.data())/L"WindowsPowerShell/v1.0/powershell.exe";
         auto command=xrfg::rife_setup::command_line(powershell,script,root,result,!visible);
         if(reinstalling)command+=L" -Reinstall";
+        if(updating_overlay)command+=L" -UpdateOverlay";
         DWORD flags=xrfg::rife_setup::process_flags(installing);
         startup.StartupInfo.dwFlags=STARTF_USESHOWWINDOW;startup.StartupInfo.wShowWindow=visible?SW_SHOWNORMAL:SW_HIDE;
         if(!visible) {
@@ -939,7 +945,7 @@ bool begin_rife_operation(AppState& state,bool installing,std::wstring* error,bo
             state.executable_directory.c_str(),&startup.StartupInfo,&process)) {
             const auto message=last_error_message(L"Starting the RIFE helper");cleanup();if(error)*error=message;return false;
         }
-        state.rife={process.hProcess,visible,GetTickCount64(),result,visible?std::filesystem::path{}:console,precompiling};
+        state.rife={process.hProcess,visible,GetTickCount64(),result,visible?std::filesystem::path{}:console,precompiling,updating_overlay};
         process.hProcess=nullptr;cleanup();
         if(state.window)SetTimer(state.window,kRifeSetupTimer,250,nullptr);
         return true;
@@ -949,7 +955,7 @@ bool begin_rife_operation(AppState& state,bool installing,std::wstring* error,bo
 }
 
 struct RifeCompletion {
-    bool installing{},precompiling{};
+    bool installing{},precompiling{},updating_overlay{};
     std::optional<xrfg::rife_setup::Result> result;
     std::wstring error;
     std::filesystem::path fallback_log;
@@ -961,7 +967,7 @@ std::optional<RifeCompletion> collect_rife_completion(AppState& state) {
     // Its progress window owns cancellation; do not detach it after two hours.
     const bool timeout=!state.rife.precompiling && GetTickCount64()-state.rife.started>=xrfg::rife_setup::operation_timeout(state.rife.installing);
     if(waited==WAIT_TIMEOUT&&!timeout)return {};
-    RifeCompletion completion;completion.installing=state.rife.installing;completion.precompiling=state.rife.precompiling;
+    RifeCompletion completion;completion.installing=state.rife.installing;completion.precompiling=state.rife.precompiling;completion.updating_overlay=state.rife.updating_overlay;
     completion.fallback_log=state.rife.console_log.empty()?state.rife.result_path.parent_path().parent_path():state.rife.console_log;
     DWORD exit_code=1;
     if(waited!=WAIT_OBJECT_0) {
@@ -993,7 +999,7 @@ void report_rife_completion(AppState& state,const RifeCompletion& completion) {
         if(text.empty())text=L"RIFE is ready.";
         MessageBoxW(state.window,text.c_str(),completion.precompiling?L"Pre-compile TensorRT":L"Check RIFE",MB_OK|MB_ICONINFORMATION);return;
     }
-    if(!completion.installing&&xrfg::rife_setup::offers_install(result.status)) {
+    if(!completion.installing&&!completion.updating_overlay&&xrfg::rife_setup::offers_install(result.status)) {
         RifeInstallDialog dialog{xrfg::managed_rife_runtime(),result.message};
         const auto answer=DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_RIFE_INSTALL),state.window,
             rife_install_dialog_procedure,reinterpret_cast<LPARAM>(&dialog));
@@ -1005,7 +1011,16 @@ void report_rife_completion(AppState& state,const RifeCompletion& completion) {
     MessageBoxW(state.window,text.c_str(),completion.precompiling?L"Pre-compile TensorRT":L"Check RIFE",MB_OK|MB_ICONWARNING);
 }
 void poll_rife_operation(AppState& state) {
-    if(auto completion=collect_rife_completion(state))report_rife_completion(state,*completion);
+    if(auto completion=collect_rife_completion(state)) {
+        if(completion->updating_overlay) {
+            if(!completion->result || (completion->result->status!=xrfg::rife_setup::Status::ready &&
+                completion->result->status!=xrfg::rife_setup::Status::missing))report_rife_completion(state,*completion);
+            if(state.startup_arm_pending) {
+                state.startup_arm_pending=false;std::wstring error;
+                if(!arm_bridge(state,&error))show_error(state.window,error);
+            }
+        }else report_rife_completion(state,*completion);
+    }
 }
 
 HMENU append_rife_menu(HMENU menu,const AppState& state) {
@@ -1022,9 +1037,10 @@ void show_context_menu(AppState& state) {
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, show_settings, L"Settings...");
     SetMenuDefaultItem(menu, show_settings, FALSE);
-    AppendMenuW(menu, MF_STRING | (state.armed ? MF_CHECKED : MF_UNCHECKED),
+    const auto startup_flags=state.startup_arm_pending?MF_GRAYED:0;
+    AppendMenuW(menu, MF_STRING | startup_flags | (state.armed ? MF_CHECKED : MF_UNCHECKED),
         toggle_arm, L"Enable");
-    AppendMenuW(menu, MF_STRING | (state.armed ? MF_UNCHECKED : MF_CHECKED),
+    AppendMenuW(menu, MF_STRING | startup_flags | (state.armed ? MF_UNCHECKED : MF_CHECKED),
         toggle_arm, L"Disable");
     AppendMenuW(menu, MF_STRING, configure_keybinds, L"Configure keybinds...");
     append_rife_menu(menu,state);
@@ -1778,9 +1794,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
     SetTimer(window,kBenchmarkTimer,100,nullptr);
     // Settings-only/preview and watchdog helpers returned before this point.
     std::wstring auto_arm_error;
-    if (!arm_bridge(state, &auto_arm_error)) {
-        log_lifecycle(state.local_directory, L"startup-auto-arm", auto_arm_error);
-        show_error(state.window, auto_arm_error);
+    const auto installed_rife=xrfg::managed_rife_runtime();
+    if(!installed_rife.empty() && std::filesystem::is_regular_file(installed_rife/L"python/python.exe") &&
+        begin_rife_operation(state,false,&auto_arm_error,false,false,true)) {
+        state.startup_arm_pending=true; // align code before registering this build
+    }else {
+        if(!auto_arm_error.empty())show_error(state.window,auto_arm_error);
+        if (!arm_bridge(state, &auto_arm_error)) {
+            log_lifecycle(state.local_directory, L"startup-auto-arm", auto_arm_error);
+            show_error(state.window, auto_arm_error);
+        }
     }
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {

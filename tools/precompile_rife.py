@@ -10,6 +10,7 @@ import time
 
 sys.dont_write_bytecode = True
 PACKAGE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PACKAGE / "tools"))
 sys.path.insert(0, str(PACKAGE / "python/rife"))
 QUALITIES = (10, 15, 18, 21, 25, 30)
 
@@ -45,9 +46,11 @@ def build_plan(games, adapters):
     plan = {}
     for game in games:
         luid = game["adapter_luid"]
-        if luid and luid not in adapters:
+        if luid and luid not in adapters and len(set(adapters.values())) != 1:
             raise ValueError("NVIDIA adapter used by " + game["game"] + " is not available")
-        device = adapters[luid] if luid else next(iter(adapters.values()))
+        # Windows LUIDs can change after reboot. With one supported GPU there
+        # is no ambiguity; the engine key still uses its current stable UUID.
+        device = adapters[luid] if luid in adapters else next(iter(adapters.values()))
         for shape in game["shapes"]:
             for quality in QUALITIES:
                 # Match native ceil(unsigned_extent * float(percent)/100).
@@ -118,6 +121,7 @@ def prepare_one(backend, shape, cancelled, sleep=time.sleep):
 def run(args):
     from trt_cache import atomic_json, cache_directory
     from runtime_lease import RuntimeBusy, RuntimeLease
+    from update_rife_overlay import sync_locked, OverlayRepairRequired
     result = dict(schema=1, status="error", message="", root=str(args.root), backend="NVIDIA / TensorRT",
                   installed_bytes=0, required_free_bytes=0, log_path=str(args.log), completed=0, total=0)
     args.log.parent.mkdir(parents=True, exist_ok=True)
@@ -134,6 +138,10 @@ def run(args):
             raise RuntimeError("Invalid game records: " + "; ".join(errors))
         # Excludes installers, other offline runs and active managed RIFE workers.
         with RuntimeLease(args.root, exclusive=True):
+            # One global preflight, before counting engine jobs. Canonical
+            # installed bytes are also the in-game worker's cache identity.
+            if sync_locked(args.root, PACKAGE):
+                report("RIFE source files aligned with this build; dependencies preserved")
             import torch
             from trt_backend import Backend
             adapters = cuda_adapters()
@@ -146,16 +154,11 @@ def run(args):
                     raise InterruptedError("Pre-compilation cancelled; completed engines remain available")
                 device, width, height, eyes = shape
                 torch.cuda.set_device(device)
-                backend = Backend(args.root, PACKAGE / "python/rife", directory)
+                backend = Backend(args.root, args.root / "app", directory)
                 backend.set_device(device)
                 try:
                     if not backend._initialize():
                         raise RuntimeError(backend.note)
-                    # Do not create engines for a different worker overlay by accident.
-                    from trt_cache import file_sha256
-                    for name in ("trt_compile.py", "models/IFNet_HDv3_v4_4.py", "models/warplayer.py"):
-                        if file_sha256(args.root / "app" / name) != file_sha256(PACKAGE / "python/rife" / name):
-                            raise RuntimeError("Installed RIFE code differs from this release. Run Check RIFE and repair it first.")
                     report(f"{width}×{height}, {eyes} eye(s): {', '.join(names)}")
                     key, cached = prepare_one(backend, shape, args.cancel.exists)
                     report(("Already ready: " if cached else "Compiled and checked: ") + key)
@@ -175,10 +178,12 @@ def run(args):
         report(result["message"], "complete")
     except RuntimeBusy as error:
         result.update(status="busy", message=str(error));report(result["message"], "error")
+    except OverlayRepairRequired as error:
+        result.update(status="repair", message=str(error));report(result["message"], "error")
     except Exception as error:
         result.update(status="error", message=str(error));report(result["message"], "cancelled" if isinstance(error, InterruptedError) else "error")
     atomic_json(args.result, result)
-    return {"ready": 0, "busy": 13}.get(result["status"], 1)
+    return {"ready": 0, "busy": 13, "repair": 11}.get(result["status"], 1)
 
 
 def main():

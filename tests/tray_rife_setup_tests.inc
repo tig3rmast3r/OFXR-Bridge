@@ -119,5 +119,16 @@ exit 10
     require(completion&&!completion->result&&completion->error.find(L"timed out")!=std::wstring::npos&&!app.rife.process,
         "timeout reports error without automatic reinstall");
     require(WaitForSingleObject(owned,15000)==WAIT_OBJECT_0,"own timed-out fixture retires before temporary directory cleanup");CloseHandle(owned);
-    std::cout<<"Check RIFE: actual confirmation controls, backend routing, argument quoting and asynchronous helper PASS\n";
+    std::ofstream(app.executable_directory/L"tools/Setup-RifeRuntime.ps1")<<R"PS(param([switch]$Check,[switch]$UpdateOverlay,[string]$Root,[string]$ResultJson)
+$r=[ordered]@{schema=1;status='ready';message='code-only fixture';root=$Root;backend='overlay';installed_bytes=0;required_free_bytes=0;log_path=''}
+if(-not $UpdateOverlay){exit 1}
+[IO.File]::WriteAllText($ResultJson,($r|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+exit 0
+)PS";
+    require(begin_rife_operation(app,false,&error,false,false,true),"startup overlay helper starts without installation or GPU check");
+    completion.reset();const auto overlay_deadline=GetTickCount64()+15000;
+    while(!completion&&GetTickCount64()<overlay_deadline){completion=collect_rife_completion(app);if(!completion)Sleep(10);}
+    require(completion&&completion->updating_overlay&&completion->result&&completion->result->status==r::Status::ready,
+        "startup overlay-only mode reaches the helper and returns its own completion kind");
+    std::cout<<"Check RIFE: controls, routing, quoting, async health and startup code alignment PASS\n";
 }

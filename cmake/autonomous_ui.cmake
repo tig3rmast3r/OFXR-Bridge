@@ -22,9 +22,11 @@ if(WIN32 AND XRFG_BUILD_TESTS)
     if(EXISTS "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe")
         add_test(NAME xrfg_rife_precompile_plan COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
             -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_precompile_tests.py")
+        add_test(NAME xrfg_rife_overlay_update COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
+            -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_overlay_update_tests.py")
         add_test(NAME xrfg_rife_precompile_progress_ui COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
             -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_precompile_ui_tests.py")
-        set_tests_properties(xrfg_rife_precompile_plan xrfg_rife_precompile_progress_ui PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        set_tests_properties(xrfg_rife_precompile_plan xrfg_rife_precompile_progress_ui xrfg_rife_overlay_update PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
     endif()
 endif()
 

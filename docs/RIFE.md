@@ -14,6 +14,10 @@ presets using each game's last recorded resolution and eye layout. Open games
 once with V863 or newer to populate the list; diagnostics need not be enabled.
 See [offline preparation and progress](V863_RIFE_PRECOMPILE.md).
 
+Installed source files are aligned automatically with the current tray at startup.
+This updates only the source overlay, preserving dependency libraries, weights and
+compatible engine caches. See [source updates](V864_RIFE_OVERLAY_UPDATE.md).
+
 ## Install or check RIFE
 
 1. Extract the **complete** OFXR archive. Keep its `tools` and `python` folders

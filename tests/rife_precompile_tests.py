@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import json
 import shutil
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -21,6 +22,19 @@ from trt_cache import cache_key
 class PlanTests(unittest.TestCase):
     def game(self, w=4400, h=4030, eyes=1, luid=123):
         return dict(game="Game.exe", adapter_luid=luid, shapes=[dict(width=w, height=h, eyes=eyes)])
+
+    def test_isolated_cli_imports_sibling_helper_before_reporting_preflight(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            command = [sys.executable, "-I", "-B", str(SOURCE / "tools/precompile_rife.py")]
+            for key in ("root", "result", "progress", "cancel", "log"):
+                command += ["--" + key, str(folder / key)]
+            command += ["--games", str(folder / "empty-games")]
+            done = subprocess.run(command, capture_output=True, timeout=10)
+            self.assertEqual(done.returncode, 1)
+            result = json.loads((folder / "result").read_text())
+            self.assertIn("No recorded game resolutions", result["message"])
+            self.assertNotIn(b"ModuleNotFoundError", done.stderr)
 
     def test_exact_native_dimensions_all_six_qualities_and_no_extra_eye_batch(self):
         plan = tool.build_plan([self.game()], {123: 0})
@@ -51,7 +65,8 @@ class PlanTests(unittest.TestCase):
 
     def test_missing_game_adapter_is_explicit_and_unknown_adapter_uses_default(self):
         with self.assertRaisesRegex(ValueError, "not available"):
-            tool.build_plan([self.game()], {456: 1})
+            tool.build_plan([self.game()], {456: 1, 789: 2})
+        self.assertEqual(tool.build_plan([self.game()], {456: 1})[0][0][0], 1)
         self.assertEqual(tool.build_plan([self.game(luid=0)], {456: 1})[0][0][0], 1)
 
     def test_compile_explicitly_retries_failed_cache_then_checks_actual_inference(self):
@@ -104,12 +119,28 @@ class PlanTests(unittest.TestCase):
                 cancel=root.parent / "cancel", log=root.parent / "run.log")
             backend = Mock();backend._initialize.return_value = True
             results = [RuntimeError("compile failed")] + [("key", True)] * 5
-            with patch.object(tool, "cuda_adapters", return_value={123: 0}), patch.object(trt_backend, "Backend", return_value=backend), patch.object(tool, "prepare_one", side_effect=results) as prepare, patch("torch.cuda.set_device"), patch("torch.cuda.empty_cache"):
+            with patch("update_rife_overlay.sync_locked", return_value=False), patch.object(tool, "cuda_adapters", return_value={123: 0}), patch.object(trt_backend, "Backend", return_value=backend) as factory, patch.object(tool, "prepare_one", side_effect=results) as prepare, patch("torch.cuda.set_device"), patch("torch.cuda.empty_cache"):
                 self.assertEqual(tool.run(args), 1)
+            for call in factory.call_args_list:
+                self.assertEqual(call.args[1], root / "app", "cache identity must use installed worker bytes, not release checkout bytes")
             result = json.loads(args.result.read_text())
             self.assertEqual((result["completed"], result["total"], result["status"]), (6, 6, "error"))
             self.assertEqual(prepare.call_count, 6)
             self.assertEqual(json.loads(args.progress.read_text())["completed"], 6)
+
+    def test_global_source_problem_is_one_preflight_error_not_six_failed_engines(self):
+        from update_rife_overlay import OverlayRepairRequired
+        with tempfile.TemporaryDirectory() as temporary:
+            folder=Path(temporary);games=folder/"games";games.mkdir()
+            (games/"game.json").write_text(json.dumps({**self.game(), "schema":1}))
+            args=types.SimpleNamespace(root=folder/"runtime",games=games,cache=folder/"cache",
+                result=folder/"result.json",progress=folder/"progress.json",cancel=folder/"cancel",log=folder/"log")
+            with patch("update_rife_overlay.sync_locked", side_effect=OverlayRepairRequired("dependency versions differ")), patch.object(tool,"prepare_one") as compile_engine:
+                self.assertEqual(tool.run(args),11)
+            compile_engine.assert_not_called()
+            result=json.loads(args.result.read_text())
+            self.assertEqual((result["completed"],result["total"],result["status"]),(0,0,"repair"))
+            self.assertIn("dependency versions differ",result["message"])
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ﻿param(
  [string]$Root=(Join-Path $env:LOCALAPPDATA 'ofxr-bridge/RIFE/runtime'),
- [switch]$Check,[string]$ResultJson,[string]$CrtSource,[string]$CacheRoot,[switch]$SkipTensorRT,[switch]$Reinstall
+ [switch]$Check,[string]$ResultJson,[string]$CrtSource,[string]$CacheRoot,[switch]$SkipTensorRT,[switch]$Reinstall,[switch]$UpdateOverlay
 )
 $ErrorActionPreference='Stop'
 $runtimeRoot=[IO.Path]::GetFullPath($Root)
@@ -80,12 +80,15 @@ function Invoke-OwnedPython([string]$Python,[string[]]$Arguments,[int]$TimeoutMi
 try{
  $lock=Get-Content -LiteralPath (Join-Path $sourceRoot 'python/rife/runtime-lock.json') -Raw|ConvertFrom-Json
  Recover-Runtime
- if($Check){
+ if($Check -or $UpdateOverlay){
   $python=Join-Path $runtimeRoot 'python/python.exe'
   if(-not (Test-Path -LiteralPath $python)){
-   if(-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32/nvcuda.dll'))){Write-Result 'unsupported' 'No NVIDIA CUDA driver was found. This release supports NVIDIA only.';exit 12}
+   if(-not $UpdateOverlay -and -not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32/nvcuda.dll'))){Write-Result 'unsupported' 'No NVIDIA CUDA driver was found. This release supports NVIDIA only.';exit 12}
    Write-Result 'missing' 'The portable RIFE runtime is not installed.';exit 10
   }
+  $arguments=@('-I','-B',(Join-Path $sourceRoot 'tools/update_rife_overlay.py'),'--root',$runtimeRoot,'--package',$sourceRoot,'--result',$ResultJson)
+  $code=Invoke-OwnedPython $python $arguments 30000 $false
+  if($UpdateOverlay -or $code -ne 0){exit $code}
   $arguments=@('-I','-B',(Join-Path $sourceRoot 'python/rife/check_runtime.py'),'--root',$runtimeRoot,'--package',$sourceRoot,'--result',$ResultJson)
   $code=Invoke-OwnedPython $python $arguments 115000 $false
   if(-not (Test-Path -LiteralPath $ResultJson)){Write-Result 'repair' 'Portable Python could not start. RIFE needs repair.';exit 11}
