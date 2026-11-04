@@ -173,24 +173,29 @@ class Backend:
                 "padded_height": (height + 31) // 32 * 32}
 
     def _failed(self, key):
-        until = self._failures.get(key)
-        if until is not None:
-            return time.time() < until
+        failure = self._failures.get(key)
+        if failure is not None:
+            until, reason = failure
+            if time.time() < until:
+                self.note = reason
+                return True
+            return False
         path = self.directory / (key + ".failed.json")
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             until = float(data["retry_after"])
-            self._failures[key] = until
+            reason = str(data.get("reason", "TensorRT optimization is temporarily unavailable"))
+            self._failures[key] = (until, reason)
             if time.time() < until:
-                self.note = str(data.get("reason", "TensorRT optimization is temporarily unavailable"))
+                self.note = reason
             return time.time() < until
         except (OSError, ValueError, KeyError, TypeError):
             return False
 
     def _failure(self, key, reason):
         until = time.time() + self.FAILURE_BACKOFF
-        self._failures[key] = until
         self.note = str(reason)
+        self._failures[key] = (until, self.note)
         try:
             atomic_json(self.directory / (key + ".failed.json"),
                         {"key": key, "reason": self.note, "retry_after": until})

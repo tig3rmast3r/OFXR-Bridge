@@ -145,6 +145,14 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(popen.call_count, 1)
             process.terminate.assert_not_called()
 
+    def test_failed_quality_retains_error_when_revisited_without_disk_reads(self):
+        key = cache_key(self.backend._spec(self.a))
+        self.backend._failure(key, "TensorRT optimization timed out")
+        self.backend.note = ""  # another size/quality clears the visible note
+        with patch("trt_backend.Path.read_text", side_effect=AssertionError("cached failure must not read disk")):
+            self.assertTrue(self.backend._failed(key))
+        self.assertEqual(self.backend.note, "TensorRT optimization timed out")
+
     def test_success_without_valid_cache_does_not_recompile_each_frame(self):
         process = self.process()
         with patch("trt_backend.subprocess.Popen", return_value=process) as popen:
