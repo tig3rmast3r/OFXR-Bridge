@@ -8,11 +8,17 @@ RIFE estimates motion from colour images; it does not require the game's DLSS
 motion vectors or depth. Luke Ross **OSR/AFW** and **Neural Rendering** retain
 their own capture and model requirements when used alongside RIFE.
 
+The tray also offers **RIFE → Reinstall RIFE...** for a clean runtime/cache reset
+and **RIFE → Pre-compile TensorRT for found games...** to prepare the six Quality
+presets using each game's last recorded resolution and eye layout. Open games
+once with V863 or newer to populate the list; diagnostics need not be enabled.
+See [offline preparation and progress](V863_RIFE_PRECOMPILE.md).
+
 ## Install or check RIFE
 
 1. Extract the **complete** OFXR archive. Keep its `tools` and `python` folders
    beside `OFXRBridgeTray.exe`.
-2. Open the tray menu and choose **Check RIFE...**. The tray remains responsive
+2. Open the tray menu and choose **RIFE → Check RIFE...**. The tray remains responsive
    while the check runs.
 3. If RIFE is missing or needs repair, confirm the installation. **NVIDIA** is
    selected; **AMD Radeon (RDNA)** is disabled because that backend is not yet

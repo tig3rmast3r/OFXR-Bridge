@@ -25,6 +25,7 @@
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/benchmark_log.hpp"
 #include "xrfg/benchmark_view_extent.hpp"
+#include "xrfg/rife_game_history.hpp"
 #include "xrfg/dlssg_profile.hpp"
 #include "xrfg/fsr_cadence_probe.hpp"
 #include "xrfg/luke_render_identity.hpp"
@@ -16930,6 +16931,12 @@ XrResult layer_end_frame_impl(
         interface_stamp.scene_owner=source->object;
         interface_stamp.scene_serial=source->render+1;
     }
+    static xrfg::RifeGameHistory game_history;
+    game_history.observe(end_info,[&]() -> std::uint64_t {
+        if(!state->d3d12_device)return 0;
+        const auto luid=state->d3d12_device->GetAdapterLuid();
+        return (std::uint64_t(std::uint32_t(luid.HighPart))<<32)|luid.LowPart;
+    });
     xrfg::autonomous::poll_diagnostic_logging_key();
     if(state->luke_fresh_only && state->frame_capture) {
         const auto keys=xrfg::autonomous::keybinds();

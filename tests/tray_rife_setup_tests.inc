@@ -79,6 +79,12 @@ void rife_setup_ui_tests() {
     require(!r::parse_result("{\"schema\":1,\"schema\":1}",0),"duplicate JSON fields rejected");
     require(!r::parse_result(json("ready")+"trailing",0),"trailing invalid JSON rejected");
     Fixture fixture;auto& app=fixture.state;
+    const auto root_menu=CreatePopupMenu();const auto rife_menu=append_rife_menu(root_menu,app);
+    require(rife_menu && GetMenuItemCount(rife_menu)==3,"RIFE submenu contains exactly Check, Reinstall and Pre-compile");
+    require(GetMenuItemID(rife_menu,0)==check_rife && GetMenuItemID(rife_menu,1)==reinstall_rife &&
+        GetMenuItemID(rife_menu,2)==precompile_rife,"RIFE actions retain their dedicated command IDs");
+    DestroyMenu(root_menu);
+
     app.settings.rife_runtime_dir="D:/developer override must not affect Check RIFE";
     app.executable_directory=app.local_directory/L"Package O'Brian $()";
     std::filesystem::create_directories(app.executable_directory/L"tools");

@@ -64,6 +64,8 @@ enum MenuCommand : UINT {
     toggle_pause = 91,
     configure_keybinds = 92,
     check_rife = 95,
+    reinstall_rife = 112,
+    precompile_rife = 113,
     steamvr_queue_separate = 93,
     steamvr_queue_shared = 94,
     toggle_benchmark_mode = 96,
@@ -112,6 +114,7 @@ struct AppState {
         bool installing{};
         ULONGLONG started{};
         std::filesystem::path result_path, console_log;
+        bool precompiling{};
     } rife;
 };
 
@@ -884,7 +887,8 @@ void close_rife_process(AppState& state) {
 // Desktop subprocess only: the window thread never waits for Python, CUDA,
 // downloads or installation. Check output is retained even on helper startup
 // errors; the install has its own visible console and backend log.
-bool begin_rife_operation(AppState& state,bool installing,std::wstring* error) {
+bool begin_rife_operation(AppState& state,bool installing,std::wstring* error,bool reinstalling=false,bool precompiling=false) {
+    const bool visible=installing||precompiling;
     if(state.rife.process){if(error)*error=L"A RIFE operation is already running.";return false;}
     HANDLE output{},input{};
     STARTUPINFOEXW startup{};startup.StartupInfo.cb=sizeof(STARTUPINFOW);
@@ -898,24 +902,25 @@ bool begin_rife_operation(AppState& state,bool installing,std::wstring* error) {
         if(process.hProcess){CloseHandle(process.hProcess);process.hProcess=nullptr;}
     };
     try {
-        const auto script=state.executable_directory/L"tools/Setup-RifeRuntime.ps1";
+        const auto script=state.executable_directory/(precompiling?L"tools/Precompile-Rife.ps1":L"tools/Setup-RifeRuntime.ps1");
         if(!std::filesystem::is_regular_file(script))throw std::runtime_error("Missing tools/Setup-RifeRuntime.ps1. Extract the complete OFXR archive first.");
         const auto root=xrfg::managed_rife_runtime();
         if(root.empty())throw std::runtime_error("Local application data is unavailable.");
         const auto status=state.local_directory/L"RIFE/status";
         std::filesystem::create_directories(status);
         static std::atomic_uint request{};
-        const auto name=(installing?L"install-":L"check-")+std::to_wstring(GetCurrentProcessId())+L"-"+
+        const auto name=(precompiling?L"precompile-":installing?L"install-":L"check-")+std::to_wstring(GetCurrentProcessId())+L"-"+
             std::to_wstring(GetTickCount64())+L"-"+std::to_wstring(++request);
         const auto result=status/(name+L".json");
         const auto console=status/(name+L".console.log");
         std::array<wchar_t,32768> system{};
         if(!GetSystemDirectoryW(system.data(),static_cast<UINT>(system.size())))throw std::runtime_error("Cannot locate Windows PowerShell.");
         const auto powershell=std::filesystem::path(system.data())/L"WindowsPowerShell/v1.0/powershell.exe";
-        auto command=xrfg::rife_setup::command_line(powershell,script,root,result,!installing);
+        auto command=xrfg::rife_setup::command_line(powershell,script,root,result,!visible);
+        if(reinstalling)command+=L" -Reinstall";
         DWORD flags=xrfg::rife_setup::process_flags(installing);
-        startup.StartupInfo.dwFlags=STARTF_USESHOWWINDOW;startup.StartupInfo.wShowWindow=installing?SW_SHOWNORMAL:SW_HIDE;
-        if(!installing) {
+        startup.StartupInfo.dwFlags=STARTF_USESHOWWINDOW;startup.StartupInfo.wShowWindow=visible?SW_SHOWNORMAL:SW_HIDE;
+        if(!visible) {
             SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};
             output=CreateFileW(console.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_DELETE,&security,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
             input=CreateFileW(L"NUL",GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,&security,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
@@ -930,11 +935,11 @@ bool begin_rife_operation(AppState& state,bool installing,std::wstring* error) {
             startup.StartupInfo.hStdOutput=startup.StartupInfo.hStdError=output;startup.StartupInfo.hStdInput=input;
             flags|=EXTENDED_STARTUPINFO_PRESENT;
         }
-        if(!CreateProcessW(powershell.c_str(),command.data(),nullptr,nullptr,installing?FALSE:TRUE,flags,nullptr,
+        if(!CreateProcessW(powershell.c_str(),command.data(),nullptr,nullptr,visible?FALSE:TRUE,flags,nullptr,
             state.executable_directory.c_str(),&startup.StartupInfo,&process)) {
             const auto message=last_error_message(L"Starting the RIFE helper");cleanup();if(error)*error=message;return false;
         }
-        state.rife={process.hProcess,installing,GetTickCount64(),result,installing?std::filesystem::path{}:console};
+        state.rife={process.hProcess,visible,GetTickCount64(),result,visible?std::filesystem::path{}:console,precompiling};
         process.hProcess=nullptr;cleanup();
         if(state.window)SetTimer(state.window,kRifeSetupTimer,250,nullptr);
         return true;
@@ -944,7 +949,7 @@ bool begin_rife_operation(AppState& state,bool installing,std::wstring* error) {
 }
 
 struct RifeCompletion {
-    bool installing{};
+    bool installing{},precompiling{};
     std::optional<xrfg::rife_setup::Result> result;
     std::wstring error;
     std::filesystem::path fallback_log;
@@ -952,9 +957,11 @@ struct RifeCompletion {
 std::optional<RifeCompletion> collect_rife_completion(AppState& state) {
     if(!state.rife.process)return {};
     const auto waited=WaitForSingleObject(state.rife.process,0);
-    const bool timeout=GetTickCount64()-state.rife.started>=xrfg::rife_setup::operation_timeout(state.rife.installing);
+    // A found-game batch has an arbitrary number of bounded 300s engines.
+    // Its progress window owns cancellation; do not detach it after two hours.
+    const bool timeout=!state.rife.precompiling && GetTickCount64()-state.rife.started>=xrfg::rife_setup::operation_timeout(state.rife.installing);
     if(waited==WAIT_TIMEOUT&&!timeout)return {};
-    RifeCompletion completion;completion.installing=state.rife.installing;
+    RifeCompletion completion;completion.installing=state.rife.installing;completion.precompiling=state.rife.precompiling;
     completion.fallback_log=state.rife.console_log.empty()?state.rife.result_path.parent_path().parent_path():state.rife.console_log;
     DWORD exit_code=1;
     if(waited!=WAIT_OBJECT_0) {
@@ -984,7 +991,7 @@ void report_rife_completion(AppState& state,const RifeCompletion& completion) {
     if(!log.empty())text+=L"\r\n\r\nLog: "+log.wstring();
     if(result.status==xrfg::rife_setup::Status::ready) {
         if(text.empty())text=L"RIFE is ready.";
-        MessageBoxW(state.window,text.c_str(),L"Check RIFE",MB_OK|MB_ICONINFORMATION);return;
+        MessageBoxW(state.window,text.c_str(),completion.precompiling?L"Pre-compile TensorRT":L"Check RIFE",MB_OK|MB_ICONINFORMATION);return;
     }
     if(!completion.installing&&xrfg::rife_setup::offers_install(result.status)) {
         RifeInstallDialog dialog{xrfg::managed_rife_runtime(),result.message};
@@ -995,10 +1002,19 @@ void report_rife_completion(AppState& state,const RifeCompletion& completion) {
         }
         return;
     }
-    MessageBoxW(state.window,text.c_str(),L"Check RIFE",MB_OK|MB_ICONWARNING);
+    MessageBoxW(state.window,text.c_str(),completion.precompiling?L"Pre-compile TensorRT":L"Check RIFE",MB_OK|MB_ICONWARNING);
 }
 void poll_rife_operation(AppState& state) {
     if(auto completion=collect_rife_completion(state))report_rife_completion(state,*completion);
+}
+
+HMENU append_rife_menu(HMENU menu,const AppState& state) {
+    const auto child=CreatePopupMenu();if(!child)return nullptr;
+    const auto flags=MF_STRING|(state.rife.process?MF_GRAYED:0);
+    AppendMenuW(child,flags,check_rife,L"Check RIFE...");
+    AppendMenuW(child,flags,reinstall_rife,L"Reinstall RIFE...");
+    AppendMenuW(child,flags,precompile_rife,L"Pre-compile TensorRT for found games...");
+    AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(child),L"RIFE");return child;
 }
 
 void show_context_menu(AppState& state) {
@@ -1011,8 +1027,7 @@ void show_context_menu(AppState& state) {
     AppendMenuW(menu, MF_STRING | (state.armed ? MF_UNCHECKED : MF_CHECKED),
         toggle_arm, L"Disable");
     AppendMenuW(menu, MF_STRING, configure_keybinds, L"Configure keybinds...");
-    AppendMenuW(menu,MF_STRING | (state.rife.process?MF_GRAYED:0),check_rife,
-        state.rife.process?(state.rife.installing?L"RIFE installation running...":L"Checking RIFE..."):L"Check RIFE...");
+    append_rife_menu(menu,state);
     HMENU pacing_menu=CreatePopupMenu();
     if(pacing_menu) {
         using xrfg::standalone::RuntimePacing;
@@ -1256,6 +1271,23 @@ void handle_command(AppState& state, UINT command) {
     case check_rife: {
         std::wstring error;
         if(!begin_rife_operation(state,false,&error))show_error(state.window,error);
+        break;
+    }
+    case reinstall_rife: {
+        RifeInstallDialog dialog{xrfg::managed_rife_runtime(),
+            L"Clean reinstall: download pinned packages again, replace the runtime and clear TensorRT engines. Recorded games are preserved."};
+        if(DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_RIFE_INSTALL),state.window,
+            rife_install_dialog_procedure,reinterpret_cast<LPARAM>(&dialog))==IDOK) {
+            std::wstring error;if(!begin_rife_operation(state,true,&error,true))show_error(state.window,error);
+        }
+        break;
+    }
+    case precompile_rife: {
+        const auto snapshot=xrfg::autonomous::snapshot();const auto now=GetTickCount64();
+        if(snapshot.connected && snapshot.runtime.heartbeat_ms && now>=snapshot.runtime.heartbeat_ms && now-snapshot.runtime.heartbeat_ms<2000) {
+            show_error(state.window,L"Close the VR game before pre-compiling TensorRT.");break;
+        }
+        std::wstring error;if(!begin_rife_operation(state,false,&error,false,true))show_error(state.window,error);
         break;
     }
     case toggle_benchmark_mode: {

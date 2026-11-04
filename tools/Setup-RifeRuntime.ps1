@@ -1,6 +1,6 @@
 ﻿param(
  [string]$Root=(Join-Path $env:LOCALAPPDATA 'ofxr-bridge/RIFE/runtime'),
- [switch]$Check,[string]$ResultJson,[string]$CrtSource,[string]$CacheRoot,[switch]$SkipTensorRT
+ [switch]$Check,[string]$ResultJson,[string]$CrtSource,[string]$CacheRoot,[switch]$SkipTensorRT,[switch]$Reinstall
 )
 $ErrorActionPreference='Stop'
 $runtimeRoot=[IO.Path]::GetFullPath($Root)
@@ -52,6 +52,12 @@ function Remove-OwnedDownloadCache([bool]$Owned) {
   Remove-Item -LiteralPath $CacheRoot -Recurse -Force
  }
 }
+function Remove-ReinstallDownloadCache {
+ $fullCache=[IO.Path]::GetFullPath($CacheRoot)
+ if([IO.Path]::GetDirectoryName($fullCache) -eq $parentRoot -and [IO.Path]::GetFileName($fullCache) -match '^\.reinstall-downloads-[0-9a-f]{32}$' -and (Test-Path -LiteralPath $fullCache) -and -not ((Get-Item -LiteralPath $fullCache -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)){
+  Remove-Item -LiteralPath $fullCache -Recurse -Force
+ }
+}
 function Invoke-OwnedPython([string]$Python,[string[]]$Arguments,[int]$TimeoutMilliseconds,[bool]$Visible){
  $start=[Diagnostics.ProcessStartInfo]::new()
  $start.FileName=$Python;$start.Arguments=(($Arguments|ForEach-Object{Quote-Argument $_}) -join ' ')
@@ -87,6 +93,16 @@ try{
  }
  if(-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32/nvcuda.dll'))){Write-Result 'unsupported' 'No NVIDIA CUDA driver was found. This release supports NVIDIA only.';exit 12}
  $ownedCache=(-not $CacheRoot)
+ if($Reinstall){
+  if($Check){throw 'Reinstall and Check cannot be combined.'}
+  $lease=Join-Path $parentRoot ('.'+[IO.Path]::GetFileName($runtimeRoot)+'.lease')
+  [IO.Directory]::CreateDirectory($parentRoot)|Out-Null
+  try{$gate=[IO.File]::Open($lease,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}catch{throw 'RIFE_BUSY: RIFE is in use. Close the game and try again.'}
+  $gate.Dispose()
+  # A clean reinstall re-downloads pinned assets instead of reusing old downloads.
+  $CacheRoot=Join-Path $parentRoot ('.reinstall-downloads-'+[Guid]::NewGuid().ToString('N'))
+  $ownedCache=$false
+ }
  if(-not $CacheRoot){$CacheRoot=Join-Path $parentRoot 'download-cache'}
  $CacheRoot=[IO.Path]::GetFullPath($CacheRoot)
  if(-not $CrtSource){$CrtSource=Join-Path $PSScriptRoot 'rife-msvc-crt'}
@@ -111,6 +127,7 @@ try{
   foreach($item in $lock.msvc_crt.files){Copy-Item -LiteralPath (Join-Path $CrtSource $item.name) -Destination (Join-Path $bootstrap $item.name)}
   $arguments=@('-I','-B',(Join-Path $PSScriptRoot 'install_rife_runtime.py'),'--root',$runtimeRoot,'--cache',$CacheRoot,'--crt-source',$CrtSource,'--result',$ResultJson)
   if($SkipTensorRT){$arguments+='--skip-tensorrt'}
+  if($Reinstall){$arguments+='--reinstall'}
   $code=Invoke-OwnedPython (Join-Path $bootstrap 'python.exe') $arguments 7200000 $true
   if(-not (Test-Path -LiteralPath $ResultJson)){throw 'The RIFE installer produced no result.'}
   if($code -eq 0 -and $ownedCache){
@@ -124,4 +141,8 @@ try{
 }catch{
  if($_.Exception.Message.StartsWith('RIFE_BUSY:')){Write-Result 'busy' $_.Exception.Message;exit 13}
  Write-Result 'error' ('RIFE setup failed: '+$_.Exception.Message);exit 1
+}finally{
+ if($Reinstall -and $CacheRoot){
+  try{Remove-ReinstallDownloadCache}catch{Write-Warning ('Cannot finish temporary download cleanup: '+$_.Exception.Message)}
+ }
 }

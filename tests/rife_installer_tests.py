@@ -282,6 +282,44 @@ if(-not (Test-Path -LiteralPath (Join-Path $external 'keep'))){throw 'Cleanup es
         for name, digest in manifest["files"].items():
             self.assertEqual(installer.sha(self.root / "app" / name), digest)
 
+    def test_clean_reinstall_replaces_runtime_and_clears_engines_but_keeps_found_games(self):
+        self.root = self.directory / "ofxr-bridge/RIFE/runtime"
+        self.root.parent.mkdir(parents=True)
+        self.old_runtime()
+        engines = self.root.parent.parent / "RIFECache";engines.mkdir()
+        (engines / "old.engine").write_text("old cache")
+        games = self.root.parent / "games";games.mkdir()
+        (games / "game.json").write_text("last game resolution")
+        package, _, _ = self.fixture()
+        with patch.object(installer, "health", return_value={"status": "ready", "message": "ready"}):
+            installer.install(self.root, self.cache, self.directory, package, True, reinstall=True)
+        self.assertFalse(engines.exists())
+        self.assertFalse((self.root / "existing-worker.txt").exists())
+        self.assertEqual((games / "game.json").read_text(), "last game resolution")
+
+    def test_failed_clean_reinstall_preserves_existing_runtime_and_engine_cache(self):
+        self.root = self.directory / "ofxr-bridge/RIFE/runtime"
+        self.root.parent.mkdir(parents=True);self.old_runtime()
+        engines = self.root.parent.parent / "RIFECache";engines.mkdir()
+        (engines / "old.engine").write_text("old cache")
+        package, _, _ = self.fixture()
+        with patch.object(installer, "health", side_effect=RuntimeError("failed inference")):
+            with self.assertRaisesRegex(RuntimeError, "failed inference"):
+                installer.install(self.root, self.cache, self.directory, package, True, reinstall=True)
+        self.assertEqual((engines / "old.engine").read_text(), "old cache")
+        self.assertTrue((self.root / "existing-worker.txt").exists())
+
+    def test_clean_reinstall_busy_before_download_or_engine_deletion(self):
+        self.root = self.directory / "ofxr-bridge/RIFE/runtime"
+        self.root.parent.mkdir(parents=True);self.old_runtime()
+        engines = self.root.parent.parent / "RIFECache";engines.mkdir()
+        (engines / "old.engine").write_text("old cache")
+        with RuntimeLease(self.root), patch.object(installer, "download") as download:
+            with self.assertRaises(RuntimeBusy):
+                installer.install(self.root, self.cache, self.directory, reinstall=True)
+        download.assert_not_called()
+        self.assertEqual((engines / "old.engine").read_text(), "old cache")
+
     def test_cli_missing_repair_and_busy_results_without_gpu_or_downloads(self):
         output = self.directory / "status.json"
         check = [sys.executable, "-I", "-B", str(SOURCE / "python/rife/check_runtime.py"), "--root", str(self.root), "--package", str(SOURCE), "--result", str(output)]

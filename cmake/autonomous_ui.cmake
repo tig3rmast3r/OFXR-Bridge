@@ -13,6 +13,21 @@ if(TARGET XR_APILAYER_XRFrameBridge_diagnostic)
     target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE xrfg_autonomous_control)
 endif()
 
+if(WIN32 AND XRFG_BUILD_TESTS)
+    add_executable(xrfg_rife_game_history_tests tests/rife_game_history_tests.cpp)
+    target_compile_features(xrfg_rife_game_history_tests PRIVATE cxx_std_20)
+    target_include_directories(xrfg_rife_game_history_tests PRIVATE include "${XRFG_OPENXR_SDK_ROOT}/include")
+    target_compile_definitions(xrfg_rife_game_history_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    add_test(NAME xrfg_rife_game_history_tests COMMAND xrfg_rife_game_history_tests)
+    if(EXISTS "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe")
+        add_test(NAME xrfg_rife_precompile_plan COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
+            -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_precompile_tests.py")
+        add_test(NAME xrfg_rife_precompile_progress_ui COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
+            -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_precompile_ui_tests.py")
+        set_tests_properties(xrfg_rife_precompile_plan xrfg_rife_precompile_progress_ui PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    endif()
+endif()
+
 if(TARGET OFXRBridgeTray OR TARGET xrfg_fps_overlay)
     set(_imgui src/ui/vendor/imgui)
     add_library(xrfg_imgui STATIC

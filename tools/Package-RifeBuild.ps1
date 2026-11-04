@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$BuildDir,
     [Parameter(Mandatory=$true)][string]$OutDir,
-    [int]$Version=862,
+    [int]$Version=863,
     [string]$SourceDir,
     [string]$CrtSource
 )
@@ -94,12 +94,12 @@ foreach($item in $lock.msvc_crt.files){
 }
 $crtLicense=Join-Path $SourceDir 'licenses/MSVC_CRT_LICENSE.rtf'
 if((NormalizedHash $crtLicense) -ne '8facd2af82a812f1107b5ef0362b28ff0648ff8d8eb237e888a9b1a0ed21847c'){throw 'The pinned Microsoft redistributable license is missing or modified.'}
-$documents=@('README.md','LICENSE','licenses/ATTRIBUTION.md','licenses/MSVC_CRT_LICENSE.rtf','docs/RIFE.md','docs/BUILDING_RIFE.md','docs/V849_NR_CAPTURE.md','docs/V850_MSFS_NR.md','docs/V851_NR_STARTUP.md','docs/V852_NR_COLOUR.md','docs/V862_RIFE_TIMEOUT.md','scripts/Set-CrashDebug.ps1')
+$documents=@('README.md','LICENSE','licenses/ATTRIBUTION.md','licenses/MSVC_CRT_LICENSE.rtf','docs/RIFE.md','docs/BUILDING_RIFE.md','docs/V849_NR_CAPTURE.md','docs/V850_MSFS_NR.md','docs/V851_NR_STARTUP.md','docs/V852_NR_COLOUR.md','docs/V862_RIFE_TIMEOUT.md','docs/V863_RIFE_PRECOMPILE.md','scripts/Set-CrashDebug.ps1')
 foreach($optional in @('CREDITS.md','THIRD_PARTY.md')){if(Test-Path -LiteralPath (Join-Path $SourceDir $optional)){$documents+=$optional}}
 $licenseRoot=Join-Path $SourceDir 'licenses'
 foreach($file in Get-ChildItem -LiteralPath $licenseRoot -Recurse -File){$documents+='licenses/'+$file.FullName.Substring($licenseRoot.Length+1).Replace('\','/')}
 $documents=@($documents|Sort-Object -Unique)
-$tools=@('tools/Inspect-NrCapture.py','tools/Setup-RifeRuntime.ps1','tools/prepare_rife_runtime.py','tools/install_rife_runtime.py','tools/build_rife_overlay_manifest.py')
+$tools=@('tools/Precompile-Rife.ps1','tools/precompile_rife.py','tools/Inspect-NrCapture.py','tools/Setup-RifeRuntime.ps1','tools/prepare_rife_runtime.py','tools/install_rife_runtime.py','tools/build_rife_overlay_manifest.py')
 foreach($relative in $documents+$tools){if(-not (Test-Path -LiteralPath (Join-Path $SourceDir $relative))){throw "Missing distribution source file: $relative"}}
 $name='OFXR-BRIDGE-0.3.3-v'+$Version
 $stage=Join-Path $OutDir $name

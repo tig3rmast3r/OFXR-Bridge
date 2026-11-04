@@ -182,7 +182,7 @@ def health(stage, package, output):
     return result
 
 
-def install(root, cache, crt_source, package=PACKAGE, skip_tensorrt=False):
+def install(root, cache, crt_source, package=PACKAGE, skip_tensorrt=False, reinstall=False):
     root = root.absolute()
     parent = root.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -190,6 +190,12 @@ def install(root, cache, crt_source, package=PACKAGE, skip_tensorrt=False):
         raise RuntimeError("The managed RIFE destination must be a regular directory, not a junction")
     with RuntimeLease(root, exclusive=True):
         recover_transaction(root)
+        engine_cache = root.parent.parent / "RIFECache"
+        if reinstall:
+            if root.parent.name != "RIFE" or root.parent.parent.name != "ofxr-bridge":
+                raise RuntimeError("Clean reinstall is restricted to the managed OFXR RIFE directory")
+            if engine_cache.exists() and (engine_cache.is_symlink() or engine_cache.lstat().st_file_attributes & 0x400):
+                raise RuntimeError("Clean reinstall refuses a linked TensorRT cache")
         if shutil.disk_usage(parent).free < REQUIRED_FREE:
             raise RuntimeError("RIFE needs at least 14 GB of free space for downloads and staged installation")
         lock_path = package / "python/rife/runtime-lock.json"
@@ -257,6 +263,13 @@ def install(root, cache, crt_source, package=PACKAGE, skip_tensorrt=False):
                     log("The new runtime is ready; previous runtime cleanup is deferred: " + str(previous))
             if not previous.exists():
                 transaction_path(root).unlink(missing_ok=True)
+            if reinstall and engine_cache.exists():
+                # Exact managed sibling only; games/ and logs/ remain outside
+                # the replaced runtime. An active worker cannot hold this lease.
+                if engine_cache.resolve().parent != root.parent.parent.resolve():
+                    raise RuntimeError("TensorRT cache escapes the managed OFXR directory")
+                shutil.rmtree(engine_cache)
+                log("Previous TensorRT engines removed; recorded games preserved")
             result.update(root=str(root), installed_bytes=sum(p.stat().st_size for p in root.rglob("*") if p.is_file()))
             log("RIFE installation complete: " + str(root))
             return result
@@ -274,6 +287,7 @@ def main():
     parser.add_argument("--crt-source", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--skip-tensorrt", action="store_true")
+    parser.add_argument("--reinstall", action="store_true")
     args = parser.parse_args()
     logs = args.root.parent / "logs"
     logs.mkdir(parents=True, exist_ok=True)
@@ -281,7 +295,7 @@ def main():
     result = {"schema": 1, "status": "error", "message": "", "root": str(args.root), "backend": "",
               "installed_bytes": INSTALLED_BYTES, "required_free_bytes": REQUIRED_FREE, "log_path": str(LOG)}
     try:
-        result.update(install(args.root, args.cache, args.crt_source, skip_tensorrt=args.skip_tensorrt))
+        result.update(install(args.root, args.cache, args.crt_source, skip_tensorrt=args.skip_tensorrt, reinstall=args.reinstall))
     except RuntimeBusy as error:
         result.update(status="busy", message=str(error))
     except Exception as error:
