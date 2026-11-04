@@ -214,6 +214,11 @@ struct D3D12NvidiaOpticalFlowOptions {
 // The experimental portable RIFE route waits its own exact interop receipts on
 // the synthesis thread; it does not wait a game queue tail or alter pacing.
 // D29: another output from the same optical-flow pair and completion fence.
+// Hybrid's depth search for thin near surfaces (0.2 V505/V555), live for
+// every synthesizer's next pair. On by default (0.2's menu switch was off).
+void set_hybrid_depth_search(bool enabled) noexcept;
+[[nodiscard]] bool hybrid_depth_search_enabled() noexcept;
+
 struct D3D12ExtraSynthetic {
     std::uint32_t destination_index{};
     float interpolation_fraction{0.5F};

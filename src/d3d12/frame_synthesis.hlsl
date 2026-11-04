@@ -6,7 +6,16 @@ Texture2D<int2> ForwardFlow : register(t4);
 Texture2D<uint> ForwardAuxiliary : register(t5);
 Texture2DArray<float2> GameMotionVectors : register(t6);
 Texture2DArray<float4> SceneOnlyFrame : register(t7);
+// Hybrid's depth search (0.2 V505, V555): the game's depth beside its
+// vectors, at their resolution, and the midpoint splat BuildDepthSplat
+// writes, this eye's slices, one per synthetic output.
+Texture2DArray<float> GameDepth : register(t8);
+Texture2DArray<uint> DepthSplat : register(t9);
 RWTexture2D<float4> PackedColor : register(u0);
+#ifdef XRFG_DEPTH_SPLAT
+// The pass that writes the splat, every eye's and output's slice.
+RWTexture2DArray<uint> DepthSplatOut : register(u0);
+#endif
 #ifdef XRFG_NVIDIA_LUMA_INPUT
 RWTexture2D<float> NvidiaPreviousColor : register(u1);
 RWTexture2D<float> NvidiaCurrentColor : register(u2);
@@ -704,8 +713,9 @@ static float last_disagreement = 1.0;
 // game-motion branch the otherwise-unused optical-flow constants carry it.
 float4 game_motion_output_rect() {
     if (hybrid_layout) {
+        // Bits 15 and 31 are the depth flags (game_depth_available).
         return float4(float(UseGameMotion & 0xffffU), float(UseGameMotion >> 16),
-                      float(GameMotionPadding & 0xffffU), float(GameMotionPadding >> 16));
+                      float(GameMotionPadding & 0x7fffU), float((GameMotionPadding >> 16) & 0x7fffU));
     }
     return float4(float(FlowWidth), float(FlowHeight), float(FlowBlockSize),
                   float(GameMotionPadding));
@@ -749,6 +759,64 @@ float2 game_motion_texel(float2 pixel) {
     int2 texel = int2(clamp(GameMotionRect.xy + uv * GameMotionRect.zw,
         GameMotionRect.xy, maximum));
     return GameMotionVectors.Load(int4(texel, 0, 0)) * GameMotionScale;
+}
+
+// ---- Hybrid's depth search, 0.2's (V505, V544, V555) at its built-in
+// values. GameMotionPadding bit 15: the guide's depth is at t8; bit 31: it
+// is inverted, larger nearer. SynthesisFlags bit 5: this eye's splat is at
+// t9; bits 27-28: which synthetic output this draw or splat pass is.
+bool game_depth_available() { return (GameMotionPadding & 0x8000u) != 0u; }
+bool depth_splat_available() { return (SynthesisFlags & 32u) != 0u; }
+uint depth_splat_output() { return (SynthesisFlags >> 27) & 3u; }
+// A surface is nearer than another by this factor, and its own samples in
+// A and B must agree within this (0.2's Nearer and Depth agreement).
+static const float kDepthNearerFactor = 1.5;
+static const float kDepthAgreeLimit = 0.25;
+
+// The depth texel game_nearness reads for `pixel`: the vectors' grid.
+int2 game_depth_texel(float2 pixel) {
+    float4 output_rect = game_motion_output_rect();
+    float2 uv = (pixel - output_rect.xy + 0.5) / max(output_rect.zw, float2(1.0, 1.0));
+    float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
+    return int2(clamp(GameMotionRect.xy + uv * GameMotionRect.zw,
+        GameMotionRect.xy, maximum));
+}
+
+// How near the surface B shows at `pixel` is, larger nearer. Only its order
+// is used.
+float game_nearness(float2 pixel) {
+    float depth = GameDepth.Load(int4(game_depth_texel(pixel), 0, 0));
+    return (GameMotionPadding & 0x80000000u) != 0u ? depth : 1.0 - depth;
+}
+
+bool nearer(float a, float b) { return a > b * kDepthNearerFactor + 1.0e-6; }
+
+// The splat's texel for a coordinate of the image: the vectors' texel grid
+// over the output rectangle, counted from its origin (0.2's coverage mask
+// grid, V539).
+int2 coverage_mask_texel(float2 coordinate) {
+    float4 output_rect = game_motion_output_rect();
+    float2 uv = (coordinate - output_rect.xy + 0.5) / max(output_rect.zw, float2(1.0, 1.0));
+    float2 limit = max(ceil(GameMotionRect.zw), float2(1.0, 1.0));
+    return int2(clamp(floor(uv * GameMotionRect.zw), float2(0.0, 0.0), limit));
+}
+
+// A splat word: bits 24-31 how near by the game's depth, on a log scale - 8
+// steps a doubling of distance over 32 doublings from the near plane (V544:
+// as it comes, a building and the terrain behind it tied) - and bits 0-23
+// the displacement in quarter pixels, 12 bits an axis from -512 to +512. The
+// largest word wins a texel; 0 is an empty one.
+float coverage_mask_depth_priority(float nearness) {
+    return saturate(1.0 + log2(max(nearness, 2.3283064e-10)) / 32.0);
+}
+
+uint coverage_mask_word(float2 motion, float priority) {
+    uint2 quarter = uint2(clamp(round(motion * 4.0) + 2048.0, 0.0, 4095.0));
+    return (uint(saturate(priority) * 255.0) << 24) | (quarter.x << 12) | quarter.y;
+}
+
+float2 coverage_mask_motion(uint word) {
+    return (float2(float((word >> 12) & 4095u), float(word & 4095u)) - 2048.0) / 4.0;
 }
 
 bool coordinate_inside_rect(float2 coordinate, float4 rect) {
@@ -845,11 +913,11 @@ bool game_motion_static_overlay(float2 pixel, float4 current) {
 
 // The game-motion solve below, from start rather than the pixel, for a second
 // surface: true, with its A and B samples, if two steps reach its fixed point.
-bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
-    out float4 current_color) {
+bool game_motion_surface_at(float2 pixel, float2 start, out float4 previous_color,
+    out float4 current_color, out float2 endpoint) {
     previous_color = float4(0.0, 0.0, 0.0, 1.0);
     current_color = previous_color;
-    float2 endpoint = start;
+    endpoint = start;
     float2 previous_coordinate = start;
     bool found = true;
     [unroll] for (uint step = 0; step < 3; ++step) {
@@ -872,6 +940,12 @@ bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
         found = a.valid >= 0.5 && b.valid >= 0.5;
     }
     return found;
+}
+
+bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
+    out float4 current_color) {
+    float2 endpoint;
+    return game_motion_surface_at(pixel, start, previous_color, current_color, endpoint);
 }
 
 // djules75 V510: compare colour AND opacity, trying still motion and the
@@ -1191,6 +1265,37 @@ float4 synthesize_midpoint(
                                 }
                             }
                         }
+                        // 0.2 V505/V555: a nearer surface - a thin bar sweeping
+                        // across background both frames show - can reach the
+                        // pixel at the generated instant although the answer's
+                        // samples agree, and the bar went missing from every
+                        // generated frame. The splat names the nearest surface
+                        // at this texel at this instant; where it is nearer than
+                        // the answer by the margin, one solve from where it is
+                        // in B, held to its own agreement.
+                        if (hybrid_layout && game_depth_available() && depth_splat_available() &&
+                            !(!camera_explains && solve_residual >= 0.5) &&
+                            repeated_capture_flag() == 0) {
+                            const float here = game_nearness(b_coordinate);
+                            const uint rank = uint(saturate(coverage_mask_depth_priority(
+                                here * kDepthNearerFactor + 1.0e-6)) * 255.0);
+                            const uint word = DepthSplat.Load(int4(coverage_mask_texel(pixel),
+                                int(depth_splat_output()), 0));
+                            if (word != 0u && (word >> 24u) >= rank) {
+                                const float2 start = pixel -
+                                    (1.0 - synthesis_fraction()) * coverage_mask_motion(word);
+                                float4 near_a, near_b;
+                                float2 endpoint;
+                                if (game_motion_surface_at(pixel, start, near_a, near_b, endpoint) &&
+                                    nearer(game_nearness(endpoint), here) &&
+                                    rgb_error(near_a, near_b) < kDepthAgreeLimit) {
+                                    output_color = saturate(lerp(near_a, near_b, synthesis_fraction()));
+                                    // The error of the answer given (0.2 V500), so
+                                    // the hybrid keeps it over the flow.
+                                    last_disagreement = rgb_error(near_a, near_b);
+                                }
+                            }
+                        }
                     }
                     }
                 }
@@ -1311,3 +1416,53 @@ float4 ReprojectGeneratedWithLateHudPS(FullscreenVertex input) : SV_Target {
         ? generated.color.rgb : scene.rgb;
     return float4(saturate(base_color + final_color.rgb - scene.rgb), 1.0);
 }
+
+#ifdef XRFG_DEPTH_SPLAT
+// 0.2 V555: for each texel of B's vectors, the surface's word at the texel of
+// the generated image it occupies at the generated instant - B's position
+// plus the generated share of its displacement to A, the fixed point the
+// search's solve converges to - on the 2 x 2 texels around that point, so no
+// gap opens between neighbours; the nearest by the game's depth keeps a
+// contested texel. The composition reads one word per pixel. Slice = the
+// eye; a slice per synthetic output, to 4X.
+static const uint kDepthSplatOutputs = 3u;
+
+[numthreads(8, 8, 1)]
+void ClearDepthSplat(uint3 id : SV_DispatchThreadID) {
+    hybrid_layout = true;
+    float2 limit = ceil(GameMotionRect.zw);
+    if (float(id.x) <= limit.x && float(id.y) <= limit.y) {
+        DepthSplatOut[uint3(id.xy, kDepthSplatOutputs * Slice + depth_splat_output())] = 0u;
+    }
+}
+
+[numthreads(8, 8, 1)]
+void BuildDepthSplat(uint3 id : SV_DispatchThreadID) {
+    hybrid_layout = true;
+    float2 extent = GameMotionRect.zw;
+    if (float(id.x) >= extent.x || float(id.y) >= extent.y) return;
+    // The output pixel under this texel's centre: game_motion_texel's map,
+    // inverted.
+    float4 output_rect = game_motion_output_rect();
+    float2 uv = (float2(id.xy) + 0.5) / max(extent, float2(1.0, 1.0));
+    float2 pixel = output_rect.xy + uv * output_rect.zw - 0.5;
+    float2 motion = game_motion_for_pixel(pixel, Slice, ViewIndex);
+    MappedCoordinate previous = map_source_to_target(pixel + motion, PreviousMappings[ViewIndex]);
+    if (previous.valid < 0.5) return;
+    float2 displacement = previous.coordinate - pixel;
+    uint word = coverage_mask_word(displacement,
+        coverage_mask_depth_priority(game_nearness(pixel)));
+    float2 midpoint = pixel + (1.0 - synthesis_fraction()) * displacement;
+    float2 per_pixel = extent / max(output_rect.zw, float2(1.0, 1.0));
+    float2 at = (midpoint - output_rect.xy + 0.5) * per_pixel;
+    int2 limit = int2(ceil(extent));
+    int2 base = int2(floor(at - 0.5));
+    uint slice = kDepthSplatOutputs * Slice + depth_splat_output();
+    [unroll] for (uint corner = 0; corner < 4; ++corner) {
+        int2 texel = base + int2(corner & 1u, corner >> 1);
+        if (all(texel >= 0) && all(texel <= limit)) {
+            InterlockedMax(DepthSplatOut[uint3(uint2(texel), slice)], word);
+        }
+    }
+}
+#endif

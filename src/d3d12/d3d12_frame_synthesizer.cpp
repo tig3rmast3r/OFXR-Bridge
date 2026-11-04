@@ -25,6 +25,8 @@
 #include "hybrid_synthesize_midpoint_pixel_shader.hpp"
 #include "hybrid_pack_flow_input_shader.hpp"
 #include "hybrid_nvidia_synthesize_midpoint_pixel_shader.hpp"
+#include "depth_splat_clear_shader.hpp"
+#include "depth_splat_build_shader.hpp"
 #include "hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "hybrid_nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
 #include "hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
@@ -137,12 +139,26 @@ struct NvidiaInputScaleRatio {
         return {1U, 1U};
     }
 }
-constexpr UINT kSrvDescriptorCount = 8;
+// t8 the game's depth and t9 the depth splat, Hybrid's depth search.
+constexpr UINT kSrvDescriptorCount = 10;
 constexpr UINT kUavDescriptorCount = 3;
 constexpr UINT kDescriptorBlockSize =
     kSrvDescriptorCount + kUavDescriptorCount;
-constexpr UINT kDescriptorCount =
+// The depth splat's UAV table (u0 the splat, u1/u2 null) after the eye
+// blocks: its pass must not overwrite a block's pack UAVs that the pair's
+// earlier commands still read when they execute.
+constexpr UINT kSplatDescriptorBase =
     kDescriptorBlockSize * kMaxReprojectionViews;
+constexpr UINT kDescriptorCount = kSplatDescriptorBase + kUavDescriptorCount;
+// SynthesisFlags bit 5: an eye's splat is bound; bits 27-28 the output.
+constexpr UINT kDepthSplatFlag = 32U;
+constexpr UINT kDepthSplatOutputShift = 27U;
+constexpr UINT kDepthSplatOutputMask = 3U << kDepthSplatOutputShift;
+// A splat slice per eye and synthetic output, to 4X.
+constexpr UINT kDepthSplatOutputs = 3U;
+// Hybrid's depth search, live for every synthesizer's next pair. On by
+// default, as the setting (0.2 V532's switch was off).
+std::atomic<bool> g_hybrid_depth_search{true};
 constexpr UINT kNvidiaTimestampCount = 5;
 constexpr UINT kNvidiaTimestampPackBegin = 0;
 constexpr UINT kNvidiaTimestampPackEnd = 1;
@@ -924,6 +940,10 @@ struct D3D12FrameSynthesizer::Impl {
     };
 
     struct WorkSlot {
+        // Hybrid's depth search: the midpoint splat (0.2 V555).
+        ComPtr<ID3D12Resource> depth_splat;
+        UINT depth_splat_width{}, depth_splat_height{};
+        D3D12_RESOURCE_STATES depth_splat_state{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
         D3D12RamTiming<5> ram_gpu;
         UINT64 ram_source_identity{}, ram_source_serial{};
         bool ram_pair{};
@@ -1042,6 +1062,9 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> hybrid_nvidia_bidirectional_graphics_pipeline;
     // The last recorded pair composed NVIDIA's flow with the game's vectors.
     bool hybrid_guides_used{};
+    ComPtr<ID3D12PipelineState> depth_splat_clear_pipeline;
+    ComPtr<ID3D12PipelineState> depth_splat_build_pipeline;
+    std::array<std::atomic<std::uint64_t>, kMaxReprojectionViews> depth_splat_recorded{};
     ComPtr<ID3D12PipelineState> nvidia_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
     DXGI_FORMAT nvidia_input_format{DXGI_FORMAT_B8G8R8A8_UNORM};
@@ -1542,6 +1565,17 @@ struct D3D12FrameSynthesizer::Impl {
                 sizeof(g_xrfg_hybrid_pack_flow_input_shader)};
             result = device->CreateComputePipelineState(&hybrid_pack_description,
                 IID_PPV_ARGS(hybrid_pack_pipeline.GetAddressOf()));
+            if (FAILED(result)) return result;
+            auto splat_description = compute_description;
+            splat_description.CS = {g_xrfg_depth_splat_clear_shader,
+                sizeof(g_xrfg_depth_splat_clear_shader)};
+            result = device->CreateComputePipelineState(&splat_description,
+                IID_PPV_ARGS(depth_splat_clear_pipeline.GetAddressOf()));
+            if (FAILED(result)) return result;
+            splat_description.CS = {g_xrfg_depth_splat_build_shader,
+                sizeof(g_xrfg_depth_splat_build_shader)};
+            result = device->CreateComputePipelineState(&splat_description,
+                IID_PPV_ARGS(depth_splat_build_pipeline.GetAddressOf()));
             if (FAILED(result)) return result;
             graphics_description.PS = {
                 g_xrfg_hybrid_synthesize_midpoint_pixel_shader,
@@ -2369,6 +2403,24 @@ struct D3D12FrameSynthesizer::Impl {
                         block * kDescriptorBlockSize + 6U,
                         descriptor_increment));
             }
+            // Every block's t8/t9 and the splat's UAV table: null until a
+            // Hybrid pair with the depth search binds them.
+            D3D12_SHADER_RESOURCE_VIEW_DESC null_array = null_motion;
+            for (UINT block = 0; block < kMaxReprojectionViews; ++block) {
+                null_array.Format = DXGI_FORMAT_R32_FLOAT;
+                device->CreateShaderResourceView(nullptr, &null_array,
+                    offset_cpu_handle(cpu_start, block * kDescriptorBlockSize + 8U, descriptor_increment));
+                null_array.Format = DXGI_FORMAT_R32_UINT;
+                device->CreateShaderResourceView(nullptr, &null_array,
+                    offset_cpu_handle(cpu_start, block * kDescriptorBlockSize + 9U, descriptor_increment));
+            }
+            D3D12_UNORDERED_ACCESS_VIEW_DESC null_splat{};
+            null_splat.Format = DXGI_FORMAT_R32_UINT;
+            null_splat.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+            null_splat.Texture2DArray.ArraySize = kMaxReprojectionViews * kDepthSplatOutputs;
+            for (UINT index = 0; index < kUavDescriptorCount; ++index)
+                device->CreateUnorderedAccessView(nullptr, nullptr, &null_splat,
+                    offset_cpu_handle(cpu_start, kSplatDescriptorBase + index, descriptor_increment));
         }
         return S_OK;
     }
@@ -3233,8 +3285,257 @@ struct D3D12FrameSynthesizer::Impl {
                 offset_cpu_handle(start,
                     eye * kDescriptorBlockSize + 6U,
                     descriptor_increment));
+            // The eye's depth at t8 for Hybrid's depth search, or a null view.
+            D3D12_SHADER_RESOURCE_VIEW_DESC depth_description = description;
+            depth_description.Format = DXGI_FORMAT_R32_FLOAT;
+            depth_description.Texture2DArray.FirstArraySlice = 0;
+            ID3D12Resource* depth = nullptr;
+            if (usable_guide_depth(*frame) && same_device(device.Get(), frame->depth.Get())) {
+                const D3D12_RESOURCE_DESC depth_resource = frame->depth->GetDesc();
+                depth = frame->depth.Get();
+                depth_description.Format = depth_view_format(depth_resource.Format);
+                depth_description.Texture2DArray.FirstArraySlice =
+                    frame->motion_slice < depth_resource.DepthOrArraySize ? frame->motion_slice : 0U;
+            }
+            device->CreateShaderResourceView(depth, &depth_description,
+                offset_cpu_handle(start, eye * kDescriptorBlockSize + 8U, descriptor_increment));
         }
         return S_OK;
+    }
+
+    // The game's depth in a view the depth search can read, from its
+    // resource format (0.2 V505).
+    [[nodiscard]] static DXGI_FORMAT depth_view_format(DXGI_FORMAT format) noexcept {
+        switch (format) {
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT:
+        case DXGI_FORMAT_R32_FLOAT:
+            return DXGI_FORMAT_R32_FLOAT;
+        case DXGI_FORMAT_R24G8_TYPELESS:
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+            return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        case DXGI_FORMAT_R32G8X24_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+        case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
+            return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_D16_UNORM:
+        case DXGI_FORMAT_R16_UNORM:
+            return DXGI_FORMAT_R16_UNORM;
+        default:
+            return DXGI_FORMAT_UNKNOWN;
+        }
+    }
+
+    // Depth the search can use: a readable format, on the vectors' rectangle.
+    [[nodiscard]] static bool usable_guide_depth(const DlssMotionVectorFrame& frame) noexcept {
+        return frame.depth && depth_view_format(frame.depth->GetDesc().Format) != DXGI_FORMAT_UNKNOWN &&
+            frame.depth_x == frame.motion_x && frame.depth_y == frame.motion_y &&
+            frame.depth_width == frame.motion_width && frame.depth_height == frame.motion_height;
+    }
+
+    // The hybrid composition's guide constants: the DLSS output rectangle
+    // packed 16 bits a value, the flow keeping its own constants. Bit 15:
+    // the guide's depth is at t8; bit 31: it is inverted (0.2 V505). Output
+    // sizes stay below 32768.
+    void apply_hybrid_guide_constants(SynthesisParameters& parameters,
+        const DlssMotionVectorFrame& guide) const noexcept {
+        const bool depth = usable_guide_depth(guide) && same_device(device.Get(), guide.depth.Get());
+        parameters.use_game_motion = guide.output_x | (guide.output_y << 16U);
+        parameters.game_motion_padding = (guide.output_width & 0x7FFFU) |
+            ((guide.output_height & 0x7FFFU) << 16U) | (depth ? 0x8000U : 0U) |
+            (depth && guide.depth_inverted ? 0x80000000U : 0U);
+        parameters.game_motion_rect = guide_motion_rect(guide);
+        parameters.game_motion_scale = {
+            guide.scale_x * static_cast<float>(guide.output_width) /
+                parameters.game_motion_rect[2],
+            guide.scale_y * static_cast<float>(guide.output_height) /
+                parameters.game_motion_rect[3]};
+        parameters.game_motion_jitter_delta = guide.jittered
+            ? std::array<float, 2>{guide.jitter_x - guide.previous_jitter_x,
+                                   guide.jitter_y - guide.previous_jitter_y}
+            : std::array<float, 2>{};
+    }
+
+    // The guide eye a view's composition reads.
+    [[nodiscard]] UINT hybrid_guide_eye(const DlssMotionVectorSet& guides, UINT view_index,
+        UINT slice, std::size_t view_count) const noexcept {
+        return image_description.DepthOrArraySize == 1 && guides.eye_count == view_count
+            ? view_index : slice;
+    }
+
+    // Hybrid's depth search runs: the setting on, not disabled for a test.
+    [[nodiscard]] static bool depth_search_requested() noexcept {
+        return hybrid_depth_search_enabled() &&
+            GetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_SPLAT", nullptr, 0) == 0;
+    }
+
+    // The guides' depth joins their motion's barriers while the search runs.
+    void guide_depth_barriers(ID3D12GraphicsCommandList* list, const DlssMotionVectorSet& guides,
+        bool to_read) const noexcept {
+        for (UINT eye = 0; eye < guides.eye_count; ++eye) {
+            const auto& guide = guides.eyes[eye];
+            if (!guide || !usable_guide_depth(*guide) || !same_device(device.Get(), guide->depth.Get()) ||
+                guide->depth_resource_state == kShaderReadState ||
+                (eye != 0 && guides.eyes[0] && guide->depth.Get() == guides.eyes[0]->depth.Get())) continue;
+            const auto barrier = to_read
+                ? transition_barrier(guide->depth.Get(), guide->depth_resource_state, kShaderReadState)
+                : transition_barrier(guide->depth.Get(), kShaderReadState, guide->depth_resource_state);
+            list->ResourceBarrier(1, &barrier);
+        }
+    }
+
+    // 0.2 V555: the depth search's midpoint splat (frame_synthesis.hlsl,
+    // BuildDepthSplat) for each view's eye whose guide brings depth, recorded
+    // on `list` before the pair's draws, which find it at t9 of the eye's
+    // block, a slice per synthetic output. The guides' vectors and depth are
+    // readable. Per eye the flags its draws carry, 0 where there is none.
+    [[nodiscard]] std::array<UINT, kMaxReprojectionViews> record_depth_splat(
+        WorkSlot& slot, ID3D12GraphicsCommandList* list, const DlssMotionVectorSet& guides,
+        const SynthesisParameters& draw_parameters,
+        std::span<const D3D12ReprojectionView> target_views) noexcept {
+        std::array<UINT, kMaxReprojectionViews> flags{};
+        if (!depth_splat_clear_pipeline || !depth_splat_build_pipeline) return flags;
+        struct EyeSplat {
+            SynthesisParameters parameters{};
+            UINT columns{}, rows{};
+        };
+        std::array<EyeSplat, kMaxReprojectionViews> eyes{};
+        std::array<bool, kMaxReprojectionViews> built{};
+        UINT width = 0, height = 0;
+        for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
+            const UINT slice = resolved_array_slice(target_views[view_index], view_index,
+                target_views.size(), image_description.DepthOrArraySize);
+            const UINT eye = hybrid_guide_eye(guides, view_index, slice, target_views.size());
+            if (eye >= kMaxReprojectionViews || eye >= guides.eye_count || !guides.eyes[eye] ||
+                built[eye]) continue;
+            const auto& guide = *guides.eyes[eye];
+            if (!guide.motion_vectors || guide.output_width == 0 || guide.output_height == 0) continue;
+            if (!usable_guide_depth(guide) || !same_device(device.Get(), guide.depth.Get())) continue;
+            EyeSplat& splat = eyes[eye];
+            splat.parameters = draw_parameters;
+            apply_hybrid_guide_constants(splat.parameters, guide);
+            splat.parameters.slice = eye;
+            splat.parameters.view_index = view_index;
+            const auto& rect = splat.parameters.game_motion_rect;
+            if (!(rect[2] >= 1.0F) || !(rect[3] >= 1.0F) || rect[2] > 16384.0F || rect[3] > 16384.0F)
+                continue;
+            splat.columns = static_cast<UINT>(std::ceil(rect[2])) + 1U;
+            splat.rows = static_cast<UINT>(std::ceil(rect[3])) + 1U;
+            width = std::max(width, splat.columns);
+            height = std::max(height, splat.rows);
+            built[eye] = true;
+        }
+        if (width == 0 || height == 0) return flags;
+        if (!slot.depth_splat || slot.depth_splat_width < width || slot.depth_splat_height < height) {
+            const D3D12_HEAP_PROPERTIES heap = default_heap_properties(0);
+            D3D12_RESOURCE_DESC texture{};
+            texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            texture.Width = std::max(width, slot.depth_splat_width);
+            texture.Height = std::max(height, slot.depth_splat_height);
+            texture.DepthOrArraySize = static_cast<UINT16>(kMaxReprojectionViews * kDepthSplatOutputs);
+            texture.MipLevels = 1;
+            texture.Format = DXGI_FORMAT_R32_UINT;
+            texture.SampleDesc.Count = 1;
+            texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            ComPtr<ID3D12Resource> splat;
+            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(splat.GetAddressOf())))) {
+                return flags;
+            }
+            splat->SetName(L"OFXR Depth Splat");
+            slot.depth_splat = std::move(splat);
+            slot.depth_splat_width = static_cast<UINT>(texture.Width);
+            slot.depth_splat_height = texture.Height;
+            slot.depth_splat_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE cpu_start = slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start = slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+        D3D12_SHADER_RESOURCE_VIEW_DESC eye_view{};
+        eye_view.Format = DXGI_FORMAT_R32_UINT;
+        eye_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        eye_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        eye_view.Texture2DArray.MipLevels = 1;
+        eye_view.Texture2DArray.ArraySize = kDepthSplatOutputs;
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC view = eye_view;
+            view.Texture2DArray.FirstArraySlice = eye * kDepthSplatOutputs;
+            // The draw's t9: this eye's slices, one per output, or nothing.
+            device->CreateShaderResourceView(built[eye] ? slot.depth_splat.Get() : nullptr, &view,
+                offset_cpu_handle(cpu_start, eye * kDescriptorBlockSize + 9U, descriptor_increment));
+        }
+        D3D12_UNORDERED_ACCESS_VIEW_DESC array_view{};
+        array_view.Format = DXGI_FORMAT_R32_UINT;
+        array_view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        array_view.Texture2DArray.ArraySize = kMaxReprojectionViews * kDepthSplatOutputs;
+        device->CreateUnorderedAccessView(slot.depth_splat.Get(), nullptr, &array_view,
+            offset_cpu_handle(cpu_start, kSplatDescriptorBase, descriptor_increment));
+
+        dred_marker(list, "OFXR depth splat begin");
+        if (slot.depth_splat_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            const auto barrier = transition_barrier(slot.depth_splat.Get(),
+                slot.depth_splat_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            list->ResourceBarrier(1, &barrier);
+        }
+        ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+        list->SetDescriptorHeaps(1, heaps);
+        list->SetComputeRootSignature(root_signature.Get());
+        const UINT outputs = synthetic_output_count();
+        // Each output's pass carries that output's fraction and index, as its
+        // draws will.
+        const auto bind = [&](UINT eye, UINT output) {
+            SynthesisParameters parameters = eyes[eye].parameters;
+            parameters.synthesis_flags =
+                (parameters.synthesis_flags & 0xFF0000FFU & ~kDepthSplatOutputMask) |
+                packed_synthesis_fraction(synthetic_output_fraction(output)) |
+                (output << kDepthSplatOutputShift);
+            list->SetComputeRootDescriptorTable(0,
+                offset_gpu_handle(gpu_start, eye * kDescriptorBlockSize, descriptor_increment));
+            list->SetComputeRootDescriptorTable(1,
+                offset_gpu_handle(gpu_start, kSplatDescriptorBase, descriptor_increment));
+            list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &parameters, 0);
+        };
+        list->SetPipelineState(depth_splat_clear_pipeline.Get());
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye]) continue;
+            for (UINT output = 0; output < outputs; ++output) {
+                bind(eye, output);
+                list->Dispatch((eyes[eye].columns + 7U) / 8U, (eyes[eye].rows + 7U) / 8U, 1);
+            }
+        }
+        D3D12_RESOURCE_BARRIER cleared{};
+        cleared.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        cleared.UAV.pResource = slot.depth_splat.Get();
+        list->ResourceBarrier(1, &cleared);
+        list->SetPipelineState(depth_splat_build_pipeline.Get());
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye]) continue;
+            for (UINT output = 0; output < outputs; ++output) {
+                bind(eye, output);
+                list->Dispatch((eyes[eye].columns + 6U) / 8U, (eyes[eye].rows + 6U) / 8U, 1);
+            }
+            flags[eye] = kDepthSplatFlag;
+        }
+        const auto readable = transition_barrier(slot.depth_splat.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kShaderReadState);
+        list->ResourceBarrier(1, &readable);
+        slot.depth_splat_state = kShaderReadState;
+        dred_marker(list, "OFXR depth splat complete");
+        // 867, a synthesizer's first splat for an eye and whenever its grid
+        // or its outputs change: a the eye << 48 | columns << 20 | rows, b
+        // the synthetic outputs splatted.
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye]) continue;
+            const std::uint64_t a = (static_cast<std::uint64_t>(eye) << 48U) |
+                (static_cast<std::uint64_t>(eyes[eye].columns & 0xFFFFFU) << 20U) |
+                (eyes[eye].rows & 0xFFFFFU);
+            const std::uint64_t key = (a << 2U) | outputs;
+            if (depth_splat_recorded[eye].exchange(key + 1U, std::memory_order_relaxed) == key + 1U) continue;
+            bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 867, a, outputs);
+        }
+        return flags;
     }
 
     // NOTE: the synthetic destination is drawn into while the private
@@ -4543,8 +4844,7 @@ struct D3D12FrameSynthesizer::Impl {
         }
         // The guide eye each view reads, as the FidelityFX hybrid picks it.
         const auto guide_eye = [&](UINT view_index, UINT slice) noexcept {
-            return image_description.DepthOrArraySize == 1 && guides->eye_count == target_views.size()
-                ? view_index : slice;
+            return hybrid_guide_eye(*guides, view_index, slice, target_views.size());
         };
         if (guides) {
             for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
@@ -4813,6 +5113,14 @@ struct D3D12FrameSynthesizer::Impl {
             }
         };
         motion_barriers(true);
+        // Hybrid's depth search: the guides' depth readable, the splat built.
+        const bool depth_search = guides && depth_search_requested();
+        if (depth_search) guide_depth_barriers(synthesis, *guides, true);
+        const auto depth_splat = depth_search
+            ? record_depth_splat(slot, synthesis, *guides, parameters, target_views)
+            : std::array<UINT, kMaxReprojectionViews>{};
+        if (depth_search) synthesis->SetPipelineState(nvidia_options.bidirectional
+            ? hybrid_nvidia_bidirectional_graphics_pipeline.Get() : hybrid_nvidia_graphics_pipeline.Get());
         dred_marker(synthesis, "OFXR NVIDIA composition draw");
         synthesis->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -4839,21 +5147,12 @@ struct D3D12FrameSynthesizer::Impl {
                 apply_synthetic_camera(parameters, output, view_index);
                 const UINT descriptor_block = guides ? guide_eye(view_index, slice) : slice;
                 if (guides) {
-                    // As the FidelityFX hybrid: the output rectangle packed 16
-                    // bits a value, the flow keeping its own constants.
-                    const auto& guide = guides->eyes[descriptor_block];
-                    parameters.use_game_motion = guide->output_x | (guide->output_y << 16U);
-                    parameters.game_motion_padding = guide->output_width | (guide->output_height << 16U);
-                    parameters.game_motion_rect = guide_motion_rect(*guide);
-                    parameters.game_motion_scale = {
-                        guide->scale_x * static_cast<float>(guide->output_width) /
-                            parameters.game_motion_rect[2],
-                        guide->scale_y * static_cast<float>(guide->output_height) /
-                            parameters.game_motion_rect[3]};
-                    parameters.game_motion_jitter_delta = guide->jittered
-                        ? std::array<float, 2>{guide->jitter_x - guide->previous_jitter_x,
-                                               guide->jitter_y - guide->previous_jitter_y}
-                        : std::array<float, 2>{};
+                    // As the FidelityFX hybrid.
+                    apply_hybrid_guide_constants(parameters, *guides->eyes[descriptor_block]);
+                    parameters.synthesis_flags = (parameters.synthesis_flags &
+                        ~(kDepthSplatFlag | kDepthSplatOutputMask)) |
+                        (descriptor_block < kMaxReprojectionViews ? depth_splat[descriptor_block] : 0U) |
+                        (output << kDepthSplatOutputShift);
                 }
                 const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
                     gpu_start,
@@ -4888,6 +5187,7 @@ struct D3D12FrameSynthesizer::Impl {
             synthetic_target_state(synthesis, output_destination, false);
         }
         motion_barriers(false);
+        if (depth_search) guide_depth_barriers(synthesis, *guides, false);
 
         std::array<D3D12_RESOURCE_BARRIER,
                    3U + 4U * kMaxReprojectionViews> before_current_copy{};
@@ -5390,6 +5690,13 @@ struct D3D12FrameSynthesizer::Impl {
             }
         };
         motion_barriers(true);
+        // Hybrid's depth search: the guides' depth readable, the splat built.
+        const bool depth_search = guides && depth_search_requested();
+        if (depth_search) guide_depth_barriers(slot.command_list.Get(), *guides, true);
+        const auto depth_splat = depth_search
+            ? record_depth_splat(slot, slot.command_list.Get(), *guides, parameters, target_views)
+            : std::array<UINT, kMaxReprojectionViews>{};
+        if (depth_search) slot.command_list->SetPipelineState(hybrid_graphics_pipeline.Get());
         slot.command_list->IASetPrimitiveTopology(
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -5418,24 +5725,17 @@ struct D3D12FrameSynthesizer::Impl {
                     // As record_game_motion_pair, but with the output
                     // rectangle packed 16 bits a value: the flow keeps its
                     // own constants.
-                    const UINT eye = (image_description.DepthOrArraySize == 1 && guides->eye_count == target_views.size() ? view_index : slice);
+                    const UINT eye = hybrid_guide_eye(*guides, view_index, slice, target_views.size());
                     if (eye >= guides->eye_count) return E_INVALIDARG;
                     const auto& guide = guides->eyes[eye];
                     const UINT descriptor_base = eye * kDescriptorBlockSize;
                     slot.command_list->SetGraphicsRootDescriptorTable(0,
                         offset_gpu_handle(gpu_start, descriptor_base, descriptor_increment));
-                    parameters.use_game_motion = guide->output_x | (guide->output_y << 16U);
-                    parameters.game_motion_padding = guide->output_width | (guide->output_height << 16U);
-                    parameters.game_motion_rect = guide_motion_rect(*guide);
-                    parameters.game_motion_scale = {
-                        guide->scale_x * static_cast<float>(guide->output_width) /
-                            parameters.game_motion_rect[2],
-                        guide->scale_y * static_cast<float>(guide->output_height) /
-                            parameters.game_motion_rect[3]};
-                    parameters.game_motion_jitter_delta = guide->jittered
-                        ? std::array<float, 2>{guide->jitter_x - guide->previous_jitter_x,
-                                               guide->jitter_y - guide->previous_jitter_y}
-                        : std::array<float, 2>{};
+                    apply_hybrid_guide_constants(parameters, *guide);
+                    parameters.synthesis_flags = (parameters.synthesis_flags &
+                        ~(kDepthSplatFlag | kDepthSplatOutputMask)) |
+                        (eye < kMaxReprojectionViews ? depth_splat[eye] : 0U) |
+                        (output << kDepthSplatOutputShift);
                 }
                 slot.command_list->SetGraphicsRoot32BitConstants(
                     2,
@@ -5460,6 +5760,7 @@ struct D3D12FrameSynthesizer::Impl {
         }
 
         motion_barriers(false);
+        if (depth_search) guide_depth_barriers(slot.command_list.Get(), *guides, false);
         if (guides) *used_game_motion = true;
         const std::array<D3D12_RESOURCE_BARRIER, 1> before_current_copy{
             transition_barrier(
@@ -7503,6 +7804,13 @@ bool D3D12FrameSynthesizer::initialized() const noexcept {
     } catch (...) {
         return false;
     }
+}
+
+void set_hybrid_depth_search(bool enabled) noexcept {
+    g_hybrid_depth_search.store(enabled, std::memory_order_relaxed);
+}
+bool hybrid_depth_search_enabled() noexcept {
+    return g_hybrid_depth_search.load(std::memory_order_relaxed);
 }
 
 }  // namespace xrfg

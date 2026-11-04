@@ -6131,6 +6131,28 @@ int main(int argc, char** argv) {
                     test_hybrid_motion_vector_occlusion_edges(hybrid_fixture,scene,true,true,flow);
                 }
             }
+            // 0.2 V505/V555: Hybrid's depth search keeps thin near bars.
+            const double bars_without_depth = test_hybrid_bars(hybrid_fixture, false);
+            require(bars_without_depth < 0.95, "hybrid bars without depth are whole: depth is not needed");
+            xrfg::set_hybrid_depth_search(true);
+            for (const auto backend : {xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                                       xrfg::D3D12OpticalFlowBackend::nvidia}) {
+                require(test_hybrid_bars(hybrid_fixture, true, backend) >= 0.95,
+                    "hybrid bars with the depth search are not whole in the generated frame");
+                for (const bool vertical : {false, true})
+                    require(test_hybrid_bars(hybrid_fixture, true, backend, 512, vertical) >= 0.95,
+                        "hybrid bars by the depth splat are not whole along either axis");
+                for (const UINT outputs : {2U, 3U})
+                    require(test_hybrid_bars(hybrid_fixture, true, backend, 256, false, outputs) >= 0.95,
+                        "hybrid bars by the depth splat are not whole in every 3X/4X output");
+            }
+            SetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_SPLAT", L"1");
+            require(test_hybrid_bars(hybrid_fixture, true) <= bars_without_depth + 0.05,
+                "with the splat disabled the bars should be as without depth");
+            SetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_SPLAT", nullptr);
+            xrfg::set_hybrid_depth_search(false);
+            require(test_hybrid_bars(hybrid_fixture, true) <= bars_without_depth + 0.05,
+                "Depth search off did not reach the shader");
             hybrid_fixture.require_no_debug_errors();return 0;
         }
         if (argc>1 && std::string_view(argv[1])=="r19-camera") {

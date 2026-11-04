@@ -233,6 +233,15 @@ void route_profiles() {
     select_generation(multiplied,0,2);require(multiplied.frame_multiplier==4 && generation_multiplier(multiplied)==4,"OFXR 0.3.0 keeps its 4X");
     select_generation(multiplied,3,2);require(multiplied.frame_multiplier==3,"Hybrid keeps its own multiplier");
     select_generation(multiplied,0,0);require(multiplied.frame_multiplier==2,"an untouched engine stays at 2X");
+    require(Settings{}.hybrid_depth_search && parse_settings("[ofxr]\nframe_generation=3\n").hybrid_depth_search,
+        "Hybrid depth search is on by default, also for profiles saved before it");
+    Settings depth;select_generation(depth,3,0);depth.hybrid_depth_search=false;
+    depth=parse_settings(serialize_settings(depth));
+    require(!depth.hybrid_depth_search,"Hybrid depth search off is saved");
+    depth.hybrid_depth_search=true;
+    Settings edited=depth;edited.hybrid_depth_search=false;
+    require(!merge_changes(depth,depth,edited).hybrid_depth_search,
+        "the UI's Depth search change survives the merge into the saved settings");
     Settings dlssg;select_generation(dlssg,2,0);dlssg.triple_frame_gen=true;dlssg=sanitize(dlssg);
     require(runtime_multiplier(dlssg)==2 && generation_multiplier(dlssg)==3,"DLSS-G 3X stays on triple_frame_gen");
     dlssg.frame_multiplier=4;dlssg.triple_frame_gen=false;dlssg=parse_settings(serialize_settings(dlssg));

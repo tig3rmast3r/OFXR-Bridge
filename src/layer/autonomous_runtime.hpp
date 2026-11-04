@@ -14,6 +14,7 @@
 #include "xrfg/luke_vulkan_scope.hpp"
 #include "xrfg/dlssg_profile.hpp"
 #include "xrfg/d3d12_rife.hpp"
+#include "xrfg/d3d12_frame_synthesizer.hpp"
 
 namespace xrfg::autonomous {
 // UEVR's Alternating/AFR is attached as OSR's eye source (uevr_afr_osr.inc).
@@ -51,6 +52,7 @@ inline void apply_runtime_settings() {
     e.hybrid=s.frame_generation==3;
     // RIFE's multiplier, or OFXR/Hybrid's 2X-4X; the layer tells them apart by rife_model.
     e.rife_multiplier=runtime_multiplier(s);
+    set_hybrid_depth_search(s.frame_generation==3 && s.hybrid_depth_search);
     e.rife_model=s.frame_generation==4?s.rife_model:-1;
     e.rife_resolution=s.rife_resolution;
     if(e.hybrid) e.backend=s.hybrid_backend; // Hybrid's own engine, independent of OFXR's.

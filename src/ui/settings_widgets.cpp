@@ -275,6 +275,9 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
             changed = true;
         if (draft.hybrid_backend != 0) nvidia_flow_controls();
         else flow_resolution();
+        changed |= ImGui::Checkbox("Depth search", &draft.hybrid_depth_search);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Uses the game's depth to keep thin near objects (bars, poles, wires) solid in generated frames. Costs GPU time at high resolutions.");
         ImGui::TextWrapped(draft.hybrid_backend == 0
             ? "Game motion vectors + FidelityFX optical flow. If game guides are unavailable or rejected, uses FidelityFX optical flow."
             : "Game motion vectors + NVIDIA optical flow. If game guides are unavailable or rejected, uses NVIDIA optical flow.");
