@@ -208,6 +208,9 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     g.reset=get<int>(p,NVSDK_NGX_Parameter_Reset)!=0;g.jittered=(f->flags&NVSDK_NGX_DLSS_Feature_Flags_MVJittered)!=0;
     g.depth_inverted=(f->flags&NVSDK_NGX_DLSS_Feature_Flags_DepthInverted)!=0;
     g.frame_time_delta_ms=get<float>(p,NVSDK_NGX_Parameter_FrameTimeDeltaInMsec,16.6667F);
+    // As the Vulkan guides do: PureDark's Skyrim VR upscaler passes 0, which
+    // the registry refuses with depth (1187 c=64), so Hybrid never got vectors.
+    if(!(g.frame_time_delta_ms>0.0F)||g.frame_time_delta_ms>1000.0F)g.frame_time_delta_ms=16.6667F;
     const bool exact=apply_camera(g,nullptr);if(luke_detected()&&!exact){note(8,S_OK);return fail();}
     // The stream's shape (V520's lines), once per change of size or rectangle.
     if(const std::array<std::uint64_t,5> shape{pack(g.output_width,g.output_height),pack(g.motion_width,g.motion_height),

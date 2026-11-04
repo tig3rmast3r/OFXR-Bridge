@@ -1,4 +1,5 @@
 #include "xrfg/dlss_motion_vectors.hpp"
+#include "xrfg/dlss_input_region.hpp"
 #include "xrfg/luke_camera_units.hpp"
 #include "xrfg/luke_color_token.hpp"
 #include "xrfg/luke_interleaved_history.hpp"
@@ -215,7 +216,13 @@ bool interleaved_frames(const DlssMotionVectorFrame& current,
         same_identity(current.producer_queue.Get(), older->producer_queue.Get());
 }
 
-bool valid(const DlssMotionVectorPublication& publication) noexcept {
+// Which of a publication's checks fail, as bits (0 = valid). 1187's refusal
+// record carries them: 1 a missing resource, zero size or non-finite scale or
+// jitter; 2 output or vectors not 2D; 4 the output rectangle leaves its
+// texture; 8 the vectors' does; 16 depth not 2D or of zero size; 32 the
+// depth rectangle leaves its texture; 64 no positive frame time with depth;
+// 128 non-finite camera planes with depth.
+std::uint32_t invalid_bits(const DlssMotionVectorPublication& publication) noexcept {
     if (publication.stream == 0 || publication.output == nullptr ||
         publication.motion_vectors == nullptr ||
         publication.producer_queue == nullptr ||
@@ -224,32 +231,44 @@ bool valid(const DlssMotionVectorPublication& publication) noexcept {
         publication.motion_height == 0 || !std::isfinite(publication.scale_x) ||
         !std::isfinite(publication.scale_y) || !std::isfinite(publication.jitter_x) ||
         !std::isfinite(publication.jitter_y)) {
-        return false;
+        return 1;
     }
     const auto output = publication.output->GetDesc();
     const auto motion = publication.motion_vectors->GetDesc();
-    const bool base_valid = output.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
-        motion.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
-        static_cast<std::uint64_t>(publication.output_x) + publication.output_width <=
-            output.Width &&
-        static_cast<std::uint64_t>(publication.output_y) + publication.output_height <=
-            output.Height &&
-        static_cast<std::uint64_t>(publication.motion_x) + publication.motion_width <=
-            motion.Width &&
-        static_cast<std::uint64_t>(publication.motion_y) + publication.motion_height <=
-            motion.Height;
-    if (!base_valid || publication.depth == nullptr) return base_valid;
+    std::uint32_t bits = 0;
+    if (output.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        motion.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) bits |= 2;
+    if (static_cast<std::uint64_t>(publication.output_x) + publication.output_width > output.Width ||
+        static_cast<std::uint64_t>(publication.output_y) + publication.output_height > output.Height)
+        bits |= 4;
+    if (static_cast<std::uint64_t>(publication.motion_x) + publication.motion_width > motion.Width ||
+        static_cast<std::uint64_t>(publication.motion_y) + publication.motion_height > motion.Height)
+        bits |= 8;
+    if (bits != 0 || publication.depth == nullptr) return bits;
     const auto depth = publication.depth->GetDesc();
-    return depth.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
-        publication.depth_width != 0 && publication.depth_height != 0 &&
-        static_cast<std::uint64_t>(publication.depth_x) + publication.depth_width <=
-            depth.Width &&
-        static_cast<std::uint64_t>(publication.depth_y) + publication.depth_height <=
-            depth.Height &&
-        std::isfinite(publication.frame_time_delta_ms) &&
-        publication.frame_time_delta_ms > 0.0F &&
-        std::isfinite(publication.camera_near) &&
-        std::isfinite(publication.camera_far);
+    if (depth.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        publication.depth_width == 0 || publication.depth_height == 0) bits |= 16;
+    if (static_cast<std::uint64_t>(publication.depth_x) + publication.depth_width > depth.Width ||
+        static_cast<std::uint64_t>(publication.depth_y) + publication.depth_height > depth.Height)
+        bits |= 32;
+    if (!std::isfinite(publication.frame_time_delta_ms) ||
+        publication.frame_time_delta_ms <= 0.0F) bits |= 64;
+    if (!std::isfinite(publication.camera_near) || !std::isfinite(publication.camera_far))
+        bits |= 128;
+    return bits;
+}
+
+// 1187: the first eight publications the registry refuses for each reason:
+// result = the stream's low 32 bits, a = 1187, b = reason (1 tracking off,
+// 2 invalid, 3 no colour token, 4 output snapshot, 5 vectors snapshot,
+// 6 depth snapshot, 7 publication counter), c = invalid_bits for reason 2.
+void record_refusal(const DlssMotionVectorPublication& publication,
+    std::uint64_t reason, std::uint64_t detail = 0) noexcept {
+    static std::array<std::atomic<unsigned>, 8> recorded{};
+    if (reason >= recorded.size() ||
+        recorded[reason].fetch_add(1, std::memory_order_relaxed) >= 8) return;
+    bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+        static_cast<std::int64_t>(publication.stream & 0xFFFFFFFFULL), 1187, reason, detail);
 }
 
 bool matching_description(
@@ -538,15 +557,19 @@ void report_luke_ingress_contract(const DlssMotionVectorFrame& frame) noexcept {
 std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
     const DlssMotionVectorPublication& publication) noexcept {
     try {
-        if (!g_tracking_enabled.load(std::memory_order_acquire)) return {};
+        if (!g_tracking_enabled.load(std::memory_order_acquire)) {
+            record_refusal(publication, 1);
+            return {};
+        }
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
         // Disable can win after the fast check but before this lock. No late
         // publisher may repopulate a registry whose retirement already ended.
-        if(!g_tracking_enabled.load(std::memory_order_acquire))return {};
-        if (!valid(publication)) {
+        if(!g_tracking_enabled.load(std::memory_order_acquire)){record_refusal(publication,1);return {};}
+        if (const auto bits = invalid_bits(publication); bits != 0) {
             ++state.statistics.invalid_publications;
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
+            record_refusal(publication, 2, bits);
             return {};
         }
 
@@ -555,6 +578,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         if (publication.protect_snapshot_lifetime && !color_origin_token) {
             ++state.statistics.invalid_publications;
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
+            record_refusal(publication, 3);
             return {};
         }
 
@@ -587,6 +611,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
                     D3D12_RESOURCE_STATE_COMMON))) {
                 ++state.statistics.snapshot_failures;
                 state.statistics.status = DlssMotionVectorStatus::invalid_input;
+                record_refusal(publication, 4);
                 return {};
             }
             ++state.statistics.snapshot_copies;
@@ -606,6 +631,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
                 &motion_snapshot_device,retained_capacity,publication.dlss_float_motion))) {
             ++state.statistics.snapshot_failures;
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
+            record_refusal(publication, 5);
             return {};
         }
         ++state.statistics.snapshot_copies;
@@ -622,6 +648,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
                     &depth_snapshot_device,retained_capacity))) {
                 ++state.statistics.snapshot_failures;
                 state.statistics.status = DlssMotionVectorStatus::invalid_input;
+                record_refusal(publication, 6);
                 return {};
             }
             ++state.statistics.snapshot_copies;
@@ -636,6 +663,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         if (state.next_publication == 0) {
             ++state.statistics.invalid_publications;
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
+            record_refusal(publication, 7);
             return {};
         }
         frame->publication = state.next_publication++;
@@ -655,8 +683,39 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->output_width = publication.output_width;
         frame->output_height = publication.output_height;
         frame->output_slice = 0;
-        frame->motion_x = publication.motion_x;
-        frame->motion_y = publication.motion_y;
+        // 0.2 V521: an input base an upscaler offset inside its eye's region
+        // goes back to the region's origin (dlss_input_region.hpp). Luke Ross
+        // streams keep theirs: AFW/OSR apply their own crops to these bases.
+        // The source_ bases stay as published for the eye order (V553).
+        long motion_dx = 0, motion_dy = 0, depth_dx = 0, depth_dy = 0;
+        if (!publication.protect_snapshot_lifetime) {
+            const auto motion = publication.motion_vectors->GetDesc();
+            motion_dx = dlss_input_offset_within_region(publication.motion_x,
+                publication.output_x, publication.motion_width, publication.output_width, motion.Width);
+            motion_dy = dlss_input_offset_within_region(publication.motion_y,
+                publication.output_y, publication.motion_height, publication.output_height, motion.Height);
+            if (publication.depth != nullptr) {
+                const auto depth = publication.depth->GetDesc();
+                depth_dx = dlss_input_offset_within_region(publication.depth_x,
+                    publication.output_x, publication.depth_width, publication.output_width, depth.Width);
+                depth_dy = dlss_input_offset_within_region(publication.depth_y,
+                    publication.output_y, publication.depth_height, publication.output_height, depth.Height);
+            }
+            static std::atomic<unsigned> realigned_records{0};
+            if ((motion_dx | motion_dy | depth_dx | depth_dy) != 0 &&
+                realigned_records.fetch_add(1, std::memory_order_relaxed) < 16) {
+                // 1186: a = vectors' removed x << 32 | y, b = depth's (signed
+                // 32-bit texels), result = the stream's low 32 bits.
+                const auto pair = [](long x, long y) {
+                    return (std::uint64_t(std::uint32_t(x)) << 32) | std::uint32_t(y);
+                };
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                    static_cast<std::int64_t>(publication.stream & 0xFFFFFFFFULL), 1186,
+                    pair(motion_dx, motion_dy), pair(depth_dx, depth_dy));
+            }
+        }
+        frame->motion_x = static_cast<std::uint32_t>(publication.motion_x - motion_dx);
+        frame->motion_y = static_cast<std::uint32_t>(publication.motion_y - motion_dy);
         frame->source_motion_x = publication.motion_x;
         frame->motion_width = publication.motion_width;
         frame->motion_height = publication.motion_height;
@@ -680,8 +739,8 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->compose_native_object_history = publication.compose_native_object_history;
         frame->gta_headlock=publication.gta_headlock;
         frame->camera_pending = publication.camera_pending && !publication.camera_data_valid;
-        frame->depth_x = publication.depth_x;
-        frame->depth_y = publication.depth_y;
+        frame->depth_x = static_cast<std::uint32_t>(publication.depth_x - depth_dx);
+        frame->depth_y = static_cast<std::uint32_t>(publication.depth_y - depth_dy);
         frame->source_depth_x = publication.depth_x;
         frame->depth_width = publication.depth_width;
         frame->depth_height = publication.depth_height;
