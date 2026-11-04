@@ -1,5 +1,6 @@
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/d3d12_rife.hpp"
+#include "rife_dependency_timing.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/fsr_guide_geometry.hpp"
 #include "xrfg/d3d12_guide_composer.hpp"
@@ -1008,6 +1009,7 @@ struct D3D12FrameSynthesizer::Impl {
 
 
     std::unique_ptr<D3D12Rife> rife;
+    std::unique_ptr<RifeDependencyTiming> rife_dependency_timing;
     struct RifePair {
         ComPtr<ID3D12Resource> a,b;
         std::array<ComPtr<ID3D12Resource>,3> out;
@@ -6023,12 +6025,12 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
-    HRESULT generate_rife_batch(RifePair& p,UINT base) noexcept {
+    HRESULT generate_rife_batch(RifePair& p,UINT base,RifeDependencyTiming* diagnostic=nullptr) noexcept {
         for(UINT output=0;output<p.outputs;++output){
             const auto result=rife->generate(p.a.Get(),p.b.Get(),p.out[output].Get(),
                 {p.av.data(),p.count},{p.bv.data(),p.count},{p.tv[output].data(),p.count},
                 {p.ar[output].data(),p.count},{p.br[output].data(),p.count},release_state,p.fractions[output],
-                {nvidia_gpu_timing_enabled?nvidia_timestamp_heap.Get():nullptr,nvidia_timestamp_readback.Get(),base,output==0,output+1==p.outputs},
+                {nvidia_gpu_timing_enabled?nvidia_timestamp_heap.Get():nullptr,nvidia_timestamp_readback.Get(),base,output==0,output+1==p.outputs,output==0 && diagnostic?diagnostic->queries():nullptr},
                 nvidia_options.rife_async?D3D12Rife::Completion::queue_ordered:D3D12Rife::Completion::wait);
             if(FAILED(result))return result;
         }
@@ -6049,16 +6051,30 @@ struct D3D12FrameSynthesizer::Impl {
                 job=std::move(rife_work.front());rife_work.pop_front();
             }
             const auto token=bridge_flight_logger().begin(BridgeFlightOperation::rife_worker,job.serial,job.value);
+            RifeDependencyTiming* diagnostic=nullptr;
+            if(rife_dependency_timing)rife_dependency_timing->poll(fence.Get(),queue.Get());
+            if(job.pair.pending && bridge_flight_logger().enabled()) {
+                if(!rife_dependency_timing)rife_dependency_timing.reset(new(std::nothrow) RifeDependencyTiming());
+                if(rife_dependency_timing && rife_dependency_timing->begin(device.Get(),true,job.serial,job.value))
+                    diagnostic=rife_dependency_timing.get();
+            }
+            if(diagnostic)diagnostic->marker(queue.Get(),0);
             HRESULT result=S_OK;
+            unsigned dependency_index=0;
             for(const auto& input:job.inputs.dependencies){
+                if(diagnostic)bridge_flight_logger().event(BridgeFlightOperation::gpu_fence_snapshot,
+                    86710+dependency_index,reinterpret_cast<std::uintptr_t>(input.fence.Get()),input.value,
+                    input.fence?input.fence->GetCompletedValue():0);
                 if(input.fence && input.value && SUCCEEDED(result))result=queue->Wait(input.fence.Get(),input.value);
+                if(diagnostic)diagnostic->marker(queue.Get(),++dependency_index);
             }
             if(SUCCEEDED(result) && job.pair.pending){
                 result=rife_error.load(std::memory_order_acquire);
                 if(SUCCEEDED(result)){
-                    result=generate_rife_batch(job.pair,job.timing_base);
+                    result=generate_rife_batch(job.pair,job.timing_base,diagnostic);
                 }
             }
+            if(diagnostic)diagnostic->finish(queue.Get(),job.value,SUCCEEDED(result));
             const auto generated=result;
             if(FAILED(result)){
                 rife_error.store(result,std::memory_order_release);

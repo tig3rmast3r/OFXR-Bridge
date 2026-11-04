@@ -24,7 +24,7 @@ public:
     // queue_ordered is only for callers publishing an exact completion fence on
     // this same queue. Inputs/outputs remain retained until GPU retirement.
     enum class Completion { wait, queue_ordered };
-    struct Timing {ID3D12QueryHeap* queries{};ID3D12Resource* readback{};UINT base{};bool first{true},last{true};};
+    struct Timing {ID3D12QueryHeap* queries{};ID3D12Resource* readback{};UINT base{};bool first{true},last{true};ID3D12QueryHeap* input_queries{};};
     D3D12Rife();
     ~D3D12Rife();
     HRESULT initialize(ID3D12Device*, ID3D12CommandQueue*, DXGI_FORMAT, int model, float scale) noexcept;

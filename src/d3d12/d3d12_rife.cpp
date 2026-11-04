@@ -427,6 +427,7 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
         if(diagnostic){std::uint32_t bits{};std::memcpy(&bits,&fraction,sizeof(bits));fraction_eyes=(static_cast<std::uint64_t>(p.eyes)<<32)|bits;}
         const auto mark=[&](UINT query){if(timing.queries)p.commands->EndQuery(timing.queries,D3D12_QUERY_TYPE_TIMESTAMP,timing.base+query);};
         p.begin();if(timing.first){mark(0);mark(5);}
+        if(timing.input_queries)p.commands->EndQuery(timing.input_queries,D3D12_QUERY_TYPE_TIMESTAMP,4);
         // The validated target layout is disjoint. A complete union needs no
         // preliminary B copy; cropped/packed subrects preserve B outside it.
         std::uint64_t covered=0;
@@ -458,7 +459,9 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
             before=barrier(resource,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);input=barrier(p.buffers[source_index].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
             p.commands->ResourceBarrier(1,&before);p.commands->ResourceBarrier(1,&input);
         }
-        if(timing.first)mark(1);p.execute(diagnostic,fraction_eyes);
+        if(timing.first)mark(1);
+        if(timing.input_queries)p.commands->EndQuery(timing.input_queries,D3D12_QUERY_TYPE_TIMESTAMP,5);
+        p.execute(diagnostic,fraction_eyes);
         p.inflight_images={a,b,out};
         std::int32_t backend_flags{};
         const auto dimensions=(static_cast<std::uint64_t>(w)<<32)|h;

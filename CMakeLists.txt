@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.866.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.867.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2466,4 +2466,14 @@ if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
             set_tests_properties(xrfg_${route} PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
         endforeach()
     endif()
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS)
+    add_executable(xrfg_rife_dependency_timing_tests tests/rife_dependency_timing_tests.cpp)
+    target_include_directories(xrfg_rife_dependency_timing_tests PRIVATE include)
+    target_compile_features(xrfg_rife_dependency_timing_tests PRIVATE cxx_std_20)
+    target_compile_definitions(xrfg_rife_dependency_timing_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(xrfg_rife_dependency_timing_tests PRIVATE xrfg_bridge_flight_logger d3d12 dxgi)
+    add_test(NAME xrfg_rife_dependency_timing COMMAND xrfg_rife_dependency_timing_tests)
+    set_tests_properties(xrfg_rife_dependency_timing PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE)
 endif()

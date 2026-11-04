@@ -420,7 +420,9 @@ struct BridgeFlightLogger::Impl {
              record.operation==BridgeFlightOperation::rife_worker ||
              record.operation==BridgeFlightOperation::timing_worker_run ||
              record.operation==BridgeFlightOperation::timing_publication_complete);
-        const bool benchmark = pacing_receipt || rife_timing || eye_changed || fsr_description ||
+        const bool rife_dependency=record.operation==BridgeFlightOperation::gpu_fence_snapshot &&
+            record.result>=86700 && record.result<=86799;
+        const bool benchmark = rife_dependency || pacing_receipt || rife_timing || eye_changed || fsr_description ||
             record.operation==BridgeFlightOperation::fsr_recovery ||
             record.operation==BridgeFlightOperation::fsr_context_lifecycle ||
             record.operation == BridgeFlightOperation::benchmark_configuration ||
