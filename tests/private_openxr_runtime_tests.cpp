@@ -72,6 +72,11 @@ struct Fixture {
     std::atomic<std::uint64_t> wait_input_ordinal{},begun_input_ordinal{};
     std::atomic_uint discarded_clocks{};
     std::atomic_bool stale_next_clock{};
+    // Waits [stall_from,stall_from+stall_count) block stall_us and return an
+    // already expired cycle, as SteamVR with VRto3D did on a 165Hz 3D monitor.
+    std::atomic_uint stall_from{},stall_count{},stalled_waits{},stalled_traces{};
+    std::atomic_int stall_us{};
+    std::atomic_bool allow_expired_end{};
     std::atomic_bool native_should_render{true};
     std::atomic<std::int64_t> prediction_horizon_ns{};
     std::unordered_map<std::uint64_t,unsigned> window_renewals;
@@ -144,7 +149,7 @@ struct Fixture {
                 return xrfg::PrivatePhysicalClock{physical_origin+n*period,period,1000+static_cast<std::uint64_t>(n)};
             };
         }
-        options.trace=[this](int stage,std::uint64_t seq,std::int64_t at,std::int64_t margin){if(stage==5)copy_ready_times[seq]=ns();if(stage==7)native_wait_entries[seq]=at;if(stage==10){if(margin)++pending_source_events;++source_ready_events;}if(stage==19)work_margins.push_back(margin);if(stage==11)refill_margins.push_back(margin);if(stage==17)native_margins.push_back(margin);if(stage==18)wait_input_ordinal=seq;if(stage==25)++window_renewals[seq];if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
+        options.trace=[this](int stage,std::uint64_t seq,std::int64_t at,std::int64_t margin){if(stage==5)copy_ready_times[seq]=ns();if(stage==7)native_wait_entries[seq]=at;if(stage==10){if(margin)++pending_source_events;++source_ready_events;}if(stage==19)work_margins.push_back(margin);if(stage==11)refill_margins.push_back(margin);if(stage==17)native_margins.push_back(margin);if(stage==18)wait_input_ordinal=seq;if(stage==25)++window_renewals[seq];if(stage==45)++stalled_traces;if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
         const auto original_trace=options.trace;
         options.trace=[this,original_trace](int stage,std::uint64_t seq,std::int64_t at,std::int64_t margin) {
             original_trace(stage,seq,at,margin);
@@ -199,13 +204,15 @@ struct Fixture {
     static XrResult XRAPI_CALL wait(XrSession,const XrFrameWaitInfo*,XrFrameState* output) {
         auto& f=*current;f.wait_thread=GetCurrentThreadId();const auto n=++f.real_waits;
         if(f.fail_wait_call==n)return XR_ERROR_RUNTIME_FAILURE;
-        const auto delay=f.frame_wait_us?f.frame_wait_us(n):f.slow_frame_wait_ms.load()*1000;
+        const bool stalled=f.stall_count && n>=f.stall_from && n<f.stall_from+f.stall_count;
+        if(stalled)++f.stalled_waits;
+        const auto delay=stalled?f.stall_us.load():f.frame_wait_us?f.frame_wait_us(n):f.slow_frame_wait_ms.load()*1000;
         if(delay){LARGE_INTEGER due{};due.QuadPart=-delay*10LL;check(f.frame_wait_timer && SetWaitableTimer(f.frame_wait_timer,&due,0,nullptr,nullptr,FALSE),"precise runtime delay");check(WaitForSingleObject(f.frame_wait_timer,1000)==WAIT_OBJECT_0,"runtime delay completed");}
         std::scoped_lock protocol(f.protocol);
         check(!f.cycle_waited && f.real_begins==f.successful_waits,"one real Wait, after prior Begin; it may overlap prior End");++f.successful_waits;f.cycle_waited=true;
         // Vary the runtime horizon while retaining the monotonic prediction
         // required by OpenXR. XR time deliberately has another epoch than QPC.
-        if(n>1 && f.stale_next_clock.exchange(false))f.raw_prediction+=period;
+        if(n>1 && (stalled || f.stale_next_clock.exchange(false)))f.raw_prediction+=period;
         else f.raw_prediction=std::max(f.raw_prediction+1,epoch+ns()+(f.prediction_horizon_ns?f.prediction_horizon_ns.load():((!f.throttled || n%2)?period:period*3)));
         output->predictedDisplayTime=f.raw_prediction;output->predictedDisplayPeriod=(!f.throttled || n%2)?period:period*2;output->shouldRender=f.native_should_render?XR_TRUE:XR_FALSE;f.wait_return=ns();return XR_SUCCESS;
     }
@@ -246,7 +253,7 @@ struct Fixture {
             f.native12,f.transport?f.transport->director_enabled():false,f.real_ends.load(),
             (prediction-epoch-start)/1e6,(start-predicted_at)/1e6,f.real_waits.load(),f.real_begins.load(),
             f.discarded_clocks.load(),f.slow_image_wait_ms.load());
-        check(prediction>epoch+start,"content requires a current native cycle, not a timestamp advanced on an expired cycle");
+        check(f.allow_expired_end || prediction>epoch+start,"content requires a current native cycle, not a timestamp advanced on an expired cycle");
         if(f.prediction_age_limit && f.real_ends>=2) {
             f.prediction_ages.push_back(start-predicted_at);
             if(start-predicted_at>f.prediction_age_limit)std::fprintf(stderr,"freshness age%.3fms, limit%.3fms\n",(start-predicted_at)/1e6,f.prediction_age_limit/1e6);
@@ -757,6 +764,51 @@ void stale_native_clock(bool d12,bool directed=true) {
     check(f.real_begins==f.real_ends+f.empty_ends+f.discarded_clocks,"every native Begin is ended or explicitly discarded");
     check(f.wait_thread!=f.delivery_thread,"cycle renewal preserves the independent Wait worker");
     std::puts(d12?"D12 stale native clock renewal retains all six exact FIFO images PASS":"D11 stale native clock renewal retains all six exact FIFO images PASS");
+}
+// pattern 0: two stalled renewals in a row stop renewal. 1: a current renewal
+// between stalls resets the count. 2: stalls more than 2s apart do not latch.
+void stalled_native_renewal(bool d12,bool directed,int pattern) {
+    Fixture f(d12,true,{},true);f.unblock();f.throttled=false;f.allow_expired_end=true;
+    if(!directed)xr_ok(f.transport->set_director_enabled(false),"Framework stalled-renewal test");
+    // At each gap the first Wait returns an expired cycle. stalled: its
+    // renewals block 60ms (> 4 refreshes) and stay expired. renewals: the
+    // native Begins discarded for that packet, -1 = at least one.
+    struct Gap{unsigned frame;bool stalled;int renewals;std::chrono::milliseconds pause;};
+    std::vector<Gap> gaps;
+    if(pattern==0)gaps={{2,true,1,65ms},{4,true,1,65ms},{6,false,0,65ms},{8,false,0,65ms}};
+    else if(pattern==1)gaps={{2,true,1,65ms},{4,false,-1,65ms},{6,true,1,65ms},{8,true,1,65ms},{10,false,0,65ms}};
+    else gaps={{2,true,1,65ms},{4,true,1,2100ms},{6,true,1,65ms},{8,false,0,65ms}};
+    // This fixture's D11 Director slots also renew current cycles between the
+    // gaps (stage 23), which resets the count by design; D12 Director covers
+    // the latch on the same consumer loop.
+    const bool latch_checked=d12 || !directed;
+    auto chain=f.make_chain();std::vector<unsigned> expected;unsigned stalls{};
+    for(unsigned n=0;n<gaps.back().frame+2;++n) {
+        const Gap* gap{};
+        for(const auto& g:gaps)if(g.frame==n)gap=&g;
+        if(gap) {
+            std::this_thread::sleep_for(gap->pause);f.stale_next_clock=true;
+            if(gap->stalled){f.stall_us=60'000;f.stall_from=f.real_waits+2;f.stall_count=20;++stalls;}
+        }
+        const auto discarded=f.discarded_clocks.load();
+        const auto color=40+n*9;f.write(chain,color);expected.push_back(color);
+        f.begin_virtual();xr_ok(f.submit(chain,float(n)),"input before a stalling native renewal");
+        f.wait_count(n+1);f.stall_count=0;
+        if(gap) {
+            const auto renewed=f.discarded_clocks-discarded;
+            if(gap->renewals<0)check(renewed>=1,"an expired cycle renews while the runtime renews current cycles");
+            else if(gap->renewals)check(renewed==1,"a stalled renewal is not repeated for the same packet");
+            else if(latch_checked)check(renewed==0,"after two stalled renewals in a row this transport no longer renews");
+        }
+    }
+    xr_ok(f.transport->drain(),"stalled renewal drain");f.transport->stop();
+    check(f.stalled_waits==stalls,"each stalled gap costs exactly one stalled Wait");
+    check(f.stalled_traces==stalls,"each stalled renewal is traced once");
+    check(f.pixels==expected && f.real_ends==expected.size(),"stalled renewals cannot drop, repeat or invent a content frame");
+    check(!f.cycle_waited && !f.cycle_begun,"stalled renewals remain balanced on stop");
+    check(f.real_begins==f.real_ends+f.empty_ends+f.discarded_clocks,"every native Begin is ended or explicitly discarded");
+    static constexpr const char* names[]{"two in a row latch","a current renewal resets","2s apart do not latch"};
+    std::printf("%s %s stalled native renewal: %s%s PASS\n",d12?"D12":"D11",directed?"Director":"Framework",names[pattern],latch_checked?"":" (latch not asserted)");
 }
 void native_renewal_failure() {
     Fixture f(true,true,{},true);f.unblock();f.throttled=false;
@@ -1467,6 +1519,16 @@ void queue_priority_policy() {
 }
 }
 int main(int argc,char** argv){
+if(argc>1 && std::string_view(argv[1])=="stalled-renewal"){
+    for(bool d12:{true,false})for(bool directed:{true,false})stalled_native_renewal(d12,directed,0);
+    for(bool directed:{true,false})for(int pattern:{1,2})stalled_native_renewal(true,directed,pattern);
+    return 0;
+}
+if(argc>1 && std::string_view(argv[1])=="stalled-renewal-native"){
+    native_contract_fixture_mode=true;stalled_native_renewal(true,true,0);stalled_native_renewal(false,true,0);
+    native_director_only_fixture_mode=true;stalled_native_renewal(true,true,0);stalled_native_renewal(false,true,0);
+    return 0;
+}
 if(argc>1 && std::string_view(argv[1])=="rife-ready-clock"){
     for(bool d12:{false,true})for(bool directed:{false,true})for(std::size_t capacity:{2u,3u})rife_ready_clock_checks(d12,directed,capacity);
     return 0;
