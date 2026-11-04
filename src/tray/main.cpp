@@ -268,12 +268,16 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     return write_text_atomic(destination, configuration, error);
 }
 
+// `x86_manifest` comes back set when the package carries the 32-bit layer
+// (0.2 V576) and it was prepared; its failure is logged, never the arm's.
 [[nodiscard]] bool prepare_runtime_layer(
     AppState& state,
     std::filesystem::path* manifest,
     std::filesystem::path* vulkan_manifest,
+    std::filesystem::path* x86_manifest,
     std::wstring* error) {
     if (vulkan_manifest) vulkan_manifest->clear();
+    if (x86_manifest) x86_manifest->clear();
     try {
         const auto source_dll = state.executable_directory / L"ofxr" /
             L"XR_APILAYER_XRFrameBridge_diagnostic.dll";
@@ -369,11 +373,54 @@ void log_lifecycle(const std::filesystem::path& local_directory,
             }
             *vulkan_manifest = generated_vulkan_manifest;
         }
+        // 0.2 V576: the 32-bit layer beside the 64-bit one, sharing its ini.
+        const auto source_x86_dll = state.executable_directory /
+            xrfg::implicit_layer::kX86BundleDirectory /
+            L"XR_APILAYER_XRFrameBridge_diagnostic.dll";
+        if (x86_manifest && std::filesystem::is_regular_file(source_x86_dll)) {
+            const auto runtime_x86_dll = directory / xrfg::implicit_layer::kX86LayerDllName;
+            const auto generated_x86_manifest =
+                xrfg::implicit_layer::x86_manifest_for(generated_manifest);
+            std::wstring x86_error;
+            if (!xrfg::standalone::install_runtime_layer_dll(source_x86_dll, runtime_x86_dll)) {
+                log_lifecycle(state.local_directory, L"x86-layer",
+                    last_error_message(L"Installing the 32-bit layer"));
+            } else if (!write_text_atomic(generated_x86_manifest,
+                           xrfg::standalone::build_implicit_layer_manifest(
+                               runtime_x86_dll, kImplementationVersion),
+                           &x86_error)) {
+                log_lifecycle(state.local_directory, L"x86-layer", x86_error);
+            } else {
+                *x86_manifest = generated_x86_manifest;
+            }
+        }
         return true;
     } catch (...) {
         if (error) *error = L"Unable to prepare the manual OpenXR layer.";
         return false;
     }
+}
+
+// 0.2 V576: registers the arm's 32-bit manifest, prepared by
+// prepare_runtime_layer. Per-user only: a machine-wide arm is in HKLM's
+// 64-bit view, which a 32-bit loader does not read. A failure is logged and
+// leaves the 64-bit arm as it is.
+void register_x86_manifest(
+    const AppState& state,
+    const std::filesystem::path& x86_manifest,
+    xrfg::implicit_layer::RegistryScope scope) {
+    if (x86_manifest.empty()) return;
+    std::wstring x86_error;
+    if (scope != xrfg::implicit_layer::RegistryScope::current_user) {
+        x86_error = L"Not armed for 32-bit games: the arm is machine-wide.";
+    } else if (xrfg::implicit_layer::register_manifest(
+                   x86_manifest, scope, &x86_error, state.registry_subkey)) {
+        return;
+    }
+    log_lifecycle(state.local_directory, L"x86-layer", x86_error);
+    std::wstring ignored;
+    static_cast<void>(xrfg::implicit_layer::retire_manifest(
+        x86_manifest, scope, &ignored, state.registry_subkey));
 }
 
 [[nodiscard]] bool spawn_cleanup_helper(
@@ -454,6 +501,19 @@ void log_lifecycle(const std::filesystem::path& local_directory,
                 *error += xrfg::implicit_layer::registry_scope_name(scope);
                 *error += L" (Vulkan): ";
                 *error += vulkan_detail;
+            }
+        }
+        // 0.2 V576: the 32-bit layer's, in the OpenXR key.
+        std::wstring x86_detail;
+        if (!xrfg::implicit_layer::cleanup_owned_registrations(
+                state.local_directory, scope, &x86_detail, state.registry_subkey,
+                xrfg::implicit_layer::kX86ManifestPrefix)) {
+            success = false;
+            if (error) {
+                if (!error->empty()) *error += L"\r\n";
+                *error += xrfg::implicit_layer::registry_scope_name(scope);
+                *error += L" (32-bit): ";
+                *error += x86_detail;
             }
         }
     }
@@ -580,8 +640,9 @@ void close_pause_signal(AppState& state) {
 
     std::filesystem::path manifest;
     std::filesystem::path vulkan_manifest;
+    std::filesystem::path x86_manifest;
     const auto scope = xrfg::implicit_layer::preferred_registry_scope();
-    if (!prepare_runtime_layer(state, &manifest, &vulkan_manifest, error) ||
+    if (!prepare_runtime_layer(state, &manifest, &vulkan_manifest, &x86_manifest, error) ||
         !xrfg::implicit_layer::register_manifest(
             manifest, scope, error, state.registry_subkey) ||
         (!vulkan_manifest.empty() &&
@@ -601,6 +662,7 @@ void close_pause_signal(AppState& state) {
                     manifest, scope, &cleanup_error, state.registry_subkey))
                 log_lifecycle(state.local_directory, L"arm-failure-cleanup", cleanup_error);
         }
+        if (!x86_manifest.empty()) remove_manifest_file(x86_manifest);
         if (state.arm_signal) {
             SetEvent(state.arm_signal);
             CloseHandle(state.arm_signal);
@@ -609,7 +671,10 @@ void close_pause_signal(AppState& state) {
         close_pause_signal(state);
         return false;
     }
+    // The 32-bit manifest is registered only once the helper runs, which
+    // retires it with the arm.
     if (!spawn_cleanup_helper(state, manifest, scope, error, vulkan_manifest)) {
+        if (!x86_manifest.empty()) remove_manifest_file(x86_manifest);
         std::wstring ignored;
         if (!vulkan_manifest.empty()) {
             static_cast<void>(xrfg::implicit_layer::retire_manifest(
@@ -626,6 +691,7 @@ void close_pause_signal(AppState& state) {
         close_pause_signal(state);
         return false;
     }
+    register_x86_manifest(state, x86_manifest, scope);
     state.armed = true;
     register_pause_hotkey(state);
     state.armed_manifest = manifest;
@@ -1459,6 +1525,22 @@ LRESULT CALLBACK window_procedure(
     // Scoped to this arm only: an old helper must never revoke a newer arm.
     bool retired = xrfg::implicit_layer::retire_manifest(
         manifest, scope, error, registry_subkey);
+    // 0.2 V576: the arm's 32-bit manifest, if it made one.
+    const auto x86_manifest = xrfg::implicit_layer::x86_manifest_for(manifest);
+    if (xrfg::implicit_layer::owned_registration_path(
+            x86_manifest, local_directory, xrfg::implicit_layer::kX86ManifestPrefix) &&
+        (xrfg::implicit_layer::manifest_registered(x86_manifest, scope, registry_subkey) ||
+         std::filesystem::exists(x86_manifest))) {
+        std::wstring x86_error;
+        if (!xrfg::implicit_layer::retire_manifest(
+                x86_manifest, scope, &x86_error, registry_subkey)) {
+            retired = false;
+            if (error) {
+                if (!error->empty()) *error += L"\r\n";
+                *error += x86_error;
+            }
+        }
+    }
     if (!vulkan_manifest.empty()) {
         std::wstring vulkan_error;
         if (!xrfg::implicit_layer::retire_manifest(

@@ -88,7 +88,7 @@ void unregister_d3d11_guide_owner(std::uintptr_t session) noexcept {
     } catch (...) {}
 }
 
-void register_d3d11_sr_destinations(std::uintptr_t session, std::uintptr_t swapchain,
+void register_d3d11_sr_destinations(std::uintptr_t session, std::uint64_t swapchain,
                                    ID3D11Texture2D* const* images, std::size_t count) noexcept {
     try {
         if (!session || !swapchain || !images || !count) return;
@@ -103,7 +103,7 @@ void register_d3d11_sr_destinations(std::uintptr_t session, std::uintptr_t swapc
         owner_registry->sr_destinations[swapchain]=std::move(entry);
     } catch (...) {}
 }
-void unregister_d3d11_sr_destinations(std::uintptr_t swapchain) noexcept {
+void unregister_d3d11_sr_destinations(std::uint64_t swapchain) noexcept {
     try {
         std::scoped_lock lock(owner_mutex);
         std::erase_if(owner_registry->sr_staging,[swapchain](const auto& item) { return item.second.swapchain==swapchain; });

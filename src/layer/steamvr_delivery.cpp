@@ -222,7 +222,12 @@ struct SteamVrDelivery::Impl {
                 BridgeFlightOperation::steamvr_delivery_attach, -1);
             return;
         }
+#if defined(_WIN64)
         const std::string dll = runtime + "\\bin\\win64\\openvr_api.dll";
+#else
+        // 0.2 V576: the 32-bit layer loads SteamVR's 32-bit API.
+        const std::string dll = runtime + "\\bin\\win32\\openvr_api.dll";
+#endif
         module = LoadLibraryA(dll.c_str());
         if (module == nullptr) {
             bridge_flight_logger().event(

@@ -1,3 +1,4 @@
+#include <type_traits>
 #include "xrfg/openxr_fps_overlay.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/benchmark_log.hpp"
@@ -25,6 +26,13 @@
 namespace xrfg {
 using Microsoft::WRL::ComPtr;
 namespace {
+// An OpenXR handle's bits: a pointer on 64-bit platforms, a 64-bit integer on
+// 32-bit ones (the 32-bit layer, 0.2 V576).
+template <typename Handle>
+[[nodiscard]] std::uint64_t xr_handle_bits(Handle handle) noexcept {
+    if constexpr (std::is_pointer_v<Handle>) return reinterpret_cast<std::uintptr_t>(handle);
+    else return static_cast<std::uint64_t>(handle);
+}
 std::int64_t now_ns() noexcept {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -188,7 +196,7 @@ struct OpenXrFpsOverlay::Impl {
 
     void menu_event(unsigned stage, std::int64_t result) noexcept {
         bridge_flight_logger().event(BridgeFlightOperation::menu_status, result, stage,
-            reinterpret_cast<std::uintptr_t>(menu_swapchain), menu_index);
+            xr_handle_bits(menu_swapchain), menu_index);
     }
     bool menu_failure(unsigned stage, std::int64_t result) noexcept {
         menu_event(stage, result); close_menu(); return false;
@@ -369,7 +377,7 @@ struct OpenXrFpsOverlay::Impl {
         if((position==FpsOverlayPosition::off || elliott_mode()) && swapchain) {
             image_valid=false;
             if(release_unused(swapchain,images,acquired,waited) && XR_SUCCEEDED(destroy_swapchain(swapchain))) {
-                bridge_flight_logger().event(BridgeFlightOperation::menu_status,0,10,reinterpret_cast<std::uintptr_t>(swapchain),0);
+                bridge_flight_logger().event(BridgeFlightOperation::menu_status,0,10,xr_handle_bits(swapchain),0);
                 images.clear();swapchain={};quad.subImage.swapchain={};fps_attempted=fps_initialized=false;
             }
         }
@@ -378,7 +386,7 @@ struct OpenXrFpsOverlay::Impl {
             if(!meter.swapchain)meter=MeterSurface{};
             if(meter.swapchain && release_unused(meter.swapchain,meter.images,meter.acquired,meter.waited) &&
                 XR_SUCCEEDED(destroy_swapchain(meter.swapchain))) {
-                bridge_flight_logger().event(BridgeFlightOperation::menu_status,0,11,reinterpret_cast<std::uintptr_t>(meter.swapchain),0);
+                bridge_flight_logger().event(BridgeFlightOperation::menu_status,0,11,xr_handle_bits(meter.swapchain),0);
                 meter=MeterSurface{};
             }
         }

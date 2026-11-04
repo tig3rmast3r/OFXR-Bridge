@@ -21,6 +21,14 @@
 #include <wrl/client.h>
 #include <d3d11.h>
 
+// An OpenXR handle's bits: a pointer on 64-bit platforms, a 64-bit integer on
+// 32-bit ones (the 32-bit layer, 0.2 V576).
+template <typename Handle>
+[[nodiscard]] static std::uint64_t xr_handle_bits(Handle handle) noexcept {
+    if constexpr (std::is_pointer_v<Handle>) return reinterpret_cast<std::uintptr_t>(handle);
+    else return static_cast<std::uint64_t>(handle);
+}
+
 namespace xrfg {
 namespace {
 using Microsoft::WRL::ComPtr;
@@ -284,7 +292,7 @@ struct PrivateOpenXrRuntime::Impl {
         auto& chain=*it->second;
         if(!chain.released || chain.images[*chain.released].acquired) {
             // Trace 44 (refused End, code 4): this chain and why.
-            refused_lease=reinterpret_cast<std::uintptr_t>(handle);
+            refused_lease=xr_handle_bits(handle);
             refused_lease_state=!chain.released ? -1 : static_cast<std::int64_t>(*chain.released);
             return XR_ERROR_CALL_ORDER_INVALID;
         }
@@ -1543,8 +1551,8 @@ XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* inf
     s.chains.emplace(chain->handle,chain);*output=chain->handle;
     // Allocation-only F9 witness: source, virtual buffer, actual XR sink.
     // No per-frame query, additional sampler or delivery callback is installed.
-    if(pooled && s.tracing())s.options.trace(27,reinterpret_cast<std::uint64_t>(publication_source),
-        reinterpret_cast<std::int64_t>(chain->handle),reinterpret_cast<std::int64_t>(endpoint.handle));
+    if(pooled && s.tracing())s.options.trace(27,xr_handle_bits(publication_source),
+        static_cast<std::int64_t>(xr_handle_bits(chain->handle)),static_cast<std::int64_t>(xr_handle_bits(endpoint.handle)));
     return XR_SUCCESS;
 }
 XrResult PrivateOpenXrRuntime::destroy_swapchain(XrSwapchain handle) {

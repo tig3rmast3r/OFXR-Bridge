@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$BuildDir,
     [Parameter(Mandatory=$true)][string]$OutDir,
-    [int]$Version=859,
+    [int]$Version=860,
     [string]$SourceDir,
     [string]$CrtSource
 )
@@ -61,6 +61,13 @@ $providers=[ordered]@{
     'ofxr_amd_fidelityfx_framegeneration_dx12.dll'='12a5081257ec95b0b53ad51b4a87fb3c03f97fe0bbb59f9496968f8d50ef93a6'
 }
 foreach($name in $binaries.Values){Require-X64 (Join-Path $release $name)}
+# 0.2 V576: the 32-bit layer for 32-bit games, when the build bundled one.
+$x86Layer=Join-Path $release 'ofxr_x86/XR_APILAYER_XRFrameBridge_diagnostic.dll'
+if(Test-Path -LiteralPath $x86Layer){
+    $bytes=[IO.File]::ReadAllBytes($x86Layer);$offset=[BitConverter]::ToInt32($bytes,60)
+    if([BitConverter]::ToUInt16($bytes,$offset+4) -ne 0x14c){throw 'ofxr_x86 holds a layer that is not 32-bit.'}
+    $binaries['ofxr_x86/XR_APILAYER_XRFrameBridge_diagnostic.dll']='ofxr_x86/XR_APILAYER_XRFrameBridge_diagnostic.dll'
+}
 $versionInfo=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $release 'OFXRBridgeTray.exe'))
 if($versionInfo.FileMajorPart -ne 0 -or $versionInfo.FileMinorPart -ne 3 -or $versionInfo.FileBuildPart -ne 2 -or $versionInfo.FilePrivatePart -ne $Version){throw 'Tray binary version does not match the requested 0.3.2 build.'}
 foreach($name in $providers.Keys){

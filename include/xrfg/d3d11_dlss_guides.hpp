@@ -17,9 +17,9 @@ struct D3D11SuperResolutionOrigin {
     std::uint64_t frame{};
     std::uint32_t width{}, height{};
 };
-void register_d3d11_sr_destinations(std::uintptr_t session, std::uintptr_t swapchain,
+void register_d3d11_sr_destinations(std::uintptr_t session, std::uint64_t swapchain,
                                    ID3D11Texture2D* const* images, std::size_t count) noexcept;
-void unregister_d3d11_sr_destinations(std::uintptr_t swapchain) noexcept;
+void unregister_d3d11_sr_destinations(std::uint64_t swapchain) noexcept;
 bool is_d3d11_sr_destination(ID3D11Resource*) noexcept;
 // A full copy into an exact XR image proves the application's staging target.
 // Resolve to the real enumerated image, never to a guessed same-size texture.

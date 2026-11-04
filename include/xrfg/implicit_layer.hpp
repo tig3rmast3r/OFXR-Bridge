@@ -51,6 +51,21 @@ inline constexpr wchar_t kVulkanManifestPrefix[] =
     L"OFXR_vulkan_queue_manual-";
 inline constexpr wchar_t kVulkanLayerName[] = L"VK_LAYER_OFXRBridge_queue_serialize";
 inline constexpr wchar_t kVulkanLayerDll[] = L"OFXR_vulkan_queue_layer.dll";
+// 0.2 V576: the 32-bit layer, for 32-bit games, armed beside the 64-bit one.
+// The 32-bit loader reads the same per-user key as the 64-bit one, and a
+// loader fails xrCreateInstance only when no layer it lists loads, so the
+// two are registered together and each loader skips the DLL it cannot load.
+// Its manifest is the arm's, same process and arm id, under its own prefix;
+// its DLL sits beside the 64-bit one under its own name, and so shares that
+// one's ini, controls and log folder. Bundled in kX86BundleDirectory beside
+// the tray's ofxr folder, under the 64-bit DLL's name.
+inline constexpr wchar_t kX86ManifestPrefix[] = L"XR_APILAYER_OFXRBridge_x86-";
+inline constexpr wchar_t kX86LayerDllName[] = L"XR_APILAYER_XRFrameBridge_x86.dll";
+inline constexpr wchar_t kX86BundleDirectory[] = L"ofxr_x86";
+// The 32-bit manifest of the arm whose 64-bit manifest is `manifest`; empty
+// when `manifest` is not a tray manifest's name.
+[[nodiscard]] std::filesystem::path x86_manifest_for(
+    const std::filesystem::path& manifest);
 
 enum class RegistryScope {
     current_user,

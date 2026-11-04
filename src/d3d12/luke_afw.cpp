@@ -118,6 +118,9 @@ struct FrameWarpEvaluateParams {
     float reserved[12]{};
 };
 
+// The x64 PDAFWPlugin's ABI. There is no 32-bit plugin: the 32-bit layer
+// (0.2 V576) never loads one.
+#if defined(_WIN64)
 static_assert(sizeof(TextureDesc) == 56);
 static_assert(sizeof(FrameBufferDesc) == 168);
 static_assert(sizeof(EyeFrameBuffers) == 336);
@@ -125,6 +128,7 @@ static_assert(sizeof(CameraData) == 768);
 static_assert(sizeof(FrameWarpEvaluateParams) == 184);
 static_assert(offsetof(FrameWarpEvaluateParams, shading_rate) == 132);
 static_assert(offsetof(FrameWarpEvaluateParams, reserved) == 136);
+#endif
 
 struct RendererApi;
 using InitDeviceFn = RendererApi* (__stdcall*)(DeviceParams);

@@ -521,6 +521,17 @@ ConfiguredNvidiaOptions read_nvidia_options(
     return options;
 }
 
+std::filesystem::path x86_manifest_for(const std::filesystem::path& manifest) {
+    const std::wstring name = manifest.filename().wstring();
+    const std::wstring_view prefix(kManifestPrefix);
+    if (name.size() <= prefix.size() ||
+        !equal_case_insensitive(std::wstring_view(name).substr(0, prefix.size()), prefix)) {
+        return {};
+    }
+    return manifest.parent_path() /
+        (std::wstring(kX86ManifestPrefix) + name.substr(prefix.size()));
+}
+
 bool register_manifest(
     const std::filesystem::path& manifest,
     RegistryScope scope,

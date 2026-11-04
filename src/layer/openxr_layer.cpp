@@ -351,6 +351,10 @@ void probe_vulkan_interop_support(
 }
 
 struct Dispatch {
+    // 0.2 V576: the 32-bit layer on an instance without XR_KHR_D3D11_enable.
+    // Every function but xrDestroyInstance is the next one's; see
+    // layer_create_api_layer_instance_impl.
+    bool passthrough{};
     bool vulkan_bridge{};
     VulkanNegotiationDispatch vulkan{};
     PFN_xrEnumerateSwapchainFormats enumerate_swapchain_formats{};
@@ -1641,6 +1645,16 @@ private:
 // transport choice, not another generation backend or a Neural Rendering switch.
 [[nodiscard]] xrfg::embedded::Settings effective_session_settings(
     const SessionState& state, xrfg::embedded::Settings requested) noexcept {
+#if !defined(_WIN64)
+    // 0.2 V576: the 32-bit layer has NVIDIA optical flow alone - FidelityFX,
+    // NGX (DLSS-G), FSR's provider and RIFE are x64 only - and 32-bit games
+    // publish no DLSS guides. FidelityFX's choice runs on NVIDIA 0.3.0.
+    if (requested.backend == 0) requested.backend = 2;
+    requested.frame_generation = 0;
+    requested.hybrid = false;
+    requested.motion_vectors = 0;
+    requested.rife_model = -1;
+#endif
     if(state.afw_only) {
         const int pacing=requested.pacing_mode;
         requested={};requested.enabled=false;requested.backend=1;
@@ -5256,6 +5270,9 @@ XrResult layer_get_instance_proc_addr_impl(
     if (!dispatch) {
         return XR_ERROR_HANDLE_INVALID;
     }
+    if (dispatch->passthrough && std::strcmp(name, "xrDestroyInstance") != 0) {
+        return dispatch->get_instance_proc_addr(instance, name, function);
+    }
 
     if (std::strcmp(
             name, XRFG_SET_PRESENTATION_TRANSFORM_FUNCTION_NAME) == 0) {
@@ -5627,6 +5644,33 @@ XrResult layer_create_api_layer_instance_impl(
         bridge_extension_added = false;
     }
 
+#if !defined(_WIN64)
+    // 0.2 V576: the 32-bit layer is for 32-bit games, which are D3D11 ones. An
+    // instance that cannot make a D3D11 session gets the runtime's functions
+    // as they are, with the layer kept only to drop its record at
+    // xrDestroyInstance. A D3D11 instance that makes another session is
+    // handled at xrCreateSession.
+    if (!asked_d3d11) {
+        XrInstance passthrough_instance = XR_NULL_HANDLE;
+        const XrResult passthrough_result = next_create_api_layer_instance(
+            forwarded_create_info, &next_layer_info, &passthrough_instance);
+        if (XR_FAILED(passthrough_result)) return passthrough_result;
+        if (!load_function(next_get_instance_proc_addr, passthrough_instance,
+                "xrDestroyInstance", dispatch->destroy_instance)) {
+            return XR_ERROR_INITIALIZATION_FAILED;
+        }
+        dispatch->passthrough = true;
+        try {
+            std::scoped_lock lock(g_state_mutex);
+            g_instances[passthrough_instance] = dispatch;
+        } catch (...) {
+            dispatch->destroy_instance(passthrough_instance);
+            return XR_ERROR_OUT_OF_MEMORY;
+        }
+        *instance = passthrough_instance;
+        return passthrough_result;
+    }
+#endif
     if(!xrfg::autonomous::initialize_game_configuration())return XR_ERROR_INITIALIZATION_FAILED;
     xrfg::autonomous::apply_runtime_settings();
     xrfg::prepare_ngx_feature_discovery(current_layer_directory().c_str());
@@ -5894,6 +5938,12 @@ XrResult layer_create_session_impl(
     state->vdxr_legacy=_wcsicmp(transport,L"force_vdxr")==0 ||
         (_wcsicmp(transport,L"force_steamvr")!=0 && (dispatch->virtual_desktop_runtime ||
             dispatch->runtime_name.find("Pimax OpenXR")!=std::string::npos));
+#if !defined(_WIN64)
+    // 0.2 V576: the 32-bit layer delivers directly, as 0.2 did, without the
+    // private SteamVR runtime. Through it, Alien: Isolation (OpenComposite)
+    // had a two-layer frame refused by SteamVR (XR_ERROR_SWAPCHAIN_RECT_INVALID).
+    state->vdxr_legacy = true;
+#endif
     const auto game_preferences=xrfg::autonomous::snapshot().desired;
     state->afw_only=state->luke_afw_enabled && game_preferences.afw_only;
     state->luke_shared_swapchains=game_preferences.luke_shared_swapchains;
@@ -5971,6 +6021,17 @@ XrResult layer_create_session_impl(
                 }
                 break;
             }
+#if !defined(_WIN64)
+            // 0.2 V576: the 32-bit layer bridges D3D11 alone. A D3D12 or Vulkan
+            // session is left with no binding, as one the layer does not
+            // recognise is: its swapchains are ineligible and its frames pass
+            // through.
+            if (next->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR ||
+                next->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
+                binding_structure_type = next->type;
+                break;
+            }
+#endif
             if (next->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
                 const auto* binding = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(next);
                 state->graphics_binding = SessionGraphicsBinding::d3d12;
@@ -7340,7 +7401,7 @@ XrResult layer_destroy_swapchain_impl(XrSwapchain swapchain) {
         return XR_ERROR_HANDLE_INVALID;
     }
 
-    xrfg::unregister_d3d11_sr_destinations(reinterpret_cast<std::uintptr_t>(swapchain));
+    xrfg::unregister_d3d11_sr_destinations(handle_value(swapchain));
 
     PresenterResourceLifetimeGuard presenter_guard(state->session);
     const bool active_color_reconfiguration =
@@ -7502,7 +7563,7 @@ XrResult layer_enumerate_swapchain_images_impl(
                 sr_images.push_back(app_images[i].texture);
             }
             if (!sr_images.empty()) xrfg::register_d3d11_sr_destinations(
-                reinterpret_cast<std::uintptr_t>(state->session.get()),reinterpret_cast<std::uintptr_t>(swapchain),
+                reinterpret_cast<std::uintptr_t>(state->session.get()),handle_value(swapchain),
                 sr_images.data(),sr_images.size());
         }
         if (state->session->graphics_binding == SessionGraphicsBinding::d3d11) {
@@ -13378,6 +13439,12 @@ std::vector<PanelSource> panel_sources(const SessionState& state,
     return out;
 }
 bool panel_generation_pending(std::span<const PanelSource> panels) {
+#if !defined(_WIN64)
+    // 0.2 V576: panels' flow is FidelityFX, which the 32-bit layer lacks; a
+    // panel passes through as it is, and nothing waits for one.
+    static_cast<void>(panels);
+    return false;
+#endif
     for(const auto& p:panels)if(const auto chain=find_swapchain(p.swapchain)) {
         std::scoped_lock lock(chain->mutex);
         if(!chain->panel_source||(!chain->frame_generation&&chain->generation_eligible_pending&&!chain->generation_declined))return true;
@@ -13385,6 +13452,11 @@ bool panel_generation_pending(std::span<const PanelSource> panels) {
     return false;
 }
 void arm_panel_generation(const std::shared_ptr<SessionState>& state,std::span<const PanelSource> panels) {
+#if !defined(_WIN64)
+    static_cast<void>(state);
+    static_cast<void>(panels);
+    return;
+#endif
     for(const auto& p:panels)if(const auto chain=find_swapchain(p.swapchain)) {
         // Only known non-projection sources enter here, after the triggering
         // frame has gone downstream and the preceding presenter is drained.
@@ -18908,6 +18980,12 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_end_frame(
 }
 
 }  // namespace
+
+// 0.2 V576: a 32-bit __stdcall export is decorated, _name@<argument bytes>;
+// the loader asks for the plain name.
+#if !defined(_WIN64)
+#pragma comment(linker, "/export:xrNegotiateLoaderApiLayerInterface=_xrNegotiateLoaderApiLayerInterface@12")
+#endif
 
 extern "C" __declspec(dllexport) XRAPI_ATTR XrResult XRAPI_CALL xrNegotiateLoaderApiLayerInterface(
     const XrNegotiateLoaderInfo* loader_info,

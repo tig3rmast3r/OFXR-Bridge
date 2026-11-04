@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.859.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.860.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -27,6 +27,18 @@ option(XRFG_BUILD_LAYER "Build the Windows OpenXR API layer" ON)
 option(XRFG_BUILD_TESTS "Build the core test executable" ON)
 option(XRFG_TEST_RIFE_GPU "Enable portable RIFE tests (requires shared runtime and CUDA GPU)" OFF)
 option(XRFG_BUILD_STANDALONE "Build the Windows standalone tray launcher" ON)
+
+# 0.2 V576: a Win32 configure builds the 32-bit layer alone, for 32-bit D3D11
+# games. The tray stays 64-bit and arms both layers. AMD ships FidelityFX and
+# NVIDIA the NGX library for x64 only: the 32-bit layer has NVIDIA optical
+# flow alone, with stand-ins for both libraries that fail at initialisation.
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(XRFG_X86 ON)
+    set(XRFG_BUILD_STANDALONE OFF CACHE BOOL "" FORCE)
+    set(XRFG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+else()
+    set(XRFG_X86 OFF)
+endif()
 set(XRFG_DEPENDENCY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.local/ofxr-autonomous-deps" CACHE PATH "Standalone vendor SDK and runtime store")
 set(XRFG_DLSS_SDK_ROOT "${XRFG_DEPENDENCY_ROOT}/DLSS" CACHE PATH "NVIDIA DLSS SDK")
 set(XRFG_FSR_RUNTIME "${XRFG_DEPENDENCY_ROOT}/runtime/fsr-optiscaler/ofxr_amd_fidelityfx_framegeneration_dx12.dll" CACHE FILEPATH "Private FSR FG provider")
@@ -238,11 +250,26 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_FIDELITYFX_DX12_LIBRARY
         "${XRFG_FIDELITYFX_LIBRARY_DIR}/ofxr_ffx_backend_dx12_x64.lib")
     if(NOT EXISTS "${XRFG_FIDELITYFX_INCLUDE_DIR}/FidelityFX/host/ffx_opticalflow.h" OR
-       NOT EXISTS "${XRFG_FIDELITYFX_INCLUDE_DIR}/FidelityFX/host/backends/dx12/ffx_dx12.h" OR
-       NOT EXISTS "${XRFG_FIDELITYFX_OPTICALFLOW_LIBRARY}" OR
-       NOT EXISTS "${XRFG_FIDELITYFX_DX12_LIBRARY}")
-        message(FATAL_ERROR
-            "Pinned FidelityFX SDK v1.1.4 headers and Release DX12/Optical Flow libraries are required")
+       NOT EXISTS "${XRFG_FIDELITYFX_INCLUDE_DIR}/FidelityFX/host/backends/dx12/ffx_dx12.h")
+        message(FATAL_ERROR "Pinned FidelityFX SDK v1.1.4 headers are required")
+    endif()
+    if(XRFG_X86)
+        # The 32-bit layer: stand-ins for the x64-only FidelityFX and NGX
+        # libraries, which fail at initialisation (see the sources).
+        set(XRFG_X86_UNAVAILABLE_SOURCES
+            src/d3d12/fidelityfx_unavailable.cpp
+            src/d3d12/ngx_unavailable.cpp)
+        set(XRFG_FIDELITYFX_LIBRARIES)
+    else()
+        if(NOT EXISTS "${XRFG_FIDELITYFX_OPTICALFLOW_LIBRARY}" OR
+           NOT EXISTS "${XRFG_FIDELITYFX_DX12_LIBRARY}")
+            message(FATAL_ERROR
+                "Pinned FidelityFX SDK v1.1.4 Release DX12/Optical Flow libraries are required")
+        endif()
+        set(XRFG_X86_UNAVAILABLE_SOURCES)
+        set(XRFG_FIDELITYFX_LIBRARIES
+            "${XRFG_FIDELITYFX_OPTICALFLOW_LIBRARY}"
+            "${XRFG_FIDELITYFX_DX12_LIBRARY}")
     endif()
 
     set(XRFG_NVIDIA_OPTICAL_FLOW_INCLUDE_DIR
@@ -517,6 +544,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         VERBATIM)
 
     add_library(xrfg_d3d12_history STATIC
+        ${XRFG_X86_UNAVAILABLE_SOURCES}
         "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
         src/common/dlss_motion_vectors.cpp
         src/common/two_frame_capture.cpp
@@ -597,8 +625,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     FetchContent_MakeAvailable(ofxr_safetyhook)
     set(XRFG_DLSSG_RUNTIME "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/rel/nvngx_dlssg.dll")
     if(NOT EXISTS "${XRFG_DLSS_SDK_ROOT}/include/nvsdk_ngx_helpers_dlssg.h" OR
-       NOT EXISTS "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib" OR
-       NOT EXISTS "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d_dbg.lib" OR
+       (NOT XRFG_X86 AND NOT EXISTS "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib") OR
+       (NOT XRFG_X86 AND NOT EXISTS "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d_dbg.lib") OR
        NOT EXISTS "${XRFG_DLSSG_RUNTIME}")
         message(FATAL_ERROR "XRFG_NATIVE_DLSSG requires a complete NVIDIA DLSS SDK at XRFG_DLSS_SDK_ROOT")
     endif()
@@ -642,9 +670,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_sources(xrfg_d3d12_history PRIVATE "${header}")
     endforeach()
     target_include_directories(xrfg_d3d12_history PUBLIC "${XRFG_DLSS_SDK_ROOT}/include")
-    target_link_libraries(xrfg_d3d12_history PUBLIC
-        optimized "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib"
-        debug "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d_dbg.lib")
+    if(NOT XRFG_X86)
+        target_link_libraries(xrfg_d3d12_history PUBLIC
+            optimized "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib"
+            debug "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d_dbg.lib")
+    endif()
     target_compile_definitions(xrfg_d3d12_history PUBLIC XRFG_NATIVE_DLSSG)
     target_sources(xrfg_d3d12_history PRIVATE src/d3d12/d3d12_native_dlssg.cpp)
     add_library(xrfg_dlssg_forwarder SHARED src/d3d12/dlssg_forwarder.cpp)
@@ -669,10 +699,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         message(FATAL_ERROR "Provide the pinned Khronos Vulkan headers")
     endif()
     target_include_directories(xrfg_d3d12_history PUBLIC "${XRFG_VULKAN_INCLUDE_DIR}")
+    if(NOT XRFG_X86)
     add_library(OFXR_vulkan_queue_layer SHARED src/vulkan_layer/vulkan_queue_layer.cpp)
     target_include_directories(OFXR_vulkan_queue_layer PRIVATE include "${XRFG_VULKAN_INCLUDE_DIR}")
     target_compile_features(OFXR_vulkan_queue_layer PRIVATE cxx_std_20)
     target_compile_definitions(OFXR_vulkan_queue_layer PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN VK_NO_PROTOTYPES)
+    endif()
     if(XRFG_BUILD_TESTS)
         add_executable(xrfg_vulkan_queue_layer_tests tests/vulkan_queue_layer_tests.cpp)
         target_include_directories(xrfg_vulkan_queue_layer_tests PRIVATE include "${XRFG_VULKAN_INCLUDE_DIR}")
@@ -687,7 +719,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
 
         set_tests_properties(xrfg_vulkan_queue_layer_tests PROPERTIES TIMEOUT 10)
     endif()
-    if(MSVC)
+    if(MSVC AND TARGET OFXR_vulkan_queue_layer)
         target_compile_options(OFXR_vulkan_queue_layer PRIVATE /W4 /permissive- /EHsc)
     endif()
     target_compile_features(xrfg_d3d12_history PUBLIC cxx_std_20)
@@ -698,8 +730,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         d3dcompiler
         d3d12
         dxgi
-        "${XRFG_FIDELITYFX_OPTICALFLOW_LIBRARY}"
-        "${XRFG_FIDELITYFX_DX12_LIBRARY}")
+        ${XRFG_FIDELITYFX_LIBRARIES})
     target_compile_definitions(xrfg_d3d12_history PRIVATE
         NOMINMAX
         WIN32_LEAN_AND_MEAN)
@@ -817,7 +848,13 @@ if(WIN32 AND XRFG_BUILD_LAYER)
 
     add_library(XR_APILAYER_XRFrameBridge_diagnostic ${XRFG_LAYER_KIND}
         ${XRFG_LAYER_SOURCE})
-    target_sources(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE src/layer/ngx_guide_capture.cpp src/layer/provider_api.cpp src/ingress/native_ingress.cpp src/ingress/luke_detection.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp src/ingress/vulkan_guide_ingress.cpp)
+    # The 32-bit layer bridges D3D11 alone: no Vulkan capture (0.2 V576).
+    if(XRFG_X86)
+        set(XRFG_VULKAN_INGRESS_SOURCE src/ingress/vulkan_native_ingress_disabled.cpp)
+    else()
+        set(XRFG_VULKAN_INGRESS_SOURCE src/ingress/vulkan_native_ingress.cpp)
+    endif()
+    target_sources(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE src/layer/ngx_guide_capture.cpp src/layer/provider_api.cpp src/ingress/native_ingress.cpp src/ingress/luke_detection.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp ${XRFG_VULKAN_INGRESS_SOURCE} src/ingress/vulkan_command_stream.cpp src/ingress/vulkan_guide_ingress.cpp)
     target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE safetyhook version)
     if(TARGET xrfg_vulkan_capture_suspended_tests)
         add_dependencies(xrfg_vulkan_capture_suspended_tests XR_APILAYER_XRFrameBridge_diagnostic)
@@ -1835,9 +1872,27 @@ if(XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
     endforeach()
 endif()
 if(XRFG_BUILD_LAYER)
-  target_compile_definitions(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE OFXR_PROVIDER_API_EXPORTS XRFG_NATIVE_DLSSG)
+  target_compile_definitions(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE OFXR_PROVIDER_API_EXPORTS)
+  # The 32-bit layer: NGX ships for x64 only, so no NGX hooks (0.2 V576).
+  if(NOT XRFG_X86)
+    target_compile_definitions(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE XRFG_NATIVE_DLSSG)
+  endif()
   target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE xrfg_neural_rendering)
   add_dependencies(XR_APILAYER_XRFrameBridge_diagnostic xrfg_neural_forwarder)
+endif()
+if(XRFG_BUILD_LAYER AND TARGET OFXRBridgeTray)
+  # 0.2 V576: the 32-bit layer, built by a Win32 configure of this tree
+  # (Build-Autonomous.ps1 -X86Layer), bundled in ofxr_x86 beside ofxr. Copied
+  # on every build; nothing to copy until that build exists.
+  set(XRFG_X86_LAYER_DLL
+      "${CMAKE_BINARY_DIR}-x86/Release/XR_APILAYER_XRFrameBridge_diagnostic.dll"
+      CACHE FILEPATH "The Win32 build's layer, bundled in ofxr_x86")
+  add_custom_target(xrfg_bundle_x86_layer ALL
+      COMMAND "${CMAKE_COMMAND}" "-DSOURCE=${XRFG_X86_LAYER_DLL}"
+          "-DDESTINATION=$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr_x86"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_x86_layer.cmake"
+      VERBATIM)
+  add_dependencies(xrfg_bundle_x86_layer OFXRBridgeTray)
   target_compile_definitions(OFXRBridgeTray PRIVATE XRFG_NATIVE_DLSSG)
   add_dependencies(OFXRBridgeTray OFXR_vulkan_queue_layer xrfg_neural_forwarder)
   add_dependencies(OFXRBridgeTray xrfg_dlssg_forwarder)
