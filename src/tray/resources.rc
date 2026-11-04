@@ -6,7 +6,7 @@ IDI_OFXR_ARMED ICON "../../OFXR_armed.ico"
 
 IDD_KEYBINDS DIALOGEX 0, 0, 364, 264
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "OFXR-BRIDGE 0.3.2 (v851) - Configure keybinds"
+CAPTION "OFXR-BRIDGE 0.3.2 (v852) - Configure keybinds"
 FONT 9, "Segoe UI"
 BEGIN
     LTEXT "Click Change, then press a key or combination.", -1, 12, 12, 340, 14
@@ -65,8 +65,8 @@ BEGIN
 END
 
 1 VERSIONINFO
-FILEVERSION 0,3,2,851
-PRODUCTVERSION 0,3,2,851
+FILEVERSION 0,3,2,852
+PRODUCTVERSION 0,3,2,852
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -77,10 +77,10 @@ BEGIN
  BEGIN
   BLOCK "040904b0"
   BEGIN
-   VALUE "FileDescription", "OFXR-BRIDGE 0.3.2 (v851)\0"
+   VALUE "FileDescription", "OFXR-BRIDGE 0.3.2 (v852)\0"
    VALUE "ProductName", "OFXR-BRIDGE\0"
-   VALUE "FileVersion", "0.3.2 (v851)\0"
-   VALUE "ProductVersion", "0.3.2 (v851)\0"
+   VALUE "FileVersion", "0.3.2 (v852)\0"
+   VALUE "ProductVersion", "0.3.2 (v852)\0"
    VALUE "OriginalFilename", "OFXRBridgeTray.exe\0"
   END
  END

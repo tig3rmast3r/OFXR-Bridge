@@ -18,7 +18,7 @@ void transition(ID3D12GraphicsCommandList* list,ID3D12Resource* resource,
 }
 int main(int argc,char** argv)try {
     const bool raw=argc>=5;
-    const bool resolveProbe=argc==2&&std::string_view(argv[1])=="resolve";
+    const bool resolveProbe=(argc==2&&std::string_view(argv[1])=="resolve")||(raw&&argc>6&&std::string_view(argv[6])=="colour");
     ComPtr<ID3D12Debug> debug;if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     ComPtr<IDXGIFactory4> factory;demand(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
     ComPtr<IDXGIAdapter> adapter;if(raw){
@@ -77,7 +77,7 @@ int main(int argc,char** argv)try {
     if(!codec.Dispatch(list.Get(),params,source.Get(),nullptr,nullptr,nullptr,exposure.Get(),encoded.Get(),original.Get()))throw std::runtime_error("encode dispatch");
     transition(list.Get(),encoded.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     transition(list.Get(),original.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    params.Mode=DlssNrMode_Resolve;params.TransferStrength=resolveProbe?1.f:0.f;params.ColourStrength=0.f;params.MaxRatio=2.f;
+    params.Mode=DlssNrMode_Resolve;params.TransferStrength=resolveProbe?1.f:0.f;params.ColourStrength=resolveProbe?1.f:0.f;params.MaxRatio=2.f;
     params.GuideWidth=width;params.GuideHeight=height;
     if(!codec.Dispatch(list.Get(),params,encoded.Get(),encoded.Get(),original.Get(),nullptr,exposure.Get(),output.Get(),nullptr))throw std::runtime_error("resolve dispatch");
     transition(list.Get(),output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -113,7 +113,7 @@ int main(int argc,char** argv)try {
         if(raw){std::uint32_t v{};memcpy(&v,p,4);rgb={unpack(v,0,6),unpack(v,11,6),unpack(v,22,5)};}
         else memcpy(rgb.data(),p,12);
         mean+=(rgb[0]+rgb[1]+rgb[2])/3;clipped+=std::max({rgb[0],rgb[1],rgb[2]})>=1;zero+=std::max({rgb[0],rgb[1],rgb[2]})==0;}
-    if(raw&&argc>5){std::ofstream dump(argv[5],std::ios::binary);dump.write(static_cast<const char*>(mapped),static_cast<std::streamsize>(bytes));if(!dump)throw std::runtime_error("encoded output write");}
+    if(raw&&argc>5&&std::string_view(argv[5])!="-"){std::ofstream dump(argv[5],std::ios::binary);dump.write(static_cast<const char*>(mapped),static_cast<std::streamsize>(bytes));if(!dump)throw std::runtime_error("encoded output write");}
     encodedRead->Unmap(0,&empty);mean/=verified;
     printf("EXPOSURE factor=%g input_mean=%g pixels_at_one_percent=%g zero_percent=%g original_max_relative_error=%g\n",factor,mean,100.*clipped/verified,100.*zero/verified,maximumRelativeError);
     if(!(factor>1 && mean>.2 && mean<.8 && clipped<double(verified)*.5 && zero<verified && maximumRelativeError<.04))throw std::runtime_error("exposure/identity bounds");
