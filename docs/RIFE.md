@@ -161,3 +161,7 @@ OFXR release archive.
 For building and assembling a complete package, see
 [`BUILDING_RIFE.md`](BUILDING_RIFE.md). For general OFXR setup and diagnostic
 logging, see the [README](../README.md).
+
+V865 reduces native D3D12/CUDA handoff stalls and allows one owned next-source
+capture during generation. Models and compatible engines are unchanged. See
+[implementation and targeted validation](V865_RIFE_PIPELINE.md).

@@ -351,6 +351,10 @@ public:
     // Poll this owned output ticket, never the newest pair or a deferred copy.
     [[nodiscard]] HRESULT ticket_available(const D3D12FrameSynthesisTicket& ticket) noexcept;
     // Retain the immutable completion owner while this exact output is submitted.
+    // Exact queue owning the submitted GPU receipts. In asynchronous RIFE this
+    // differs from the initialization queue; useful for ownership diagnostics.
+    [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12CommandQueue> submission_queue() const noexcept;
+
     [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12Fence> submission_fence(
         const D3D12FrameSynthesisTicket& ticket) noexcept;
 

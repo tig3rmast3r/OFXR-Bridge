@@ -1097,6 +1097,10 @@ struct SessionState {
     std::uint64_t optical_reserve_pair{}, optical_reserve_served{};
     HANDLE optical_reserve_timer{}; // application publication thread only
     bool synthesis_busy{};
+    // presenter_mutex: after every source has been snapshotted and leased, a
+    // native RIFE producer may capture one next image while GPU work finishes.
+    bool synthesis_capture_ready{};
+    std::uint64_t synthesis_capture_sequence{};
     bool director_draining{};
     std::uint64_t next_source_sequence{1};
     std::uint64_t director_anchor_sequence{}; // presenter_mutex; history identity, not a retained output
@@ -2534,6 +2538,8 @@ struct SwapchainState {
     bool presentation_transform_known{};
     bool presentation_transform_active{};
     std::shared_ptr<FrameGenerationSwapchainState> frame_generation;
+    // session.presenter_mutex; at most one early capture per synthesis job.
+    std::uint64_t rife_capture_sequence{};
     std::atomic_bool panel_source{};
     // Release-time private snapshot, never a read of an already released app
     // image. Output leases are held by A and by B/S(A,B) until presentation.
@@ -2929,7 +2935,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
 [[nodiscard]] bool queued_nvidia_session(const std::shared_ptr<SessionState>& state) noexcept;
 void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept;
 [[nodiscard]] XrResult wait_for_synthesis_handoff(
-    const std::shared_ptr<SessionState>& state) noexcept;
+    const std::shared_ptr<SessionState>& state, SwapchainState* capture_source=nullptr) noexcept;
 
 // A promoted frame owner inherits an already-forwarded, unbegun runtime
 // wait exactly once. Issuing another wait first would deadlock pipelined games.
@@ -8622,7 +8628,17 @@ XrResult release_swapchain_with_identity(
     }
     if (worker_source && !afw_producer &&
         (!state->session->luke_fresh_only || (state->session->luke_source_filter_armed && !state->session->afw_only && xrfg::embedded::snapshot().desired.enabled))) {
-        const XrResult worker_ready = wait_for_synthesis_handoff(state->session);
+        // Only ordinary native D12 color captures use this early handoff.
+        // Bridges, OSR/AFW, shared composition inputs and other backends retain
+        // their existing ownership gates.
+        bool overlap=false;
+        {std::scoped_lock lock(state->mutex);
+            overlap=state->session->nvidia_options.rife_model>=0 &&
+                state->session->graphics_binding==SessionGraphicsBinding::d3d12 &&
+                !state->session->luke_afw_enabled && !state->composition_referenced &&
+                state->d3d12_history && !state->bridge && !state->vulkan_bridge &&
+                state->frame_generation && !state->frame_generation->d3d11_interop;}
+        const XrResult worker_ready = wait_for_synthesis_handoff(state->session,overlap?state.get():nullptr);
         if (XR_FAILED(worker_ready)) return worker_ready;
     }
     std::scoped_lock call_lock(state->call_mutex);
@@ -9006,20 +9022,28 @@ struct SynthesisJob {
 };
 
 [[nodiscard]] XrResult wait_for_synthesis_handoff(
-    const std::shared_ptr<SessionState>& state) noexcept {
+    const std::shared_ptr<SessionState>& state, SwapchainState* capture_source) noexcept {
     std::unique_lock lock(state->presenter_mutex);
     if (!state->three_slot_director) return XR_SUCCESS;
     const auto token = xrfg::bridge_flight_logger().begin(
         xrfg::BridgeFlightOperation::three_slot_worker_wait, handle_value(state->handle));
+    const auto capture_ready=[&] {
+        return capture_source && state->synthesis_capture_ready &&
+            capture_source->rife_capture_sequence!=state->synthesis_capture_sequence;
+    };
     state->presenter_condition.wait(lock, [&] {
-        return !state->synthesis_busy || state->presenter_stop_requested ||
+        return !state->synthesis_busy || capture_ready() || state->presenter_stop_requested ||
                XR_FAILED(state->presenter_failure);
     });
+    const bool early=state->synthesis_busy && capture_ready();
+    if(early)capture_source->rife_capture_sequence=state->synthesis_capture_sequence;
+    const auto capture_sequence=state->synthesis_capture_sequence;
     const XrResult result = XR_FAILED(state->presenter_failure)
         ? state->presenter_failure : XR_SUCCESS;
     lock.unlock();
     xrfg::bridge_flight_logger().end(token,
-        xrfg::BridgeFlightOperation::three_slot_worker_wait, result);
+        xrfg::BridgeFlightOperation::three_slot_worker_wait, result, early?1:0,
+        capture_source?handle_value(capture_source->handle):0,capture_sequence);
     return result;
 }
 
@@ -13585,6 +13609,23 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
             audit.stage=2;
             if(prepared.kind!=PreparedGenerationKind::none)
                 prepare_panel_generation(*state,job->snapshot,job->panels,prepared,job->fraction,job->extra_fraction,true,job->third_fraction);
+            // All source tickets/cameras are now copied into the queued jobs.
+            // Their consumer leases/fences protect the old history; the third
+            // history slot can capture C while the worker finishes A/B. Keep
+            // synthesis_busy set: EndFrame still admits only one complete job.
+            if(state->nvidia_options.rife_model>=0 &&
+                state->graphics_binding==SessionGraphicsBinding::d3d12 && !state->luke_afw_enabled &&
+                !job->post_afw_frame && prepared.kind!=PreparedGenerationKind::none && !prepared.resources.empty()) {
+                const bool owned=std::all_of(prepared.resources.begin(),prepared.resources.end(),[](const auto& resource){
+                    const auto& g=resource.generation;
+                    return g.worker_generation && g.worker_generation->synthesizer &&
+                        !g.worker_generation->d3d11_interop && g.worker_fence && g.worker_fence_value;
+                });
+                if(owned){
+                    {std::scoped_lock lock(state->presenter_mutex);state->synthesis_capture_ready=true;}
+                    state->presenter_condition.notify_all();
+                }
+            }
             bool success = finish_worker_outputs(state, prepared, job->current->source_sequence);
             if(success)audit.stage=3;
             const auto auxiliary_token = xrfg::bridge_flight_logger().begin(
@@ -14661,6 +14702,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         // One atomic handoff starts generation AND makes A eligible for the
         // director. Worker GPU latency does not delay the release of A.
         static_cast<void>(state->three_slots.push_real(job->current));
+        state->synthesis_capture_ready=false;
+        ++state->synthesis_capture_sequence;
         state->synthesis_busy = true;
         state->synthesis_job = job;
     }

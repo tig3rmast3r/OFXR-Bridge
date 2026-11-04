@@ -252,6 +252,37 @@ static int panel_metadata_contract() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route=="rife-source-handoff") {
+        auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
+        XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        auto left=std::make_shared<SwapchainState>(state,info),right=std::make_shared<SwapchainState>(state,info);
+        state->three_slot_director=true;state->synthesis_busy=true;state->synthesis_capture_sequence=1;
+        auto a=std::async(std::launch::async,[&]{return wait_for_synthesis_handoff(state,left.get());});
+        check(a.wait_for(30ms)==std::future_status::timeout,"capture cannot race source snapshot/lease acquisition");
+        {std::scoped_lock lock(state->presenter_mutex);state->synthesis_capture_ready=true;}
+        state->presenter_condition.notify_all();
+        check(a.wait_for(1s)==std::future_status::ready,"owned inputs must release next capture before GPU completion");
+        xr_ok(a.get(),"left early capture");
+        xr_ok(wait_for_synthesis_handoff(state,right.get()),"right early capture");
+        check(state->synthesis_busy,"early capture must not admit another EndFrame synthesis job");
+        auto duplicate=std::async(std::launch::async,[&]{return wait_for_synthesis_handoff(state,left.get());});
+        auto strict=std::async(std::launch::async,[&]{return wait_for_synthesis_handoff(state);});
+        check(duplicate.wait_for(30ms)==std::future_status::timeout,"only one early capture per eye/job");
+        check(strict.wait_for(30ms)==std::future_status::timeout,"bridges/composition/non-RIFE retain full completion wait");
+        {std::scoped_lock lock(state->presenter_mutex);state->synthesis_busy=false;}
+        state->presenter_condition.notify_all();xr_ok(duplicate.get(),"bounded next capture");xr_ok(strict.get(),"strict completion");
+        {std::scoped_lock lock(state->presenter_mutex);state->synthesis_busy=true;state->synthesis_capture_ready=false;++state->synthesis_capture_sequence;}
+        auto next=std::async(std::launch::async,[&]{return wait_for_synthesis_handoff(state,left.get());});
+        check(next.wait_for(30ms)==std::future_status::timeout,"new job must not inherit the old owned-input signal");
+        {std::scoped_lock lock(state->presenter_mutex);state->synthesis_capture_ready=true;}
+        state->presenter_condition.notify_all();check(next.wait_for(1s)==std::future_status::ready,"next job has a fresh capture credit");
+        xr_ok(next.get(),"fresh early capture");
+        auto failure=std::async(std::launch::async,[&]{return wait_for_synthesis_handoff(state,left.get());});
+        check(failure.wait_for(30ms)==std::future_status::timeout,"credit remains bounded on second job");
+        {std::scoped_lock lock(state->presenter_mutex);state->presenter_failure=XR_ERROR_RUNTIME_FAILURE;}
+        state->presenter_condition.notify_all();check(failure.get()==XR_ERROR_RUNTIME_FAILURE,"worker failure wakes a pending capture with its error");
+        std::puts("RIFE source snapshot ownership, per-eye capture credit, strict paths, restart and failure PASS");return 0;
+    }
     if(route=="reconstruction-controls") {
         xrfg_fixture::ControlProfile profile;
         for(int engine:{0,2}) {
@@ -377,7 +408,9 @@ int main(int argc,char** argv) {
     const unsigned rife_luke_factor=route.find("luke4")!=std::string::npos?4:route.find("luke2")!=std::string::npos?2:3;
     const bool rife_tail=route.starts_with("rife-tail");
     const bool rife_overlap=route.starts_with("rife-overlap");
-    const bool rife_overlap_retire=rife_overlap && route.find("retire")!=std::string::npos;
+    const bool rife_overlap_capture=rife_overlap && route.find("capture")!=std::string::npos;
+    bool rife_early_capture_done=false;
+    const bool rife_overlap_retire=rife_overlap && (rife_overlap_capture || route.find("retire")!=std::string::npos);
     const unsigned rife_overlap_factor=route.find("overlap4")!=std::string::npos?4:3;
     const unsigned rife_tail_factor=route.find("tail3")!=std::string::npos?3:4;
     const bool rife_latency=route.find("rife-latency")!=std::string::npos;
@@ -1230,7 +1263,7 @@ int main(int argc,char** argv) {
             }
             released.get();
             check(captured,"RIFE next source Release/capture waited for old batch delivery admission after GPU completion");
-        } else if(!rife_msfs)f.write(chain,color);
+        } else if(!rife_msfs && !(rife_early_capture_done && n==6))f.write(chain,color);
         if(split_eyes && !rife_msfs)f.write(right,color+7);
         if(panel_test)f.write(panel_chain,30+n);
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
@@ -1286,7 +1319,11 @@ int main(int argc,char** argv) {
             check(bool(state->d3d12_synthesis_queue),"retirement race requires the real independent synthesis queue");
             ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&rife_overlap_compute_gate)),
                 "retirement-race compute gate");
-            ok(state->d3d12_synthesis_queue->Wait(rife_overlap_compute_gate.Get(),1),
+            const auto compute=rife_overlap_capture
+                ? find_swapchain(chain)->frame_generation->synthesizer->submission_queue()
+                : state->d3d12_synthesis_queue;
+            check(bool(compute),"exact RIFE queue for capture overlap proof");
+            ok(compute->Wait(rife_overlap_compute_gate.Get(),1),
                 "hold C compute while the presenter retires B");
         }
         if(rife_app_overlap && !rife_msfs && n<input_count) {
@@ -1367,7 +1404,8 @@ int main(int argc,char** argv) {
                 f.unblock();
                 {
                     std::unique_lock lock(state->presenter_mutex);
-                    computed=state->presenter_condition.wait_for(lock,5s,[&] {
+                    computed=state->presenter_condition.wait_for(lock,rife_overlap_capture?500ms:5s,[&] {
+                        if(rife_overlap_capture)return state->synthesis_busy && state->synthesis_capture_ready;
                         const auto& current=state->three_slots.slot(state->three_slots.capacity()-2);
                         return !state->three_slots.slot(0) && current && !current->synthetic &&
                             current->value->source_sequence==rife_overlap_b_sequence+1 &&
@@ -1385,6 +1423,30 @@ int main(int argc,char** argv) {
                                 entry?entry->value->source_sequence:0,entry?entry->value->frame.get():nullptr);
                         }
                     }
+                }
+                if(rife_overlap_capture && computed) {
+                    // Real public Release while the previous generation's GPU
+                    // receipt is deliberately withheld. First suppress the new
+                    // ownership signal as the old-path negative control.
+                    bool owned=false;
+                    {std::unique_lock lock(state->presenter_mutex);
+                        owned=state->presenter_condition.wait_for(lock,2s,[&]{return state->synthesis_capture_ready && state->synthesis_busy;});
+                        if(owned)state->synthesis_capture_ready=false;}
+                    HANDLE rescued=CreateEventW(nullptr,TRUE,FALSE,nullptr);check(rescued!=nullptr,"capture rescue event");
+                    auto gate=rife_overlap_compute_gate;
+                    std::thread rescue([gate,rescued]{WaitForSingleObject(rescued,3000);gate->Signal(1);});
+                    auto next_capture=std::async(std::launch::async,[&]{f.write(chain,color+20);});
+                    const bool old_blocked=next_capture.wait_for(30ms)==std::future_status::timeout;
+                    {std::scoped_lock lock(state->presenter_mutex);state->synthesis_capture_ready=owned;}
+                    state->presenter_condition.notify_all();
+                    const bool captured=next_capture.wait_for(500ms)==std::future_status::ready;
+                    const bool gpu_pending=gate->GetCompletedValue()==0;
+                    gate->Signal(1);SetEvent(rescued);rescue.join();CloseHandle(rescued);next_capture.get();
+                    check(owned,"real worker must publish source ownership before GPU completion");
+                    check(old_blocked,"negative control must reproduce full-worker Release blocking");
+                    check(captured && gpu_pending,"public source capture must return while previous generation GPU is still held");
+                    rife_early_capture_done=true;
+                    std::puts("Real public RIFE Release: old gate blocked, owned input captured with prior GPU still pending PASS");
                 }
                 ok(rife_overlap_compute_gate->Signal(1),"release C compute after B has advanced the logical head");
                 check(computed,"old real B did not retire while C compute was independently held");

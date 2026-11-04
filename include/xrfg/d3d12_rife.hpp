@@ -21,6 +21,9 @@ RifeExecutionStatus rife_execution_status() noexcept;
 // synchronization is with this worker's exact GPU transactions, never a game tail.
 class D3D12Rife {
 public:
+    // queue_ordered is only for callers publishing an exact completion fence on
+    // this same queue. Inputs/outputs remain retained until GPU retirement.
+    enum class Completion { wait, queue_ordered };
     struct Timing {ID3D12QueryHeap* queries{};ID3D12Resource* readback{};UINT base{};bool first{true},last{true};};
     D3D12Rife();
     ~D3D12Rife();
@@ -30,7 +33,8 @@ public:
         std::span<const D3D12ReprojectionView> target,
         std::span<const std::array<float,4>> a_rotations,
         std::span<const std::array<float,4>> b_rotations,
-        D3D12_RESOURCE_STATES output_state, float fraction=.5F, Timing timing={}) noexcept;
+        D3D12_RESOURCE_STATES output_state, float fraction=.5F, Timing timing={},
+        Completion completion=Completion::wait) noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

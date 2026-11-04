@@ -280,14 +280,17 @@ struct D3D12Rife::Impl{
     ComPtr<ID3D12Device> device;ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12RootSignature> root;ComPtr<ID3D12PipelineState> pack,unpack;
     ComPtr<ID3D12DescriptorHeap> heap,rtvs;
-    ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> commands;
+    std::array<ComPtr<ID3D12CommandAllocator>,2> allocators;
+    std::array<ComPtr<ID3D12GraphicsCommandList>,2> lists;
+    ID3D12GraphicsCommandList* commands{};
     ComPtr<ID3D12Fence> fence;Handle event;
     std::array<ComPtr<ID3D12Resource>,3> buffers;
-    std::array<ComPtr<ID3D12Resource>,3> inflight_images;
+    std::vector<ComPtr<ID3D12Resource>> inflight_images;
     std::shared_ptr<Worker> worker;
     DXGI_FORMAT format{};int model{};float scale{};UINT width{},height{},eyes{},proxy{};
     std::uint64_t id{identifiers.fetch_add(1)},luid{},value{},submitted{};
     bool configured{};
+    HRESULT failure{S_OK};
     ~Impl(){
         bool safe=true;
         if(submitted && fence && fence->GetCompletedValue()<submitted){
@@ -296,27 +299,42 @@ struct D3D12Rife::Impl{
         }
         if(configured && worker)worker->request("{\"op\":\"release\",\"id\":"+std::to_string(id)+"}");
         // An unresponsive live GPU must retain objects referenced by its list.
-        if(!safe){for(auto& b:buffers)b.Detach();for(auto& image:inflight_images)image.Detach();heap.Detach();rtvs.Detach();allocator.Detach();commands.Detach();root.Detach();pack.Detach();unpack.Detach();fence.Detach();}
+        if(!safe){for(auto& b:buffers)b.Detach();for(auto& image:inflight_images)image.Detach();heap.Detach();rtvs.Detach();for(auto& a:allocators)a.Detach();for(auto& l:lists)l.Detach();root.Detach();pack.Detach();unpack.Detach();fence.Detach();}
     }
     D3D12_CPU_DESCRIPTOR_HANDLE cpu(UINT i){auto h=heap->GetCPUDescriptorHandleForHeapStart();h.ptr+=i*device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);return h;}
     D3D12_GPU_DESCRIPTOR_HANDLE gpu(UINT i){auto h=heap->GetGPUDescriptorHandleForHeapStart();h.ptr+=i*device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);return h;}
-    void begin(){check(allocator->Reset());check(commands->Reset(allocator.Get(),nullptr));}
-    void execute(BridgeFlightLogger* diagnostic=nullptr,std::uint64_t fraction_eyes=0,bool compose=false){
+    void wait_submitted(){
+        if(submitted && fence->GetCompletedValue()<submitted){
+            check(fence->SetEventOnCompletion(submitted,event.value));
+            if(WaitForSingleObject(event.value,30000)!=WAIT_OBJECT_0)throw HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        }
+        check(device->GetDeviceRemovedReason());
+    }
+    void begin(bool compose=false){
+        const auto i=compose?1U:0U;
+        // Pack's allocator retired in its own wait. Compose's allocator retired
+        // in the following pack wait (same-queue FIFO), before this reset.
+        check(allocators[i]->Reset());commands=lists[i].Get();
+        check(commands->Reset(allocators[i].Get(),nullptr));
+    }
+    void execute(BridgeFlightLogger* diagnostic=nullptr,std::uint64_t fraction_eyes=0,bool compose=false,bool wait=true){
         const auto dimensions=(static_cast<std::uint64_t>(width)<<32)|height;
         rife_phase(diagnostic,compose?BridgeFlightOperation::rife_compose_execute:BridgeFlightOperation::rife_pack_execute,
             id,dimensions,fraction_eyes,[&]{
-                check(commands->Close());ID3D12CommandList* list=commands.Get();queue->ExecuteCommandLists(1,&list);
+                check(commands->Close());ID3D12CommandList* list=commands;queue->ExecuteCommandLists(1,&list);
                 submitted=++value;check(queue->Signal(fence.Get(),submitted));
             });
+        if(!wait)return;
         rife_phase(diagnostic,compose?BridgeFlightOperation::rife_compose_wait:BridgeFlightOperation::rife_pack_wait,
             id,dimensions,fraction_eyes,[&]{
-                if(fence->GetCompletedValue()<submitted){check(fence->SetEventOnCompletion(submitted,event.value));
-                    if(WaitForSingleObject(event.value,30000)!=WAIT_OBJECT_0)throw HRESULT_FROM_WIN32(ERROR_TIMEOUT);}
-                check(device->GetDeviceRemovedReason());
+                wait_submitted();
             });
     }
     void size(UINT w,UINT h,UINT count){
         if(w==width&&h==height&&count==eyes)return;
+        // Reconfiguration must not release CUDA buffers/descriptors still read
+        // by the last queued composition.
+        wait_submitted();inflight_images.clear();
         if(configured){check(worker->request("{\"op\":\"release\",\"id\":"+std::to_string(id)+"}"));configured=false;}
         for(auto& b:buffers)b.Reset();width=w;height=h;eyes=count;
         auto bytes=static_cast<UINT64>(w)*h*count*5*2;
@@ -383,21 +401,26 @@ HRESULT D3D12Rife::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,DXG
         check(device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&p->heap)));
         heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;heap.NumDescriptors=2;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
         check(device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&p->rtvs)));
-        check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&p->allocator)));
-        check(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,p->allocator.Get(),nullptr,IID_PPV_ARGS(&p->commands)));check(p->commands->Close());
+        for(UINT i=0;i<2;++i){
+            check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&p->allocators[i])));
+            check(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,p->allocators[i].Get(),nullptr,IID_PPV_ARGS(&p->lists[i])));
+            check(p->lists[i]->Close());
+        }
         check(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&p->fence)));p->event.value=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!p->event.value)throw E_FAIL;
         impl_=std::move(p);return S_OK;
     }catch(HRESULT hr){return hr;}catch(...){return E_FAIL;}
 }
 HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* out,
     std::span<const D3D12ReprojectionView> av,std::span<const D3D12ReprojectionView> bv,std::span<const D3D12ReprojectionView> tv,
-    std::span<const std::array<float,4>> ar,std::span<const std::array<float,4>> br,D3D12_RESOURCE_STATES output_state,float fraction,Timing timing)noexcept{
+    std::span<const std::array<float,4>> ar,std::span<const std::array<float,4>> br,D3D12_RESOURCE_STATES output_state,float fraction,Timing timing,Completion completion)noexcept{
     try{
         if(!impl_||!a||!b||!out||av.empty()||av.size()>2||av.size()!=bv.size()||av.size()!=tv.size()||ar.size()!=tv.size()||br.size()!=tv.size())return E_INVALIDARG;
-        auto& p=*impl_;const auto desc=b->GetDesc();const auto roi=rect_of(bv[0],desc);
-        p.inflight_images={a,b,out};
+        auto& p=*impl_;if(FAILED(p.failure))return p.failure;const auto desc=b->GetDesc();const auto roi=rect_of(bv[0],desc);
         const UINT w=std::max(32U,static_cast<UINT>(std::ceil(roi.width*p.scale))),h=std::max(32U,static_cast<UINT>(std::ceil(roi.height*p.scale)));
         p.size(w,h,static_cast<UINT>(av.size()));
+        // Keep the preceding deferred output and the current transaction alive
+        // until pack's receipt proves the preceding compose has retired.
+        for(auto* image:{a,b,out})p.inflight_images.emplace_back(image);
         auto& flight=bridge_flight_logger();
         auto* diagnostic=flight.enabled()?&flight:nullptr;
         std::uint64_t fraction_eyes=0;
@@ -436,6 +459,7 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
             p.commands->ResourceBarrier(1,&before);p.commands->ResourceBarrier(1,&input);
         }
         if(timing.first)mark(1);p.execute(diagnostic,fraction_eyes);
+        p.inflight_images={a,b,out};
         std::int32_t backend_flags{};
         const auto dimensions=(static_cast<std::uint64_t>(w)<<32)|h;
         rife_phase(diagnostic,BridgeFlightOperation::rife_infer,p.id,dimensions,fraction_eyes,[&]{
@@ -451,7 +475,9 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
             srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.Texture2DArray.MipLevels=1;srv.Texture2DArray.ArraySize=description.DepthOrArraySize;
             p.device->CreateShaderResourceView(resource,&srv,p.cpu(12+source_index));
         }
-        p.begin();if(timing.last){mark(2);mark(3);}
+        // Pack's fence also retires the preceding compose before descriptor
+        // slots12..17, its list/allocator or the shared CUDA output are reused.
+        p.begin(true);if(timing.last){mark(2);mark(3);}
         auto output=barrier(out,output_state,D3D12_RESOURCE_STATE_RENDER_TARGET);auto result=barrier(p.buffers[2].Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         auto alpha=barrier(b,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);p.commands->ResourceBarrier(1,&alpha);
         auto peer=barrier(a,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);p.commands->ResourceBarrier(1,&peer);
@@ -476,7 +502,11 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
         if(output_state!=D3D12_RESOURCE_STATE_RENDER_TARGET)p.commands->ResourceBarrier(1,&output);
         p.commands->ResourceBarrier(1,&result);if(timing.last){mark(4);mark(6);}
         if(timing.last&&timing.queries&&timing.readback)p.commands->ResolveQueryData(timing.queries,D3D12_QUERY_TYPE_TIMESTAMP,timing.base,7,timing.readback,timing.base*sizeof(std::uint64_t));
-        p.execute(diagnostic,fraction_eyes,true);p.inflight_images={};return S_OK;
-    }catch(HRESULT hr){return hr;}catch(...){return E_FAIL;}
+        const bool wait=completion==Completion::wait;
+        p.execute(diagnostic,fraction_eyes,true,wait);
+        if(wait)p.inflight_images.clear();
+        return S_OK;
+    }catch(HRESULT hr){if(impl_)impl_->failure=hr;return hr;}
+    catch(...){if(impl_)impl_->failure=E_FAIL;return E_FAIL;}
 }
 }

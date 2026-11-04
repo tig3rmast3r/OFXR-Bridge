@@ -6028,7 +6028,8 @@ struct D3D12FrameSynthesizer::Impl {
             const auto result=rife->generate(p.a.Get(),p.b.Get(),p.out[output].Get(),
                 {p.av.data(),p.count},{p.bv.data(),p.count},{p.tv[output].data(),p.count},
                 {p.ar[output].data(),p.count},{p.br[output].data(),p.count},release_state,p.fractions[output],
-                {nvidia_gpu_timing_enabled?nvidia_timestamp_heap.Get():nullptr,nvidia_timestamp_readback.Get(),base,output==0,output+1==p.outputs});
+                {nvidia_gpu_timing_enabled?nvidia_timestamp_heap.Get():nullptr,nvidia_timestamp_readback.Get(),base,output==0,output+1==p.outputs},
+                nvidia_options.rife_async?D3D12Rife::Completion::queue_ordered:D3D12Rife::Completion::wait);
             if(FAILED(result))return result;
         }
         return S_OK;
@@ -7677,6 +7678,13 @@ HRESULT D3D12FrameSynthesizer::ticket_available(const D3D12FrameSynthesisTicket&
         if(completed==UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
         return completed>=value?S_OK:S_FALSE;
     } catch(...) { return E_FAIL; }
+}
+
+Microsoft::WRL::ComPtr<ID3D12CommandQueue> D3D12FrameSynthesizer::submission_queue() const noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ ? impl_->queue : Microsoft::WRL::ComPtr<ID3D12CommandQueue>{};
+    } catch (...) { return {}; }
 }
 
 Microsoft::WRL::ComPtr<ID3D12Fence> D3D12FrameSynthesizer::submission_fence(

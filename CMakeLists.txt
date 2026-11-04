@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.864.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.865.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2431,4 +2431,26 @@ if(WIN32 AND TARGET xrfg_d3d12_history)
  target_link_libraries(xrfg_osr_quality_bench PRIVATE d3d12 dxgi)
  add_dependencies(xrfg_osr_quality_bench xrfg_d3d12_history)
  endif()
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_TEST_RIFE_GPU)
+    add_executable(xrfg_rife_queue_tests tests/rife_queue_tests.cpp)
+    target_include_directories(xrfg_rife_queue_tests PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}/generated-shaders" "${XRFG_DLSS_SDK_ROOT}/include")
+    target_compile_features(xrfg_rife_queue_tests PRIVATE cxx_std_20)
+    target_compile_definitions(xrfg_rife_queue_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(xrfg_rife_queue_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
+    add_test(NAME xrfg_rife_queue_gpu COMMAND xrfg_rife_queue_tests)
+    set_tests_properties(xrfg_rife_queue_gpu PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
+    add_test(NAME xrfg_rife_source_handoff COMMAND xrfg_private_runtime_layer_tests rife-source-handoff)
+    set_tests_properties(xrfg_rife_source_handoff PROPERTIES TIMEOUT 15)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND XRFG_TEST_RIFE_GPU AND TARGET xrfg_private_runtime_layer_tests)
+    foreach(route rife-overlap3-capture rife-overlap3-capture-director)
+        add_test(NAME xrfg_private_${route}_gpu COMMAND xrfg_private_runtime_layer_tests ${route})
+        set_tests_properties(xrfg_private_${route}_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    endforeach()
 endif()
