@@ -35,7 +35,24 @@ public:
         std::span<const std::array<float,4>> b_rotations,
         D3D12_RESOURCE_STATES output_state, float fraction=.5F, Timing timing={},
         Completion completion=Completion::wait) noexcept;
+    struct Output {
+        ID3D12Resource* image{};
+        std::span<const D3D12ReprojectionView> views;
+        std::span<const std::array<float,4>> a_rotations,b_rotations;
+        float fraction{.5F};
+        Timing timing{};
+    };
+    // Preserve every fractional camera, but pack all inputs, execute one CUDA
+    // transaction, then compose all outputs. One exact pack/completion receipt.
+    HRESULT generate_batch(ID3D12Resource* a,ID3D12Resource* b,
+        std::span<const D3D12ReprojectionView> av,std::span<const D3D12ReprojectionView> bv,
+        std::span<const Output> outputs,D3D12_RESOURCE_STATES output_state,
+        Completion completion=Completion::wait) noexcept;
 private:
+    HRESULT generate_impl(ID3D12Resource*,ID3D12Resource*,ID3D12Resource*,
+        std::span<const D3D12ReprojectionView>,std::span<const D3D12ReprojectionView>,std::span<const D3D12ReprojectionView>,
+        std::span<const std::array<float,4>>,std::span<const std::array<float,4>>,
+        D3D12_RESOURCE_STATES,float,Timing,Completion,unsigned stage) noexcept;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

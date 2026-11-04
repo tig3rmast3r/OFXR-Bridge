@@ -282,6 +282,39 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertFalse(self.runner.trt.try_infer.called)
         self.assertEqual(self.runner.infer_cached.call_count, 2)
 
+    def test_fraction_batch_has_one_completion_and_distinct_ordered_outputs(self):
+        self.runner.configs[2] = [types.SimpleNamespace(tensor=Tensor((2, channels, 511, 555))) for channels in (3, 3, 5)]
+        self.runner.optimization_enabled = True
+        self.runner.trt = Mock(note="")
+        self.runner.trt.try_infer.side_effect = [(Tensor((2, 5, 511, 555)), False), (Tensor((2, 5, 511, 555)), False)]
+        stream = Mock()
+        with patch.object(self.worker.torch.cuda, "current_stream", return_value=stream):
+            result = self.runner.command({"op": "infer_batch", "requests": [
+                {"id": 1, "model": 3, "fraction": 1/3}, {"id": 2, "model": 3, "fraction": 2/3}]})
+        stream.synchronize.assert_called_once()
+        self.assertEqual(result, {"optimizing": False, "backend": "tensorrt"})
+        self.assertEqual([c.args[2] for c in self.runner.trt.try_infer.call_args_list], [1/3, 2/3])
+        for ident in (1, 2):
+            self.assertEqual(self.runner.configs[ident][2].tensor.copies, [(2, 5, 511, 555)])
+
+    def test_fraction_batch_rejects_alias_or_late_invalid_fraction_before_execution(self):
+        self.runner._infer = Mock()
+        for requests in ([], [{"id": 1, "model": 3}]*2,
+                         [{"id": 1, "model": 3}, {"id": 2, "model": 3, "fraction": 1.0}]):
+            with self.assertRaises(ValueError):
+                self.runner.command({"op": "infer_batch", "requests": requests})
+        self.runner._infer.assert_not_called()
+
+    def test_fraction_batch_preserves_fallback_error_and_single_completion(self):
+        self.runner.configs[2] = [types.SimpleNamespace(tensor=Tensor((2, channels, 511, 555))) for channels in (3, 3, 5)]
+        self.runner._infer = Mock(side_effect=[{"optimizing": True, "backend": "torch", "optimization_error": "test failure"},
+                                             {"optimizing": False, "backend": "tensorrt"}])
+        stream = Mock()
+        with patch.object(self.worker.torch.cuda, "current_stream", return_value=stream):
+            result = self.runner.command({"op": "infer_batch", "requests": [{"id": 1, "model": 3}, {"id": 2, "model": 3}]})
+        stream.synchronize.assert_called_once()
+        self.assertEqual(result, {"optimizing": True, "backend": "torch", "optimization_error": "test failure"})
+
     def configure(self, optimize=None):
         request = {"op": "configure", "id": 9, "luid": 0, "eyes": 2,
                    "height": 511, "width": 555, "buffers": [[0, 0], [0, 0], [0, 0]]}

@@ -6026,6 +6026,14 @@ struct D3D12FrameSynthesizer::Impl {
     }
 
     HRESULT generate_rife_batch(RifePair& p,UINT base,RifeDependencyTiming* diagnostic=nullptr) noexcept {
+        if(nvidia_options.rife_async && p.outputs>1){
+            std::array<D3D12Rife::Output,3> outputs;
+            for(UINT i=0;i<p.outputs;++i)outputs[i]={p.out[i].Get(),{p.tv[i].data(),p.count},
+                {p.ar[i].data(),p.count},{p.br[i].data(),p.count},p.fractions[i],
+                {nvidia_gpu_timing_enabled?nvidia_timestamp_heap.Get():nullptr,nvidia_timestamp_readback.Get(),base,i==0,i+1==p.outputs,i==0&&diagnostic?diagnostic->queries():nullptr}};
+            return rife->generate_batch(p.a.Get(),p.b.Get(),{p.av.data(),p.count},{p.bv.data(),p.count},
+                {outputs.data(),p.outputs},release_state,D3D12Rife::Completion::queue_ordered);
+        }
         for(UINT output=0;output<p.outputs;++output){
             const auto result=rife->generate(p.a.Get(),p.b.Get(),p.out[output].Get(),
                 {p.av.data(),p.count},{p.bv.data(),p.count},{p.tv[output].data(),p.count},

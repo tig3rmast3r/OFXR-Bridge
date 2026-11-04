@@ -244,38 +244,34 @@ class Runner:
             self.release(request["id"])
             return {}
         if op == "infer":
-            model = request["model"]
-            # A warm engine needs no Torch weights/graph. The normal model is
-            # loaded lazily only while optimizing or if the backend falls back.
-            self.select_model(model, load=not (self.optimization_enabled and model == 3))
-            a, b, out = [buffer.tensor for buffer in self.configs[request["id"]]]
-            fraction = request.get("fraction", .5)
-            generated = None
-            optimizing = False
-            if model == 3 and self.optimization_enabled:
-                try:
-                    generated, optimizing = self.trt.try_infer(a, b, fraction)
-                except Exception as error:
-                    self.trt.note = "TensorRT unavailable: " + str(error)
-            if generated is not None:
-                out.copy_(generated)
-                backend = "tensorrt"
-            else:
-                self.select_model(model, load=True)
-                if model == 3 and self.optimization_enabled:
-                    out.copy_(self.infer_cached(a, b, fraction))
-                else:
-                    for eye in range(a.shape[0]):
-                        out[eye:eye+1].copy_(self.infer_cached(a[eye:eye+1], b[eye:eye+1], fraction))
-                backend = "torch"
-            # The reply is a completion receipt. D3D12 never waits an output
-            # semaphore that a failed or terminated worker might not signal.
+            return self._infer(request)
+        if op == "infer_batch":
+            requests = request["requests"]
+            if not isinstance(requests, list) or not 1 <= len(requests) <= 3:
+                raise ValueError("Invalid fractional batch length")
+            # Reject the entire batch before touching a shared CUDA buffer.
+            first = requests[0]
+            shape = None
+            identities = set()
+            for item in requests:
+                if item["model"] != first["model"] or item["id"] not in self.configs or item["id"] in identities or not .05 <= item.get("fraction", .5) <= .95:
+                    raise ValueError("Invalid fractional batch request")
+                identities.add(item["id"])
+                current = tuple(self.configs[item["id"]][0].tensor.shape)
+                if shape is not None and current != shape:
+                    raise ValueError("Fractional batch shapes differ")
+                shape = current
+            results = [self._infer(item, complete=False) for item in requests]
+            # Replays, input copies and per-ID output copies are FIFO on one
+            # stream. Each fractional output has a distinct imported buffer.
             torch.cuda.current_stream().synchronize()
-            if backend == "tensorrt" and self.net is not None:
+            if results[-1].get("backend") == "tensorrt" and self.net is not None:
                 self._clear_torch()
-            result = {"optimizing": bool(optimizing), "backend": backend} if self.optimization_enabled else {}
-            if model == 3 and self.trt is not None and self.trt.note:
-                result["optimization_error"] = self.trt.note
+            result = {"optimizing": any(r.get("optimizing", False) for r in results),
+                      "backend": "tensorrt" if all(r.get("backend") == "tensorrt" for r in results) else "torch"}
+            errors = [r["optimization_error"] for r in results if r.get("optimization_error")]
+            if errors:
+                result["optimization_error"] = errors[-1]
             if request.get("memory") and self.memory:
                 usage = self.memory.usage()
                 if usage is not None:
@@ -283,6 +279,47 @@ class Runner:
                                   torch_reserved=torch.cuda.memory_reserved(self.device))
             return result
         raise ValueError("Unknown worker operation")
+
+    def _infer(self, request, complete=True):
+        model = request["model"]
+        # A warm engine needs no Torch weights/graph. The normal model is
+        # loaded lazily only while optimizing or if the backend falls back.
+        self.select_model(model, load=not (self.optimization_enabled and model == 3))
+        a, b, out = [buffer.tensor for buffer in self.configs[request["id"]]]
+        fraction = request.get("fraction", .5)
+        generated = None
+        optimizing = False
+        if model == 3 and self.optimization_enabled:
+            try:
+                generated, optimizing = self.trt.try_infer(a, b, fraction)
+            except Exception as error:
+                self.trt.note = "TensorRT unavailable: " + str(error)
+        if generated is not None:
+            out.copy_(generated)
+            backend = "tensorrt"
+        else:
+            self.select_model(model, load=True)
+            if model == 3 and self.optimization_enabled:
+                out.copy_(self.infer_cached(a, b, fraction))
+            else:
+                for eye in range(a.shape[0]):
+                    out[eye:eye+1].copy_(self.infer_cached(a[eye:eye+1], b[eye:eye+1], fraction))
+            backend = "torch"
+        # The reply is a completion receipt. D3D12 never waits an output
+        # semaphore that a failed or terminated worker might not signal.
+        if complete:
+            torch.cuda.current_stream().synchronize()
+        if complete and backend == "tensorrt" and self.net is not None:
+            self._clear_torch()
+        result = {"optimizing": bool(optimizing), "backend": backend} if self.optimization_enabled else {}
+        if model == 3 and self.trt is not None and self.trt.note:
+            result["optimization_error"] = self.trt.note
+        if request.get("memory") and self.memory:
+            usage = self.memory.usage()
+            if usage is not None:
+                result.update(vram_private=max(0, usage-sum(self.import_charges.values())),
+                              torch_reserved=torch.cuda.memory_reserved(self.device))
+        return result
 
     @torch.inference_mode()
     def infer_cached(self, a, b, fraction=.5):
@@ -335,7 +372,7 @@ class Runner:
 
 def main():
     runner = Runner()
-    print(json.dumps({"ok": True, "protocol": 2}), flush=True)
+    print(json.dumps({"ok": True, "protocol": 2, "fraction_batch": True}), flush=True)
     try:
         for line in sys.stdin:
             try:

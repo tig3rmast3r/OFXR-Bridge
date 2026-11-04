@@ -18,6 +18,6 @@
     "trt_backend.py": "3030a510b5f5b94e15c4b2cee0519eb953aebe2d514e7677c9acabd2e25651e4",
     "trt_cache.py": "b672c2bcf60fe1635e9fed4214b86f2e4193b9195a1c9db3181e36f874901e3b",
     "trt_compile.py": "ec4a43183454076a58ac9910209101b7baa9ec4aa7ae6c47e7f938d7405519b4",
-    "worker.py": "615d40a50ace8ca200e334f7d2f5a3dcb83cc9b12bcd8999ad5d7caa466a5cb5"
+    "worker.py": "5e863120ef79e9d320fc78948de41889c0916f0ddbb3fa9d22d05acef899b7cb"
   }
 }

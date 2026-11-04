@@ -50,6 +50,7 @@ class Worker {
     std::mutex mutex_;
     std::string line_;
     std::atomic<bool> live_{};
+    bool fraction_batch_{};
     std::atomic<bool> optimizing_{}, tensorrt_{};
     std::atomic<unsigned> optimization_error_{};
     std::atomic<std::uint64_t> execution_updated_ms_{};
@@ -163,10 +164,11 @@ public:
             TerminateProcess(process_.value,1);throw E_FAIL;
         }
         ResumeThread(thread.value);child_input.reset();child_output.reset();
-        try{if(read(60000).find("\"protocol\": 2")==std::string::npos)throw E_FAIL;live_=true;}catch(...){stop();throw;}
+        try{const auto hello=read(60000);if(hello.find("\"protocol\": 2")==std::string::npos)throw E_FAIL;fraction_batch_=boolean(hello,"\"fraction_batch\"");live_=true;}catch(...){stop();throw;}
     }
     ~Worker(){stop();}
     bool alive() const noexcept {return live_.load(std::memory_order_acquire);}
+    bool fraction_batch() const noexcept {return fraction_batch_;}
     RifeExecutionStatus execution() const noexcept {
         const auto updated=execution_updated_ms_.load(std::memory_order_acquire);
         const auto now=GetTickCount64();
@@ -191,7 +193,8 @@ public:
         if(!live_)return E_FAIL;
         try{
             auto text=message;
-            if(GetTickCount64()<memory_until_.load(std::memory_order_relaxed) && text.find("\"op\":\"infer\"")!=std::string::npos){
+            const bool inference=text.find("\"op\":\"infer\"")!=std::string::npos || text.find("\"op\":\"infer_batch\"")!=std::string::npos;
+            if(GetTickCount64()<memory_until_.load(std::memory_order_relaxed) && inference){
                 std::scoped_lock sample(memory_mutex_);
                 if(GetTickCount64()-memory_.updated_ms>=1000){text.pop_back();text+=",\"memory\":true}";}
             }
@@ -199,7 +202,7 @@ public:
             if(!WriteFile(input_.value,text.data(),static_cast<DWORD>(text.size()),&written,nullptr)||written!=text.size())throw E_FAIL;
             const auto reply=read(30000); // first model graph warm-up may take seconds
             if(reply.find("\"ok\": true")==std::string::npos)throw E_FAIL;
-            if(message.find("\"op\":\"infer\"")!=std::string::npos) {
+            if(inference) {
                 const bool optimizing=boolean(reply,"\"optimizing\"");
                 optimizing_.store(optimizing,std::memory_order_relaxed);
                 // Protocol values are emitted by our owned portable worker.
@@ -248,6 +251,7 @@ std::array<float,4> tangents(const D3D12FieldOfView& f){return {std::tan(f.angle
 D3D12ImageRect rect_of(const D3D12ReprojectionView& view,const D3D12_RESOURCE_DESC& d){
     return view.image_rect.width&&view.image_rect.height?view.image_rect:D3D12ImageRect{0,0,static_cast<UINT>(d.Width),d.Height};
 }
+
 }
 RifeMemoryStatus rife_memory_for_adapter(LUID adapter,bool request) noexcept {
     try{
@@ -287,6 +291,7 @@ struct D3D12Rife::Impl{
     std::array<ComPtr<ID3D12Resource>,3> buffers;
     std::vector<ComPtr<ID3D12Resource>> inflight_images;
     std::shared_ptr<Worker> worker;
+    std::array<std::unique_ptr<D3D12Rife>,2> fractional;
     DXGI_FORMAT format{};int model{};float scale{};UINT width{},height{},eyes{},proxy{};
     std::uint64_t id{identifiers.fetch_add(1)},luid{},value{},submitted{};
     bool configured{};
@@ -312,8 +317,8 @@ struct D3D12Rife::Impl{
     }
     void begin(bool compose=false){
         const auto i=compose?1U:0U;
-        // Pack's allocator retired in its own wait. Compose's allocator retired
-        // in the following pack wait (same-queue FIFO), before this reset.
+        // Pack's allocator retired in its own receipt or the batch's last-pack
+        // receipt on this same queue. Both also retire the preceding compose.
         check(allocators[i]->Reset());commands=lists[i].Get();
         check(commands->Reset(allocators[i].Get(),nullptr));
     }
@@ -413,6 +418,11 @@ HRESULT D3D12Rife::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,DXG
 HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* out,
     std::span<const D3D12ReprojectionView> av,std::span<const D3D12ReprojectionView> bv,std::span<const D3D12ReprojectionView> tv,
     std::span<const std::array<float,4>> ar,std::span<const std::array<float,4>> br,D3D12_RESOURCE_STATES output_state,float fraction,Timing timing,Completion completion)noexcept{
+    return generate_impl(a,b,out,av,bv,tv,ar,br,output_state,fraction,timing,completion,0);
+}
+HRESULT D3D12Rife::generate_impl(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* out,
+    std::span<const D3D12ReprojectionView> av,std::span<const D3D12ReprojectionView> bv,std::span<const D3D12ReprojectionView> tv,
+    std::span<const std::array<float,4>> ar,std::span<const std::array<float,4>> br,D3D12_RESOURCE_STATES output_state,float fraction,Timing timing,Completion completion,unsigned stage)noexcept{
     try{
         if(!impl_||!a||!b||!out||av.empty()||av.size()>2||av.size()!=bv.size()||av.size()!=tv.size()||ar.size()!=tv.size()||br.size()!=tv.size())return E_INVALIDARG;
         auto& p=*impl_;if(FAILED(p.failure))return p.failure;const auto desc=b->GetDesc();const auto roi=rect_of(bv[0],desc);
@@ -420,12 +430,13 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
         p.size(w,h,static_cast<UINT>(av.size()));
         // Keep the preceding deferred output and the current transaction alive
         // until pack's receipt proves the preceding compose has retired.
-        for(auto* image:{a,b,out})p.inflight_images.emplace_back(image);
+        if(stage!=2)for(auto* image:{a,b,out})p.inflight_images.emplace_back(image);
         auto& flight=bridge_flight_logger();
         auto* diagnostic=flight.enabled()?&flight:nullptr;
         std::uint64_t fraction_eyes=0;
         if(diagnostic){std::uint32_t bits{};std::memcpy(&bits,&fraction,sizeof(bits));fraction_eyes=(static_cast<std::uint64_t>(p.eyes)<<32)|bits;}
         const auto mark=[&](UINT query){if(timing.queries)p.commands->EndQuery(timing.queries,D3D12_QUERY_TYPE_TIMESTAMP,timing.base+query);};
+        if(stage!=2){
         p.begin();if(timing.first){mark(0);mark(5);}
         if(timing.input_queries)p.commands->EndQuery(timing.input_queries,D3D12_QUERY_TYPE_TIMESTAMP,4);
         // The validated target layout is disjoint. A complete union needs no
@@ -461,15 +472,18 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
         }
         if(timing.first)mark(1);
         if(timing.input_queries)p.commands->EndQuery(timing.input_queries,D3D12_QUERY_TYPE_TIMESTAMP,5);
-        p.execute(diagnostic,fraction_eyes);
+        p.execute(diagnostic,fraction_eyes,false,stage!=1);
+        if(stage==1)return S_OK;
+        }
         p.inflight_images={a,b,out};
         std::int32_t backend_flags{};
         const auto dimensions=(static_cast<std::uint64_t>(w)<<32)|h;
-        rife_phase(diagnostic,BridgeFlightOperation::rife_infer,p.id,dimensions,fraction_eyes,[&]{
+        if(stage==0){rife_phase(diagnostic,BridgeFlightOperation::rife_infer,p.id,dimensions,fraction_eyes,[&]{
             check(p.worker->request("{\"op\":\"infer\",\"id\":"+std::to_string(p.id)+",\"model\":"+std::to_string(p.model)+",\"fraction\":"+std::to_string(fraction)+"}",diagnostic?&backend_flags:nullptr));
         });
         if(diagnostic)diagnostic->event(BridgeFlightOperation::rife_backend,
             backend_flags,p.id,dimensions,fraction_eyes);
+        }
         // Restore full-resolution A/B descriptors after both reduced-input
         // packs have retired. Only flow/mask planes return from Python.
         for(UINT source_index=0;source_index<2;++source_index){
@@ -511,5 +525,47 @@ HRESULT D3D12Rife::generate(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resource* 
         return S_OK;
     }catch(HRESULT hr){if(impl_)impl_->failure=hr;return hr;}
     catch(...){if(impl_)impl_->failure=E_FAIL;return E_FAIL;}
+}
+HRESULT D3D12Rife::generate_batch(ID3D12Resource* a,ID3D12Resource* b,
+    std::span<const D3D12ReprojectionView> av,std::span<const D3D12ReprojectionView> bv,
+    std::span<const Output> outputs,D3D12_RESOURCE_STATES state,Completion completion) noexcept {
+    if(!impl_||outputs.empty()||outputs.size()>3)return E_INVALIDARG;
+    if(!impl_->worker->fraction_batch()){
+        for(const auto& o:outputs){const auto hr=generate(a,b,o.image,av,bv,o.views,o.a_rotations,o.b_rotations,state,o.fraction,o.timing,completion);if(FAILED(hr))return hr;}
+        return S_OK;
+    }
+    if(outputs.size()==1){const auto& o=outputs[0];return generate(a,b,o.image,av,bv,o.views,o.a_rotations,o.b_rotations,state,o.fraction,o.timing,completion);}
+    std::array<D3D12Rife*,3> generators{this};
+    auto poison=[&](HRESULT hr){for(auto* g:generators)if(g&&g->impl_)g->impl_->failure=hr;return hr;};
+    try{
+        if(FAILED(impl_->failure))return impl_->failure;
+        // Validate the entire request before queuing any part of a batch.
+        for(const auto& o:outputs)if(!a||!b||!o.image||av.empty()||av.size()>2||bv.size()!=av.size()||o.views.size()!=av.size()||o.a_rotations.size()!=av.size()||o.b_rotations.size()!=av.size()||!(o.fraction>=.05F&&o.fraction<=.95F))return E_INVALIDARG;
+        for(size_t i=1;i<outputs.size();++i){
+            auto& g=impl_->fractional[i-1];
+            if(!g){auto candidate=std::make_unique<D3D12Rife>();check(candidate->initialize(impl_->device.Get(),impl_->queue.Get(),impl_->format,impl_->model,impl_->scale));g=std::move(candidate);}
+            generators[i]=g.get();
+        }
+        for(size_t i=0;i<outputs.size();++i){const auto& o=outputs[i];
+            check(generators[i]->generate_impl(a,b,o.image,av,bv,o.views,o.a_rotations,o.b_rotations,state,o.fraction,o.timing,Completion::queue_ordered,1));
+        }
+        auto& flight=bridge_flight_logger();auto* diagnostic=flight.enabled()?&flight:nullptr;
+        auto& last=*generators[outputs.size()-1]->impl_;
+        const auto dimensions=(std::uint64_t(last.width)<<32)|last.height;
+        // Low word 2/3 denotes a fractional batch rather than float fraction
+        // bits; high word keeps the existing number-of-views contract.
+        const auto batch_identity=(std::uint64_t(last.eyes)<<32)|outputs.size();
+        rife_phase(diagnostic,BridgeFlightOperation::rife_pack_wait,impl_->id,dimensions,batch_identity,[&]{last.wait_submitted();});
+        std::ostringstream request;request<<"{\"op\":\"infer_batch\",\"requests\":[";
+        for(size_t i=0;i<outputs.size();++i){if(i)request<<',';request<<"{\"id\":"<<generators[i]->impl_->id<<",\"model\":"<<impl_->model<<",\"fraction\":"<<outputs[i].fraction<<'}';}
+        request<<"]}";std::int32_t flags{};
+        rife_phase(diagnostic,BridgeFlightOperation::rife_infer,impl_->id,dimensions,batch_identity,[&]{check(impl_->worker->request(request.str(),diagnostic?&flags:nullptr));});
+        if(diagnostic)flight.event(BridgeFlightOperation::rife_backend,flags,impl_->id,dimensions,batch_identity);
+        for(size_t i=0;i<outputs.size();++i){const auto& o=outputs[i];
+            check(generators[i]->generate_impl(a,b,o.image,av,bv,o.views,o.a_rotations,o.b_rotations,state,o.fraction,o.timing,Completion::queue_ordered,2));
+        }
+        if(completion==Completion::wait){last.wait_submitted();for(size_t i=0;i<outputs.size();++i)generators[i]->impl_->inflight_images.clear();}
+        return S_OK;
+    }catch(HRESULT hr){return poison(hr);}catch(...){return poison(E_FAIL);}
 }
 }
