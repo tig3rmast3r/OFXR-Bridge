@@ -52,6 +52,10 @@ struct Parameters final:NVSDK_NGX_Parameter {
 #undef SCALAR
     void Set(const char*,ID3D11Resource*)override{}void Set(const char*,ID3D12Resource*)override{}void Set(const char*,void*)override{}
     NVSDK_NGX_Result Get(const char* n,ID3D11Resource** v)const override{return base->Get(n,v);}
+    static bool substituted(const char* n) {
+        return !strcmp(n,NVSDK_NGX_Parameter_Color)||!strcmp(n,NVSDK_NGX_Parameter_Output)||
+            !strcmp(n,NVSDK_NGX_Parameter_MotionVectors)||!strcmp(n,NVSDK_NGX_Parameter_Depth);
+    }
     ID3D12Resource* resource(const char* n)const {
         if(!strcmp(n,NVSDK_NGX_Parameter_Color))return transport->resource(D3D11GuideTransport::color);
         if(!strcmp(n,NVSDK_NGX_Parameter_Output))return transport->resource(D3D11GuideTransport::output);
@@ -63,7 +67,13 @@ struct Parameters final:NVSDK_NGX_Parameter {
         if(auto* r=resource(n)){*v=r;return NVSDK_NGX_Result_Success;}return NVSDK_NGX_Result_FAIL_InvalidParameter;
     }
     NVSDK_NGX_Result Get(const char* n,void** v)const override {
-        if(auto* r=resource(n)){*v=r;return NVSDK_NGX_Result_Success;}return base->Get(n,v);
+        if(auto* r=resource(n)){*v=r;return NVSDK_NGX_Result_Success;}
+        // The game's own texture under these names is D3D11, never the D3D12
+        // resource a reader expects: until the transport holds one (Output
+        // before its first copy, withheld depth), there is none. NR read the
+        // D3D11 output as D3D12 and crashed Ready or Not entering VR.
+        if(substituted(n))return NVSDK_NGX_Result_FAIL_InvalidParameter;
+        return base->Get(n,v);
     }
     void Reset()override{}
 };
