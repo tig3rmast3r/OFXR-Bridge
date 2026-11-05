@@ -1383,8 +1383,8 @@ void handle_command(AppState& state, UINT command) {
             L"ko-fi.com/djules</a>\r\n\r\n"
             L"DLSS and Hybrid Framegen Integration by Elliotttate.\r\n\r\n"
             L"Licensed under LGPL-3.0-or-later.\r\n"
-            L"<a href=\"https://github.com/djules75/OFXR-Bridge\">"
-            L"github.com/djules75/OFXR-Bridge</a>";
+            L"<a href=\"https://github.com/tig3rmast3r/OFXR-Bridge\">"
+            L"github.com/tig3rmast3r/OFXR-Bridge</a>";
         dialog.hMainIcon = state.disarmed_icon;
         dialog.pfCallback = [](
             HWND window,
@@ -1411,7 +1411,7 @@ void handle_command(AppState& state, UINT command) {
                 L"Support him: https://ko-fi.com/djules\r\n\r\n"
                 L"DLSS and Hybrid Framegen Integration by Elliotttate.\r\n\r\n"
                 L"License: LGPL-3.0-or-later\r\n"
-                L"https://github.com/djules75/OFXR-Bridge";
+                L"https://github.com/tig3rmast3r/OFXR-Bridge";
             MessageBoxW(
                 state.window,
                 message.c_str(),
