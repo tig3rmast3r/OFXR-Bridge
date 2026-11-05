@@ -60,6 +60,7 @@ struct Settings {
     int native_scale{100};
     int frame_multiplier{2}; // OFXR engines but 0.2.13, and Hybrid: 2X, 3X or 4X
     bool hybrid_depth_search{true}; // Hybrid: the game's depth keeps thin near surfaces (0.2 V505/V555)
+    bool hybrid_hud_fix{}; // Hybrid: hold a HUD and cockpit instruments still (0.2 V559-V563, V573)
     int afw_mode{3}; // 0 off, 1 alternate, 2 previous, 3 combined
     bool afw_debug{};
     bool afw_clear_before_warping{};

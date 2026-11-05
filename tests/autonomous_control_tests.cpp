@@ -242,6 +242,13 @@ void route_profiles() {
     Settings edited=depth;edited.hybrid_depth_search=false;
     require(!merge_changes(depth,depth,edited).hybrid_depth_search,
         "the UI's Depth search change survives the merge into the saved settings");
+    require(!Settings{}.hybrid_hud_fix && !parse_settings("[ofxr]\nframe_generation=3\n").hybrid_hud_fix,
+        "Hybrid's HUD fix is off by default, also for profiles saved before it");
+    Settings hud;select_generation(hud,3,0);hud.hybrid_hud_fix=true;
+    require(parse_settings(serialize_settings(hud)).hybrid_hud_fix,"Hybrid's HUD fix on is saved");
+    Settings hud_edited=depth;hud_edited.hybrid_hud_fix=true;
+    require(merge_changes(depth,depth,hud_edited).hybrid_hud_fix,
+        "the UI's HUD fix change survives the merge into the saved settings");
     Settings dlssg;select_generation(dlssg,2,0);dlssg.triple_frame_gen=true;dlssg=sanitize(dlssg);
     require(runtime_multiplier(dlssg)==2 && generation_multiplier(dlssg)==3,"DLSS-G 3X stays on triple_frame_gen");
     dlssg.frame_multiplier=4;dlssg.triple_frame_gen=false;dlssg=parse_settings(serialize_settings(dlssg));

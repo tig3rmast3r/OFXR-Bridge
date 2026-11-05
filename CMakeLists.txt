@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.871.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.872.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -296,6 +296,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_DEPTH_SPLAT_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/depth_splat_clear_shader.hpp")
     set(XRFG_DEPTH_SPLAT_BUILD_HEADER "${XRFG_GENERATED_SHADER_DIR}/depth_splat_build_shader.hpp")
+    set(XRFG_STILL_MASK_BUILD_HEADER "${XRFG_GENERATED_SHADER_DIR}/still_mask_build_shader.hpp")
+    set(XRFG_STILL_MASK_DILATE_HEADER "${XRFG_GENERATED_SHADER_DIR}/still_mask_dilate_shader.hpp")
     set(XRFG_HYBRID_NVIDIA_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_nvidia_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_HYBRID_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_HYBRID_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_nvidia_fast_synthesize_midpoint_pixel_shader.hpp")
@@ -337,6 +339,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_DEPTH_SPLAT_CLEAR_HEADER}"
             "${XRFG_DEPTH_SPLAT_BUILD_HEADER}"
+            "${XRFG_STILL_MASK_BUILD_HEADER}"
+            "${XRFG_STILL_MASK_DILATE_HEADER}"
             "${XRFG_HYBRID_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_HYBRID_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_HYBRID_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
@@ -413,6 +417,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E BuildDepthSplat
             /D XRFG_DEPTH_SPLAT=1 /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_DEPTH_SPLAT_BUILD_HEADER}" /Vn g_xrfg_depth_splat_build_shader
+            "${XRFG_SYNTHESIS_SHADER}"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E BuildStillMask
+            /D XRFG_STILL_MASK=1 /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_STILL_MASK_BUILD_HEADER}" /Vn g_xrfg_still_mask_build_shader
+            "${XRFG_SYNTHESIS_SHADER}"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E DilateStillMask
+            /D XRFG_STILL_MASK=1 /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_STILL_MASK_DILATE_HEADER}" /Vn g_xrfg_still_mask_dilate_shader
             "${XRFG_SYNTHESIS_SHADER}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeHybridNvidiaMidpointPS
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
@@ -568,6 +580,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_DEPTH_SPLAT_CLEAR_HEADER}"
         "${XRFG_DEPTH_SPLAT_BUILD_HEADER}"
+        "${XRFG_STILL_MASK_BUILD_HEADER}"
+        "${XRFG_STILL_MASK_DILATE_HEADER}"
         "${XRFG_HYBRID_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_HYBRID_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_HYBRID_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"

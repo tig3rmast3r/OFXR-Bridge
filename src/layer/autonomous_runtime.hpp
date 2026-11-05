@@ -53,6 +53,7 @@ inline void apply_runtime_settings() {
     // RIFE's multiplier, or OFXR/Hybrid's 2X-4X; the layer tells them apart by rife_model.
     e.rife_multiplier=runtime_multiplier(s);
     set_hybrid_depth_search(s.frame_generation==3 && s.hybrid_depth_search);
+    set_hybrid_hud_fix(s.frame_generation==3 && s.hybrid_hud_fix);
     e.rife_model=s.frame_generation==4?s.rife_model:-1;
     e.rife_resolution=s.rife_resolution;
     if(e.hybrid) e.backend=s.hybrid_backend; // Hybrid's own engine, independent of OFXR's.

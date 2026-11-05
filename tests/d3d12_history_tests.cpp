@@ -6155,6 +6155,53 @@ int main(int argc, char** argv) {
                 "Depth search off did not reach the shader");
             hybrid_fixture.require_no_debug_errors();return 0;
         }
+        if (argc>1 && std::string_view(argv[1])=="hybrid-hud") {
+            // 0.2 V559-V573: Hybrid's HUD fix.
+            D3D12WarpFixture hud_fixture(true);
+            for (const auto backend : {xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                                       xrfg::D3D12OpticalFlowBackend::nvidia}) {
+                for (const auto scene : {HudScene::strokes, HudScene::pulsing, HudScene::panel,
+                                         HudScene::panel_fast, HudScene::dark, HudScene::dim,
+                                         HudScene::cockpit, HudScene::helmet_turn}) {
+                    xrfg::set_hybrid_hud_fix(false);
+                    const HudError off = test_hybrid_hud(hud_fixture, scene, backend);
+                    xrfg::set_hybrid_hud_fix(true);
+                    const HudError on = test_hybrid_hud(hud_fixture, scene, backend);
+                    require(on.to_true < on.to_other, "the HUD fix left the HUD closer to its dragged place");
+                    require(on.to_true <= off.to_true + 0.05, "the HUD fix made the HUD worse");
+                }
+                for (const auto scene : {HudScene::cockpit, HudScene::helmet_turn}) {
+                    xrfg::set_hybrid_hud_fix(false);
+                    const HudError off = test_hybrid_hud(hud_fixture, scene, backend, true);
+                    xrfg::set_hybrid_hud_fix(true);
+                    const HudError on = test_hybrid_hud(hud_fixture, scene, backend, true);
+                    require(on.to_true < on.to_other, "in a synthetic camera the HUD left its place");
+                    require(on.to_true <= off.to_true + 0.05, "in a synthetic camera the HUD fix made the HUD worse");
+                }
+                for (const UINT outputs : {2U, 3U}) {
+                    const HudError on = test_hybrid_hud(hud_fixture, HudScene::dim, backend, false, outputs);
+                    require(on.to_true < on.to_other, "a 3X/4X output's HUD was not held");
+                }
+                // Both eyes on one slice share the mask.
+                xrfg::set_hybrid_hud_fix(false);
+                const HudError wide_off = test_hybrid_hud_double_wide(hud_fixture, backend);
+                xrfg::set_hybrid_hud_fix(true);
+                const HudError wide_on = test_hybrid_hud_double_wide(hud_fixture, backend);
+                require(wide_on.to_true < 1.0 && wide_on.to_true < wide_off.to_true,
+                    "a double-wide image's HUD was not held in both eyes");
+                // Without a mask the per-pixel stroke test stands in, and
+                // holds the pixels before an edge: closer, not whole.
+                xrfg::set_hybrid_hud_fix(false);
+                const HudError unheld = test_hybrid_hud(hud_fixture, HudScene::pulsing, backend);
+                xrfg::set_hybrid_hud_fix(true);
+                SetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", L"1");
+                const HudError plain = test_hybrid_hud(hud_fixture, HudScene::pulsing, backend);
+                SetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", nullptr);
+                require(plain.to_true < unheld.to_true, "the per-pixel stroke test did not reach the frame");
+            }
+            xrfg::set_hybrid_hud_fix(false);
+            hud_fixture.require_no_debug_errors();return 0;
+        }
         if (argc>1 && std::string_view(argv[1])=="r19-camera") {
             D3D12WarpFixture camera_fixture(true);
             for (const auto path : {SyntheticCameraPath::flow,SyntheticCameraPath::vectors,SyntheticCameraPath::nvidia,SyntheticCameraPath::native,SyntheticCameraPath::hybrid}) {

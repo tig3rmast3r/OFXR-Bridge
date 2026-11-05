@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 86201;
+constexpr std::uint32_t kAbi = 87201;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -529,7 +529,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(increase_buffer) READ_FIELD(enabled) READ_FIELD(afw_only) READ_FIELD(backend) READ_FIELD(motion_vectors)
         READ_FIELD(frame_generation) READ_FIELD(rife_resolution) READ_FIELD(rife_multiplier) READ_FIELD(rife_model) READ_FIELD(hybrid_backend) READ_FIELD(preset) READ_FIELD(scale)
         READ_FIELD(pacing_mode) READ_FIELD(backward) READ_FIELD(separate_synthesis) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
-        READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(frame_multiplier) READ_FIELD(hybrid_depth_search) READ_FIELD(r19_camera)
+        READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(frame_multiplier) READ_FIELD(hybrid_depth_search) READ_FIELD(hybrid_hud_fix) READ_FIELD(r19_camera)
         READ_FIELD(afw_mode) READ_FIELD(afw_debug) READ_FIELD(afw_clear_before_warping)
         READ_FIELD(afw_ignore_motion_threshold) READ_FIELD(afw_depth_dilate_mode) READ_FIELD(afw_shading_rate)
         READ_FIELD(luke_osr) READ_FIELD(luke_osr_lower_quality) READ_FIELD(luke_osr_cover) READ_FIELD(luke_osr_trim) READ_FIELD(luke_osr_fill) READ_FIELD(luke_advanced)
@@ -574,7 +574,7 @@ std::string serialize_settings(const Settings& settings,bool include_global_ui) 
     WRITE_FIELD(increase_buffer) WRITE_FIELD(enabled) WRITE_FIELD(afw_only) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
     WRITE_FIELD(frame_generation) WRITE_FIELD(rife_resolution) WRITE_FIELD(rife_multiplier) WRITE_FIELD(rife_model) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
     WRITE_FIELD(pacing_mode) WRITE_FIELD(backward) WRITE_FIELD(separate_synthesis) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
-    WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(frame_multiplier) WRITE_FIELD(hybrid_depth_search) WRITE_FIELD(r19_camera)
+    WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(frame_multiplier) WRITE_FIELD(hybrid_depth_search) WRITE_FIELD(hybrid_hud_fix) WRITE_FIELD(r19_camera)
     WRITE_FIELD(afw_mode) WRITE_FIELD(afw_debug) WRITE_FIELD(afw_clear_before_warping)
     WRITE_FIELD(afw_ignore_motion_threshold) WRITE_FIELD(afw_depth_dilate_mode) WRITE_FIELD(afw_shading_rate)
     WRITE_FIELD(luke_osr) WRITE_FIELD(luke_osr_lower_quality) WRITE_FIELD(luke_osr_cover) WRITE_FIELD(luke_osr_trim) WRITE_FIELD(luke_osr_fill) WRITE_FIELD(luke_advanced)
@@ -822,7 +822,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
 #undef MERGE_PROFILE
     }
 #define MERGE_FIELD(name) if (base.name != desired.name) current.name = desired.name;
-    MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(rife_resolution) MERGE_FIELD(rife_multiplier) MERGE_FIELD(rife_model) MERGE_FIELD(hybrid_backend) MERGE_FIELD(hybrid_depth_search) MERGE_FIELD(r19_camera)
+    MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(rife_resolution) MERGE_FIELD(rife_multiplier) MERGE_FIELD(rife_model) MERGE_FIELD(hybrid_backend) MERGE_FIELD(hybrid_depth_search) MERGE_FIELD(hybrid_hud_fix) MERGE_FIELD(r19_camera)
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
     MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
     MERGE_FIELD(luke_osr) MERGE_FIELD(luke_osr_lower_quality) MERGE_FIELD(luke_osr_cover) MERGE_FIELD(luke_osr_trim) MERGE_FIELD(luke_osr_fill) MERGE_FIELD(luke_advanced)

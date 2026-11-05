@@ -28,6 +28,8 @@
 #include "hybrid_nvidia_synthesize_midpoint_pixel_shader.hpp"
 #include "depth_splat_clear_shader.hpp"
 #include "depth_splat_build_shader.hpp"
+#include "still_mask_build_shader.hpp"
+#include "still_mask_dilate_shader.hpp"
 #include "hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "hybrid_nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
 #include "hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
@@ -140,8 +142,9 @@ struct NvidiaInputScaleRatio {
         return {1U, 1U};
     }
 }
-// t8 the game's depth and t9 the depth splat, Hybrid's depth search.
-constexpr UINT kSrvDescriptorCount = 10;
+// t8 the game's depth and t9 the depth splat, Hybrid's depth search; t10 the
+// still mask, its HUD fix, every image slice's at half resolution.
+constexpr UINT kSrvDescriptorCount = 11;
 constexpr UINT kUavDescriptorCount = 3;
 constexpr UINT kDescriptorBlockSize =
     kSrvDescriptorCount + kUavDescriptorCount;
@@ -150,7 +153,9 @@ constexpr UINT kDescriptorBlockSize =
 // earlier commands still read when they execute.
 constexpr UINT kSplatDescriptorBase =
     kDescriptorBlockSize * kMaxReprojectionViews;
-constexpr UINT kDescriptorCount = kSplatDescriptorBase + kUavDescriptorCount;
+// The still mask's likewise.
+constexpr UINT kStillMaskDescriptorBase = kSplatDescriptorBase + kUavDescriptorCount;
+constexpr UINT kDescriptorCount = kStillMaskDescriptorBase + kUavDescriptorCount;
 // SynthesisFlags bit 5: an eye's splat is bound; bits 27-28 the output.
 constexpr UINT kDepthSplatFlag = 32U;
 constexpr UINT kDepthSplatOutputShift = 27U;
@@ -160,6 +165,17 @@ constexpr UINT kDepthSplatOutputs = 3U;
 // Hybrid's depth search, live for every synthesizer's next pair. On by
 // default, as the setting (0.2 V532's switch was off).
 std::atomic<bool> g_hybrid_depth_search{true};
+// Hybrid's HUD fix (0.2 V559-V563, V573): SynthesisFlags bit 3, the
+// composition holds head-locked HUD strokes, by the still mask where bit 6
+// says it is bound at t10, else per pixel. Slices per image slice: the mask,
+// the mask grown by a texel, and two of ages, read and written by the pair's
+// parity, bit 25 of the mask passes' flags.
+constexpr UINT kHudFixFlag = 8U;
+constexpr UINT kStillMaskFlag = 64U;
+constexpr UINT kStillMaskSlicesPerImageSlice = 4U;
+constexpr UINT kStillMaskParityShift = 25U;
+// Off by default, as 0.2's switch; live for every synthesizer's next pair.
+std::atomic<bool> g_hybrid_hud_fix{false};
 constexpr UINT kNvidiaTimestampCount = 5;
 constexpr UINT kNvidiaTimestampPackBegin = 0;
 constexpr UINT kNvidiaTimestampPackEnd = 1;
@@ -1067,6 +1083,18 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> depth_splat_clear_pipeline;
     ComPtr<ID3D12PipelineState> depth_splat_build_pipeline;
     std::array<std::atomic<std::uint64_t>, kMaxReprojectionViews> depth_splat_recorded{};
+    ComPtr<ID3D12PipelineState> still_mask_build_pipeline;
+    ComPtr<ID3D12PipelineState> still_mask_dilate_pipeline;
+    int still_mask_supported{-1};
+    std::atomic<std::uint64_t> still_mask_recorded{};
+    // The still mask itself, one for the synthesizer rather than per slot: a
+    // texel's age runs from pair to pair, whichever slot records them.
+    ComPtr<ID3D12Resource> still_mask;
+    UINT still_mask_width{};
+    UINT still_mask_height{};
+    UINT still_mask_slices{};
+    D3D12_RESOURCE_STATES still_mask_state{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+    UINT still_mask_parity{};
     ComPtr<ID3D12PipelineState> nvidia_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
     DXGI_FORMAT nvidia_input_format{DXGI_FORMAT_B8G8R8A8_UNORM};
@@ -1578,6 +1606,17 @@ struct D3D12FrameSynthesizer::Impl {
                 sizeof(g_xrfg_depth_splat_build_shader)};
             result = device->CreateComputePipelineState(&splat_description,
                 IID_PPV_ARGS(depth_splat_build_pipeline.GetAddressOf()));
+            if (FAILED(result)) return result;
+            auto still_description = compute_description;
+            still_description.CS = {g_xrfg_still_mask_build_shader,
+                sizeof(g_xrfg_still_mask_build_shader)};
+            result = device->CreateComputePipelineState(&still_description,
+                IID_PPV_ARGS(still_mask_build_pipeline.GetAddressOf()));
+            if (FAILED(result)) return result;
+            still_description.CS = {g_xrfg_still_mask_dilate_shader,
+                sizeof(g_xrfg_still_mask_dilate_shader)};
+            result = device->CreateComputePipelineState(&still_description,
+                IID_PPV_ARGS(still_mask_dilate_pipeline.GetAddressOf()));
             if (FAILED(result)) return result;
             graphics_description.PS = {
                 g_xrfg_hybrid_synthesize_midpoint_pixel_shader,
@@ -2410,8 +2449,9 @@ struct D3D12FrameSynthesizer::Impl {
                         block * kDescriptorBlockSize + 6U,
                         descriptor_increment));
             }
-            // Every block's t8/t9 and the splat's UAV table: null until a
-            // Hybrid pair with the depth search binds them.
+            // Every block's t8/t9/t10 and the splat's and still mask's UAV
+            // tables: null until a Hybrid pair with the depth search or the
+            // HUD fix binds them.
             D3D12_SHADER_RESOURCE_VIEW_DESC null_array = null_motion;
             for (UINT block = 0; block < kMaxReprojectionViews; ++block) {
                 null_array.Format = DXGI_FORMAT_R32_FLOAT;
@@ -2420,6 +2460,9 @@ struct D3D12FrameSynthesizer::Impl {
                 null_array.Format = DXGI_FORMAT_R32_UINT;
                 device->CreateShaderResourceView(nullptr, &null_array,
                     offset_cpu_handle(cpu_start, block * kDescriptorBlockSize + 9U, descriptor_increment));
+                null_array.Format = DXGI_FORMAT_R8_UINT;
+                device->CreateShaderResourceView(nullptr, &null_array,
+                    offset_cpu_handle(cpu_start, block * kDescriptorBlockSize + 10U, descriptor_increment));
             }
             D3D12_UNORDERED_ACCESS_VIEW_DESC null_splat{};
             null_splat.Format = DXGI_FORMAT_R32_UINT;
@@ -2428,6 +2471,10 @@ struct D3D12FrameSynthesizer::Impl {
             for (UINT index = 0; index < kUavDescriptorCount; ++index)
                 device->CreateUnorderedAccessView(nullptr, nullptr, &null_splat,
                     offset_cpu_handle(cpu_start, kSplatDescriptorBase + index, descriptor_increment));
+            null_splat.Format = DXGI_FORMAT_R8_UINT;
+            for (UINT index = 0; index < kUavDescriptorCount; ++index)
+                device->CreateUnorderedAccessView(nullptr, nullptr, &null_splat,
+                    offset_cpu_handle(cpu_start, kStillMaskDescriptorBase + index, descriptor_increment));
         }
         return S_OK;
     }
@@ -3543,6 +3590,154 @@ struct D3D12FrameSynthesizer::Impl {
             bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 867, a, outputs);
         }
         return flags;
+    }
+
+    // 0.2 V559, V573: Hybrid's still mask (frame_synthesis.hlsl, BuildStillMask
+    // and DilateStillMask) for every view of the pair, recorded on `list`
+    // before the pair's draws, which find it at t10 of every block. The
+    // guides' vectors are readable. The flags the draws carry: none with the
+    // HUD fix off (nothing of it runs); kHudFixFlag alone where no mask could
+    // be built, for the composition's per-pixel stroke test. The mask is kept
+    // per image slice; the two views of a double-wide image each write their
+    // own rectangle of it. The caller restores its pipeline if the mask's flag
+    // comes back.
+    [[nodiscard]] UINT record_still_mask(
+        WorkSlot& slot, ID3D12GraphicsCommandList* list, const DlssMotionVectorSet& guides,
+        const SynthesisParameters& draw_parameters,
+        std::span<const D3D12ReprojectionView> target_views) noexcept {
+        const UINT hud = hybrid_hud_fix_enabled() ? kHudFixFlag : 0U;
+        if (hud == 0U) return 0U;
+        // The harness compares the composition with and without it.
+        if (GetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", nullptr, 0) != 0 ||
+            !still_mask_build_pipeline || !still_mask_dilate_pipeline ||
+            target_views.empty() || target_views.size() > kMaxReprojectionViews ||
+            image_description.DepthOrArraySize > kMaxReprojectionViews) {
+            return hud;
+        }
+        if (still_mask_supported < 0) {
+            D3D12_FEATURE_DATA_FORMAT_SUPPORT support{};
+            support.Format = DXGI_FORMAT_R8_UINT;
+            still_mask_supported =
+                SUCCEEDED(device->CheckFeatureSupport(
+                    D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
+                (support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) != 0 &&
+                (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0 &&
+                (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0
+                    ? 1 : 0;
+        }
+        if (still_mask_supported == 0) return hud;
+        // Each view reads its own eye's vectors.
+        std::array<UINT, kMaxReprojectionViews> view_eyes{};
+        for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
+            const UINT slice = resolved_array_slice(target_views[view_index], view_index,
+                target_views.size(), image_description.DepthOrArraySize);
+            view_eyes[view_index] = hybrid_guide_eye(guides, view_index, slice, target_views.size());
+            if (view_eyes[view_index] >= guides.eye_count || !guides.eyes[view_eyes[view_index]] ||
+                !guides.eyes[view_eyes[view_index]]->motion_vectors) return hud;
+        }
+        const UINT width = (static_cast<UINT>(image_description.Width) + 1U) / 2U;
+        const UINT height = (image_description.Height + 1U) / 2U;
+        const UINT slices = kStillMaskSlicesPerImageSlice * image_description.DepthOrArraySize;
+        if (width == 0 || height == 0) return hud;
+        if (!still_mask || still_mask_width < width ||
+            still_mask_height < height || still_mask_slices < slices) {
+            const D3D12_HEAP_PROPERTIES heap = default_heap_properties(0);
+            D3D12_RESOURCE_DESC texture{};
+            texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            texture.Width = std::max(width, still_mask_width);
+            texture.Height = std::max(height, still_mask_height);
+            texture.DepthOrArraySize = static_cast<UINT16>(std::max(slices, still_mask_slices));
+            texture.MipLevels = 1;
+            texture.Format = DXGI_FORMAT_R8_UINT;
+            texture.SampleDesc.Count = 1;
+            texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            ComPtr<ID3D12Resource> mask;
+            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(mask.GetAddressOf())))) {
+                return hud;
+            }
+            mask->SetName(L"OFXR Still Mask");
+            // A fresh texture is all zero: every age starts over.
+            still_mask = std::move(mask);
+            still_mask_width = static_cast<UINT>(texture.Width);
+            still_mask_height = texture.Height;
+            still_mask_slices = texture.DepthOrArraySize;
+            still_mask_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE cpu_start = slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start = slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+        // The whole array in every block: the draw addresses the slice.
+        D3D12_SHADER_RESOURCE_VIEW_DESC array_view{};
+        array_view.Format = DXGI_FORMAT_R8_UINT;
+        array_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        array_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        array_view.Texture2DArray.MipLevels = 1;
+        array_view.Texture2DArray.ArraySize = still_mask_slices;
+        for (UINT block = 0; block < kMaxReprojectionViews; ++block) {
+            device->CreateShaderResourceView(still_mask.Get(), &array_view,
+                offset_cpu_handle(cpu_start, block * kDescriptorBlockSize + 10U, descriptor_increment));
+        }
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R8_UINT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        uav.Texture2DArray.ArraySize = still_mask_slices;
+        device->CreateUnorderedAccessView(still_mask.Get(), nullptr, &uav,
+            offset_cpu_handle(cpu_start, kStillMaskDescriptorBase, descriptor_increment));
+
+        dred_marker(list, "OFXR still mask begin");
+        if (still_mask_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            const auto barrier = transition_barrier(still_mask.Get(),
+                still_mask_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            list->ResourceBarrier(1, &barrier);
+        }
+        ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+        list->SetDescriptorHeaps(1, heaps);
+        list->SetComputeRootSignature(root_signature.Get());
+        const UINT parity = still_mask_parity << kStillMaskParityShift;
+        still_mask_parity ^= 1U;
+        // Per view: its image slice and mapping, and its eye's block, whose
+        // t6 holds the eye's vectors; the frames are at t0/t1 of every block.
+        const auto bind = [&](UINT view_index) {
+            SynthesisParameters parameters = draw_parameters;
+            parameters.synthesis_flags |= parity;
+            parameters.slice = resolved_array_slice(target_views[view_index], view_index,
+                target_views.size(), image_description.DepthOrArraySize);
+            parameters.view_index = view_index;
+            apply_hybrid_guide_constants(parameters, *guides.eyes[view_eyes[view_index]]);
+            list->SetComputeRootDescriptorTable(0, offset_gpu_handle(gpu_start,
+                view_eyes[view_index] * kDescriptorBlockSize, descriptor_increment));
+            list->SetComputeRootDescriptorTable(1,
+                offset_gpu_handle(gpu_start, kStillMaskDescriptorBase, descriptor_increment));
+            list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &parameters, 0);
+        };
+        list->SetPipelineState(still_mask_build_pipeline.Get());
+        for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
+            bind(view_index);
+            list->Dispatch((width + 7U) / 8U, (height + 7U) / 8U, 1);
+        }
+        D3D12_RESOURCE_BARRIER built{};
+        built.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        built.UAV.pResource = still_mask.Get();
+        list->ResourceBarrier(1, &built);
+        list->SetPipelineState(still_mask_dilate_pipeline.Get());
+        for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
+            bind(view_index);
+            list->Dispatch((width + 7U) / 8U, (height + 7U) / 8U, 1);
+        }
+        const auto readable = transition_barrier(still_mask.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kShaderReadState);
+        list->ResourceBarrier(1, &readable);
+        still_mask_state = kShaderReadState;
+        dred_marker(list, "OFXR still mask complete");
+        // 861, once per synthesizer and whenever the mask's shape changes: a
+        // width << 32 | height of the mask, b its slices.
+        const std::uint64_t key = ((static_cast<std::uint64_t>(width) << 32U) | height) * 8U + slices;
+        if (still_mask_recorded.exchange(key + 1U, std::memory_order_relaxed) != key + 1U) {
+            bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 861,
+                (static_cast<std::uint64_t>(width) << 32U) | height, slices);
+        }
+        return hud | kStillMaskFlag;
     }
 
     // NOTE: the synthetic destination is drawn into while the private
@@ -5126,7 +5321,12 @@ struct D3D12FrameSynthesizer::Impl {
         const auto depth_splat = depth_search
             ? record_depth_splat(slot, synthesis, *guides, parameters, target_views)
             : std::array<UINT, kMaxReprojectionViews>{};
-        if (depth_search) synthesis->SetPipelineState(nvidia_options.bidirectional
+        // Hybrid's HUD fix: the still mask, every pair's. Its flags survive
+        // each output's reset of the upper bits.
+        const UINT hud_fix = guides
+            ? record_still_mask(slot, synthesis, *guides, parameters, target_views) : 0U;
+        parameters.synthesis_flags |= hud_fix;
+        if (depth_search || (hud_fix & kStillMaskFlag) != 0U) synthesis->SetPipelineState(nvidia_options.bidirectional
             ? hybrid_nvidia_bidirectional_graphics_pipeline.Get() : hybrid_nvidia_graphics_pipeline.Get());
         dred_marker(synthesis, "OFXR NVIDIA composition draw");
         synthesis->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -5703,7 +5903,13 @@ struct D3D12FrameSynthesizer::Impl {
         const auto depth_splat = depth_search
             ? record_depth_splat(slot, slot.command_list.Get(), *guides, parameters, target_views)
             : std::array<UINT, kMaxReprojectionViews>{};
-        if (depth_search) slot.command_list->SetPipelineState(hybrid_graphics_pipeline.Get());
+        // Hybrid's HUD fix: the still mask, every pair's. Its flags survive
+        // each output's reset of the upper bits.
+        const UINT hud_fix = guides
+            ? record_still_mask(slot, slot.command_list.Get(), *guides, parameters, target_views) : 0U;
+        parameters.synthesis_flags |= hud_fix;
+        if (depth_search || (hud_fix & kStillMaskFlag) != 0U)
+            slot.command_list->SetPipelineState(hybrid_graphics_pipeline.Get());
         slot.command_list->IASetPrimitiveTopology(
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -7848,6 +8054,15 @@ void set_hybrid_depth_search(bool enabled) noexcept {
 }
 bool hybrid_depth_search_enabled() noexcept {
     return g_hybrid_depth_search.load(std::memory_order_relaxed);
+}
+void set_hybrid_hud_fix(bool enabled) noexcept {
+    // 871 at each change: a 1 on, 0 off.
+    if (g_hybrid_hud_fix.exchange(enabled, std::memory_order_relaxed) != enabled) {
+        bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 871, enabled ? 1U : 0U);
+    }
+}
+bool hybrid_hud_fix_enabled() noexcept {
+    return g_hybrid_hud_fix.load(std::memory_order_relaxed);
 }
 
 }  // namespace xrfg

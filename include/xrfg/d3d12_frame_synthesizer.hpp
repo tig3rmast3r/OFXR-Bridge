@@ -218,6 +218,11 @@ struct D3D12NvidiaOpticalFlowOptions {
 // every synthesizer's next pair. On by default (0.2's menu switch was off).
 void set_hybrid_depth_search(bool enabled) noexcept;
 [[nodiscard]] bool hybrid_depth_search_enabled() noexcept;
+// Hybrid's HUD fix (0.2 V559-V563, V573), live for every synthesizer's next
+// pair: head-locked HUD strokes and cockpit instruments held by the still
+// mask. Off by default; off, none of its passes run.
+void set_hybrid_hud_fix(bool enabled) noexcept;
+[[nodiscard]] bool hybrid_hud_fix_enabled() noexcept;
 
 struct D3D12ExtraSynthetic {
     std::uint32_t destination_index{};

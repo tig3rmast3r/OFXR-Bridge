@@ -446,6 +446,7 @@ constexpr Help kHelpRifeQuality{"Quality","Motion inference uses this preset; ou
 constexpr Help kHelpRifeMultiplier{"Multiplier","3X and 4X require the private route. Luke Ross also requires the isolated post-AFW synthesis queue. Additional intermediates increase GPU work and memory use."};
 constexpr Help kHelpRifeModel{"RIFE model","Installed compatible model weights."};
 constexpr Help kHelpDepth{"Depth search","Uses the game's depth to keep thin near objects (bars, poles, wires) solid in generated frames. Costs GPU time at high resolutions."};
+constexpr Help kHelpHud{"HUD fix","Keeps a HUD and cockpit instruments steady in generated frames, instead of smearing or doubling with the scene when you turn. The effect depends on the game: designed first for Star Citizen, and most useful at 3X and 4X. Uses additional GPU time."};
 constexpr Help kHelpPreset{"DLSS-G preset","C uses Lite blending; A uses Full quality. If the driver rejects C, OFXR tries A. A saved request does not verify the model loaded by NVIDIA; global overrides may still apply."};
 constexpr Help kHelpGenerated{"Generated resolution","Resolution of DLSS-G generated frames. Requires compatible NVIDIA DLSS-G hardware and runtime."};
 constexpr Help kHelpMethod{"Reconstruction","Rebuilds the eye the game skipped this frame. Applies live. Off stops it for every game, Luke Ross and UEVR alike; frame generation and Neural Rendering stay independent."};
@@ -721,6 +722,7 @@ bool generation(Panel& p) {
         changed|=cards(p,"Optical flow engine",draft.hybrid_backend,engines);
         show_flow=true;nvidia_flow=draft.hybrid_backend!=0;
         changed|=toggle_row(p,"Depth search","Depth search",draft.hybrid_depth_search,kHelpDepth);
+        changed|=toggle_row(p,"HUD fix","HUD fix",draft.hybrid_hud_fix,kHelpHud);
     }
 
     if(state.runtime.luke_detected && draft.afw_mode!=0 &&
