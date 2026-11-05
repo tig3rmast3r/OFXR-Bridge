@@ -148,6 +148,7 @@ struct PrivateOpenXrRuntime::Impl {
     std::size_t requested_capacity{}; // preserve Framework2/3 selection across Director switches
     std::deque<std::shared_ptr<Packet>> prepared;
     std::atomic_bool stopping{true};
+    unsigned refused_frames{};
     std::atomic_bool pair_next{};
     std::atomic<XrTime> next_content_time{};
     std::atomic<XrTime> last_end_display{}; // written by the consumer thread: the slot time of the last native End
@@ -277,6 +278,19 @@ struct PrivateOpenXrRuntime::Impl {
             if(selected_timer && SetWaitableTimer(selected_timer,&due,0,nullptr,nullptr,FALSE))WaitForSingleObject(selected_timer,10);
             else {std::unique_lock lock(mutex);changed.wait_for(lock,std::chrono::nanoseconds(left));}
         }
+    }
+    // V417 for the consumer: the producer's End already returned success, so
+    // this frame is simply not shown. OpenComposite's SetSkyboxOverride sends
+    // a loading quad that SteamVR refuses (Green Hell VR) and ignores that
+    // refusal; latching it failed every later frame call of the session. A
+    // failed End closed the frame (see trace 43 below), so nothing is ended
+    // again. Trace 43, c=1: refused for its contents. kPrivateRefusedFrameLimit
+    // in a row still fail the session. Consumer thread only.
+    [[nodiscard]] XrResult drop_refused_frame(std::uint64_t sequence,XrResult result) {
+        if(XR_SUCCEEDED(result))refused_frames=0;
+        if(!frame_content_refused(result) || ++refused_frames>=kPrivateRefusedFrameLimit)return result;
+        if(options.trace)options.trace(43,sequence,static_cast<std::int64_t>(result),1);
+        return XR_SUCCESS;
     }
     void fail(XrResult result) {
         {std::scoped_lock lock(mutex);if(XR_SUCCEEDED(failure))failure=result;}
@@ -727,6 +741,7 @@ struct PrivateOpenXrRuntime::Impl {
                 if(options.accepted_output && result==XR_SUCCESS && end.layerCount)options.accepted_output(returned);
                 if(options.trace)options.trace(8,packet->sequence,entered,0);
                 if(XR_SUCCEEDED(result))trace(2,packet->sequence);
+                result=drop_refused_frame(packet->sequence,result);
                 if(XR_FAILED(result))fail(result);
                 retire(packet);fifo->retire();
                 if(XR_FAILED(result))break;
@@ -941,6 +956,7 @@ struct PrivateOpenXrRuntime::Impl {
                     last_handoff=entered;
                     if(options.trace)options.trace(8,packet->sequence,entered,0);
                     if(XR_SUCCEEDED(result))trace(2,packet->sequence);
+                    result=drop_refused_frame(packet->sequence,result);
                     if(XR_SUCCEEDED(result) && !early && !post_wait(0))result=XR_ERROR_CALL_ORDER_INVALID;
                     if(XR_FAILED(result))fail(result);
                     retire(packet);fifo->retire();if(XR_FAILED(result))break;
@@ -1213,6 +1229,7 @@ struct PrivateOpenXrRuntime::Impl {
                     if(options.trace && (packet->pair_previous || packet->content_time))options.trace(42,packet->sequence,end.displayTime,
                         (packet->pair_previous?1:0)|(packet->content_time?2:0)|(packet->content_time && packet->content_time!=prediction.predictedDisplayTime?4:0));
                     if(XR_SUCCEEDED(result))trace(2,packet->sequence,directed?(slots.valid()?slots.delay():schedule.delay()):0);
+                    result=drop_refused_frame(packet->sequence,result);
                 }
                 // Publish a failed End before freeing a producer credit; a
                 // woken producer must not accept another frame in that gap.

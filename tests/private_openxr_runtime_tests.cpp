@@ -58,6 +58,7 @@ struct Fixture {
     std::condition_variable changed;
     std::atomic_bool block_end{true},end_entered{},fail_end{};
     std::atomic_uint real_acquires{},real_waits{},real_begins{},real_ends{};
+    std::atomic_uint refuse_end_call{},refuse_end_count{1};
     std::atomic<std::int64_t> native_wait_tick_ns{}; // layer fixture's throttling runtime
     bool cycle_waited{},cycle_begun{};
     unsigned successful_waits{};
@@ -290,7 +291,10 @@ struct Fixture {
         }
         if(panel_count==2){std::scoped_lock lock(f.mutex);f.panel_positions.push_back(panels);}
         {std::scoped_lock lock(f.mutex);f.pixels.push_back(color);if(has_overlay)f.overlay_pixels.push_back(overlay_color);f.positions.push_back(position);f.handoffs.push_back(start);f.director_policies.push_back(f.transport?f.transport->director_enabled():true);f.targets.push_back(info->displayTime);++f.real_ends;}
-        f.changed.notify_all();return f.fail_end?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;
+        f.changed.notify_all();
+        if(f.refuse_end_call && f.real_ends>=f.refuse_end_call && f.real_ends<f.refuse_end_call+f.refuse_end_count)
+            return XR_ERROR_SWAPCHAIN_RECT_INVALID;
+        return f.fail_end?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;
     }
     static XrResult XRAPI_CALL create(XrSession,const XrSwapchainCreateInfo* info,XrSwapchain* output) {
         auto& f=*current;if(f.chains.size()>=f.native_chain_limit)return XR_ERROR_LIMIT_REACHED;
@@ -481,6 +485,52 @@ void failure_wakeup() {
     f.begin_virtual();auto pending=std::async(std::launch::async,[&]{return f.submit(chain,4);});check(pending.wait_for(50ms)==std::future_status::timeout,"failure test full");
     f.fail_end=true;f.unblock();check(pending.wait_for(3s)==std::future_status::ready,"runtime failure wakes blocked producer");check(pending.get()==XR_ERROR_RUNTIME_FAILURE,"runtime error propagated, no fabricated success after failure");
     std::puts("Runtime failure propagation and cancellation PASS");
+}
+// V417 in the consumer: one frame refused for its contents (OpenComposite's
+// skybox quad, Green Hell VR) must not end the session on any delivery path.
+void content_refusal(bool directed,unsigned refusals) {
+    Fixture f(true);f.throttled=false;f.allow_expired_end=true;f.unblock();f.refuse_end_call=3;f.refuse_end_count=refusals;auto chain=f.make_chain();
+    if(!native_contract_fixture_mode || native_director_only_fixture_mode)
+        xr_ok(f.transport->set_director_enabled(directed),"choose the delivery path");
+    const unsigned frames=refusals+7;
+    for(unsigned n=1;n<=frames;++n) {
+        f.write(chain,n*8);f.begin_virtual();
+        xr_ok(f.submit(chain,float(n)),"frames around refused ones are accepted");
+    }
+    f.wait_count(frames);xr_ok(f.transport->drain(),"refused frames do not stop delivery");
+    f.write(chain,8);f.begin_virtual();xr_ok(f.submit(chain,1.f),"the session runs on after the refusals");
+    f.wait_count(frames+1);
+    std::printf("Content refusal keeps the session: contract=%d director_only=%d directed=%d refusals=%u PASS\n",
+        native_contract_fixture_mode,native_director_only_fixture_mode,directed,refusals);
+}
+// A refusal that never ends is a fault: it must fail the session, at the limit.
+void content_refusal_limit(bool directed) {
+    Fixture f(true);f.throttled=false;f.allow_expired_end=true;f.unblock();f.refuse_end_call=3;f.refuse_end_count=1000000;auto chain=f.make_chain();
+    if(!native_contract_fixture_mode || native_director_only_fixture_mode)
+        xr_ok(f.transport->set_director_enabled(directed),"choose the delivery path");
+    f.write(chain,8);
+    XrResult result=XR_SUCCESS;
+    const auto limit=xrfg::kPrivateRefusedFrameLimit;
+    for(unsigned n=1;n<=limit+64 && XR_SUCCEEDED(result);++n) {
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        result=f.transport->wait_frame(nullptr,&state);
+        if(XR_SUCCEEDED(result))result=f.transport->begin_frame(nullptr);
+        if(XR_SUCCEEDED(result))result=f.submit(chain,float(n));
+    }
+    check(result==XR_ERROR_SWAPCHAIN_RECT_INVALID,"a permanent refusal fails the session with its own error");
+    check(f.real_ends==limit+2,"the session fails on the limit's refusal, not before and not after");
+    std::printf("Content refusal limit: contract=%d director_only=%d directed=%d PASS\n",
+        native_contract_fixture_mode,native_director_only_fixture_mode,directed);
+}
+void content_refusal_paths() {
+    const auto run=[](bool directed) {
+        content_refusal(directed,1);content_refusal(directed,xrfg::kPrivateRefusedFrameLimit-1);content_refusal_limit(directed);
+    };
+    for(bool directed:{false,true})run(directed);
+    native_contract_fixture_mode=true;run(false);
+    native_adaptive_wait_fixture_mode=true;native_director_only_fixture_mode=true;
+    run(true);
+    native_contract_fixture_mode=native_adaptive_wait_fixture_mode=native_director_only_fixture_mode=false;
 }
 void pending_gpu() {
     Fixture f(true);f.unblock();auto chain=f.make_chain();f.write(chain,77);
@@ -1519,6 +1569,7 @@ void queue_priority_policy() {
 }
 }
 int main(int argc,char** argv){
+if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
 if(argc>1 && std::string_view(argv[1])=="stalled-renewal"){
     for(bool d12:{true,false})for(bool directed:{true,false})stalled_native_renewal(d12,directed,0);
     for(bool directed:{true,false})for(int pattern:{1,2})stalled_native_renewal(true,directed,pattern);

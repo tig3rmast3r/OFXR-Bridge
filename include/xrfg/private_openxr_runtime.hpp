@@ -14,6 +14,16 @@
 
 namespace xrfg {
 struct InterfaceDeliveryReceipt;
+// Djules df029629 / V417: these errors reject one frame's contents, not the
+// session. The presenter and the private consumer drop that frame and go on.
+[[nodiscard]] constexpr bool frame_content_refused(XrResult result) noexcept {
+    return result==XR_ERROR_LAYER_INVALID || result==XR_ERROR_LAYER_LIMIT_EXCEEDED ||
+           result==XR_ERROR_SWAPCHAIN_RECT_INVALID || result==XR_ERROR_POSE_INVALID;
+}
+// About a second of consecutive refusals is a fault, not one bad frame: the
+// consumer latches it so the session fails visibly instead of showing a stuck
+// image while the application still sees every End succeed.
+inline constexpr unsigned kPrivateRefusedFrameLimit=90;
 // Downstream functions are the REAL runtime, never the layer intercepts.
 struct PrivateRuntimeDispatch {
     XrInstance instance{};

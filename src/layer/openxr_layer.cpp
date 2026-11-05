@@ -9212,14 +9212,7 @@ make_presenter_owned_frame(GeneratedFrameEndInfo&& source) {
     return time > maximum - duration ? maximum : time + duration;
 }
 
-// Djules df029629 / V417: these errors reject this frame's contents, not
-// the session. Drop it and return its error; preserve all fatal-error handling.
-[[nodiscard]] constexpr bool frame_content_refused(XrResult result) noexcept {
-    return result == XR_ERROR_LAYER_INVALID ||
-           result == XR_ERROR_LAYER_LIMIT_EXCEEDED ||
-           result == XR_ERROR_SWAPCHAIN_RECT_INVALID ||
-           result == XR_ERROR_POSE_INVALID;
-}
+using xrfg::frame_content_refused;
 
 void fail_pending_presenter_submissions_locked(
     SessionState& state,
