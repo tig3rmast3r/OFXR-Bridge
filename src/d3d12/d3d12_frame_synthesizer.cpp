@@ -145,8 +145,9 @@ struct NvidiaInputScaleRatio {
     }
 }
 // t8 the game's depth and t9 the depth splat, Hybrid's depth search; t10 the
-// still mask, its HUD fix, every image slice's at half resolution.
-constexpr UINT kSrvDescriptorCount = 11;
+// still mask, its HUD fix, every image slice's at half resolution; t11 where
+// the depth is in its texture.
+constexpr UINT kSrvDescriptorCount = 12;
 constexpr UINT kUavDescriptorCount = 3;
 constexpr UINT kDescriptorBlockSize =
     kSrvDescriptorCount + kUavDescriptorCount;
@@ -972,6 +973,9 @@ struct D3D12FrameSynthesizer::Impl {
         std::uint32_t eye_order_eye{};
         std::uint64_t eye_order_assigned{};
         std::uint64_t eye_order_alternate{};
+        // Each eye's depth rectangle, read at t11: four floats an eye.
+        ComPtr<ID3D12Resource> depth_regions;
+        float* depth_regions_mapped{};
         // Hybrid's depth search: the midpoint splat (0.2 V555).
         ComPtr<ID3D12Resource> depth_splat;
         UINT depth_splat_width{}, depth_splat_height{};
@@ -2494,6 +2498,14 @@ struct D3D12FrameSynthesizer::Impl {
                 null_array.Format = DXGI_FORMAT_R8_UINT;
                 device->CreateShaderResourceView(nullptr, &null_array,
                     offset_cpu_handle(cpu_start, block * kDescriptorBlockSize + 10U, descriptor_increment));
+                D3D12_SHADER_RESOURCE_VIEW_DESC null_region{};
+                null_region.Format = DXGI_FORMAT_R32_TYPELESS;
+                null_region.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                null_region.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                null_region.Buffer.NumElements = 4;
+                null_region.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                device->CreateShaderResourceView(nullptr, &null_region,
+                    offset_cpu_handle(cpu_start, block * kDescriptorBlockSize + 11U, descriptor_increment));
             }
             D3D12_UNORDERED_ACCESS_VIEW_DESC null_splat{};
             null_splat.Format = DXGI_FORMAT_R32_UINT;
@@ -3384,6 +3396,46 @@ struct D3D12FrameSynthesizer::Impl {
             }
             device->CreateShaderResourceView(depth, &depth_description,
                 offset_cpu_handle(start, eye * kDescriptorBlockSize + 8U, descriptor_increment));
+            // And where it is in that texture, at t11.
+            if (depth != nullptr) {
+                if (!slot.depth_regions) {
+                    D3D12_HEAP_PROPERTIES heap{};
+                    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+                    heap.CreationNodeMask = 1;
+                    heap.VisibleNodeMask = 1;
+                    D3D12_RESOURCE_DESC buffer{};
+                    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                    buffer.Width = kMaxReprojectionViews * 4U * sizeof(float);
+                    buffer.Height = 1;
+                    buffer.DepthOrArraySize = 1;
+                    buffer.MipLevels = 1;
+                    buffer.SampleDesc.Count = 1;
+                    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                    HRESULT made = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                        IID_PPV_ARGS(slot.depth_regions.ReleaseAndGetAddressOf()));
+                    if (SUCCEEDED(made)) {
+                        made = slot.depth_regions->Map(0, nullptr,
+                            reinterpret_cast<void**>(&slot.depth_regions_mapped));
+                    }
+                    if (FAILED(made)) {
+                        slot.depth_regions.Reset();
+                        slot.depth_regions_mapped = nullptr;
+                        return made;
+                    }
+                }
+                const auto region = guide_depth_rect(*frame);
+                std::memcpy(slot.depth_regions_mapped + eye * 4U, region.data(), sizeof(float) * 4U);
+                D3D12_SHADER_RESOURCE_VIEW_DESC region_view{};
+                region_view.Format = DXGI_FORMAT_R32_TYPELESS;
+                region_view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                region_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                region_view.Buffer.FirstElement = eye * 4U;
+                region_view.Buffer.NumElements = 4;
+                region_view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                device->CreateShaderResourceView(slot.depth_regions.Get(), &region_view,
+                    offset_cpu_handle(start, eye * kDescriptorBlockSize + 11U, descriptor_increment));
+            }
         }
         return S_OK;
     }
@@ -3415,9 +3467,10 @@ struct D3D12FrameSynthesizer::Impl {
 
     // Depth the search can use: a readable format, on the vectors' rectangle.
     [[nodiscard]] static bool usable_guide_depth(const DlssMotionVectorFrame& frame) noexcept {
+        // Depth has a size of its own: Ready or Not's vectors are at the
+        // output's resolution and its depth at the render's.
         return frame.depth && depth_view_format(frame.depth->GetDesc().Format) != DXGI_FORMAT_UNKNOWN &&
-            frame.depth_x == frame.motion_x && frame.depth_y == frame.motion_y &&
-            frame.depth_width == frame.motion_width && frame.depth_height == frame.motion_height;
+            frame.depth_width != 0 && frame.depth_height != 0;
     }
 
     // The hybrid composition's guide constants: the DLSS output rectangle
@@ -3503,7 +3556,7 @@ struct D3D12FrameSynthesizer::Impl {
             apply_hybrid_guide_constants(splat.parameters, guide);
             splat.parameters.slice = eye;
             splat.parameters.view_index = view_index;
-            const auto& rect = splat.parameters.game_motion_rect;
+            const auto rect = guide_depth_rect(guide);
             if (!(rect[2] >= 1.0F) || !(rect[3] >= 1.0F) || rect[2] > 16384.0F || rect[3] > 16384.0F)
                 continue;
             splat.columns = static_cast<UINT>(std::ceil(rect[2])) + 1U;

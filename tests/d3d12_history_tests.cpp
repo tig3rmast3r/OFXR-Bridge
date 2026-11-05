@@ -6245,6 +6245,11 @@ int main(int argc, char** argv) {
                 for (const UINT outputs : {2U, 3U})
                     require(test_hybrid_bars(hybrid_fixture, true, backend, 256, false, outputs) >= 0.95,
                         "hybrid bars by the depth splat are not whole in every 3X/4X output");
+                const double low_res = test_hybrid_bars(hybrid_fixture, true, backend, 256, false, 1, true);
+                std::cout << "hybrid bars, depth at 2/3 of the vectors: " << low_res << '\n';
+                require(low_res >= 0.9, "depth at a resolution of its own did not reach the search");
+                require(test_hybrid_bars(hybrid_fixture, true, backend, 256, false, 1, false, true) >= 0.95,
+                    "hybrid bars by forward depth are not whole");
             }
             SetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_SPLAT", L"1");
             require(test_hybrid_bars(hybrid_fixture, true) <= bars_without_depth + 0.05,

@@ -11,6 +11,10 @@ Texture2DArray<float4> SceneOnlyFrame : register(t7);
 // writes, this eye's slices, one per synthetic output.
 Texture2DArray<float> GameDepth : register(t8);
 Texture2DArray<uint> DepthSplat : register(t9);
+// Where this eye's depth is in its texture, four floats: x, y, width, height.
+// Its own rectangle, since depth can be at render resolution beside vectors at
+// the output's (Ready or Not); the constants have no room left for it.
+ByteAddressBuffer GameDepthRegion : register(t11);
 // Hybrid's HUD fix (0.2 V559, V573): the still mask BuildStillMask writes, at
 // half the output's resolution over the whole image, four slices per image
 // slice: 4s the texels whose edge has stayed in place for enough pairs in a
@@ -830,13 +834,15 @@ uint depth_splat_output() { return (SynthesisFlags >> 27) & 3u; }
 static const float kDepthNearerFactor = 1.5;
 static const float kDepthAgreeLimit = 0.25;
 
-// The depth texel game_nearness reads for `pixel`: the vectors' grid.
+float4 game_depth_region() { return asfloat(GameDepthRegion.Load4(0)); }
+
+// The depth texel game_nearness reads for `pixel`.
 int2 game_depth_texel(float2 pixel) {
     float4 output_rect = game_motion_output_rect();
     float2 uv = (pixel - output_rect.xy + 0.5) / max(output_rect.zw, float2(1.0, 1.0));
-    float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
-    return int2(clamp(GameMotionRect.xy + uv * GameMotionRect.zw,
-        GameMotionRect.xy, maximum));
+    float4 region = game_depth_region();
+    float2 maximum = region.xy + region.zw - 1.0;
+    return int2(clamp(region.xy + uv * region.zw, region.xy, maximum));
 }
 
 // How near the surface B shows at `pixel` is, larger nearer. Only its order
@@ -848,14 +854,15 @@ float game_nearness(float2 pixel) {
 
 bool nearer(float a, float b) { return a > b * kDepthNearerFactor + 1.0e-6; }
 
-// The splat's texel for a coordinate of the image: the vectors' texel grid
+// The splat's texel for a coordinate of the image: the depth's texel grid
 // over the output rectangle, counted from its origin (0.2's coverage mask
-// grid, V539).
+// grid, V539, was the vectors': the same but for full-resolution vectors).
 int2 coverage_mask_texel(float2 coordinate) {
     float4 output_rect = game_motion_output_rect();
     float2 uv = (coordinate - output_rect.xy + 0.5) / max(output_rect.zw, float2(1.0, 1.0));
-    float2 limit = max(ceil(GameMotionRect.zw), float2(1.0, 1.0));
-    return int2(clamp(floor(uv * GameMotionRect.zw), float2(0.0, 0.0), limit));
+    float2 extent = game_depth_region().zw;
+    float2 limit = max(ceil(extent), float2(1.0, 1.0));
+    return int2(clamp(floor(uv * extent), float2(0.0, 0.0), limit));
 }
 
 // A splat word: bits 24-31 how near by the game's depth, on a log scale - 8
@@ -1847,7 +1854,7 @@ static const uint kDepthSplatOutputs = 3u;
 [numthreads(8, 8, 1)]
 void ClearDepthSplat(uint3 id : SV_DispatchThreadID) {
     hybrid_layout = true;
-    float2 limit = ceil(GameMotionRect.zw);
+    float2 limit = ceil(game_depth_region().zw);
     if (float(id.x) <= limit.x && float(id.y) <= limit.y) {
         DepthSplatOut[uint3(id.xy, kDepthSplatOutputs * Slice + depth_splat_output())] = 0u;
     }
@@ -1856,7 +1863,7 @@ void ClearDepthSplat(uint3 id : SV_DispatchThreadID) {
 [numthreads(8, 8, 1)]
 void BuildDepthSplat(uint3 id : SV_DispatchThreadID) {
     hybrid_layout = true;
-    float2 extent = GameMotionRect.zw;
+    float2 extent = game_depth_region().zw;
     if (float(id.x) >= extent.x || float(id.y) >= extent.y) return;
     // The output pixel under this texel's centre: game_motion_texel's map,
     // inverted.

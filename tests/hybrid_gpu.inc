@@ -215,10 +215,13 @@ template <typename DepthForPixel>
 // 0.2 V505/V555: a thin near bar sweeps across background both frames show.
 // Without the depth search the solve finds the background and the bars go
 // missing from the generated frame; with it they stay whole. outputs 1-3 is
-// 2X-4X, each output checked at its own instant.
+// 2X-4X, each output checked at its own instant. low_res_depth: depth at two
+// thirds of the vectors' size, as Ready or Not's full-resolution vectors have.
+// forward_depth: larger is farther, as Skyrim's is.
 double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
     xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx,
-    UINT length = 256, bool vertical = false, UINT outputs = 1) {
+    UINT length = 256, bool vertical = false, UINT outputs = 1, bool low_res_depth = false,
+    bool forward_depth = false) {
     const UINT width = vertical ? 128U : length;
     const UINT height = vertical ? length : 128U;
     // Along the motion (u) and across it (v), in image pixels.
@@ -261,9 +264,14 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
             return vertical ? std::array<float, 2>{0.0F, motion} : std::array<float, 2>{motion, 0.0F};
         });
     // Inverted depth, as DI2's and MSFS's DLSS: larger is nearer.
+    const UINT depth_field_width = low_res_depth ? width * 2U / 3U : width;
+    const UINT depth_field_height = low_res_depth ? height * 2U / 3U : height;
     auto game_depth = create_and_upload_game_depth_field(
-        fixture, width, height, [&](UINT, UINT x, UINT y) {
-            return bar_at(along(x, y), across(x, y), bar_motion) ? 0.5F : 0.01F;
+        fixture, depth_field_width, depth_field_height, [&](UINT, UINT dx, UINT dy) {
+            const UINT x = (dx * 2U + 1U) * width / (depth_field_width * 2U);
+            const UINT y = (dy * 2U + 1U) * height / (depth_field_height * 2U);
+            const float nearness = bar_at(along(x, y), across(x, y), bar_motion) ? 0.5F : 0.01F;
+            return forward_depth ? 1.0F - nearness : nearness;
         });
     std::array<ComPtr<ID3D12Resource>, 2> sources{
         create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
@@ -307,9 +315,9 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
             frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             if (with_depth) {
                 frame->depth = game_depth;
-                frame->depth_width = width;
-                frame->depth_height = height;
-                frame->depth_inverted = true;
+                frame->depth_width = depth_field_width;
+                frame->depth_height = depth_field_height;
+                frame->depth_inverted = !forward_depth;
                 frame->depth_resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
             }
