@@ -829,3 +829,140 @@ HudError test_hybrid_hud_double_wide(D3D12WarpFixture& fixture,
     require(operation_succeeded(history->invalidate()), "double-wide HUD history invalidate failed");
     return error;
 }
+
+// 0.2 V546: the eye-order measurement on the GPU, for a swapchain of one eye
+// whose two DLSS streams nothing tells apart. A textured object moves 16 pixels
+// over a background moving 4; this eye's stream has the object where the image
+// shows it, the other eye's 40 pixels to the side, as a disparity puts it.
+// Whichever of the two the resolver assigned, the eye's own images have to vote
+// this eye's stream in, and the pair's order follow. native: on the DLSS-G
+// route as well, which measures through the same pass; a real adapter.
+void test_eye_order_measurement_on_gpu(D3D12WarpFixture& fixture, bool native = false) {
+    constexpr UINT width = 512, height = 256;
+    constexpr int object_left = 128, object_width = 128, object_top = 64, object_bottom = 192;
+    constexpr int object_motion = 16, background_motion = 4, disparity = 40;
+    const auto byte = [](int value) { return static_cast<std::uint8_t>(value); };
+    const auto image = [&](int background_shift, int object_shift) {
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(width) * height * kBytesPerPixel, 0);
+        for (UINT y = 0; y < height; ++y) {
+            for (UINT x = 0; x < width; ++x) {
+                const int left = object_left + object_shift, v = static_cast<int>(y);
+                const bool object = v >= object_top && v < object_bottom &&
+                    static_cast<int>(x) >= left && static_cast<int>(x) < left + object_width;
+                const int u = object ? static_cast<int>(x) - left
+                                     : static_cast<int>(x) - background_shift + 64;
+                const RgbaBytes color = object
+                    ? RgbaBytes{byte(200 - (u * 29 + v * 17) % 120), byte(40 + (u * 11 + v * 23) % 160),
+                          byte(60 + ((u / 3) * 19 + v * 5) % 150), 255}
+                    : RgbaBytes{byte(60 + (u * 37 + v * 11) % 150), byte(70 + ((u / 2) * 13 + v * 7) % 140),
+                          byte(80 + (u * 5 + v * 3) % 120), 255};
+                std::copy(color.begin(), color.end(),
+                    bytes.begin() + (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel);
+            }
+        }
+        return bytes;
+    };
+    const auto image_a = image(0, 0);
+    const auto image_b = image(background_motion, object_motion);
+    // Each pixel's vector back to the other image: from B to A (forward) or
+    // from A to B, the object where this eye (offset 0) or the other eye
+    // (offset disparity) sees it.
+    const auto field = [&](bool forward, int offset) {
+        return create_and_upload_game_motion_field(
+            fixture, width, height, [&, forward, offset](UINT, UINT x, UINT y) {
+                const int left = object_left + offset + (forward ? object_motion : 0);
+                const int v = static_cast<int>(y);
+                const bool object = v >= object_top && v < object_bottom &&
+                    static_cast<int>(x) >= left && static_cast<int>(x) < left + object_width;
+                const float motion = static_cast<float>(object ? object_motion : background_motion);
+                return std::array<float, 2>{forward ? -motion : motion, 0.0F};
+            });
+    };
+    const auto own_forward = field(true, 0), own_backward = field(false, 0);
+    const auto other_forward = field(true, disparity), other_backward = field(false, disparity);
+    const auto run = [&](std::uint64_t own_stream, std::uint64_t other_stream, bool assign_own,
+                         xrfg::D3D12FrameGenerationMode mode = xrfg::D3D12FrameGenerationMode::ofxr) {
+        std::array<ComPtr<ID3D12Resource>, 2> sources{create_single_slice_texture(fixture, width, height),
+            create_single_slice_texture(fixture, width, height)};
+        std::array<ComPtr<ID3D12Resource>, 2> current_destinations{create_single_slice_texture(fixture, width, height),
+            create_single_slice_texture(fixture, width, height)};
+        std::array<ComPtr<ID3D12Resource>, 1> synthetic_destinations{create_single_slice_texture(fixture, width, height)};
+        upload_single_slice(fixture, sources[0].Get(), image_a, width, height);
+        upload_single_slice(fixture, sources[1].Get(), image_b, width, height);
+        std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
+        std::array<ID3D12Resource*, 2> current_pointers{current_destinations[0].Get(), current_destinations[1].Get()};
+        std::array<ID3D12Resource*, 1> synthetic_pointers{synthetic_destinations[0].Get()};
+        auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+        require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
+                    source_pointers, D3D12_RESOURCE_STATE_RENDER_TARGET)),
+            "eye-order history initialization failed");
+        xrfg::D3D12NvidiaOpticalFlowOptions options{};
+        options.hybrid = mode == xrfg::D3D12FrameGenerationMode::ofxr;
+        xrfg::D3D12FrameSynthesizer synthesizer;
+        require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
+                    current_pointers, synthetic_pointers, kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                    xrfg::D3D12OpticalFlowBackend::fidelity_fx, options, false, mode)),
+            "eye-order synthesizer initialization failed");
+        std::array<xrfg::D3D12ReprojectionView, 1> view{};
+        view[0].fov = {-0.785398F, 0.785398F, 0.785398F, -0.785398F};
+        view[0].image_rect = {0, 0, width, height};
+        view[0].array_slice = 0;
+        const auto frame_for = [&](std::uint64_t stream, std::uint64_t serial, const ComPtr<ID3D12Resource>& vectors) {
+            auto frame = std::make_shared<xrfg::DlssMotionVectorFrame>();
+            frame->stream = stream;
+            frame->epoch = 5;
+            frame->serial = serial;
+            frame->previous_serial = serial - 1;
+            frame->motion_vectors = vectors;
+            frame->producer_queue = fixture.queue();
+            frame->output_width = frame->motion_width = width;
+            frame->output_height = frame->motion_height = height;
+            frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            return frame;
+        };
+        const auto set_for = [&](std::uint64_t serial, bool forward) {
+            auto own = frame_for(own_stream, serial, forward ? own_forward : own_backward);
+            auto other = frame_for(other_stream, serial, forward ? other_forward : other_backward);
+            auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+            set->eye_count = 1;
+            set->eyes[0] = assign_own ? own : other;
+            set->alternate = assign_own ? other : own;
+            set->resolved_eye = 0;
+            return set;
+        };
+        xrfg::D3D12HistoryCaptureTicket capture{};
+        require(operation_succeeded(history->capture(0, &capture)) &&
+                operation_succeeded(history->commit(capture)),
+            "eye-order capture A failed");
+        xrfg::D3D12FrameSynthesisTicket ticket{};
+        require(operation_succeeded(synthesizer.submit_prime(capture, view, 0, &ticket, set_for(1, false))),
+            "eye-order prime failed");
+        require_frame_start_gate(synthesizer, "eye-order frame-start gate");
+        for (std::uint64_t pair = 1; pair <= 32; ++pair) {
+            const std::uint32_t index = static_cast<std::uint32_t>(pair % 2U);
+            require(operation_succeeded(history->capture(index, &capture)) &&
+                    operation_succeeded(history->commit(capture)),
+                "eye-order capture failed");
+            require(operation_succeeded(synthesizer.submit_pair(capture, view, view, 0, index,
+                        &ticket, std::nullopt, set_for(pair + 1, index == 1))),
+                "eye-order pair failed");
+            fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+        }
+        require(operation_succeeded(synthesizer.wait_for_idle()), "eye-order drain failed");
+        require(operation_succeeded(history->invalidate()), "eye-order history invalidate failed");
+        return xrfg::dlss_eye_order_left(own_stream, other_stream);
+    };
+    const std::uint64_t kept = run(901, 902, true);
+    const std::uint64_t swapped = run(911, 912, false);
+    std::cout << "eye order: assigned own -> left " << kept << ", assigned other -> left " << swapped << '\n';
+    require(kept == 901, "the eye images did not vote in the eye's own stream when it was assigned");
+    require(swapped == 911, "the eye images did not vote in the eye's own stream when the other was assigned");
+    if (native) {
+        const std::uint64_t native_kept = run(921, 922, true, xrfg::D3D12FrameGenerationMode::native_dlss);
+        const std::uint64_t native_swapped = run(931, 932, false, xrfg::D3D12FrameGenerationMode::native_dlss);
+        std::cout << "eye order DLSS-G: assigned own -> left " << native_kept
+                  << ", assigned other -> left " << native_swapped << '\n';
+        require(native_kept == 921 && native_swapped == 931,
+            "the DLSS-G route did not measure the eye's own stream");
+    }
+}

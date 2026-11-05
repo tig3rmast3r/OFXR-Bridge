@@ -298,6 +298,13 @@ struct DlssMotionVectorSet {
                kDlssMotionVectorEyeCount>
         eyes;
     std::uint32_t eye_count{};
+    // 0.2 V546: an eye of a swapchain per eye whose two DLSS streams nothing
+    // tells apart, while their order is being measured: the other stream's
+    // evaluation, and the eye (0 left, 1 right) this set was resolved for.
+    // The synthesizer compares both against the eye's images
+    // (report_dlss_eye_order).
+    std::shared_ptr<const DlssMotionVectorFrame> alternate;
+    int resolved_eye{-1};
 };
 
 enum class DlssMotionVectorStatus : std::uint32_t {
@@ -386,11 +393,27 @@ struct DlssReleasedEyeIdentity {
     bool both_eyes{};
     std::uint32_t view_half{};
     // Hybrid: where nothing learned names this eye's stream, two streams
-    // alike take the order every other route does, and the identity is learned
-    // from that. A stream is learned only from a join, and with both eyes
+    // alike take the measured order (report_dlss_eye_order), first seen until
+    // it is decided. A stream is learned only from a join, and with both eyes
     // evaluated before either release (Star Citizen) strict alone never joins.
     bool learn_from_order{};
 };
+// 0.2 V546: two DLSS streams, one per eye, that nothing tells apart - each eye
+// in a swapchain of its own, both inputs at the same offset, no camera (Star
+// Citizen) - went to the eyes by which one was seen first, which says nothing
+// about the eye: a swapped pair gives double edges on every sideways head move
+// and none with the head still. So the order is measured. While a pair is
+// undecided each eye's set carries the other stream's evaluation
+// (DlssMotionVectorSet::alternate) and the synthesizer reports, over the pixels
+// where the two streams' vectors part, how many the eye's own images favour
+// each: the current pixel against the previous image read at the end of each
+// vector. Once the votes agree the pair's left stream is fixed until a stream
+// of it is retired. `informative` is the pixels compared.
+void report_dlss_eye_order(std::uint32_t eye, std::uint64_t assigned_stream,
+    std::uint64_t alternate_stream, std::uint64_t assigned_votes,
+    std::uint64_t alternate_votes, std::uint64_t informative) noexcept;
+// The left stream decided for the pair, or 0 while it is undecided.
+[[nodiscard]] std::uint64_t dlss_eye_order_left(std::uint64_t first, std::uint64_t second) noexcept;
 // tentative: a per-eye lookup that xrEndFrame's placement by camera revisits
 // (MSFS 2024's foveated streams are never the eye's size). Its failure leaves
 // the guide status as it was; the caller reports one if the frame ends

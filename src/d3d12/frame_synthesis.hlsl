@@ -30,6 +30,13 @@ RWTexture2DArray<uint> DepthSplatOut : register(u0);
 // The passes that write the still mask, every image slice's.
 RWTexture2DArray<uint> StillMaskOut : register(u0);
 #endif
+#ifdef XRFG_EYE_ORDER
+// 0.2 V546: the eye-order measurement, in a descriptor block of its own: the
+// other stream's vectors on the still mask's register and its verdict on the
+// pack's, neither of which it uses.
+Texture2DArray<float2> AlternateMotionVectors : register(t10);
+RWByteAddressBuffer EyeOrderVerdict : register(u0);
+#endif
 #ifdef XRFG_NVIDIA_LUMA_INPUT
 RWTexture2D<float> NvidiaPreviousColor : register(u1);
 RWTexture2D<float> NvidiaCurrentColor : register(u2);
@@ -2141,5 +2148,85 @@ void DilateStillMask(uint3 id : SV_DispatchThreadID) {
         }
     }
     StillMaskOut[uint3(id.xy, kStillMaskSlices * Slice + 1u)] = grown;
+}
+#endif
+
+#ifdef XRFG_EYE_ORDER
+// 0.2 V546: which of two DLSS streams nothing else tells apart is this eye's
+// (dlss_motion_vectors.hpp, report_dlss_eye_order). Every second texel of this
+// stream's vectors (t6) where the other stream's (t10) part from them by more
+// than a pixel, the current image's pixel is compared with the previous image
+// read at the end of each vector: the eye's own vectors land on the surface
+// the pixel shows, the other eye's a disparity to the side. EyeOrderVerdict
+// words: 0 the pixels compared, 1 those this stream's vector matched better by
+// more than the margin, 2 those the other's did.
+float eye_order_tone(float4 color) {
+    return sqrt(max(dot(color.rgb, float3(0.2126, 0.7152, 0.0722)), 0.0));
+}
+
+[numthreads(1, 1, 1)]
+void ClearEyeOrder(uint3 id : SV_DispatchThreadID) {
+    EyeOrderVerdict.Store4(0, uint4(0u, 0u, 0u, 0u));
+}
+
+// 0 not compared, 1 compared without a winner, 2 this stream's vector won,
+// 3 the other's.
+uint eye_order_vote(uint2 cell) {
+    uint vote = 0u;
+    float2 extent = GameMotionRect.zw;
+    int2 texel = int2(cell) * 2;
+    float4 output_rect = game_motion_output_rect();
+    float2 pixel = output_rect.xy +
+        (float2(texel) + 0.5) / max(extent, float2(1.0, 1.0)) * output_rect.zw - 0.5;
+    float2 limit = float2(float(Width) - 1.0, float(Height) - 1.0);
+    bool inside = float(texel.x) < extent.x && float(texel.y) < extent.y &&
+        all(pixel >= 0.0) && all(pixel <= limit);
+    [branch] if (inside) {
+        int2 at = int2(GameMotionRect.xy) + texel;
+        float2 own = GameMotionVectors.Load(int4(at, 0, 0)) * GameMotionScale +
+            GameMotionJitterDelta;
+        float2 other = AlternateMotionVectors.Load(int4(at, 0, 0)) * GameMotionScale +
+            GameMotionJitterDelta;
+        float2 own_end = pixel + own;
+        float2 other_end = pixel + other;
+        bool compared = length(own - other) > 1.0 &&
+            all(own_end >= 0.0) && all(own_end <= limit) &&
+            all(other_end >= 0.0) && all(other_end <= limit);
+        [branch] if (compared) {
+            float now = eye_order_tone(bilinear_current_source(pixel, Slice));
+            float own_error = abs(now - eye_order_tone(bilinear_previous_source(own_end, Slice)));
+            float other_error =
+                abs(now - eye_order_tone(bilinear_previous_source(other_end, Slice)));
+            const float margin = 1.0 / 64.0;
+            vote = own_error + margin < other_error ? 2u
+                : (other_error + margin < own_error ? 3u : 1u);
+        }
+    }
+    return vote;
+}
+
+groupshared uint eye_order_counts[3];
+
+[numthreads(8, 8, 1)]
+void MeasureEyeOrder(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex) {
+    hybrid_layout = true;
+    if (index < 3u) eye_order_counts[index] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    uint vote = eye_order_vote(id.xy);
+    if (vote != 0u) {
+        InterlockedAdd(eye_order_counts[0], 1u);
+        if (vote == 2u) {
+            InterlockedAdd(eye_order_counts[1], 1u);
+        } else if (vote == 3u) {
+            InterlockedAdd(eye_order_counts[2], 1u);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (index == 0u && eye_order_counts[0] != 0u) {
+        uint ignored;
+        EyeOrderVerdict.InterlockedAdd(0, eye_order_counts[0], ignored);
+        EyeOrderVerdict.InterlockedAdd(4, eye_order_counts[1], ignored);
+        EyeOrderVerdict.InterlockedAdd(8, eye_order_counts[2], ignored);
+    }
 }
 #endif

@@ -12,6 +12,7 @@
 #include <bit>
 #include <cmath>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -99,6 +100,16 @@ struct StreamState {
 };
 
 struct Registry {
+    // 0.2 V546: the measured eye order of two streams nothing else tells apart
+    // (report_dlss_eye_order), by the pair's lower and higher stream.
+    struct EyeOrder {
+        // The pixels that favoured each stream as the left eye's.
+        std::uint64_t lower_left_votes{};
+        std::uint64_t higher_left_votes{};
+        std::uint64_t measurements{};
+        std::uint64_t left{};
+    };
+    std::map<std::pair<std::uint64_t, std::uint64_t>, EyeOrder> eye_orders;
     std::mutex mutex;
     std::unordered_map<std::uint64_t, StreamState> streams;
     // A retired stream must disappear from resolution immediately, but its
@@ -924,6 +935,7 @@ void retire_disabled_dlss_motion_vector_resources() noexcept {
             state.retired_streams.reserve(state.retired_streams.size()+state.streams.size());
             for(auto& [unused,stream]:state.streams)state.retired_streams.push_back(std::move(stream));
             state.streams.clear();
+            state.eye_orders.clear();
             state.statistics = {};
             state.statistics.status = DlssMotionVectorStatus::disabled;
         }
@@ -943,6 +955,10 @@ void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept {
             g_retirement_pending.store(true,std::memory_order_release);
             collect_retired(state);
         }
+        // A pair with this stream in it is a pair no more.
+        std::erase_if(state.eye_orders, [&](const auto& entry) {
+            return entry.first.first == stream || entry.first.second == stream;
+        });
     } catch (...) {
     }
 }
@@ -1492,27 +1508,73 @@ resolve_view_placed_dlss_guides(
                     fit[index][eye] = view_fit_error(cameras[index], eyes[eye]);
             }
         }
-        // The pair of streams, one an eye, that fits best.
-        std::size_t best_left = 0, best_right = 0;
-        double best = kNoFit;
-        for (std::size_t left = 0; left < candidates.size(); ++left) {
-            for (std::size_t right = 0; right < candidates.size(); ++right) {
-                if (left == right || fit[left][0] >= kNoFit || fit[right][1] >= kNoFit) continue;
-                const double cost = fit[left][0] + fit[right][1];
-                if (cost < best) {
-                    best = cost;
-                    best_left = left;
-                    best_right = right;
+        // 0.2 V549: the evaluations' order against the two eyes' releases picks
+        // each eye's streams before the cameras do. A game evaluates a view's
+        // DLSS and then releases that view's image, so the streams whose newest
+        // evaluation came before the first eye's release are that eye's, and
+        // those evaluated between the two releases the other's. MSFS 2024
+        // foveated on a Pimax Dream Air: both peripheries carry the same
+        // symmetric field, the fit ties every frame, and the cameras' positions
+        // put the eyes the wrong way round about half the time; the left eye
+        // then took the right periphery's previous evaluation, the other eye's
+        // vectors a frame old, and juddered alone. The cameras decide only when
+        // the order says nothing: both eyes evaluated before either release, or
+        // no covering stream in one of the two groups.
+        constexpr std::uint8_t kNoGroup = 2;
+        std::vector<std::uint8_t> group(candidates.size(), kNoGroup);
+        std::uint32_t first_eye = kDlssMotionVectorEyeCount;
+        if (released_at[0] != 0 && released_at[1] != 0 && released_at[0] != released_at[1]) {
+            first_eye = released_at[0] < released_at[1] ? 0U : 1U;
+            for (std::size_t index = 0; index < candidates.size(); ++index) {
+                const std::uint64_t publication = candidates[index].frame->publication;
+                if (publication <= released_at[first_eye]) {
+                    group[index] = static_cast<std::uint8_t>(first_eye);
+                } else if (publication <= released_at[1 - first_eye]) {
+                    group[index] = static_cast<std::uint8_t>(1 - first_eye);
                 }
             }
+        }
+        // The pair of streams, one an eye, that fits best among those allowed;
+        // equal fits prefer the newer evaluations (a stream left from the frame
+        // before, in the first eye's group).
+        std::size_t best_left = 0, best_right = 0;
+        double best = kNoFit;
+        const auto search = [&](auto&& allowed) {
+            best = kNoFit;
+            std::uint64_t best_recency = 0;
+            for (std::size_t left = 0; left < candidates.size(); ++left) {
+                for (std::size_t right = 0; right < candidates.size(); ++right) {
+                    if (left == right || fit[left][0] >= kNoFit || fit[right][1] >= kNoFit ||
+                        !allowed(left, right)) continue;
+                    const double cost = fit[left][0] + fit[right][1];
+                    const std::uint64_t recency =
+                        candidates[left].frame->publication + candidates[right].frame->publication;
+                    if (cost < best - 1e-9 || (std::fabs(cost - best) <= 1e-9 && recency > best_recency)) {
+                        best = cost;
+                        best_recency = recency;
+                        best_left = left;
+                        best_right = right;
+                    }
+                }
+            }
+            return best < kNoFit;
+        };
+        bool by_release = false;
+        if (first_eye < kDlssMotionVectorEyeCount) {
+            by_release = search([&](std::size_t left, std::size_t right) {
+                return group[left] == 0 && group[right] == 1;
+            });
+        }
+        if (!by_release) {
+            search([](std::size_t, std::size_t) { return true; });
         }
         if (best >= kNoFit) {
             state.statistics.status = DlssMotionVectorStatus::output_not_direct;
             return none;
         }
         // Two cameras that fit both eyes alike (a symmetric field): the
-        // camera further left is the left eye.
-        if (fit[best_right][0] < kNoFit && fit[best_left][1] < kNoFit &&
+        // camera further left is the left eye, where the releases said nothing.
+        if (!by_release && fit[best_right][0] < kNoFit && fit[best_left][1] < kNoFit &&
             std::fabs((fit[best_right][0] + fit[best_left][1]) - best) < 1e-4) {
             const auto& a = cameras[best_left];
             const auto& b = cameras[best_right];
@@ -1560,6 +1622,23 @@ resolve_view_placed_dlss_guides(
             result[eye] = std::move(set);
         }
         state.statistics.matched += kDlssMotionVectorEyeCount;
+        // 870: how the eyes were joined, the first 16, every 512th and each
+        // change: a 1 by the releases' order, 2 by the cameras | the left
+        // stream's low 24 bits << 8 | the right's << 32, b the eye released
+        // first (2 none), c the streams considered.
+        {
+            static std::uint64_t joins = 0;
+            static std::uint64_t last_key = ~0ULL;
+            const std::uint64_t key = (by_release ? 1ULL : 2ULL) |
+                ((candidates[best_left].frame->stream & 0xFFFFFFULL) << 8U) |
+                ((candidates[best_right].frame->stream & 0xFFFFFFULL) << 32U);
+            const std::uint64_t join = joins++;
+            if (join < 16 || join % 512 == 0 || key != last_key) {
+                bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 870,
+                    key, first_eye, candidates.size());
+            }
+            last_key = key;
+        }
         return result;
     } catch (...) {
         return none;
@@ -1720,6 +1799,114 @@ std::uint64_t dlss_motion_vector_publications() noexcept {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
         return state.next_publication - 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+// 0.2 V547, 869: how a swapchain-per-eye session's two untold streams went to
+// an eye at its release, the first 16 and every 600th after: a the eye << 40 |
+// the path << 32 | the chosen stream's low 32 bits, b the paths so far: 0
+// undecided, both evaluations before either release << 32 | 1 undecided, one
+// between the releases; c 2 decided, both before << 32 | 3 decided, one
+// between. V548: a bit 44 where the eye took its stream's previous evaluation,
+// not its newest, and the count of those so far in b's bits 48-63.
+static void record_pair_path(std::uint64_t eye, unsigned path, bool behind,
+    const DlssMotionVectorFrame* chosen) noexcept {
+    if (chosen == nullptr || path > 3) return;
+    static std::array<std::atomic<std::uint64_t>, 4> paths{};
+    static std::atomic<std::uint64_t> behinds{0};
+    static std::atomic<std::uint64_t> records{0};
+    paths[path].fetch_add(1, std::memory_order_relaxed);
+    if (behind) behinds.fetch_add(1, std::memory_order_relaxed);
+    const std::uint64_t record = records.fetch_add(1, std::memory_order_relaxed);
+    if (record >= 16 && record % 600 != 0) return;
+    const auto count = [&](unsigned index) {
+        return paths[index].load(std::memory_order_relaxed) & 0xFFFFFFFFULL;
+    };
+    try {
+        bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 869,
+            (eye << 40U) | (behind ? 1ULL << 44U : 0ULL) |
+                (static_cast<std::uint64_t>(path) << 32U) | (chosen->stream & 0xFFFFFFFFULL),
+            (std::min<std::uint64_t>(behinds.load(std::memory_order_relaxed), 0xFFFFULL) << 48U) |
+                ((count(0) & 0xFFFFULL) << 32U) | count(1),
+            (count(2) << 32U) | count(3));
+    } catch (...) {
+    }
+}
+
+// When the eye images' votes decide a stream pair's order. A measurement counts
+// with at least kEyeOrderMinimumPixels compared; the pair is decided after
+// kEyeOrderMeasurements of them and kEyeOrderVotes pixels, once one order has
+// half as many votes again as the other. A head still and a scene standing
+// still give no pixel where the two streams' vectors part, so no vote: the
+// decision waits for motion.
+constexpr std::uint64_t kEyeOrderMinimumPixels = 64;
+constexpr std::uint64_t kEyeOrderMeasurements = 24;
+constexpr std::uint64_t kEyeOrderVotes = 20000;
+
+void report_dlss_eye_order(std::uint32_t eye, std::uint64_t assigned_stream,
+    std::uint64_t alternate_stream, std::uint64_t assigned_votes,
+    std::uint64_t alternate_votes, std::uint64_t informative) noexcept {
+    try {
+        if (eye > 1 || assigned_stream == alternate_stream) return;
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        // 872: a measurement, the first 64 and every 100th after: a the eye
+        // << 56 | the assigned stream's low 28 bits << 28 | the alternate's,
+        // b the pixels that favoured the assigned stream << 32 | the
+        // alternate, c the pixels compared.
+        static std::uint64_t measured = 0;
+        if (measured < 64 || measured % 100 == 0) {
+            bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 872,
+                (static_cast<std::uint64_t>(eye) << 56U) |
+                    ((assigned_stream & 0xFFFFFFFULL) << 28U) | (alternate_stream & 0xFFFFFFFULL),
+                (std::min<std::uint64_t>(assigned_votes, 0xFFFFFFFFULL) << 32U) |
+                    std::min<std::uint64_t>(alternate_votes, 0xFFFFFFFFULL),
+                informative);
+        }
+        ++measured;
+        const auto key = std::minmax(assigned_stream, alternate_stream);
+        auto& order = state.eye_orders[{key.first, key.second}];
+        if (order.left != 0 || informative < kEyeOrderMinimumPixels) return;
+        // An assigned stream that matches is this eye's; the left eye's for
+        // eye 0, and for eye 1 it makes the other stream the left one.
+        const std::uint64_t left_if_assigned = eye == 0 ? assigned_stream : alternate_stream;
+        const std::uint64_t left_if_alternate = eye == 0 ? alternate_stream : assigned_stream;
+        (left_if_assigned == key.first ? order.lower_left_votes : order.higher_left_votes) +=
+            assigned_votes;
+        (left_if_alternate == key.first ? order.lower_left_votes : order.higher_left_votes) +=
+            alternate_votes;
+        ++order.measurements;
+        const std::uint64_t lower = order.lower_left_votes;
+        const std::uint64_t higher = order.higher_left_votes;
+        if (order.measurements < kEyeOrderMeasurements || lower + higher < kEyeOrderVotes) return;
+        if (lower * 2U >= higher * 3U) {
+            order.left = key.first;
+        } else if (higher * 2U >= lower * 3U) {
+            order.left = key.second;
+        } else {
+            return;
+        }
+        // 868: the pair's order: a the left stream, b the right, c the votes
+        // for the lower stream as the left << 40 | for the higher << 16 (24
+        // bits each) | the measurements (16 bits).
+        bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 868,
+            order.left, order.left == key.first ? key.second : key.first,
+            (std::min<std::uint64_t>(lower, 0xFFFFFFULL) << 40U) |
+                (std::min<std::uint64_t>(higher, 0xFFFFFFULL) << 16U) |
+                std::min<std::uint64_t>(order.measurements, 0xFFFFULL));
+    } catch (...) {
+    }
+}
+
+std::uint64_t dlss_eye_order_left(std::uint64_t first, std::uint64_t second) noexcept {
+    try {
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        const auto key = std::minmax(first, second);
+        const auto found = state.eye_orders.find({key.first, key.second});
+        return found != state.eye_orders.end() ? found->second.left : 0U;
     } catch (...) {
         return 0;
     }
@@ -1912,7 +2099,60 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             const auto other = other_released_at && !identity.both_eyes
                 ? newest_by(other_released_at) : nullptr;
             bool shared_stream = candidates.size() == 1 && !identity.both_eyes;
-            if (chosen && other && chosen == other) {
+            // 0.2 V546-V548: two streams nothing tells apart - the same input
+            // offset, no camera - go to the eyes by their measured order, first
+            // seen until it is decided, and an undecided pair carries the other
+            // stream for the measurement. The release only says which of the
+            // eye's stream's evaluations it takes, and the later of the two
+            // eyes' watermarks bounds both: the bridged releases of a frame's
+            // two eyes run back to back at the game's xrEndFrame, each
+            // publishing what its wait for the game's queue completed, so when
+            // the second eye's wait completes the first eye's DLSS (Star Citizen
+            // evaluates its eyes in either order), the first eye's evaluation
+            // lands above its own watermark. An eye's own watermark would give
+            // it its previous evaluation: vectors a frame older than its image,
+            // a valid pair that chains, and a double image on every head move.
+            // Every route takes the same order: strict FSR too, where these
+            // pairs had no identity to learn and were refused for good.
+            const bool untold = !identity.both_eyes && candidates.size() == 2 &&
+                candidates[0].frame->stream != candidates[1].frame->stream &&
+                input_offset(*candidates[0].frame) == input_offset(*candidates[1].frame) &&
+                !dlss_view_geometry(*candidates[0].frame).known &&
+                !dlss_view_geometry(*candidates[1].frame).known;
+            std::shared_ptr<const DlssMotionVectorFrame> alternate;
+            std::uint64_t accept_limit = released_at;
+            if (untold) {
+                std::sort(candidates.begin(), candidates.end(),
+                    [](const Candidate& a, const Candidate& b) {
+                        return a.first_publication < b.first_publication;
+                    });
+                const auto key = std::minmax(candidates[0].frame->stream, candidates[1].frame->stream);
+                const auto order = state.eye_orders.find({key.first, key.second});
+                const std::uint64_t left = order != state.eye_orders.end() ? order->second.left : 0U;
+                if (left != 0 && candidates[1].frame->stream == left) std::swap(candidates[0], candidates[1]);
+                const std::uint64_t limit =
+                    other_released_at != 0 ? std::max(released_at, other_released_at) : released_at;
+                accept_limit = limit;
+                const auto at_release = [&](const Candidate& candidate) {
+                    return candidate.frame->publication <= limit ? candidate.frame : candidate.previous;
+                };
+                const bool tie = chosen && other && chosen == other;
+                unsigned path = tie ? 0U : 1U;
+                bool behind = false;
+                if (left != 0 || tie) {
+                    const Candidate& own = candidates[static_cast<std::size_t>(eye)];
+                    chosen = at_release(own);
+                    behind = chosen != own.frame;
+                    if (left != 0) path += 2U;
+                    else alternate = at_release(candidates[static_cast<std::size_t>(1 - eye)]);
+                } else if (chosen) {
+                    // Undecided with an evaluation between the releases: the
+                    // release says which is this eye's, and the other is
+                    // measured against it.
+                    alternate = at_release(candidates[candidates[0].frame->stream == chosen->stream ? 1U : 0U]);
+                }
+                record_pair_path(static_cast<std::uint64_t>(eye), path, behind, chosen.get());
+            } else if (chosen && other && chosen == other) {
                 if (candidates.size() >= 2) {
                     // Both evaluated before either release. Exactly two
                     // active streams retain the legacy ordering unless strict identity is requested.
@@ -1959,7 +2199,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             // Distinct release watermarks can still select the opposite
             // stream when native evaluation order changes. A known active
             // stream remains this eye's, including during an epoch reset.
-            if (identity.strict && identity.stream && chosen && chosen->stream != identity.stream) {
+            if (!untold && identity.strict && identity.stream && chosen && chosen->stream != identity.stream) {
                 const auto known = std::find_if(candidates.begin(), candidates.end(),
                     [&](const Candidate& c) { return c.frame->stream == identity.stream; });
                 if (known != candidates.end()) {
@@ -1969,7 +2209,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                         return stale();
                 }
             }
-            if (!chosen || frames.empty() || chosen->publication > released_at ||
+            if (!chosen || frames.empty() || chosen->publication > accept_limit ||
                 frames.front()->publication - chosen->publication > kMaximumStereoPublicationGap)
                 return stale();
             // Strict stereo identities can select an older snapshot of this
@@ -1977,7 +2217,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             // snapshot. That does not make two independent streams shared.
             // Preserve their actual native previous_serial; only a genuinely
             // single-stream stereo path advances this eye by two serials.
-            if (other && other != chosen && (!identity.strict || candidates.size() == 1))
+            if (!untold && other && other != chosen && (!identity.strict || candidates.size() == 1))
                 shared_stream = other->stream == chosen->stream;
             // In OFXR-BRIDGE a CPU publication is not a cross-queue receipt.
             // Apply the existing synchronization check to the actual chosen
@@ -2022,6 +2262,10 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             auto result = std::make_shared<DlssMotionVectorSet>();
             result->eye_count = 1;
             result->eyes[0] = std::move(frame);
+            if (alternate && alternate->stream != chosen->stream && synchronize(alternate)) {
+                result->alternate = std::move(alternate);
+                result->resolved_eye = eye;
+            }
             ++state.statistics.matched;
             return result;
         }

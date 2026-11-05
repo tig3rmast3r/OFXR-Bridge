@@ -4149,22 +4149,60 @@ void test_hybrid_eye_identity_from_order(D3D12WarpFixture& fixture) {
     const auto stream_of = [](const auto& set) {
         return set && set->eyes[0] ? set->eyes[0]->stream : 0ULL;
     };
-    require(!resolve(0, {true, 0, 0}) && !resolve(1, {true, 0, 0}),
-        "strict FSR took an eye's stream from discovery order");
+    // Nothing tells these two apart, so FSR's strict join takes the same
+    // measured order as the other routes.
+    require(stream_of(resolve(0, {true, 0, 0})) == 801 && stream_of(resolve(1, {true, 0, 0})) == 802,
+        "strict FSR did not take the pair's order");
     xrfg::DlssReleasedEyeIdentity learning{true, 0, 0};
     learning.learn_from_order = true;
     const auto left = resolve(0, learning), right = resolve(1, learning);
     require(stream_of(left) == 801 && stream_of(right) == 802,
         "Hybrid with nothing learned did not take the streams in order");
-    auto learned = learning;
-    learned.stream = 802;
-    learned.epoch = left->eyes[0]->epoch;
-    require(stream_of(resolve(0, learned)) == 802, "a learned stream did not outrank the order");
-    learned.stream = 999;
-    require(stream_of(resolve(0, learned)) == 801 && stream_of(resolve(1, learned)) == 802,
-        "Hybrid stayed on a stream the game replaced");
-    learned.learn_from_order = false;
-    require(!resolve(0, learned), "strict FSR accepted a stream it never learned");
+    require(left->alternate && left->alternate->stream == 802 && left->resolved_eye == 0 &&
+            right->alternate && right->alternate->stream == 801 && right->resolved_eye == 1,
+        "an undecided pair's sets did not carry the other stream for the measurement");
+    // 0.2 V546: too few measurements decide nothing, nor do votes without a
+    // clear winner, nor measurements of too few pixels.
+    for (int measurement = 0; measurement < 10; ++measurement) {
+        xrfg::report_dlss_eye_order(0, 801, 802, 100, 900, 1200);
+        xrfg::report_dlss_eye_order(1, 802, 801, 100, 900, 1200);
+    }
+    require(xrfg::dlss_eye_order_left(801, 802) == 0, "the eye order was decided on too few measurements");
+    for (int measurement = 0; measurement < 40; ++measurement)
+        xrfg::report_dlss_eye_order(0, 801, 802, 40000, 40000, 90000);
+    require(xrfg::dlss_eye_order_left(801, 802) == 0, "the eye order was decided without a clear winner");
+    for (int measurement = 0; measurement < 40; ++measurement)
+        xrfg::report_dlss_eye_order(1, 802, 801, 0, 40, 40);
+    require(xrfg::dlss_eye_order_left(801, 802) == 0, "measurements of too few pixels decided the eye order");
+    // A clear majority decides: the second stream is the left eye's.
+    for (int measurement = 0; measurement < 200 && xrfg::dlss_eye_order_left(801, 802) == 0; ++measurement) {
+        xrfg::report_dlss_eye_order(0, 801, 802, 100, 3000, 3200);
+        xrfg::report_dlss_eye_order(1, 802, 801, 100, 3000, 3200);
+    }
+    require(xrfg::dlss_eye_order_left(801, 802) == 802, "a clear majority did not decide the eye order");
+    publish(801);
+    release = publish(802);
+    const auto left_decided = resolve(0, learning), right_decided = resolve(1, learning);
+    require(stream_of(left_decided) == 802 && stream_of(right_decided) == 801,
+        "the decided eye order did not replace the first-seen order");
+    require(!left_decided->alternate && !right_decided->alternate,
+        "a decided pair still carried the other stream for the measurement");
+    require(stream_of(resolve(0, {true, 0, 0})) == 802 && stream_of(resolve(1, {true, 0, 0})) == 801,
+        "strict FSR did not take the decided order");
+    // 0.2 V548: the eye released first takes its own evaluation although it
+    // was published between the two releases.
+    const auto first_release = publish(801);
+    const auto second_release = publish(802);
+    const auto between = xrfg::resolve_dlss_motion_vectors(xr_color.Get(), fixture.queue(),
+        1, first_release - 1, second_release, learning);
+    require(between && between->eyes[0]->stream == 801 && between->eyes[0]->publication == first_release,
+        "an eye took its stream's previous evaluation for one published between the releases");
+    for (int measurement = 0; measurement < 100; ++measurement)
+        xrfg::report_dlss_eye_order(0, 802, 801, 0, 5000, 5000);
+    require(xrfg::dlss_eye_order_left(801, 802) == 802, "a decided eye order was reopened");
+    xrfg::retire_dlss_motion_vector_stream(801);
+    require(xrfg::dlss_eye_order_left(801, 802) == 0, "a retired stream's pair kept its eye order");
+    xrfg::retire_dlss_motion_vector_stream(802);
 }
 
 void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
@@ -6261,6 +6299,7 @@ int main(int argc, char** argv) {
                 SetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", nullptr);
                 require(plain.to_true < unheld.to_true, "the per-pixel stroke test did not reach the frame");
             }
+            test_eye_order_measurement_on_gpu(hud_fixture, true);
             xrfg::set_hybrid_hud_fix(false);
             hud_fixture.require_no_debug_errors();return 0;
         }
@@ -6468,6 +6507,7 @@ int main(int argc, char** argv) {
             D3D12WarpFixture fixture;
             test_release_bound_dlss_guides(fixture);
             test_hybrid_eye_identity_from_order(fixture);
+            test_eye_order_measurement_on_gpu(fixture);
             test_view_placed_dlss_guides(fixture);
             test_enlarged_dlss_guides(fixture);
             fixture.require_no_debug_errors();
