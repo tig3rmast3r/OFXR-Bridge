@@ -123,6 +123,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.afw_running=!afw.flat_scene && afw.desired.mode!=0 && afw.last_success_ms &&
         now>=afw.last_success_ms && now-afw.last_success_ms<2000;
     out.nr_running=nr.running;
+    out.nr_model_missing=nr.enabled && nr.model_missing;
     out.logging_active=bridge_flight_logger().enabled();
     out.vulkan_capture_suspended=vulkan_detected && !native_vulkan::luke_vulkan_process();
     out.nr_evaluations=nr.evaluations;

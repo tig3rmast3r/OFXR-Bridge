@@ -937,7 +937,10 @@ bool neural(Panel& p) {
     changed|=switch_control(p,"Enable Neural Rendering",draft.nr_enabled,kHelpNeural);
     if(state.connected && state.runtime.vulkan_capture_suspended)
         notice(p,Tone::warn,"Vulkan Neural Rendering input capture is suspended.");
-    if(draft.nr_enabled && !state.runtime.nr_running)
+    if(draft.nr_enabled && state.connected && state.runtime.nr_model_missing)
+        notice(p,Tone::danger,"nvngx_dlssnr.dll is missing. OFXR cannot include this NVIDIA file. "
+            "Put it in OFXR's ofxr folder or next to the game, then restart the tray and the game.");
+    else if(draft.nr_enabled && !state.runtime.nr_running)
         notice(p,Tone::idle,"Waiting for compatible DLSS frames and the Neural Rendering runtime");
     else if(state.runtime.nr_running)
         notice(p,Tone::ok,"Neural Rendering active");
@@ -1303,10 +1306,11 @@ constexpr std::array<Section,6> kSections{{
     {"Overlay","Overlay",Icon::gauge},{"Logging","Logging",Icon::log},{"Tests","Tests",Icon::stopwatch}}};
 
 // Each entry states the section's current value, so the pipeline reads at a glance.
-std::string section_summary(const Panel& p,int index,bool& live) {
+std::string section_summary(const Panel& p,int index,bool& live,bool& alert) {
     const auto& draft=p.ui.draft;
     const auto& state=p.state;
     live=false;
+    alert=false;
     switch(index) {
     case 0: {
         live=interface_generation_active(state);
@@ -1325,7 +1329,8 @@ std::string section_summary(const Panel& p,int index,bool& live) {
     }
     case 2:
         live=state.connected && draft.nr_enabled && state.runtime.nr_running;
-        return draft.nr_enabled ? "On" : "Off";
+        alert=state.connected && draft.nr_enabled && state.runtime.nr_model_missing;
+        return alert ? "Model missing" : draft.nr_enabled ? "On" : "Off";
     case 3: return draft.overlay_enabled ? "Counter on" : "Counter off";
     case 4:
         live=state.connected && state.runtime.logging_active;
@@ -1346,15 +1351,15 @@ void rail(Panel& p,float width) {
         const auto& section=kSections[i];
         const bool selected=ui.section==i;
         if(ImGui::InvisibleButton(section.name,ImVec2(item,height)))ui.section=i;
-        bool live=false;
-        const auto summary=section_summary(p,i,live);
+        bool live=false,alert=false;
+        const auto summary=section_summary(p,i,live,alert);
         const auto min=ImGui::GetItemRectMin(),max=ImGui::GetItemRectMax();
         if(selected) {
             list->AddRectFilled(min,max,p.c.accent_soft,kCardRadius);
             list->AddRect(min,max,p.c.accent,kCardRadius,0,p.m.border);
         } else if(ImGui::IsItemHovered())list->AddRectFilled(min,max,p.c.hover,kCardRadius);
         constexpr float icon=24;
-        draw_icon(list,{narrow ? min.x+(item-icon)*.5F : min.x+10,min.y+(height-icon)*.5F},icon,p.c.ink,section.icon);
+        draw_icon(list,{narrow ? min.x+(item-icon)*.5F : min.x+10,min.y+(height-icon)*.5F},icon,alert ? p.c.danger : p.c.ink,section.icon);
         if(!narrow) {
             const float line=p.m.label*1.25F,x=min.x+44,top=min.y+(height-line*2)*.5F;
             {
@@ -1362,7 +1367,7 @@ void rail(Panel& p,float width) {
                 list->AddText({x,top},p.c.ink,section.name);
             }
             FaceScope scope(face_sans,p.m.label);
-            list->AddText({x,top+line},live ? p.c.ok : selected ? p.c.ink : p.c.muted,summary.c_str());
+            list->AddText({x,top+line},alert ? p.c.danger : live ? p.c.ok : selected ? p.c.ink : p.c.muted,summary.c_str());
         }
         ImGui::RenderNavCursor(ImRect(min,max),ImGui::GetItemID());
     }

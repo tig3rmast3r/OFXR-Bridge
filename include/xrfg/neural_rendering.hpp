@@ -44,6 +44,9 @@ struct Status {
     bool before_sr = true;
     std::string reason;
     uint64_t evaluations = 0;
+    // nvngx_dlssnr.dll, which OFXR cannot ship, was found neither beside OFXR
+    // nor beside the game.
+    bool model_missing = false;
 };
 // Configuration is serialized with evaluation; feature creation settings retain
 // the accepted debounce/rebuild behavior and one history per native SR handle.

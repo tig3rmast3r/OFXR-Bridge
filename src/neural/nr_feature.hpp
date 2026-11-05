@@ -21,6 +21,7 @@ void ReleaseForHandle(unsigned int handle);
 void RetryAfterFailure();
 bool IsRunning();
 const char* FailureReason();
+bool ModelMissing();
 std::optional<double> LastGpuTime();
 void RequestCapture(unsigned int frames);
 bool CaptureInProgress();

@@ -134,6 +134,13 @@ int main(int argc,char** argv){try{
     check(count_top(rasterize_elliott_meter(disabled,now,false,false),green)==0,"disabled generation header not green; valid reconstruction state is independent");
     auto neural=active;neural.desired.nr_enabled=true;
     check(count(rasterize_elliott_meter(neural,now,false,false),red)>100,"Neural on but idle red");
+    const auto neural_idle_red=count(rasterize_elliott_meter(neural,now,false,false),red);
+    auto no_model=neural;no_model.runtime.nr_model_missing=true;
+    const auto no_model_meter=rasterize_elliott_meter(no_model,now,false,false);
+    check(autonomous::interface_status_text(no_model).find("Neural Render: Model missing")!=std::string::npos,
+        "a missing NR model is named in the status");
+    check(count(no_model_meter,red)>0 && count_top(no_model_meter,red)==0 &&
+        count_top(no_model_meter,green)==neural_idle_red,"a missing NR model is one red line, the numbers keep their colour");
     neural.runtime.nr_running=1;
     check(count(rasterize_elliott_meter(neural,now,false,false),red)==0,"active Neural green");
     auto luke=active;luke.runtime.luke_detected=1;

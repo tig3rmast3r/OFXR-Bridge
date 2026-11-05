@@ -157,6 +157,7 @@ struct RuntimeStatus {
     bool vulkan_capture_suspended{};
     bool luke_detected{}, vulkan_detected{};
     bool afw_running{}; // actual recent AFW output; IPC V487 rejects older reporters
+    bool nr_model_missing{}; // in the padding before provider_error: the IPC layout stays
     std::uint32_t provider_error{};
     std::uint32_t overlay_limit_mask{}; // 1 FPS, 2 meter, 4 headset menu; last refusal until successful retry
     InterfaceTelemetry telemetry{};

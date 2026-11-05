@@ -341,7 +341,10 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const auto& r=state.runtime;
     const bool optimizing=status=="Optimizing, please wait";
     const bool fresh=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000;
-    const bool optional_ready=(!state.desired.nr_enabled || (fresh && r.nr_running)) &&
+    // A model the user has not installed is told apart below: the frames are
+    // fine, so the numbers keep their colour.
+    const bool nr_model_missing=state.desired.nr_enabled && r.nr_model_missing;
+    const bool optional_ready=(!state.desired.nr_enabled || (fresh && r.nr_running) || nr_model_missing) &&
         (!autonomous::reconstruction_source(r) || state.desired.afw_mode==0 || (fresh && r.afw_running));
     const bool ofxr_active=m.generating && state.desired.enabled && autonomous::interface_generation_active(state) && !r.provider_error;
     const bool rife_error=state.desired.enabled && state.desired.frame_generation==4 && r.rife_error;
@@ -368,7 +371,8 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const auto vector_rows=wrap(vectors,51), status_rows=wrap(explanation,51);
     const auto benchmark=elliott_benchmark_text(state,now_ms);
     const int rows_top=214+(benchmark.empty()?0:28), line_height=22;
-    const int count=std::min<int>(int(vector_rows.size()+status_rows.size()+1),(h-rows_top-8)/line_height);
+    const int count=std::min<int>(int(vector_rows.size()+status_rows.size()+1+(nr_model_missing?1:0)),
+        (h-rows_top-8)/line_height);
     const int used=rows_top+count*line_height+8;
     if(used_height)*used_height=unsigned(used);
     Canvas c(w,h,bgra,linear);c.panel(used,16,2);
@@ -404,6 +408,7 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
         c.text(margin,y,label,body,PanelTone::dim);
         for(const auto& text:pieces){if(drawn++>=count)break;c.text(184,y,text,body,PanelTone::normal);y+=line_height;}
     };
+    if(nr_model_missing){c.text(margin,y,"Neural Rendering: nvngx_dlssnr.dll missing",body,PanelTone::bad);++drawn;y+=line_height;}
     if(drawn<count){c.text(margin,y,reconstruction,body,PanelTone::good);++drawn;y+=line_height;}
     rows("Vectors:",vector_rows);rows("Status:",status_rows);
     return c.take();

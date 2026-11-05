@@ -1507,7 +1507,8 @@ std::string interface_status_text(const Snapshot& s,bool include_reconstruction)
     const auto generator=r.generation_mode==1 ? "FSR" : r.generation_mode==2 ? "DLSS-G" : "OFXR";
     add(std::string(generator)+(s.desired.enabled ? (generating ? ": Active" : ": Waiting") : ": Off"));
     if(include_reconstruction)add(interface_reconstruction_text(s,now));
-    add(!s.desired.nr_enabled ? "Neural Render: Off" : runtime_fresh && r.nr_running ? "Neural Render: Active" : "Neural Render: Waiting");
+    add(!s.desired.nr_enabled ? "Neural Render: Off" : runtime_fresh && r.nr_running ? "Neural Render: Active" :
+        r.nr_model_missing ? "Neural Render: Model missing" : "Neural Render: Waiting");
     return result;
 }
 } // namespace xrfg::autonomous

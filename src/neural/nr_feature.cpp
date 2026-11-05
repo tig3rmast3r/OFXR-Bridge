@@ -2790,6 +2790,23 @@ bool IsRunning()
     });
 }
 
+// Whether the file is there, not whether NR got as far as asking for it: NR
+// waiting on its first frames, or failing earlier, says nothing about the file.
+// Asked for every status, so looked up every two seconds, and it clears itself
+// once the file is added.
+bool ModelMissing() {
+    static ULONGLONG next_check = 0;
+    static bool missing = false;
+    const ULONGLONG now = GetTickCount64();
+    if (now >= next_check) {
+        next_check = now + 2000;
+        if (g_dllDir.empty()) g_dllDir = Util::DllPath().remove_filename();
+        missing = !Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll").has_value() &&
+            !Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll").has_value();
+    }
+    return missing;
+}
+
 const char* FailureReason() {
     if (g_runtime.failed) return g_runtime.reason;
     if (NrConfiguration::Instance()->DlssNrSecondPass.value_or_default())
@@ -3031,7 +3048,8 @@ void retry(){std::scoped_lock lock(DlssNr::g_nrMutex);DlssNr::RetryAfterFailure(
 Status status() {
     std::scoped_lock lock(DlssNr::g_nrMutex);const auto& c=*NrConfiguration::Instance();
     return {c.DlssNrEnabled.value_or_default(),c.DlssNrEnabled.value_or_default() && DlssNr::IsRunning(),
-        c.DlssNrRunBeforeSr.value_or_default(),DlssNr::FailureReason(),g_successfulEvaluations};
+        c.DlssNrRunBeforeSr.value_or_default(),DlssNr::FailureReason(),g_successfulEvaluations,
+        c.DlssNrEnabled.value_or_default() && DlssNr::ModelMissing()};
 }
 void shutdown(){DlssNr::Shutdown();}
 void request_capture(unsigned int frames) {
