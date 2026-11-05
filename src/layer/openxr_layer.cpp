@@ -837,6 +837,7 @@ struct SessionState {
     bool manual_stop_applied{}; // frame_call_mutex; terminal for this XrSession.
     std::atomic<std::int64_t> interface_begun_ns{};
     std::atomic<std::uint64_t> interface_serial{};
+    std::atomic<std::uint64_t> app_image_releases{}; // names Luke scenes while reconstruction is off
     std::array<XrSpace,2> panel_grip_spaces{};
     std::atomic<bool> panel_actions_attached{false};
     std::unique_ptr<xrfg::OpenXrFpsOverlay> fps_overlay;
@@ -8455,6 +8456,7 @@ XrResult release_swapchain_image_locked(
     if (vulkan_bridge && candidate_index && FAILED(vulkan_bridge->mark_read(*candidate_index)))
         return XR_ERROR_RUNTIME_FAILURE;
 
+    state->session->app_image_releases.fetch_add(1, std::memory_order_relaxed);
     mark_application_release(state->session.get());
     XrResult result = XR_ERROR_RUNTIME_FAILURE;
     try {
@@ -16980,6 +16982,15 @@ XrResult layer_end_frame_impl(
     if(xrfg::native_ingress::luke_detected())if(const auto source=xrfg::query_luke_render_identity()) {
         interface_stamp.scene_owner=source->object;
         interface_stamp.scene_serial=source->render+1;
+    }
+    // With reconstruction off no producer names the scene, and the meter then
+    // counts every xrEndFrame, held repeats included. Luke releases no image
+    // for a repeat, so the application's releases name the scene instead and
+    // the meter shows new game frames, as it does with AFW or OSR on.
+    if(!interface_stamp.scene_owner && state->luke_afw_enabled &&
+        xrfg::embedded::afw_snapshot().desired.mode==0) {
+        interface_stamp.scene_owner=0x52454C4541534501ULL;
+        interface_stamp.scene_serial=state->app_image_releases.load(std::memory_order_relaxed)+1;
     }
     static xrfg::RifeGameHistory game_history;
     game_history.observe(end_info,[&]() -> std::uint64_t {

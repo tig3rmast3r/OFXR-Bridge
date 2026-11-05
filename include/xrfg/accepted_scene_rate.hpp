@@ -32,12 +32,31 @@ public:
         // as startup; never count unknown images or reuse the pre-gap FPS.
         const auto start=std::max({first_,now-1'000'000'000,unknown_});
         if(now-start<100'000'000)return {};
-        unsigned real{},generated{};
+        unsigned real{},generated{},count{};
+        std::array<std::int64_t,1024> times;
         for(const auto& s:samples_)if(s.at>start && s.at<=now) {
             if(s.scene.output)++generated;else ++real;
+            times[count++]=s.at;
         }
-        const double seconds=double(now-start)*1e-9;
-        return ScenePresentationRate::Rate{float((real+generated)/seconds),float(real/seconds),float(generated/seconds)};
+        // Counting whole images in the window makes a steady 90 Hz read 89 or
+        // 90 depending on where its edges fall. Acceptance times are taken after
+        // xrEndFrame, which can vary by 10 ms, so neither can its two end images
+        // set the rate: fit the spacing through all of them. A stall keeps the
+        // window, because images that stopped must drop the rate.
+        double seconds=double(now-start)*1e-9;
+        if(count>=4) {
+            std::sort(times.begin(),times.begin()+count);
+            const double middle=(count-1)*.5;
+            double covariance{},variance{};
+            for(unsigned i=0;i<count;++i) {
+                const double offset=i-middle;
+                covariance+=offset*double(times[i]-times[0])*1e-9;variance+=offset*offset;
+            }
+            const double period=covariance/variance;
+            if(period>0 && double(now-times[count-1])*1e-9<=period*2)seconds=period*count;
+        }
+        const auto total=real+generated;
+        return ScenePresentationRate::Rate{float(total/seconds),float(real/seconds),float(generated/seconds)};
     }
 };
 }

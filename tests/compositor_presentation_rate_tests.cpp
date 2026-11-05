@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "xrfg/presented_output_rate.hpp"
 #include "xrfg/compositor_presentation_rate.hpp"
 #include "xrfg/scene_presentation_rate.hpp"
@@ -61,7 +62,8 @@ int main() {
                 accepted.accepted(std::int64_t(i)*1'000'000'000/90,id);
             }
             auto r=accepted.rate(2'000'000'000);
-            if(!r||r->output!=50||r->real!=25||r->generated!=25)
+            const auto near=[](float value,float wanted){return std::abs(value-wanted)<.5F;};
+            if(!r||!near(r->output,50)||!near(r->real,25)||!near(r->generated,25))
                 throw std::runtime_error("accepted total includes held resubmissions");
             xrfg::AcceptedSceneRate raw;unsigned serial=1;
             for(unsigned i=0;i<=180;++i) {
@@ -69,14 +71,14 @@ int main() {
                 raw.accepted(std::int64_t(i)*1'000'000'000/90,{2,serial,0});
             }
             r=raw.rate(2'000'000'000);
-            if(!r||r->output!=47)throw std::runtime_error("AFW-only held sources inflate total");
+            if(!r||!near(r->output,47))throw std::runtime_error("AFW-only held sources inflate total");
             raw.accepted(2'100'000'000,{});
             if(raw.rate(2'200'000'000))throw std::runtime_error("unknown identity invents new content");
             // Recover from a fully known suffix, without counting the gap.
             for(unsigned i=1;i<=5;++i)raw.accepted(2'100'000'000+i*20'000'000LL,{2,1000+i,0});
             if(raw.rate(2'150'000'000))throw std::runtime_error("short recovered interval bypassed minimum sample time");
             r=raw.rate(2'200'000'000);
-            if(!r||r->output!=50||r->real!=50||r->generated!=0)
+            if(!r||!near(r->output,50)||!near(r->real,50)||r->generated!=0)
                 throw std::runtime_error("known suffix mixed pre-gap samples or invented generated frames");
             raw.accepted(2'300'000'000,{});
             raw.accepted(2'250'000'000,{2,9999,0});
@@ -109,8 +111,26 @@ int main() {
                 mixed.accepted(std::int64_t(i)*1'000'000'000/90,scene);
             }
             const auto rate=mixed.rate(2'000'000'000);
-            if(!rate||rate->output!=50||rate->real!=50||rate->generated!=0)
+            if(!rate||std::abs(rate->output-50)>=.5F||std::abs(rate->real-50)>=.5F||rate->generated!=0)
                 throw std::runtime_error("AFW fallback lost known originals or counted held XR calls");
+        }
+        {
+            // A steady cadence reads the same wherever the window edges fall,
+            // even with xrEndFrame moving acceptance by up to 10 ms, and a
+            // stall still drops the rate.
+            xrfg::AcceptedSceneRate steady;std::int64_t at=0;float lowest=1000,highest=0;
+            std::uint32_t noise=12345;
+            for(unsigned i=1;i<=900;++i) {
+                noise=noise*1664525u+1013904223u;
+                at=std::int64_t(i)*11'111'111+std::int64_t((noise>>16)%10'001)*1'000;
+                steady.accepted(at,{7,i,0});
+                if(i>120)if(const auto rate=steady.rate(at+3'000'000)) {
+                    lowest=std::min(lowest,rate->output);highest=std::max(highest,rate->output);
+                }
+            }
+            if(lowest<89.5F||highest>=90.5F)throw std::runtime_error("steady 90 Hz flickers between counts");
+            const auto stalled=steady.rate(at+600'000'000);
+            if(!stalled||stalled->output>50)throw std::runtime_error("stalled images keep the old rate");
         }
         struct Delivery {
             std::optional<float> rate{45};unsigned calls{};
