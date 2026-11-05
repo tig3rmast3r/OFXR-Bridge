@@ -16,6 +16,7 @@
 #include "xrfg/vulkan_native_ingress.hpp"
 #include "xrfg/vulkan_command_stream.hpp"
 #include "xrfg/native_ingress.hpp"
+#include "xrfg/upscaler_observation.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/luke_vulkan_scope.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
@@ -674,13 +675,16 @@ void flush_transport(GuideTransport& transport,std::uint64_t cutoff) noexcept {
             const auto frame = publish_dlss_motion_vectors(publication);
             if (!frame) return;
             auto& s = state();
-            bool first = false;
+            bool first = false, flags_known = false;
+            int flags = 0;
             {
                 std::scoped_lock lock(s.mutex);
                 for (auto& [handle, feature] : s.features) {
                     static_cast<void>(handle);
                     if (reinterpret_cast<std::uintptr_t>(handle) != publication.stream) continue;
                     first = feature.publications++ == 0;
+                    flags_known = feature.flags_known;
+                    flags = static_cast<int>(feature.flags);
                     break;
                 }
             }
@@ -689,6 +693,14 @@ void flush_transport(GuideTransport& transport,std::uint64_t cutoff) noexcept {
                     (publication.stream & 0xFFFFFFFFULL) | (publication.depth != nullptr ? 1ULL << 32U : 0ULL),
                     (std::uint64_t(publication.motion_width) << 32U) | publication.motion_height,
                     (std::uint64_t(publication.output_width) << 32U) | publication.output_height);
+            // 11, with 7: the stream's depth convention. a stream, b its DXGI
+            // format, c inverted | flags known << 1 | create flags << 8.
+            if (first)
+                bridge_flight_logger().event(BridgeFlightOperation::vulkan_bridge, 11,
+                    publication.stream & 0xFFFFFFFFULL,
+                    publication.depth != nullptr ? static_cast<std::uint64_t>(publication.depth->GetDesc().Format) : 0ULL,
+                    (publication.depth_inverted ? 1ULL : 0ULL) | (flags_known ? 2ULL : 0ULL) |
+                        (static_cast<std::uint64_t>(flags) << 8U));
         } catch (...) {
         }
     });
@@ -849,7 +861,7 @@ struct EvaluationScope {
 // The first hooked module in a nested chain that knows the feature copies.
 void capture_once(VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* p,
     std::size_t slot) noexcept {
-    if (evaluation_captured || !state().active.load(std::memory_order_acquire)) return;
+    if (evaluation_captured) return;
     bool known{};
     {
         auto& s = state();
@@ -858,7 +870,12 @@ void capture_once(VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const 
     }
     if (!known) return;
     evaluation_captured = true;
-    capture(buffer, handle, p, slot);
+    // What the settings panel shows as DLSS, whatever the route; REAL VR's
+    // titles report it through the native ingress.
+    if (!luke_vulkan_process()) native_ingress::observe_upscaler_inputs(
+        image_view(p, NVSDK_NGX_Parameter_MotionVectors) != nullptr,
+        image_view(p, NVSDK_NGX_Parameter_Depth) != nullptr);
+    if (state().active.load(std::memory_order_acquire)) capture(buffer, handle, p, slot);
 }
 
 template <std::size_t Slot>
