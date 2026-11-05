@@ -782,6 +782,18 @@ float2 game_motion_for_pixel(float2 pixel, uint slice, uint view_index) {
         GameMotionVectors.Load(int4(bottom_right, 0, 0)),
         fraction.x);
     float2 raw = lerp(top, bottom, fraction.y);
+    // 0.2 V503, Hybrid's built-in: DLSS vectors are at render resolution, and
+    // across a motion edge the blend of a thin bar's vector and the
+    // background's is a motion neither surface has: the solve never settles
+    // on the bar and the depth search refuses it. The nearest vector instead;
+    // the flow covers what that costs under rotation.
+    if (hybrid_layout) {
+        raw = fraction.y < 0.5
+            ? (fraction.x < 0.5 ? GameMotionVectors.Load(int4(top_left, 0, 0))
+                                : GameMotionVectors.Load(int4(bottom_right.x, top_left.y, 0, 0)))
+            : (fraction.x < 0.5 ? GameMotionVectors.Load(int4(top_left.x, bottom_right.y, 0, 0))
+                                : GameMotionVectors.Load(int4(bottom_right, 0, 0)));
+    }
     float2 result = raw * GameMotionScale + GameMotionJitterDelta;
     float magnitude = length(result);
     return magnitude > 512.0 ? result * (512.0 / magnitude) : result;
@@ -1683,9 +1695,11 @@ float4 synthesize_midpoint(
                                     nearer(game_nearness(endpoint), here) &&
                                     rgb_error(near_a, near_b) < kDepthAgreeLimit) {
                                     output_color = saturate(lerp(near_a, near_b, synthesis_fraction()));
-                                    // The error of the answer given (0.2 V500), so
-                                    // the hybrid keeps it over the flow.
-                                    last_disagreement = rgb_error(near_a, near_b);
+                                    // Verified by depth and its own samples, so the
+                                    // hybrid keeps it: the flow, following the
+                                    // background, would take the bar back. 0.2 asked
+                                    // the flow only past 62/255, this limit's size.
+                                    last_disagreement = 0.0;
                                 }
                             }
                         }
