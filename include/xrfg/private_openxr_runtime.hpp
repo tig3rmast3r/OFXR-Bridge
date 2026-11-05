@@ -124,6 +124,9 @@ public:
     PrivateOpenXrRuntime(const PrivateOpenXrRuntime&)=delete;
     PrivateOpenXrRuntime& operator=(const PrivateOpenXrRuntime&)=delete;
     HRESULT initialize();
+    // Last step initialize() reached: 1 options, 2-3 fences, 4 allocator,
+    // 5 command list, 6 close, 7 D3D12 done, 8 D3D11.
+    [[nodiscard]] int initialize_step() const noexcept;
     XrResult start(); // after successful real xrBeginSession
     void stop(); // wakes producers; consumer closes/joins native Wait; drains GPU reads
     XrResult drain();

@@ -6290,6 +6290,21 @@ XrResult layer_create_session_impl(
                 586,static_cast<std::uint64_t>(description.Priority),
                 static_cast<std::uint64_t>(state->private_delivery_queue->GetDesc().Priority),supported?1:0);
             state->private_delivery_queue->SetName(L"OFXR real OpenXR delivery only");
+            // The delivery queue belongs to the unwrapped device. A runtime
+            // handed a wrapper's device with it records wrapped lists and
+            // submits them straight to D3D12, which faults reading them.
+            // Luke's transport keeps the device it was built around.
+            Microsoft::WRL::ComPtr<IUnknown> game_device,game_queue,native_device,native_queue;
+            const bool device_wrapped=SUCCEEDED(delivery_binding.device->QueryInterface(IID_PPV_ARGS(&game_device))) &&
+                SUCCEEDED(state->d3d12_device.As(&native_device)) && game_device.Get()!=native_device.Get();
+            const bool queue_wrapped=SUCCEEDED(delivery_binding.queue->QueryInterface(IID_PPV_ARGS(&game_queue))) &&
+                SUCCEEDED(state->d3d12_queue.As(&native_queue)) && game_queue.Get()!=native_queue.Get();
+            const bool paired=device_wrapped && !state->luke_afw_enabled;
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::steamvr_queue_configuration,
+                587,(device_wrapped?1ULL:0ULL)|(queue_wrapped?2ULL:0ULL)|(paired?4ULL:0ULL),
+                reinterpret_cast<std::uintptr_t>(delivery_binding.device),
+                reinterpret_cast<std::uintptr_t>(state->d3d12_device.Get()));
+            if(paired)delivery_binding.device=state->d3d12_device.Get();
             delivery_binding.queue=state->private_delivery_queue.Get();
             // forwarded_info may already refer to substituted_info.
             XrSessionCreateInfo with_delivery=*forwarded_info;
@@ -6298,6 +6313,8 @@ XrResult layer_create_session_impl(
         }
     }
     XrSession created_session = XR_NULL_HANDLE;
+    // A crash from here on takes the writer's unsaved tail with it.
+    if(xrfg::bridge_flight_logger().enabled())xrfg::bridge_flight_logger().flush();
     const XrResult result = dispatch->create_session(instance, forwarded_info, &created_session);
     if (XR_FAILED(result)) {
         return result;
@@ -6316,7 +6333,13 @@ XrResult layer_create_session_impl(
 
     state->steamvr_delivery = std::make_unique<xrfg::SteamVrDelivery>(dispatch->steamvr_runtime);
     const auto private_result=install_private_runtime(state);
-    if(FAILED(private_result)){dispatch->destroy_session(created_session);return XR_ERROR_INITIALIZATION_FAILED;}
+    if(FAILED(private_result)){
+        const auto destroyed=dispatch->destroy_session(created_session);
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::steamvr_queue_configuration,
+            589,static_cast<std::uint32_t>(destroyed),0,0);
+        if(xrfg::bridge_flight_logger().enabled())xrfg::bridge_flight_logger().flush();
+        return XR_ERROR_INITIALIZATION_FAILED;
+    }
     // Before any frame call can reach the UEVR AFR hooks from another thread.
     if (GetModuleHandleW(L"UEVRBackend.dll")) state->uevr_afr = make_uevr_afr_osr_state();
     log_video_memory(*state, VideoMemoryStage::session, 0);

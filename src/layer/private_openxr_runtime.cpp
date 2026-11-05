@@ -184,6 +184,7 @@ struct PrivateOpenXrRuntime::Impl {
     ComPtr<ID3D11DeviceContext4> context11;
     ComPtr<ID3D11Fence> ready11,copy11;
     HANDLE fence_event{CreateEventW(nullptr,FALSE,FALSE,nullptr)};
+    int initialize_step{};
     HANDLE timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
     HANDLE wait_timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
     explicit Impl(Options input):options(std::move(input)),director_enabled(options.director_enabled),buffered(options.adaptive_buffer && options.capacity==3),stable_phase(options.capacity>=3) {
@@ -1271,19 +1272,23 @@ struct PrivateOpenXrRuntime::EndFrameReservation {
 
 PrivateOpenXrRuntime::PrivateOpenXrRuntime(Options options):impl_(std::make_shared<Impl>(std::move(options))){}
 PrivateOpenXrRuntime::~PrivateOpenXrRuntime(){stop();}
+int PrivateOpenXrRuntime::initialize_step() const noexcept {return impl_->initialize_step;}
 HRESULT PrivateOpenXrRuntime::initialize() {
     auto& s=*impl_;auto& real=s.options.real;
+    s.initialize_step=1;
     if(!real.wait || !real.begin || !real.end || !real.create || !real.destroy || !real.enumerate || !real.acquire || !real.wait_image || !real.release || !s.fence_event || !s.options.capacity)return E_INVALIDARG;
     HRESULT result=S_OK;
     if(s.options.device12 && s.options.queue12) {
         s.device12=s.options.device12;s.queue12=s.options.queue12;
         s.producer_queue12=s.options.producer_queue12?s.options.producer_queue12:s.options.queue12;
-        result=s.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s.ready12));
-        if(SUCCEEDED(result))result=s.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s.copy12));
-        if(SUCCEEDED(result))result=s.device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&s.allocator));
-        if(SUCCEEDED(result))result=s.device12->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,s.allocator.Get(),nullptr,IID_PPV_ARGS(&s.list));
-        if(SUCCEEDED(result))result=s.list->Close();
+        s.initialize_step=2;result=s.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s.ready12));
+        if(SUCCEEDED(result)){s.initialize_step=3;result=s.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s.copy12));}
+        if(SUCCEEDED(result)){s.initialize_step=4;result=s.device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&s.allocator));}
+        if(SUCCEEDED(result)){s.initialize_step=5;result=s.device12->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,s.allocator.Get(),nullptr,IID_PPV_ARGS(&s.list));}
+        if(SUCCEEDED(result)){s.initialize_step=6;result=s.list->Close();}
+        if(SUCCEEDED(result))s.initialize_step=7;
     } else if(s.options.device11 && s.options.context11) {
+        s.initialize_step=8;
         result=s.options.device11->QueryInterface(IID_PPV_ARGS(&s.device11));
         if(SUCCEEDED(result))result=s.options.context11->QueryInterface(IID_PPV_ARGS(&s.context11));
         ComPtr<ID3D11Multithread> protection;

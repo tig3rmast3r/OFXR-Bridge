@@ -104,8 +104,9 @@ inline HRESULT allocation_owner(ID3D12Device* input,
     return accept(std::move(candidate));
 }
 
-// Keep the application's binding untouched downstream, retaining canonical
-// objects for guide ownership and bridge GPU allocations/synchronization.
+// Retain canonical objects for guide ownership and bridge GPU allocations and
+// synchronization. The application's binding stays untouched downstream unless
+// the session gives the runtime a queue of its own, which needs the same owner.
 // Adapter equality alone never admits a device/queue pair.
 inline HRESULT canonical_binding(ID3D12Device* input_device,
     ID3D12CommandQueue* input_queue,

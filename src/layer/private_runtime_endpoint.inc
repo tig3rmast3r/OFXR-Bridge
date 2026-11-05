@@ -110,8 +110,15 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         options.accepted_output=[rate](auto at){rate->accepted(at);};
     }
     options.trace_enabled=[]{return xrfg::bridge_flight_logger().enabled();};
+    auto* const options_device12=options.device12;
     auto transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
-    auto result=transport->initialize();if(FAILED(result))return result;
+    auto result=transport->initialize();
+    const HRESULT removed=options_device12?options_device12->GetDeviceRemovedReason():S_OK;
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::steamvr_queue_configuration,
+        588,static_cast<std::uint64_t>(transport->initialize_step()),
+        static_cast<std::uint32_t>(result),static_cast<std::uint32_t>(removed));
+    if(xrfg::bridge_flight_logger().enabled())xrfg::bridge_flight_logger().flush();
+    if(FAILED(result))return result;
     if(XR_FAILED(transport->set_buffer_capacity(xrfg::embedded::snapshot().desired.increase_buffer?3:2,state->menu_enabled)))return E_FAIL;
     auto dispatch=std::make_shared<Dispatch>(*original);
     dispatch->inline_unless_pipelined=false; // common endpoint owns the runtime frame loop
