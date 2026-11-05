@@ -35,6 +35,8 @@ struct RecordingLifetime {
 };
 // One external D3D12-fence timeline orders prefix capture -> D3D12 work ->
 // continuation copyback. Optional suffix signal proves native copyback retired.
+// suffix_wait equal to prefix_signal orders the continuation on the prefix alone,
+// for work the application's queue need not wait for; D3D12 must not signal then.
 struct CommandHandoff {
     VkSemaphore timeline = VK_NULL_HANDLE;
     uint64_t prefix_signal = 0;

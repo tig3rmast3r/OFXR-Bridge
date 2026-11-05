@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$BuildDir,
     [Parameter(Mandatory=$true)][string]$OutDir,
-    [int]$Version=869,
+    [int]$Version=870,
     [string]$SourceDir,
     [string]$CrtSource
 )

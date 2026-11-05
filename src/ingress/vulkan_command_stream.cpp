@@ -23,10 +23,22 @@ struct DisposedRecordings {
     std::vector<CommandHandoff> handoffs;
     std::vector<std::shared_ptr<void>> retained;
 };
+// Every exclusive acquisition may change how a command buffer resolves, so it
+// advances the generation the per-thread dispatch cache is checked against.
+// Dispatch itself resolves through `inner`, which changes nothing.
+struct GenerationMutex {
+    std::recursive_mutex inner;
+    std::atomic<uint64_t> generation{1};
+    void lock(){inner.lock();generation.fetch_add(1,std::memory_order_release);}
+    bool try_lock(){if(!inner.try_lock())return false;generation.fetch_add(1,std::memory_order_release);return true;}
+    void unlock(){inner.unlock();}
+};
+std::atomic<uint64_t> device_serials{};
 struct DeviceState {
     VkInstance instance{};VkPhysicalDevice physical{};VkDevice device{};
     PFN_vkGetInstanceProcAddr gipa{};PFN_vkGetDeviceProcAddr gdpa{};
-    std::recursive_mutex mutex;
+    GenerationMutex mutex;
+    uint64_t serial{device_serials.fetch_add(1)+1};
     std::unordered_map<std::string,PFN_vkVoidFunction> functions;
     std::unordered_map<VkCommandPool,uint32_t> pools;
     std::unordered_map<VkCommandBuffer,CommandChain> commands;
@@ -50,6 +62,8 @@ struct Registry {
     std::unordered_map<std::string,PFN_vkVoidFunction> guide_fallbacks;
 };
 std::atomic<uint64_t> submission_serial{};
+// Advanced whenever a command buffer or dispatch key may name another device.
+std::atomic<uint64_t> registry_generation{1};
 Registry& registry(){static auto* value=new Registry;return *value;}
 void* dispatch_key(const void* object){return object?*static_cast<void* const*>(object):nullptr;}
 std::shared_ptr<DeviceState> device_state(VkDevice device) {
@@ -85,33 +99,89 @@ VkCommandBuffer native_locked(DeviceState& device,VkCommandBuffer& original) {
     auto found=device.commands.find(original);
     return found!=device.commands.end()&&found->second.actual?found->second.actual:original;
 }
-void remember_state(DeviceState& device,VkCommandBuffer original,
-    std::function<void(VkCommandBuffer)> replay) {
-    auto& chain=device.commands[original];
+// The game records on many threads, and every vkCmd passes through here. A
+// command buffer is recorded by one thread at a time, so that thread keeps its
+// resolution and reaches the recording's own state without the device or
+// registry locks; any exclusive lock ends the cached resolution.
+struct ThreadCommand {
+    VkCommandBuffer received{},original{},actual{};
+    std::shared_ptr<DeviceState> device;
+    CommandChain* chain{};
+    uint64_t registry_generation{},device_generation{};
+};
+ThreadCommand* dispatch_command(VkCommandBuffer received) {
+    thread_local std::array<ThreadCommand,4> entries;
+    thread_local unsigned next{};
+    ThreadCommand* entry{};
+    for(auto& candidate:entries)if(candidate.received==received&&candidate.device){entry=&candidate;break;}
+    if(entry&&entry->registry_generation==registry_generation.load(std::memory_order_acquire)&&
+        entry->device_generation==entry->device->mutex.generation.load(std::memory_order_acquire))return entry;
+    if(!entry)entry=&entries[next++%entries.size()];
+    *entry={};
+    const auto registry_now=registry_generation.load(std::memory_order_acquire);
+    auto device=command_device(received);if(!device)return nullptr;
+    std::scoped_lock lock(device->mutex.inner);
+    entry->device=std::move(device);entry->registry_generation=registry_now;
+    entry->device_generation=entry->device->mutex.generation.load(std::memory_order_acquire);
+    entry->original=received;entry->actual=native_locked(*entry->device,entry->original);
+    const auto found=entry->device->commands.find(entry->original);
+    entry->chain=found==entry->device->commands.end()?nullptr:&found->second;
+    entry->received=received;return entry;
+}
+CommandChain& command_chain(ThreadCommand& command) {
+    if(!command.chain) {
+        std::scoped_lock lock(command.device->mutex.inner);
+        command.chain=&command.device->commands[command.original];
+    }
+    return *command.chain;
+}
+void remember_state(ThreadCommand& command,std::function<void(VkCommandBuffer)> replay) {
+    auto& chain=command_chain(command);
     if(chain.state_commands.size()<4096)chain.state_commands.push_back(std::move(replay));
     else chain.unsupported_state=true;
 }
+// One resolved driver entry per wrapper and device, without the name lookup.
+struct SiteFunction {
+    struct Entry {uint64_t serial{};PFN_vkVoidFunction function{};};
+    std::array<std::atomic<const Entry*>,4> entries{};
+    template<class T>T get(DeviceState& device,const char* name) {
+        for(auto& slot:entries) {
+            const auto* entry=slot.load(std::memory_order_acquire);
+            if(!entry)break;
+            if(entry->serial==device.serial)return reinterpret_cast<T>(entry->function);
+        }
+        const auto function=reinterpret_cast<PFN_vkVoidFunction>(load<T>(device,name));
+        const auto* created=new Entry{device.serial,function};
+        for(auto& slot:entries) {
+            const Entry* empty{};
+            if(slot.compare_exchange_strong(empty,created,std::memory_order_release,std::memory_order_acquire))
+                return reinterpret_cast<T>(function);
+        }
+        delete created;return reinterpret_cast<T>(function);
+    }
+};
 template<class Fn>
-void remember_viewport_count(DeviceState& d,VkCommandBuffer original,Fn fn,uint32_t count,const VkViewport* values) {
+void remember_viewport_count(ThreadCommand& command,Fn fn,uint32_t count,const VkViewport* values) {
     std::vector<VkViewport> saved;if(count)saved.assign(values,values+count);
-    remember_state(d,original,[=](VkCommandBuffer target){fn(target,count,saved.data());});
+    remember_state(command,[=](VkCommandBuffer target){fn(target,count,saved.data());});
 }
 template<class Fn>
-void remember_scissor_count(DeviceState& d,VkCommandBuffer original,Fn fn,uint32_t count,const VkRect2D* values) {
+void remember_scissor_count(ThreadCommand& command,Fn fn,uint32_t count,const VkRect2D* values) {
     std::vector<VkRect2D> saved;if(count)saved.assign(values,values+count);
-    remember_state(d,original,[=](VkCommandBuffer target){fn(target,count,saved.data());});
+    remember_state(command,[=](VkCommandBuffer target){fn(target,count,saved.data());});
 }
 template<class Fn>
-void remember_vertex2(DeviceState& d,VkCommandBuffer original,Fn fn,uint32_t first,uint32_t count,
+void remember_vertex2(ThreadCommand& command,Fn fn,uint32_t first,uint32_t count,
     const VkBuffer* buffers,const VkDeviceSize* offsets,const VkDeviceSize* sizes,const VkDeviceSize* strides) {
     std::vector<VkBuffer> saved_buffers;std::vector<VkDeviceSize> saved_offsets,saved_sizes,saved_strides;
     if(count){saved_buffers.assign(buffers,buffers+count);saved_offsets.assign(offsets,offsets+count);
         if(sizes)saved_sizes.assign(sizes,sizes+count);if(strides)saved_strides.assign(strides,strides+count);}
-    remember_state(d,original,[=](VkCommandBuffer target){fn(target,first,count,saved_buffers.data(),saved_offsets.data(),
+    remember_state(command,[=](VkCommandBuffer target){fn(target,first,count,saved_buffers.data(),saved_offsets.data(),
         sizes?saved_sizes.data():nullptr,strides?saved_strides.data():nullptr);});
 }
 void register_command(const std::shared_ptr<DeviceState>& device,VkCommandBuffer original) {
-    auto& r=registry();std::scoped_lock lock(r.mutex);r.commands[original]=device;
+    auto& r=registry();std::scoped_lock lock(r.mutex);auto& owner=r.commands[original];
+    if(owner.lock()!=device){owner=device;registry_generation.fetch_add(1,std::memory_order_release);}
 }
 void release_chain(DeviceState& device,CommandChain& chain,DisposedRecordings& abandoned) {
     if(chain.receipt) {
@@ -344,7 +414,7 @@ bool initialize_commands(VkInstance instance,VkPhysicalDevice physical,VkDevice 
     VK_REPLAY(CmdSetStencilOp,vkCmdSetStencilOp);
 #undef VK_REPLAY
     d->tracker.SetFunctionTable(fns);auto& r=registry();std::scoped_lock lock(r.mutex);
-    if(r.devices.contains(device))return true;r.devices[device]=d;r.dispatch[dispatch_key(device)]=d;return true;
+    if(r.devices.contains(device))return true;r.devices[device]=d;r.dispatch[dispatch_key(device)]=d;registry_generation.fetch_add(1,std::memory_order_release);return true;
 }
 PFN_vkVoidFunction resolve_command(VkDevice device,const char* name,PFN_vkVoidFunction original) noexcept {
     if(!name||!original)return original;
@@ -447,7 +517,7 @@ bool initialize_guide_commands(VkInstance instance,VkPhysicalDevice physical,VkD
 CommandSplit split(VkCommandBuffer original,const CommandHandoff& handoff,
     RecordCopyback copyback,void* context) noexcept {
     CommandSplit result;auto d=command_device(original);if(!d||!handoff.timeline||!handoff.prefix_signal||
-        handoff.suffix_wait<=handoff.prefix_signal||
+        handoff.suffix_wait<handoff.prefix_signal||
         (handoff.suffix_signal&&handoff.suffix_signal<=handoff.suffix_wait))return result;
     try {
         std::scoped_lock lock(d->mutex);original_locked(*d,original);auto found=d->commands.find(original);if(found==d->commands.end())return result;
@@ -495,7 +565,7 @@ void destroy_commands(VkDevice device) noexcept {
     DisposedRecordings abandoned;
     {std::scoped_lock lock(d->mutex);for(auto& [original,chain]:d->commands)release_chain(*d,chain,abandoned);d->commands.clear();}
     {
-        auto& r=registry();std::scoped_lock lock(r.mutex);r.dispatch.erase(dispatch_key(device));r.devices.erase(device);
+        auto& r=registry();std::scoped_lock lock(r.mutex);registry_generation.fetch_add(1,std::memory_order_release);r.dispatch.erase(dispatch_key(device));r.devices.erase(device);
         for(auto iterator=r.commands.begin();iterator!=r.commands.end();) {
             if(iterator->second.lock()==d)iterator=r.commands.erase(iterator);else ++iterator;
         }

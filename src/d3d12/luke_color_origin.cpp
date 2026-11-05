@@ -339,6 +339,44 @@ static void report_origin_layout(bool writer, unsigned reason,
     } catch (...) { }
 }
 
+bool luke_color_origin_patch_layout(unsigned texture_width, unsigned texture_height,
+    LukeColorOriginRect rect, LukeColorOriginPatch* patch) noexcept {
+    if (!patch) return false;
+    *patch = {};
+    try {
+        if (!rect.width) rect.width = texture_width;
+        if (!rect.height) rect.height = texture_height;
+        if (rect.width < kLukeOriginWidth || rect.height > 8192 ||
+            static_cast<UINT64>(rect.x) + rect.width > texture_width ||
+            static_cast<UINT64>(rect.y) + rect.height > texture_height) return false;
+        g_output_extent.store(extent_bits(rect.width, rect.height), std::memory_order_release);
+        const auto color_extent = g_color_extent.load(std::memory_order_acquire);
+        if (!color_extent) return false;
+        LukeColorOriginLayout layout;
+        const auto inset=origin_inset(static_cast<UINT>(color_extent >> 32),static_cast<UINT>(color_extent));
+        if (!compact_luke_origin_layout(rect.width, rect.height,
+                static_cast<UINT>(color_extent >> 32), static_cast<UINT>(color_extent), layout,inset[0],inset[1],
+                origin_from_bottom())) return false;
+        const bool primary_bright=bright_primary_origin();
+        for(unsigned band=0;band<layout.band_count;++band) {
+            auto area=layout.bands[band];area.x+=rect.x;area.y+=rect.y;
+            if(static_cast<UINT64>(area.x)+area.width>texture_width ||
+                static_cast<UINT64>(area.y)+area.height>texture_height)return false;
+            patch->bands[band]=area;patch->bright[band]=layout.bright[band]||primary_bright;
+        }
+        patch->band_count=layout.band_count;
+        return patch->band_count!=0;
+    } catch (...) { return false; }
+}
+void luke_color_origin_patch_pixels(const LukeColorOriginPatch& patch, DXGI_FORMAT format,
+    std::uint32_t token, std::byte* pixels) noexcept {
+    const auto bytes=luke_origin_pixel_bytes(format);
+    if(!pixels||!bytes)return;
+    for(unsigned band=0;band<patch.band_count;++band)
+        for(unsigned y=0;y<kLukeOriginHeight;++y)
+            for(unsigned x=0;x<kLukeOriginWidth;++x,pixels+=bytes)
+                luke_origin_pixel(pixels,format,luke_origin_white(token,(x/2)*2),patch.bright[band]);
+}
 HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* color,
     std::uint32_t token, D3D12_RESOURCE_STATES state, ID3D12Device* native_device,
     LukeColorOriginRect rect, DXGI_FORMAT proven_color_view, LukeColorOriginRect* written_rectangle) noexcept {

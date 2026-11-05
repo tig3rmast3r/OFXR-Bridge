@@ -406,6 +406,19 @@ inline bool compact_luke_origin_layout(unsigned output_width, unsigned output_he
 void configure_luke_color_origin_extent(unsigned color_width, unsigned color_height) noexcept;
 // Two immutable black/white cell uploads per device/format/height. No per-frame
 // upload allocation, CPU rewrite, producer-submission receipt or 64-frame cap.
+// The bands mark_luke_color_origin would write, in texture coordinates, for a
+// producer that writes them itself. False while the layout is not yet known.
+struct LukeColorOriginPatch {
+    std::array<LukeColorOriginRect,8> bands{};
+    std::array<bool,8> bright{};
+    unsigned band_count{};
+};
+inline constexpr unsigned kLukeOriginPatchMaximumBytes = 8 * kLukeOriginWidth * kLukeOriginHeight * 16;
+bool luke_color_origin_patch_layout(unsigned texture_width, unsigned texture_height,
+    LukeColorOriginRect rect, LukeColorOriginPatch* patch) noexcept;
+// Tightly packed, band after band, kLukeOriginWidth x kLukeOriginHeight each.
+void luke_color_origin_patch_pixels(const LukeColorOriginPatch& patch, DXGI_FORMAT format,
+    std::uint32_t token, std::byte* pixels) noexcept;
 HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* color,
     std::uint32_t token, D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
     ID3D12Device* native_device = nullptr, LukeColorOriginRect rect = {},
