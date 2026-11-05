@@ -39,4 +39,25 @@ namespace xrfg {
     return removed;
 }
 
+// A depth texture exactly two eyes wide holds the eyes' depth at that size,
+// whatever smaller rectangle the upscaler reports. PureDark's Skyrim VR
+// upscaler reports 2824 x 2212 of a 9740 x 3813 texture for both inputs; its
+// vectors are that size, its depth fills 4870 x 3813 per eye. Read as
+// reported, depth was zoomed 1.72 times and the right eye ran into the left's
+// (F8 captures). Elsewhere a depth texture is sized to its render.
+// Takes the reported rectangle, returns false to leave it as it is.
+[[nodiscard]] inline bool dlss_depth_fills_eye_slot(std::uint32_t& x, std::uint32_t& y,
+    std::uint32_t& width, std::uint32_t& height, std::uint32_t output_width,
+    std::uint32_t output_height, std::uint32_t texture_width,
+    std::uint32_t texture_height) noexcept {
+    if (width == 0 || height == 0 || output_width == 0 || texture_height != output_height ||
+        width >= output_width || height >= output_height ||
+        std::uint64_t(texture_width) != std::uint64_t(output_width) * 2U) return false;
+    x = std::lround(static_cast<double>(x) / static_cast<double>(width)) == 1 ? output_width : 0U;
+    y = 0;
+    width = output_width;
+    height = output_height;
+    return true;
+}
+
 }  // namespace xrfg

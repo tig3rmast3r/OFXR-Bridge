@@ -836,6 +836,10 @@ static const float kDepthAgreeLimit = 0.25;
 
 float4 game_depth_region() { return asfloat(GameDepthRegion.Load4(0)); }
 
+// The splat's grid: the smaller of depth and the vectors. Past either's size
+// it would add memory and nothing else.
+float2 depth_splat_extent() { return min(game_depth_region().zw, GameMotionRect.zw); }
+
 // The depth texel game_nearness reads for `pixel`.
 int2 game_depth_texel(float2 pixel) {
     float4 output_rect = game_motion_output_rect();
@@ -854,13 +858,13 @@ float game_nearness(float2 pixel) {
 
 bool nearer(float a, float b) { return a > b * kDepthNearerFactor + 1.0e-6; }
 
-// The splat's texel for a coordinate of the image: the depth's texel grid
-// over the output rectangle, counted from its origin (0.2's coverage mask
-// grid, V539, was the vectors': the same but for full-resolution vectors).
+// The splat's texel for a coordinate of the image: its grid over the output
+// rectangle, counted from its origin (0.2's coverage mask grid, V539, was the
+// vectors').
 int2 coverage_mask_texel(float2 coordinate) {
     float4 output_rect = game_motion_output_rect();
     float2 uv = (coordinate - output_rect.xy + 0.5) / max(output_rect.zw, float2(1.0, 1.0));
-    float2 extent = game_depth_region().zw;
+    float2 extent = depth_splat_extent();
     float2 limit = max(ceil(extent), float2(1.0, 1.0));
     return int2(clamp(floor(uv * extent), float2(0.0, 0.0), limit));
 }
@@ -1854,7 +1858,7 @@ static const uint kDepthSplatOutputs = 3u;
 [numthreads(8, 8, 1)]
 void ClearDepthSplat(uint3 id : SV_DispatchThreadID) {
     hybrid_layout = true;
-    float2 limit = ceil(game_depth_region().zw);
+    float2 limit = ceil(depth_splat_extent());
     if (float(id.x) <= limit.x && float(id.y) <= limit.y) {
         DepthSplatOut[uint3(id.xy, kDepthSplatOutputs * Slice + depth_splat_output())] = 0u;
     }
@@ -1863,7 +1867,7 @@ void ClearDepthSplat(uint3 id : SV_DispatchThreadID) {
 [numthreads(8, 8, 1)]
 void BuildDepthSplat(uint3 id : SV_DispatchThreadID) {
     hybrid_layout = true;
-    float2 extent = game_depth_region().zw;
+    float2 extent = depth_splat_extent();
     if (float(id.x) >= extent.x || float(id.y) >= extent.y) return;
     // The output pixel under this texel's centre: game_motion_texel's map,
     // inverted.

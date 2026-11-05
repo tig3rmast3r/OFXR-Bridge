@@ -3465,7 +3465,7 @@ struct D3D12FrameSynthesizer::Impl {
         }
     }
 
-    // Depth the search can use: a readable format, on the vectors' rectangle.
+    // Depth the search can use: a readable format.
     [[nodiscard]] static bool usable_guide_depth(const DlssMotionVectorFrame& frame) noexcept {
         // Depth has a size of its own: Ready or Not's vectors are at the
         // output's resolution and its depth at the render's.
@@ -3556,11 +3556,15 @@ struct D3D12FrameSynthesizer::Impl {
             apply_hybrid_guide_constants(splat.parameters, guide);
             splat.parameters.slice = eye;
             splat.parameters.view_index = view_index;
-            const auto rect = guide_depth_rect(guide);
-            if (!(rect[2] >= 1.0F) || !(rect[3] >= 1.0F) || rect[2] > 16384.0F || rect[3] > 16384.0F)
-                continue;
-            splat.columns = static_cast<UINT>(std::ceil(rect[2])) + 1U;
-            splat.rows = static_cast<UINT>(std::ceil(rect[3])) + 1U;
+            // Its grid, depth_splat_extent: the smaller of depth and the vectors.
+            const auto depth_rect = guide_depth_rect(guide);
+            const auto motion_rect = guide_motion_rect(guide);
+            const float grid_width = std::min(depth_rect[2], motion_rect[2]);
+            const float grid_height = std::min(depth_rect[3], motion_rect[3]);
+            if (!(grid_width >= 1.0F) || !(grid_height >= 1.0F) ||
+                grid_width > 16384.0F || grid_height > 16384.0F) continue;
+            splat.columns = static_cast<UINT>(std::ceil(grid_width)) + 1U;
+            splat.rows = static_cast<UINT>(std::ceil(grid_height)) + 1U;
             width = std::max(width, splat.columns);
             height = std::max(height, splat.rows);
             built[eye] = true;

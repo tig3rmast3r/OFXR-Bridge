@@ -215,12 +215,12 @@ template <typename DepthForPixel>
 // 0.2 V505/V555: a thin near bar sweeps across background both frames show.
 // Without the depth search the solve finds the background and the bars go
 // missing from the generated frame; with it they stay whole. outputs 1-3 is
-// 2X-4X, each output checked at its own instant. low_res_depth: depth at two
-// thirds of the vectors' size, as Ready or Not's full-resolution vectors have.
+// 2X-4X, each output checked at its own instant. depth_thirds: depth's size
+// in thirds of the vectors': 2 as Ready or Not's, larger as Skyrim's.
 // forward_depth: larger is farther, as Skyrim's is.
 double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
     xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx,
-    UINT length = 256, bool vertical = false, UINT outputs = 1, bool low_res_depth = false,
+    UINT length = 256, bool vertical = false, UINT outputs = 1, UINT depth_thirds = 3,
     bool forward_depth = false) {
     const UINT width = vertical ? 128U : length;
     const UINT height = vertical ? length : 128U;
@@ -264,8 +264,8 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
             return vertical ? std::array<float, 2>{0.0F, motion} : std::array<float, 2>{motion, 0.0F};
         });
     // Inverted depth, as DI2's and MSFS's DLSS: larger is nearer.
-    const UINT depth_field_width = low_res_depth ? width * 2U / 3U : width;
-    const UINT depth_field_height = low_res_depth ? height * 2U / 3U : height;
+    const UINT depth_field_width = width * depth_thirds / 3U;
+    const UINT depth_field_height = height * depth_thirds / 3U;
     auto game_depth = create_and_upload_game_depth_field(
         fixture, depth_field_width, depth_field_height, [&](UINT, UINT dx, UINT dy) {
             const UINT x = (dx * 2U + 1U) * width / (depth_field_width * 2U);

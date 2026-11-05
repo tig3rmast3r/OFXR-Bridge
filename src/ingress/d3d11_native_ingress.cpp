@@ -1,6 +1,7 @@
 #include "xrfg/native_ingress.hpp"
 #include "xrfg/upscaler_observation.hpp"
 #include "xrfg/d3d11_dlss_guides.hpp"
+#include "xrfg/dlss_input_region.hpp"
 #include "xrfg/d3d11_guide_transport.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
 #include "xrfg/neural_rendering.hpp"
@@ -213,6 +214,11 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     g.output_x=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X);g.output_y=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y);
     g.motion_x=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X);g.motion_y=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y);
     g.depth_x=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X);g.depth_y=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y);
+    const std::array<std::uint32_t,4> reported_depth{g.depth_x,g.depth_y,g.depth_width,g.depth_height};
+    const auto depth_extent=extent(depth_texture.Get());
+    // Luke's AFW keeps the rectangle it has always read.
+    const bool depth_slot=g.depth&&!luke_detected()&&dlss_depth_fills_eye_slot(g.depth_x,g.depth_y,g.depth_width,g.depth_height,
+        g.output_width,g.output_height,static_cast<std::uint32_t>(depth_extent>>32),static_cast<std::uint32_t>(depth_extent));
     g.scale_x=get<float>(p,NVSDK_NGX_Parameter_MV_Scale_X,1);g.scale_y=get<float>(p,NVSDK_NGX_Parameter_MV_Scale_Y,1);
     g.jitter_x=get<float>(p,NVSDK_NGX_Parameter_Jitter_Offset_X);g.jitter_y=get<float>(p,NVSDK_NGX_Parameter_Jitter_Offset_Y);
     g.reset=get<int>(p,NVSDK_NGX_Parameter_Reset)!=0;g.jittered=(f->flags&NVSDK_NGX_DLSS_Feature_Flags_MVJittered)!=0;
@@ -230,6 +236,8 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
         capture_log("d3d11_stream_rects",shape[2],shape[3],shape[4],pack(g.depth_width,g.depth_height));
         capture_log("d3d11_stream_textures",extent(motion.Get()),extent(depth_texture.Get()),extent(output.Get()),
             describe(motion.Get()));
+        if(depth_slot)capture_log("d3d11_stream_depth_slot",pack(reported_depth[0],reported_depth[1]),
+            pack(reported_depth[2],reported_depth[3]),pack(g.depth_x,g.depth_y));
     }
     nr_guides(t,true);
     if(color)neural_rendering::before_sr(f->identity,t.list(),&shadow,queue.Get());

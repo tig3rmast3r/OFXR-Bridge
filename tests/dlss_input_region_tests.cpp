@@ -37,6 +37,24 @@ int main() {
     expect(dlss_input_offset_within_region(5113, 0, 4627, 4870, 9740) == 0, "flush with far edge");
     // A move that would leave the texture is refused.
     expect(dlss_input_offset_within_region(2768, 0, 2824, 4870, 5600) == 0, "moved past the texture");
+
+    // Depth the size of the eyes, reported as the vectors' rectangle: Skyrim.
+    using xrfg::dlss_depth_fills_eye_slot;
+    std::uint32_t x = 56, y = 88, w = 2824, h = 2212;
+    expect(dlss_depth_fills_eye_slot(x, y, w, h, 4870, 3813, 9740, 3813) &&
+        x == 0 && y == 0 && w == 4870 && h == 3813, "left eye's slot");
+    x = 2768; y = 88; w = 2824; h = 2212;
+    expect(dlss_depth_fills_eye_slot(x, y, w, h, 4870, 3813, 9740, 3813) &&
+        x == 4870 && y == 0 && w == 4870 && h == 3813, "right eye's slot");
+    x = 10; y = 10; w = 2824; h = 2212;
+    expect(!dlss_depth_fills_eye_slot(x, y, w, h, 4870, 3813, 4870, 3813) && x == 10 && w == 2824,
+        "one eye's texture stays as reported");
+    // Depth sized to its render stays as reported: Ready or Not, and the rest.
+    x = 2840; y = 0; w = 2837; h = 2223;
+    expect(!dlss_depth_fills_eye_slot(x, y, w, h, 4172, 3268, 5680, 2224) && x == 2840 && w == 2837,
+        "a render-sized texture");
+    x = 0; y = 0; w = 4870; h = 3813;
+    expect(!dlss_depth_fills_eye_slot(x, y, w, h, 4870, 3813, 9740, 3813), "already the whole eye");
     std::cout << checks - failures << '/' << checks << " dlss input region checks passed\n";
     return failures == 0 ? 0 : 1;
 }
