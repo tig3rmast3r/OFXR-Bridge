@@ -1804,8 +1804,11 @@ bool rife_multiframe_capable(const SessionState& state) noexcept {
             (state.graphics_binding==SessionGraphicsBinding::d3d11 ||
              state.graphics_binding==SessionGraphicsBinding::d3d12);
     }
+    // A Vulkan bridge is D3D12 towards the runtime, and its images are copied
+    // at the release: OFXR, Hybrid and DLSS-G take 3X/4X over it, as in 0.2
+    // (Star Citizen). RIFE keeps its accepted interop contract.
     return state.graphics_binding==SessionGraphicsBinding::d3d12 &&
-        !state.d3d11_bridge && !state.vulkan_bridge;
+        !state.d3d11_bridge && (!state.vulkan_bridge || state.nvidia_options.rife_model<0);
 }
 unsigned rife_benchmark_max_multiplier(const SessionState& state) noexcept {
     if(native_vdxr_rife_three(state))return state.pipelined_presenter_mode?2:3;
@@ -16219,7 +16222,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         static_cast<void>(wait_for_presenter_idle(state));
     if(state->private_runtime && state->pipelined_presenter_mode && control.desired.enabled &&
         requested_ordered_multiframe(control.desired) && !state->luke_afw_enabled &&
-        state->graphics_binding==SessionGraphicsBinding::d3d12 && !state->d3d11_bridge && !state->vulkan_bridge) {
+        state->graphics_binding==SessionGraphicsBinding::d3d12 && !state->d3d11_bridge &&
+        (!state->vulkan_bridge || control.desired.rife_model<0)) {
         // An optical route may have promoted before RIFE was selected. Its
         // legacy overlap owner is not a hardware restriction on private RIFE.
         // Drain/join it before validating and bootstrapping the native worker.
