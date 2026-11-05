@@ -8076,6 +8076,17 @@ XrResult layer_wait_swapchain_image_impl(
     return identity;
 }
 
+// What a release-bound lookup knows of this eye's stream. Caller holds the
+// swapchain's mutex.
+[[nodiscard]] xrfg::DlssReleasedEyeIdentity released_eye_identity(
+    const SessionState& session, const SwapchainState& state) noexcept {
+    if (!strict_release_eye_identity(session)) return both_eyes_identity(state, {});
+    auto identity = both_eyes_identity(state,
+        {true, state.fsr_eye_identity.stream, state.fsr_eye_identity.epoch});
+    identity.learn_from_order = !strict_fsr_release_guides(session);
+    return identity;
+}
+
 XrResult release_swapchain_image_locked(
     const std::shared_ptr<SwapchainState>& state,
     const XrSwapchainImageReleaseInfo* release_info,
@@ -8233,9 +8244,7 @@ XrResult release_swapchain_image_locked(
                     release_bound_guides && (eye == 0 || eye == 1)
                         ? state->session->eye_release_publication[1 - eye].load(
                               std::memory_order_relaxed) : 0,
-                    strict_release_eye_identity(*state->session)
-                        ? both_eyes_identity(*state, {true, state->fsr_eye_identity.stream, state->fsr_eye_identity.epoch})
-                        : both_eyes_identity(*state, {}),
+                    released_eye_identity(*state->session, *state),
                     revisited_at_end && release_bound_guides && (eye == 0 || eye == 1) &&
                         !state->session->uevr_osr_active.load(std::memory_order_acquire));
             };
@@ -11395,10 +11404,7 @@ void refresh_release_bound_projection_guides(
             return releases[eye] ? xrfg::resolve_dlss_motion_vectors(
                 chains[eye]->enumerated_d3d12_images[*chains[eye]->last_released_index].Get(),
                 session.d3d12_queue.Get(), static_cast<int>(eye), releases[eye], releases[1 - eye],
-                strict_release_eye_identity(session)
-                    ? both_eyes_identity(*chains[eye], {true, chains[eye]->fsr_eye_identity.stream,
-                        chains[eye]->fsr_eye_identity.epoch})
-                    : both_eyes_identity(*chains[eye], {}), tentative) : nullptr;
+                released_eye_identity(session, *chains[eye]), tentative) : nullptr;
         };
         for (std::size_t eye = 0; eye < chains.size(); ++eye) {
             session.eye_release_publication[eye].store(releases[eye], std::memory_order_relaxed);

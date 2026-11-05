@@ -385,6 +385,11 @@ struct DlssReleasedEyeIdentity {
     // of the image.
     bool both_eyes{};
     std::uint32_t view_half{};
+    // Hybrid: where nothing learned names this eye's stream, two streams
+    // alike take the order every other route does, and the identity is learned
+    // from that. A stream is learned only from a join, and with both eyes
+    // evaluated before either release (Star Citizen) strict alone never joins.
+    bool learn_from_order{};
 };
 // tentative: a per-eye lookup that xrEndFrame's placement by camera revisits
 // (MSFS 2024's foveated streams are never the eye's size). Its failure leaves

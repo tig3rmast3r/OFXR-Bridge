@@ -4106,6 +4106,67 @@ void test_enlarged_dlss_guides(D3D12WarpFixture& fixture) {
     std::cout << "Enlarged guides: peripheries over both eyes, insets refused, release bound, third refused, single refused, input side, stale refused PASS\n";
 }
 
+// Star Citizen: a swapchain per eye, two eye-sized streams, both evaluated
+// before either eye is released. Hybrid's strict join has no stream to go by
+// until a join teaches it one; FSR's stays refused.
+void test_hybrid_eye_identity_from_order(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    const auto texture = [&]() {
+        auto description = stereo_texture_description(64, 32);
+        description.DepthOrArraySize = 1;
+        description.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const auto properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> resource;
+        require_hresult(fixture.device()->CreateCommittedResource(&properties,
+            D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_COMMON,
+            nullptr, IID_PPV_ARGS(&resource)), "eye identity texture");
+        return resource;
+    };
+    const auto color = texture(), xr_color = texture(), motion = texture();
+    const auto publish = [&](std::uint64_t stream) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::DlssMotionVectorPublication p{};
+            p.stream = stream; p.output = color.Get(); p.motion_vectors = motion.Get();
+            p.output_width = 64; p.output_height = 32;
+            p.motion_width = 64; p.motion_height = 32;
+            p.producer_queue = fixture.queue(); p.producer_command_list = list;
+            p.resource_state = D3D12_RESOURCE_STATE_COMMON;
+            require(xrfg::publish_dlss_motion_vectors(p) != nullptr, "eye identity publication failed");
+        }, true);
+        return xrfg::dlss_motion_vector_publications();
+    };
+    std::uint64_t release{};
+    for (int frame = 0; frame < 3; ++frame) {
+        publish(801);
+        release = publish(802);
+    }
+    const auto resolve = [&](int eye, xrfg::DlssReleasedEyeIdentity identity) {
+        return xrfg::resolve_dlss_motion_vectors(xr_color.Get(), fixture.queue(),
+            eye, release, release, identity);
+    };
+    const auto stream_of = [](const auto& set) {
+        return set && set->eyes[0] ? set->eyes[0]->stream : 0ULL;
+    };
+    require(!resolve(0, {true, 0, 0}) && !resolve(1, {true, 0, 0}),
+        "strict FSR took an eye's stream from discovery order");
+    xrfg::DlssReleasedEyeIdentity learning{true, 0, 0};
+    learning.learn_from_order = true;
+    const auto left = resolve(0, learning), right = resolve(1, learning);
+    require(stream_of(left) == 801 && stream_of(right) == 802,
+        "Hybrid with nothing learned did not take the streams in order");
+    auto learned = learning;
+    learned.stream = 802;
+    learned.epoch = left->eyes[0]->epoch;
+    require(stream_of(resolve(0, learned)) == 802, "a learned stream did not outrank the order");
+    learned.stream = 999;
+    require(stream_of(resolve(0, learned)) == 801 && stream_of(resolve(1, learned)) == 802,
+        "Hybrid stayed on a stream the game replaced");
+    learned.learn_from_order = false;
+    require(!resolve(0, learned), "strict FSR accepted a stream it never learned");
+}
+
 void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
     using Mode = xrfg::D3D12FrameGenerationMode;
     require(xrfg::use_release_bound_game_guides(Mode::ofxr, true, false) &&
@@ -6115,6 +6176,7 @@ int main(int argc, char** argv) {
             test_dlss_motion_vector_stereo_stream_pairing(guides_fixture);
             test_dlss_motion_vector_per_eye_swapchains(guides_fixture);
             test_release_bound_dlss_guides(guides_fixture);
+            test_hybrid_eye_identity_from_order(guides_fixture);
             test_guide_composer(guides_fixture);
             guides_fixture.require_no_debug_errors();
             std::cout << "Stellar R22 resolver/composer GPU checks passed\n";
@@ -6405,6 +6467,7 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string_view(argv[1]) == "release-bound-guides") {
             D3D12WarpFixture fixture;
             test_release_bound_dlss_guides(fixture);
+            test_hybrid_eye_identity_from_order(fixture);
             test_view_placed_dlss_guides(fixture);
             test_enlarged_dlss_guides(fixture);
             fixture.require_no_debug_errors();

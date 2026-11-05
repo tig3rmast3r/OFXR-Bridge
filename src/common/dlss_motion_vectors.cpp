@@ -1929,8 +1929,9 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                         const auto known = std::find_if(candidates.begin(), candidates.end(),
                             [&](const Candidate& c) { return identity.stream != 0 &&
                                 c.frame->stream == identity.stream && c.frame->epoch == identity.epoch; });
-                        if (known == candidates.end()) return stale();
-                        selected = static_cast<std::size_t>(known - candidates.begin());
+                        if (known != candidates.end())
+                            selected = static_cast<std::size_t>(known - candidates.begin());
+                        else if (!identity.learn_from_order) return stale();
                     }
                     const auto& candidate = candidates[selected];
                     chosen = candidate.frame->publication <= released_at
