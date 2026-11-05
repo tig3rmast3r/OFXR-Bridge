@@ -33,8 +33,11 @@ void geometry() {
     Settings settings;
     auto quad = calculate_menu_presentation({}, settings);
     inside(quad, {});
-    require(approximately(quad.width, 1.92F) && approximately(quad.height, 1.44F) &&
-        approximately(quad.x, 0) && approximately(quad.y, 0), "default matches V441 fitted 80-percent quad");
+    require(approximately(quad.width, 1.44F) && approximately(quad.height, 1.08F) &&
+        approximately(quad.x, 0) && approximately(quad.y, 0), "default is three quarters of the fitted 80-percent quad");
+    settings.menu_scale = 1;
+    quad = calculate_menu_presentation({}, settings);
+    require(approximately(quad.width, 1.92F) && approximately(quad.height, 1.44F), "1.00x matches the V441 fitted quad");
     settings.menu_scale = .5F;
     quad = calculate_menu_presentation({}, settings);
     require(approximately(quad.width, .96F) && approximately(quad.height, .72F), "half size keeps same texture aspect");
@@ -64,7 +67,7 @@ void geometry() {
     settings.menu_offset_x = std::numeric_limits<float>::infinity();
     settings.menu_offset_y = -std::numeric_limits<float>::infinity();
     quad = calculate_menu_presentation({}, settings);
-    require(quad.valid && approximately(quad.scale, 1) && approximately(quad.x, 0) && approximately(quad.y, 0),
+    require(quad.valid && approximately(quad.scale, kDefaultMenuScale) && approximately(quad.x, 0) && approximately(quad.y, 0),
         "nonfinite settings recover finite default geometry");
     settings.menu_scale = 99;
     require(approximately(calculate_menu_presentation({}, settings).scale, 1.25F), "oversized scale clamps");
@@ -85,7 +88,7 @@ struct Surface {
     SettingsWidgetState widgets{};
     MenuPresentationInteraction interaction{};
     MenuDragResult drag{};
-    ImRect checkbox{}, disabled_checkbox{}, slider{}, popup_button{}, footer_slider{}, reset_button{};
+    ImRect checkbox{}, disabled_checkbox{}, slider{}, popup_button{}, reset_button{};
     ImGuiWindow* child{};
     bool checked{}, disabled_checked{}, popup_requested{};
     float value{.5F};
@@ -153,12 +156,6 @@ struct Surface {
         drag = update_menu_drag(interaction, widgets,
             calculate_menu_presentation({}, widgets.draft));
         ImGui::Separator();
-        const auto footer = ImGui::GetCursorScreenPos();
-        const auto& style = ImGui::GetStyle();
-        const float width = ImGui::GetContentRegionAvail().x -
-            (ImGui::CalcTextSize("Reset position / size").x + style.FramePadding.x * 2) -
-            ImGui::CalcTextSize("Interface size").x - style.ItemSpacing.x * 3;
-        footer_slider = ImRect(footer, ImVec2(footer.x + width, footer.y + ImGui::GetFrameHeight()));
         render_menu_footer(widgets, interaction);
         reset_button = context->LastItemData.Rect;
         ImGui::End();
@@ -174,10 +171,9 @@ struct Surface {
         }
         require(ImGui::GetCurrentContext() == context, "presentation preserves caller's ImGui context");
         require(ImGui::GetDrawData()->TotalVtxCount > 0, "presentation produces real widget draw data");
-        require(footer_slider.Min.y > 690 && reset_button.Max.y < 768,
-            "size slider and reset remain outside content scroller and inside canvas");
-        require(reset_button.Max.x <= 1024 && footer_slider.Max.x < reset_button.Min.x,
-            "footer controls fit canvas horizontally");
+        require(reset_button.Min.y > 690 && reset_button.Max.y < 768,
+            "size buttons and reset remain outside content scroller and inside canvas");
+        require(reset_button.Max.x <= 1024, "footer controls fit canvas horizontally");
     }
     void press(ImVec2 point) {
         position(point); draw();
@@ -279,20 +275,15 @@ void interactions() {
     surface.close(); surface.draw(); surface.draw();
     baseline(surface);
     const auto revision = snapshot().revision;
-    surface.press(ImVec2(surface.footer_slider.Min.x + 50, surface.footer_slider.GetCenter().y));
-    surface.position(ImVec2(surface.footer_slider.Max.x - 15, surface.footer_slider.GetCenter().y));
-    surface.draw();
-    require(surface.interaction.footer_scale_editing && !surface.interaction.dragging &&
-        !surface.interaction.pending_drag && surface.widgets.draft.menu_scale > 1,
-        "footer slider edits interface scale without becoming blank drag");
-    require(snapshot().revision == revision && surface.widgets.dirty,
-        "interface size waits for actual slider release");
-    surface.release(ImVec2(surface.footer_slider.Max.x - 15, surface.footer_slider.GetCenter().y));
-    require(snapshot().desired.menu_scale > 1 && !surface.widgets.dirty,
-        "footer size slider publishes on release");
+    ImGui::SetCurrentContext(surface.context);
+    ImGui::ActivateItemByID(ImGui::FindWindowByName("OFXR menu")->GetID("###Larger size"));
+    surface.draw(); surface.draw();
+    require(!surface.interaction.dragging && !surface.interaction.pending_drag &&
+        snapshot().revision != revision && approximately(snapshot().desired.menu_scale, .8F) && !surface.widgets.dirty,
+        "footer size button publishes one step without becoming blank drag");
     surface.press(center(surface.reset_button));
     surface.release(center(surface.reset_button));
-    require(approximately(snapshot().desired.menu_scale, 1) && approximately(snapshot().desired.menu_offset_x, 0) &&
+    require(approximately(snapshot().desired.menu_scale, kDefaultMenuScale) && approximately(snapshot().desired.menu_offset_x, 0) &&
         approximately(snapshot().desired.menu_offset_y, 0), "reset restores size and position together");
     surface.press(ImVec2(920, 350));
     surface.position(ImVec2(960, 375)); surface.draw();

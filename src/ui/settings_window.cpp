@@ -33,6 +33,7 @@ struct Window {
     bool win32_ready{};
     bool dx11_ready{};
     SettingsWidgetState widgets{};
+    bool headset_preview{};
 
     ~Window() {
         set_interface_visible(InterfaceSurface::desktop, false);
@@ -69,11 +70,6 @@ struct Window {
         ImGui::GetIO().IniFilename = nullptr;
         ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         apply_settings_style();
-        auto& style = ImGui::GetStyle();
-        style.WindowRounding = 0;
-        style.FrameRounding = 4;
-        style.ItemSpacing = ImVec2(10, 9);
-        style.WindowPadding = ImVec2(18, 16);
         win32_ready = ImGui_ImplWin32_Init(handle);
         dx11_ready = win32_ready && ImGui_ImplDX11_Init(device.Get(), context.Get());
         return dx11_ready;
@@ -107,6 +103,7 @@ struct Window {
         }
         ScopedConfigurationSelection selection(profiles.selected());
         SettingsWidgetOptions options;
+        options.compact=headset_preview;
         options.desktop_profile_header=[&](SettingsWidgetState& ui){return render_desktop_profile_picker(profiles,ui,selection);};
         render_settings_widgets(widgets,snapshot(),std::move(options));
         ImGui::End();
@@ -215,9 +212,12 @@ bool show_settings_window(HWND owner) noexcept {
             if (!RegisterClassExW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
             auto candidate = std::make_unique<Window>();
             const auto title=L"OFXR-BRIDGE 0.3.3 (v"+std::to_wstring(XRFG_IMPLEMENTATION_VERSION)+L") - Settings";
+            // The same 1024 x 768 layout as the headset menu.
+            RECT frame{0, 0, 1024, 768};
+            AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW);
             const HWND handle = CreateWindowExW(WS_EX_APPWINDOW, kClassName,
                 title.c_str(), WS_OVERLAPPEDWINDOW,
-                CW_USEDEFAULT, CW_USEDEFAULT, 690, 900, owner, nullptr,
+                CW_USEDEFAULT, CW_USEDEFAULT, frame.right - frame.left, frame.bottom - frame.top, owner, nullptr,
                 cls.hInstance, candidate.get());
             if (!handle || !candidate->initialize()) {
                 if (handle) DestroyWindow(handle);
@@ -241,8 +241,17 @@ void close_settings_window() noexcept {
         window.reset();
     }
 }
-bool save_settings_preview(const std::filesystem::path& output) noexcept {
-    try { return window && window->preview(output); }
+bool save_settings_preview(const std::filesystem::path& output, int section, bool headset) noexcept {
+    try {
+        if (!window) return false;
+        window->widgets.section = section;
+        if (headset) {
+            ImGui::SetCurrentContext(window->imgui);
+            window->headset_preview = true;
+            apply_settings_style(true);
+        }
+        return window->preview(output);
+    }
     catch (...) { return false; }
 }
 } // namespace xrfg::autonomous

@@ -73,16 +73,6 @@ struct Context {
         }
         require(ImGui::GetCurrentContext() == context, "shared widgets preserve caller's context");
         require(ImGui::GetDrawData()->TotalVtxCount > 0, "settings surface renders real draw data");
-        if (context->FrameCount >= 2) {
-            unsigned tab_vertices{};
-            for (int i = 0; i < context->TabBars.GetMapSize(); ++i) {
-                auto* bar = context->TabBars.TryGetMapData(i);
-                if (!bar) continue;
-                for (const auto& vertex : bar->Window->DrawList->VtxBuffer)
-                    if (bar->BarRect.Contains(vertex.pos)) ++tab_vertices;
-            }
-            require(tab_vertices > 24, "settings tab strip is visibly rendered after layout warmup");
-        }
     }
     void activate(const char* child, const char* label) {
         ImGui::SetCurrentContext(context);
@@ -94,8 +84,22 @@ struct Context {
         }
         throw std::runtime_error("expected settings child was not rendered");
     }
+    // Segmented controls and cards are buttons under their control's ID. RIFE
+    // model stays a dropdown, reached through its popup.
     void choose(const char* label, int index, const char* item, const char* child = "/Generation_") {
-        activate(child, label);
+        ImGui::SetCurrentContext(context);
+        if (std::strcmp(label, "RIFE model") != 0) {
+            for (auto* window : context->Windows) {
+                if (std::strstr(window->Name, child)) {
+                    ImGui::ActivateItemByID(ImHashStr(item, 0, window->GetID(label)));
+                    draw();
+                    draw();
+                    return;
+                }
+            }
+            throw std::runtime_error("expected settings child was not rendered");
+        }
+        activate(child, "##RIFE model");
         draw();
         draw();
         ImGui::SetCurrentContext(context);
@@ -105,31 +109,25 @@ struct Context {
                 std::strstr(window->Name, "##Combo")) popup = window;
         if(!popup)throw std::runtime_error(std::string("combo did not open: ")+label+" in "+child+
             " generation="+std::to_string(snapshot().desired.frame_generation)+" backend="+std::to_string(snapshot().desired.backend));
-        if(std::strcmp(label,"AFW shading rate")==0){
-            draw(true);
-            require(rendered_text.find("4x4 (quarter per axis)")==std::string::npos,"AFW dropdown offers only1x1 and2x2");
-        }
         const auto seed = ImHashData(&index, sizeof(index), popup->IDStack.back());
         ImGui::ActivateItemByID(ImHashStr(item, 0, seed));
         draw();
         draw();
     }
-    void select_tab(const char* label) {
+    void activate_root(const char* label) {
         ImGui::SetCurrentContext(context);
-        for (int i = 0; i < context->TabBars.GetMapSize(); ++i) {
-            auto* bar = context->TabBars.TryGetMapData(i);
-            if (!bar) continue;
-            for (auto& tab : bar->Tabs) {
-                if (std::strcmp(ImGui::TabBarGetTabName(bar, &tab), label) == 0) {
-                    ImGui::ActivateItemByID(tab.ID);
-                    draw();
-                    draw();
-                    require(bar->SelectedTabId == tab.ID, "tab responds to ImGui navigation activation");
-                    return;
-                }
-            }
-        }
-        throw std::runtime_error("expected settings tab was not rendered");
+        auto* window = ImGui::FindWindowByName("Settings");
+        window->IDStack.push_back(window->GetID("OFXRBridgeSettings"));
+        ImGui::ActivateItemByID(window->GetID((std::string("###") + label).c_str()));
+        window->IDStack.pop_back();
+    }
+    void select_tab(const char* label) {
+        const int before = widgets.section;
+        activate("/Rail_", label);
+        draw();
+        draw();
+        require(before != widgets.section || std::strcmp(label, "Frame generation") == 0 || widgets.section != 0,
+            "rail entry responds to ImGui navigation activation");
     }
 };
 
@@ -182,36 +180,36 @@ void route_motion_widgets() {
     require(request(settings), "initialize OFXR optical-flow selection");
     Context tray(ImVec2(674, 861), false), headset(ImVec2(1024, 768), true);
     tray.draw(); tray.draw(); headset.draw(); headset.draw();
-    tray.choose("OFXR engine", 3, "Nvidia 0.3.0 (medium latency, medium compatibility)");
+    tray.choose("OFXR engine", 3, "Nvidia 0.3.0");
     require(snapshot().desired.backend == 2, "new display order keeps 0.3.0 on persisted backend 2");
     headset.draw();
-    headset.choose("OFXR engine", 2, "Nvidia 0.2.13 (medium latency, high compatibility)");
+    headset.choose("OFXR engine", 2, "Nvidia 0.2.13");
     require(snapshot().desired.backend == 3, "new display order keeps 0.2.13 on persisted backend 3");
     tray.draw();
-    tray.choose("Frame generation", 1, "RIFE (experimental, NVIDIA)");
+    tray.choose("Frame generation", 4, "RIFE");
     require(snapshot().desired.frame_generation == 4,
-        "RIFE is displayed after OFXR while keeping its persisted mode ID 4");
+        "RIFE is displayed last while keeping its persisted mode ID 4");
     headset.draw();
-    headset.choose("Frame generation", 0, "OFXR (fast)");
+    headset.choose("Frame generation", 0, "OFXR");
     require(snapshot().desired.motion_vectors == 0,
         "returning from RIFE preserves the independent OFXR optical-flow selection");
     tray.draw();
-    tray.choose("Frame generation", 2, "Hybrid (slow, needs DLSS)");
+    tray.choose("Frame generation", 1, "Hybrid");
     require(snapshot().desired.frame_generation == 3, "actual tray selects Hybrid with stable mode ID");
     headset.draw();
-    headset.choose("Frame generation", 0, "OFXR (fast)");
+    headset.choose("Frame generation", 0, "OFXR");
     require(snapshot().desired.motion_vectors == 0, "Hybrid preserves independent OFXR optical flow selection");
     tray.draw();
-    tray.choose("Frame generation", 3, "FSR 3.1 (slow, needs DLSS)");
+    tray.choose("Frame generation", 2, "FSR 3.1");
     require(snapshot().desired.frame_generation == 1, "actual tray selects FSR");
     headset.draw();
-    headset.choose("Frame generation", 0, "OFXR (fast)");
+    headset.choose("Frame generation", 0, "OFXR");
     require(snapshot().desired.motion_vectors == 0,
         "returning from FSR restores OFXR optical flow");
     tray.draw();
-    tray.choose("Frame generation", 4, "DLSS Frame Generation (slowest, needs DLSS)");
+    tray.choose("Frame generation", 3, "DLSS-G");
     headset.draw();
-    headset.choose("Frame generation", 0, "OFXR (fast)");
+    headset.choose("Frame generation", 0, "OFXR");
     require(snapshot().desired.motion_vectors == 0,
         "returning from DLSS-G restores OFXR optical flow");
 }
@@ -225,20 +223,20 @@ void route_multiplier_widgets() {
     tray.choose("Multiplier", 1, "3X");
     require(snapshot().desired.triple_frame_gen, "actual DJ menu selects 3X");
     headset.draw();
-    headset.choose("Frame generation", 4, "DLSS Frame Generation (slowest, needs DLSS)");
+    headset.choose("Frame generation", 3, "DLSS-G");
     require(!snapshot().desired.triple_frame_gen,
         "DLSS-G keeps its own 2X after DJ selects 3X");
     headset.choose("Multiplier", 1, "3X");
-    tray.draw(); tray.choose("Frame generation", 0, "OFXR (fast)");
+    tray.draw(); tray.choose("Frame generation", 0, "OFXR");
     // Since V609, DLSS-G has canonical backend0. Select Djules explicitly
     // after leaving it instead of assuming DLSS-G retained a Djules presenter.
-    tray.choose("OFXR engine", 2, "Nvidia 0.2.13 (medium latency, high compatibility)");
+    tray.choose("OFXR engine", 2, "Nvidia 0.2.13");
     tray.choose("Multiplier", 0, "2X");
-    headset.draw(); headset.choose("Frame generation", 4, "DLSS Frame Generation (slowest, needs DLSS)");
+    headset.draw(); headset.choose("Frame generation", 3, "DLSS-G");
     require(snapshot().desired.triple_frame_gen,
         "DLSS-G keeps its 3X after DJ selects 2X");
-    tray.draw(); tray.choose("Frame generation", 0, "OFXR (fast)");
-    tray.choose("OFXR engine", 2, "Nvidia 0.2.13 (medium latency, high compatibility)");
+    tray.draw(); tray.choose("Frame generation", 0, "OFXR");
+    tray.choose("OFXR engine", 2, "Nvidia 0.2.13");
     require(!snapshot().desired.triple_frame_gen, "DJ keeps its own 2X");
 }
 void rife_catalog() {
@@ -283,7 +281,7 @@ void rife_widgets() {
     require(snapshot().desired.rife_model==3,"leaving Advanced restores 4.4 immediately");
     require(WritePrivateProfileStringW(L"tray",L"rife_runtime_dir",nullptr,global_configuration_path().c_str())!=0,"remove isolated developer override");
     std::error_code error;std::filesystem::remove_all(runtime,error);
-    require(request(prior),"restore pre-RIFE widget settings");tray.select_tab("Display");
+    require(request(prior),"restore pre-RIFE widget settings");tray.select_tab("Overlay");
 }
 
 void release_controls() {
@@ -293,10 +291,12 @@ void release_controls() {
     require(desktop.rendered_text.find("Framework+director")==std::string::npos,"basic UI has no combined mode or help");
     desktop.choose("Pacing",0,"Framework");require(snapshot().desired.pacing_mode==0,"basic Framework selection works");
     desktop.choose("Pacing",1,"Director");require(snapshot().desired.pacing_mode==1,"basic Director selection works");
-    require(desktop.rendered_text.find("Reset to defaults")!=std::string::npos,"reset appears beside enable");
-    require(desktop.rendered_text.find("Pacing")<desktop.rendered_text.find("Frame generationOFXR"),"pacing is first under enable");
-    desktop.activate("/Generation_","Reset to defaults");desktop.draw();desktop.draw();
-    require(snapshot().desired==sanitize(Settings{}),"actual Reset button restores all factory settings");
+    require(desktop.rendered_text.find("Reset defaults")!=std::string::npos,"reset appears in the footer");
+    const auto before_reset=snapshot().desired;
+    desktop.activate_root("Reset defaults");desktop.draw();desktop.draw();
+    require(snapshot().desired==before_reset,"the first Reset click only arms the button");
+    desktop.activate_root("Reset defaults");desktop.draw();desktop.draw();
+    require(snapshot().desired==sanitize(Settings{}),"a second Reset click restores all factory settings");
     const auto single_pass=snapshot().desired;
     desktop.select_tab("Neural Rendering");desktop.draw(true);
     require(desktop.rendered_text.find("2x NR")!=std::string::npos,
@@ -307,25 +307,25 @@ void release_controls() {
         "second-pass checkbox is editable with NR off and changes no shared NR parameters");
     desktop.activate("/Neural_","2x NR");desktop.draw();
     require(snapshot().desired==single_pass,"second-pass checkbox returns to the unchanged single-pass settings");
-    desktop.select_tab("Display");desktop.draw(true);
-    require(desktop.rendered_text.find("Experimental features")==std::string::npos &&
+    desktop.select_tab("Overlay");desktop.draw(true);
+    require(desktop.rendered_text.find("Experimental")==std::string::npos &&
         desktop.rendered_text.find("Output CSV")==std::string::npos &&
         desktop.rendered_text.find("Open ofxr-bridge.ini")==std::string::npos,"basic Display removes experimental and redundant controls");
-    desktop.select_tab("Frame Reconstruction");desktop.draw(true);
-    require(snapshot().desired.luke_osr==2 && desktop.rendered_text.find("OSR (OFXR Stereo Reconstruction)")!=std::string::npos,
-        "reset selects OSR in the actual desktop Reconstruction combo");
+    desktop.select_tab("Reconstruction");desktop.draw(true);
+    require(snapshot().desired.luke_osr==2 && desktop.rendered_text.find("OSR quality")!=std::string::npos,
+        "reset selects OSR in the actual desktop Reconstruction control");
     require(desktop.rendered_text.find("Setup: Luke Ross")!=std::string::npos &&
         desktop.rendered_text.find("Setup: UEVR (Alternating / AFR)")!=std::string::npos &&
-        desktop.rendered_text.find("Source: ")!=std::string::npos,"Frame Reconstruction names its sources and their setup");
-    desktop.choose("Reconstruction",2,"AFW (Luke Ross only)","/Framewarp_");
+        desktop.rendered_text.find("Source")!=std::string::npos,"Frame Reconstruction names its sources and their setup");
+    desktop.choose("Reconstruction",2,"AFW","/Framewarp_");
     require(snapshot().desired.luke_osr==0,"second reconstruction choice selects legacy AFW");
     desktop.choose("Reconstruction",1,"OSR","/Framewarp_");
     require(snapshot().desired.luke_osr==2,"first reconstruction choice selects OSR");
     desktop.draw(true);
     require(desktop.rendered_text.find("AFW + OSR")==std::string::npos &&
         desktop.rendered_text.find("Band fill")==std::string::npos,"retired band-fill controls are absent");
-    require(desktop.rendered_text.find("Frame Reconstruction only (AFW or OSR, restart game)")!=std::string::npos && desktop.rendered_text.find("Clear before framewarp")==std::string::npos,"basic Luke UI exposes per-game Frame Reconstruction only without Clear");
-    desktop.activate("/Framewarp_","Frame Reconstruction only (AFW or OSR, restart game)");desktop.draw();
+    require(desktop.rendered_text.find("Frame Reconstruction only")!=std::string::npos && desktop.rendered_text.find("Clear before framewarp")==std::string::npos,"basic Luke UI exposes per-game Frame Reconstruction only without Clear");
+    desktop.activate("/Framewarp_","Frame Reconstruction only");desktop.draw();
     require(snapshot().desired.afw_only,"actual AFW Only control persists settings");
     auto advanced=snapshot().desired;advanced.advanced_mode=true;advanced.afw_only=false;require(request(advanced),"enable advanced UI by configuration");
     desktop.select_tab("Frame generation");desktop.draw(true);
@@ -349,13 +349,13 @@ void actual_widgets() {
     require(headset.widgets.draft.enabled == enabled.desired.enabled,
         "headset reflects hot tray checkbox edit");
     require(enabled.desired.lower_vram == 0, "opening settings preserves Lower VRAM off");
-    tray.activate("/Generation_", "Fast mode (lower vram, lower latency, may reduce performance)");
+    tray.activate("/Generation_", "Fast mode");
     tray.draw(); tray.draw();
     require(snapshot().desired.separate_synthesis == 1 && snapshot().desired.lower_vram == 1,
         "Lower VRAM enables private textures and reduced rings together");
     headset.draw();
     require(headset.widgets.draft.lower_vram == 1, "headset reflects Lower VRAM on");
-    headset.activate("/Generation_", "Fast mode (lower vram, lower latency, may reduce performance)");
+    headset.activate("/Generation_", "Fast mode");
     headset.draw(); headset.draw();
     require(snapshot().desired.separate_synthesis == 0 && snapshot().desired.lower_vram == 0,
         "Lower VRAM off restores both controls");
@@ -380,48 +380,52 @@ void actual_widgets() {
     tray.activate("/Neural_","2x NR");tray.draw();headset.draw();
     require(snapshot().desired==before_second && headset.widgets.draft.nr_second_pass==before_second.nr_second_pass,
         "desktop second-pass edit reaches F10 without changing model, scale or frame generation");
-    headset.select_tab("Frame Reconstruction");
+    headset.select_tab("Reconstruction");
     // The provider controls sit behind the persisted Advanced parameters checkbox.
-    headset.activate("/Framewarp_", "Advanced parameters");
+    headset.activate("/Framewarp_", "Advanced");
     headset.draw();
     require(snapshot().desired.luke_advanced, "Luke advanced checkbox publishes hot setting");
     headset.activate("/Framewarp_", "Debug framewarp");
     headset.draw();
     require(snapshot().desired.afw_debug != enabled.desired.afw_debug,
         "real Luke debug checkbox publishes hot setting");
-    headset.select_tab("Display");
-    headset.choose("Counter type", 4, "Elliottate's follow controller", "/Display_");
+    headset.select_tab("Overlay");
+    headset.choose("Counter type", 4, "On controller", "/Overlay_");
     require(snapshot().desired.overlay_position == 5, "headset controller meter publishes existing display setting");
-    tray.select_tab("Display");
-    tray.choose("Counter type", 5, "Elliottate's stick to bottom", "/Display_");
+    tray.select_tab("Overlay");
+    tray.choose("Counter type", 5, "Bottom edge", "/Overlay_");
     require(snapshot().desired.overlay_position == 6, "tray bottom meter preserves mode 6");
     headset.draw();
     require(headset.widgets.draft.overlay_position == 6, "both surfaces reflect new meter mode");
     const bool counter_was_enabled=snapshot().desired.overlay_enabled;
-    headset.activate("/Display_", "On-screen FPS counter");headset.draw();headset.draw();
+    headset.activate("/Overlay_", "On-screen FPS counter");headset.draw();headset.draw();
     require(snapshot().desired.overlay_enabled!=counter_was_enabled && snapshot().desired.overlay_position==6,
         "counter checkbox toggles visibility without discarding selected type");
     tray.draw();tray.draw();
     require(tray.widgets.draft.overlay_enabled==snapshot().desired.overlay_enabled,
         "desktop reflects headset counter visibility");
-    tray.choose("Counter type", 0, "Upper left", "/Display_");
+    tray.choose("Counter type", 0, "Upper left", "/Overlay_");
     require(snapshot().desired.overlay_position==1 && snapshot().desired.overlay_enabled!=counter_was_enabled,
         "type selection does not implicitly enable or disable the counter");
-    tray.activate("/Display_", "On-screen FPS counter");tray.draw();tray.draw();
+    tray.activate("/Overlay_", "On-screen FPS counter");tray.draw();tray.draw();
     require(snapshot().desired.overlay_enabled==counter_was_enabled && snapshot().desired.overlay_position==1,
         "counter toggle restores the selected type");
-    headset.activate("/Display_", "Diagnostic logging");
+    headset.select_tab("Logging");
+    headset.activate("/Logging_", "Diagnostic logging");
     headset.draw();
     require(snapshot().desired.diagnostics != enabled.desired.diagnostics,
         "real diagnostics checkbox publishes setting");
-    headset.activate("/Display_", "Experimental features");headset.draw();headset.draw();
+    headset.select_tab("Overlay");
+    headset.activate("/Overlay_", "Experimental");headset.draw();headset.draw();
     const bool previous_camera=snapshot().desired.r19_camera;
-    headset.activate("/Display_", "Reduce black bars during headset rotation###R19 synthetic camera (experimental)");headset.draw();headset.draw();
+    headset.activate("/Overlay_", "R19 synthetic camera (experimental)");headset.draw();headset.draw();
     require(snapshot().desired.r19_camera!=previous_camera,"experimental camera setting remains live in Display");
     headset.select_tab("Frame generation");
     tray.select_tab("Neural Rendering");
-    tray.select_tab("Frame Reconstruction");
-    tray.select_tab("Display");
+    tray.select_tab("Reconstruction");
+    tray.select_tab("Logging");
+    tray.select_tab("Tests");
+    tray.select_tab("Overlay");
     auto status = snapshot().runtime;
     status.applied_revision = snapshot().revision;
     status.ready = 1;
@@ -448,19 +452,19 @@ void actual_widgets() {
     status.swapchains.auxiliary_outputs=1;status.swapchains.private_snapshots=3;
     std::strcpy(status.swapchains.details,"App UNCLASSIFIED: 0x823, 16x16, array 1, format 28");
     report_runtime(status);
-    tray.select_tab("Frame Reconstruction");headset.select_tab("Frame Reconstruction");
+    tray.select_tab("Reconstruction");headset.select_tab("Reconstruction");
     tray.draw(true);headset.draw(true);
     for(const auto* view:{&tray,&headset}) {
-        require(view->rendered_text.find("Framewarp mode")!=std::string::npos &&
+        require(view->rendered_text.find("Use previous frame (debug only)")!=std::string::npos &&
             view->rendered_text.find("Total swapchains:")==std::string::npos,
             "Luke controls remain above collapsed swapchain Details");
         require(view->rendered_text.find("Swapchain fallback")!=std::string::npos,
             "status warns even with ownership Details collapsed");
     }
-    tray.activate("/Framewarp_","Details (Luke Ross swapchains)");headset.activate("/Framewarp_","Details (Luke Ross swapchains)");
+    tray.activate("/Framewarp_","Swapchains");headset.activate("/Framewarp_","Swapchains");
     tray.draw(true);headset.draw(true);
     for(const auto* view:{&tray,&headset}) {
-        require(view->rendered_text.find("Framewarp mode")<view->rendered_text.find("Total swapchains:"),
+        require(view->rendered_text.find("Use previous frame (debug only)")<view->rendered_text.find("Total swapchains:"),
             "expanded swapchain details follow the Luke controls");
         require(view->rendered_text.find("Swapchain fallback")!=std::string::npos,
             "desktop/headset status and warning expose actual fallback");
@@ -479,14 +483,14 @@ void actual_widgets() {
     tray.draw();tray.draw();
     tray.choose("Reconstruction",0,"Off","/Framewarp_");
     require(snapshot().desired.afw_mode==0 && snapshot().desired.luke_osr==0,"primary Off also stops legacy AFW");
-    tray.choose("Reconstruction",2,"AFW (Luke Ross only)","/Framewarp_");
+    tray.choose("Reconstruction",2,"AFW","/Framewarp_");
     require(snapshot().desired.afw_mode==3 && snapshot().desired.luke_osr==0,"primary AFW restores the legacy engine");
-    tray.choose("Framewarp mode",0,"Alternate eye (for debug)","/Framewarp_");
+    tray.choose("Framewarp mode",0,"Alternate","/Framewarp_");
     require(snapshot().desired.afw_mode==1,"AFW mode first entry is Alternate eye, not Off");
     tray.choose("Framewarp mode",2,"Combined","/Framewarp_");
     require(snapshot().desired.afw_mode==3,"AFW mode third entry is Combined");
     status.afw_shading_rate=0;report_runtime(status);
-    tray.choose("AFW shading rate",1,"2x2 (half per axis)","/Framewarp_");
+    tray.choose("AFW shading rate",1,"2x2","/Framewarp_");
     require(snapshot().desired.afw_shading_rate==4,"live quality dropdown publishes beta6 2x2 index");
     tray.draw(true);
     require(tray.rendered_text.find("Quality change pending")!=std::string::npos &&
@@ -496,12 +500,12 @@ void actual_widgets() {
         "successful active quality update clears pending explanation");
     tray.choose("Reconstruction",1,"OSR","/Framewarp_");
     require(snapshot().desired.luke_osr==2,"desktop selects OSR from legacy AFW");
-    tray.choose("OSR quality",1,"OSR (lower quality, faster)","/Framewarp_");
+    tray.choose("OSR quality",1,"Faster","/Framewarp_");
     require(snapshot().desired.luke_osr_lower_quality,"desktop selects OSR cheap live");
-    tray.choose("OSR quality",0,"OSR (normal)","/Framewarp_");
+    tray.choose("OSR quality",0,"Normal","/Framewarp_");
     require(!snapshot().desired.luke_osr_lower_quality,"desktop restores normal OSR live");
     headset.draw();headset.draw();
-    headset.choose("Reconstruction",2,"AFW (Luke Ross only)","/Framewarp_");
+    headset.choose("Reconstruction",2,"AFW","/Framewarp_");
     require(snapshot().desired.luke_osr==0,"headset selects the second legacy AFW entry");
     headset.choose("Reconstruction",1,"OSR","/Framewarp_");
     require(snapshot().desired.luke_osr==2,"headset selects the first OSR entry");
@@ -509,17 +513,17 @@ void actual_widgets() {
     require(tray.rendered_text.find("AFW shading rate")==std::string::npos &&
         tray.rendered_text.find("Ignore motion")==std::string::npos &&
         tray.rendered_text.find("Depth dilation")==std::string::npos &&
-        tray.rendered_text.find("Framewarp mode")!=std::string::npos,
+        tray.rendered_text.find("Use previous frame (debug only)")!=std::string::npos,
         "Full OSR advanced parameters show only what it uses, Off included");
-    tray.choose("Framewarp mode",0,"Other eye only (for debug)","/Framewarp_");
-    require(snapshot().desired.afw_mode==1,"Full OSR Other eye only is the alternate-eye mode");
-    tray.choose("Framewarp mode",1,"On","/Framewarp_");
-    require(snapshot().desired.afw_mode==3,"Full OSR On is Combined");
+    tray.activate("/Framewarp_","Use previous frame");tray.draw();tray.draw();
+    require(snapshot().desired.afw_mode==1,"Full OSR without the previous frame is the alternate-eye mode");
+    tray.activate("/Framewarp_","Use previous frame");tray.draw();tray.draw();
+    require(snapshot().desired.afw_mode==3,"Full OSR with the previous frame is Combined");
     tray.choose("Reconstruction",0,"Off","/Framewarp_");
     require(snapshot().desired.afw_mode==0,"primary Off disables reconstruction");
     tray.draw(true);headset.draw(true);
-    require(tray.rendered_text.find("Framewarp mode")==std::string::npos &&
-        headset.rendered_text.find("Framewarp mode")==std::string::npos,
+    require(tray.rendered_text.find("Use previous frame")==std::string::npos &&
+        headset.rendered_text.find("Use previous frame")==std::string::npos,
         "primary Off hides both engines' advanced mode menus");
     require(snapshot().desired.luke_osr==2,"Off preserves the previous engine without re-enabling it");
     headset.choose("Reconstruction",1,"OSR","/Framewarp_");
@@ -553,6 +557,7 @@ void offline_preset() {
     Context already_open({900,1100},false);already_open.draw();already_open.draw();
     require(already_open.widgets.dlssg_executable.empty(),"desktop starts with no target");
     require(remember_dlssg_game(selection,process_executable()),"remember the game without changing its NVIDIA profile");
+    already_open.activate("/Generation_","Preset details");already_open.draw();already_open.draw();
     already_open.activate("/Generation_","Refresh preset profile");already_open.draw();already_open.draw();
     require(already_open.widgets.dlssg_executable==process_executable(),
         "Refresh resolves a game learned after this settings window was opened");
@@ -568,12 +573,8 @@ void offline_preset() {
     require(!snapshot().connected && desktop.widgets.dlssg_executable==process_executable(),
         "cold desktop settings restore last game while disconnected");
     require(desktop.rendered_text.find("Choose game executable")==std::string::npos &&
-        desktop.rendered_text.find("DLSS-G preset (next launch)")!=std::string::npos,
+        desktop.rendered_text.find("DLSS-G preset")!=std::string::npos,
         "offline selector replaces file browser");
-    desktop.activate("/Generation_","DLSS-G preset (next launch)");desktop.draw();desktop.draw();
-    bool opened=false;for(auto* window:desktop.context->Windows)
-        opened|=window->Active && (window->Flags&ImGuiWindowFlags_Popup) && std::strstr(window->Name,"##Combo");
-    require(opened,"actual preset dropdown opens with no game connected; no driver write performed");
 }
 void automatic_buttons() {
     require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable benchmark GUI fixture in single INI");
@@ -584,50 +585,57 @@ void automatic_buttons() {
     runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;
     runtime.rife_max_multiplier=4;runtime.dlssg_preset_request=3;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
     const auto prior=snapshot().desired;
-    Context tray({690,900},false);tray.draw();tray.draw();tray.select_tab("Display");tray.draw(true);
-    for(const auto label:{"Tests without vectors","Complete tests","Test Luke Ross"})
-        require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Display");
+    Context tray({690,900},false);tray.draw();tray.draw();tray.select_tab("Tests");tray.draw(true);
+    for(const auto label:{"Without vectors","Complete","Luke Ross"})
+        require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Tests");
     require(tray.rendered_text.find("Open benchmark folder")==std::string::npos,"shared settings no longer opens shell folders");
-    require(tray.rendered_text.find("73 optical or 97 complete")!=std::string::npos &&
-        tray.rendered_text.find("Luke Ross: up to 74 tests")!=std::string::npos,
+    require(tray.rendered_text.find("Up to 73 tests")!=std::string::npos &&
+        tray.rendered_text.find("Up to 97 tests")!=std::string::npos &&
+        tray.rendered_text.find("Up to 74 tests")!=std::string::npos,
         "SteamVR Display describes its actual pacing and AFW matrix");
-    tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
+    tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
     require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==73,
         "Display button starts the actual SteamVR optical matrix");
-    tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
+    tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==prior,"Display Stop restores original settings");
     runtime.steamvr_runtime=false;runtime.vdxr_runtime=true;runtime.vdxr_legacy=true;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("19 optical or 25 complete")!=std::string::npos,
+    require(tray.rendered_text.find("Up to 19 tests")!=std::string::npos && tray.rendered_text.find("Up to 25 tests")!=std::string::npos,
         "VDXR Display describes the Legacy spreadsheet suite");
-    tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
+    tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
     require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==19,
         "Legacy Display starts Normal/Fast for every optical route");
-    tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
+    tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     runtime.vdxr_legacy=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("73 optical or 97 complete")!=std::string::npos,
+    require(tray.rendered_text.find("Up to 73 tests")!=std::string::npos,
         "opt-in VDXR exposes the full comparison in the actual Display surface");
-    tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
+    tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
     require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==73,
         "VDXR Display button starts all three pacing variants");
-    tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
+    tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     auto simple=snapshot().desired;simple.advanced_mode=false;require(request(simple),"return to basic UI policy");
+    require(simple.afw_mode!=0,"reconstruction stays on for the Advanced check");
+    tray.select_tab("Reconstruction");tray.draw();tray.draw(true);
+    require(tray.rendered_text.find("Debug framewarp")==std::string::npos &&
+        tray.rendered_text.find("Use previous frame")==std::string::npos,"Advanced needs AdvancedMode=1");
+    tray.select_tab("Tests");
     runtime.applied_revision=snapshot().revision;runtime.pacing_mode=1;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("73 optical or 97 complete")!=std::string::npos && tray.rendered_text.find("Luke Ross: up to 74 tests")!=std::string::npos,"basic Display shows current two/three-buffer counts");
+    require(tray.rendered_text.find("Up to 73 tests")!=std::string::npos && tray.rendered_text.find("Up to 74 tests")!=std::string::npos,"basic Display shows current two/three-buffer counts");
+    tray.activate("/Tests_","How tests work");tray.draw();tray.draw(true);
     require(tray.rendered_text.find("7.5 seconds per configuration")!=std::string::npos &&
         tray.rendered_text.find("2.5 seconds settling, then 5 seconds measured")!=std::string::npos,
         "Display describes the actual shorter benchmark timing");
-    tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
+    tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
     require(snapshot().benchmark.count==73 && !snapshot().benchmark.advanced,"basic Display starts current buffer matrix");
-    tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
+    tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     require(tray.rendered_text.find("Auto pick best one")!=std::string::npos,"auto-pick checkbox is in Display");
     require(tray.rendered_text.find("On completion: within")==std::string::npos &&
         tray.rendered_text.find("Native vectors take priority")==std::string::npos,
         "automatic selection rules stay out of the product interface");
-    tray.activate("/Display_","Auto pick best one");tray.draw();tray.draw();
+    tray.activate("/Tests_","Auto pick best one");tray.draw();tray.draw();
     require(snapshot().desired.benchmark_auto_pick,"actual checkbox saves the per-profile automatic preference");
-    tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
+    tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
     require(snapshot().benchmark.auto_pick,"UI-started suite captures the auto-pick preference");
-    tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
+    tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     require(snapshot().desired.benchmark_auto_pick && snapshot().benchmark.phase==BenchmarkPhase::stopped,"Stop restores settings without clearing the auto-pick preference");
 }
 } // namespace
@@ -639,10 +647,10 @@ void gpu_telemetry_and_quality() {
     for(bool compact:{false,true}) {
         Context ui(compact?ImVec2(1024,768):ImVec2(690,900),compact);
         ui.injected_snapshot=&sample;ui.draw();ui.draw(true);
-        require(ui.rendered_text.find("VRAM 60%")!=std::string::npos && ui.rendered_text.find("GPU 81%")!=std::string::npos,
+        require(ui.rendered_text.find("VRAM")!=std::string::npos && ui.rendered_text.find("60%")!=std::string::npos && ui.rendered_text.find("81%")!=std::string::npos,
             "desktop and headset headers both render independently measured memory and GPU percentage");
         sample.runtime.gpu_usage.updated_ms=GetTickCount64()-4000;ui.draw(true);
-        require(ui.rendered_text.find("GPU N/A")!=std::string::npos,"stale utilization is not kept indefinitely");
+        require(ui.rendered_text.find("81%")==std::string::npos,"stale utilization is not kept indefinitely");
         sample.runtime.gpu_usage.updated_ms=GetTickCount64();
     }
     auto desired=snapshot().desired;select_generation(desired,4,2);

@@ -6,6 +6,14 @@ locations draw the same options and publish only edited fields. No OptiScaler
 module is required. The tray owns its Win32/D3D11 window; the headset uses the
 existing FPS OpenXR compositor path and a private ImGui context.
 
+Both surfaces use one 1024x768 layout: a left rail of sections, the controls in
+the centre, and a fixed status pane on the right that also shows help for the
+hovered or focused control. Controls are segmented buttons rather than dropdowns
+where the options fit, because every option stays visible in the headset. Labels
+are plain text, not items: `update_menu_drag` needs empty space with no hovered
+item. `settings_fonts.inc` holds Atkinson Hyperlegible subsets (SIL OFL) and
+`settings_icons.inc` holds the icons as polylines; both are generated files.
+
 The headset menu is a separate 1024x768 quad sharing FPS's VIEW space. It is
 updated only on application frames, appended to original/synthetic submissions,
 and does not modify game images, graphics state or frame-generation guides.
@@ -57,7 +65,7 @@ NVIDIA NR vendor runtime is optional and is copied only when the user supplies
 it in the package's `ofxr` directory. No game directory is modified.
 
 For engineering inspection, `--settings-only` opens just the panel,
-`--settings-smoke` opens it briefly, and `--settings-preview <image.bmp>`
+`--settings-smoke` opens it briefly, and `--settings-preview <image.bmp> [section] [headset]`
 captures the panel's own backbuffer. These paths perform no activation or
 registry cleanup. The test profile override `OFXR_BRIDGE_PROFILE_DIR`
 keeps IPC and fake-runtime fixtures separate from the user's configuration.

@@ -435,7 +435,7 @@ Settings sanitize(Settings value) noexcept {
     value.nr_compare_zoom = bounded(value.nr_compare_zoom, 1.F, 2.F, 1.F);
     if(value.overlay_position<=0){value.overlay_enabled=false;value.overlay_position=6;}
     value.overlay_position = std::clamp(value.overlay_position, 1, 6);
-    value.menu_scale = bounded(value.menu_scale, .5F, 1.25F, 1.F);
+    value.menu_scale = bounded(value.menu_scale, .5F, 1.25F, kDefaultMenuScale);
     value.menu_offset_x = bounded(value.menu_offset_x, -1.F, 1.F, 0.F);
     value.menu_offset_y = bounded(value.menu_offset_y, -1.F, 1.F, 0.F);
     // FSR and DLSS-G require engine guides. No optical-flow substitution is
@@ -1400,9 +1400,9 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
         // Columns: base, + AFW, + Neural, + AFW + Neural, + OSR, + OSR + Neural.
         static constexpr std::string_view names[8][6]={
             {"FidelityFX","FidelityFX + AFW","FidelityFX + Neural","FidelityFX + AFW + Neural","FidelityFX + OSR","FidelityFX + OSR + Neural"},
-            {"OFXR 0.2.1","OFXR 0.2.1 + AFW","OFXR 0.2.1 + Neural","OFXR 0.2.1 + AFW + Neural","OFXR 0.2.1 + OSR","OFXR 0.2.1 + OSR + Neural"},
-            {"OFXR 0.3.0","OFXR 0.3.0 + AFW","OFXR 0.3.0 + Neural","OFXR 0.3.0 + AFW + Neural","OFXR 0.3.0 + OSR","OFXR 0.3.0 + OSR + Neural"},
-            {"OFXR 0.2.13","OFXR 0.2.13 + AFW","OFXR 0.2.13 + Neural","OFXR 0.2.13 + AFW + Neural","OFXR 0.2.13 + OSR","OFXR 0.2.13 + OSR + Neural"},
+            {"Nvidia 0.2.1","Nvidia 0.2.1 + AFW","Nvidia 0.2.1 + Neural","Nvidia 0.2.1 + AFW + Neural","Nvidia 0.2.1 + OSR","Nvidia 0.2.1 + OSR + Neural"},
+            {"Nvidia 0.3.0","Nvidia 0.3.0 + AFW","Nvidia 0.3.0 + Neural","Nvidia 0.3.0 + AFW + Neural","Nvidia 0.3.0 + OSR","Nvidia 0.3.0 + OSR + Neural"},
+            {"Nvidia 0.2.13","Nvidia 0.2.13 + AFW","Nvidia 0.2.13 + Neural","Nvidia 0.2.13 + AFW + Neural","Nvidia 0.2.13 + OSR","Nvidia 0.2.13 + OSR + Neural"},
             {"Hybrid","Hybrid + AFW","Hybrid + Neural","Hybrid + AFW + Neural","Hybrid + OSR","Hybrid + OSR + Neural"},
             {"FSR","FSR + AFW","FSR + Neural","FSR + AFW + Neural","FSR + OSR","FSR + OSR + Neural"},
             {"DLSS-G","DLSS-G + AFW","DLSS-G + Neural","DLSS-G + AFW + Neural","DLSS-G + OSR","DLSS-G + OSR + Neural"},
@@ -1422,7 +1422,7 @@ bool interface_generation_active(const Snapshot& s) noexcept {
             r.telemetry.updated_ms && now>=r.telemetry.updated_ms && now-r.telemetry.updated_ms<2000 && r.telemetry.generating;
     }
     const auto text=interface_state_text(s);
-    return s.desired.enabled && (text.starts_with("FidelityFX") || text.starts_with("OFXR ") ||
+    return s.desired.enabled && (text.starts_with("FidelityFX") || text.starts_with("Nvidia ") ||
         text.starts_with("RIFE") || text.starts_with("Hybrid") || text.starts_with("FSR") || text.starts_with("DLSS-G"));
 }
 bool interface_afw_only_active(const Snapshot& s,std::uint64_t now) noexcept {

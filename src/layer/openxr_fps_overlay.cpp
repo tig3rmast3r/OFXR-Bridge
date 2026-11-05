@@ -208,14 +208,15 @@ struct OpenXrFpsOverlay::Impl {
         ImGui::SetNextWindowSize(ImVec2(static_cast<float>(menu_width), static_cast<float>(menu_height)));
         ImGui::Begin("OFXR menu", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
-        ImGui::TextDisabled("F10: menu   Esc: close   Mouse: click / scroll   Drag empty space to move");
-        const auto footer_height = ImGui::GetFrameHeightWithSpacing() + 24.F;
-        ImGui::BeginChild("OFXR options", ImVec2(0, -footer_height));
+        constexpr float footer_height = 40.F;
+        ImGui::BeginChild("OFXR options", ImVec2(0, -footer_height), ImGuiChildFlags_None,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         autonomous::render_settings_widgets(self.menu_widgets, autonomous::snapshot(), {true, true});
         ImGui::EndChild();
         const auto drag = update_menu_drag(self.menu_interaction, self.menu_widgets, self.menu_layout, "OFXR menu");
         if (self.menu_input && (drag.consumed_dx != 0 || drag.consumed_dy != 0))
             self.menu_input->offset_pointer(-drag.consumed_dx, -drag.consumed_dy);
+        ImGui::SetCursorPos(ImVec2(12.F, static_cast<float>(menu_height) - footer_height + 5.F));
         render_menu_footer(self.menu_widgets, self.menu_interaction);
         ImGui::End();
     }

@@ -35,6 +35,8 @@ constexpr auto default_generation_profiles() noexcept {
 
 // Plain CPU values shared between the standalone UI and the in-process layer.
 // No application resource pointers cross this boundary.
+// The F10 panel keeps its edges within easier eye reach at this size.
+inline constexpr float kDefaultMenuScale = .75F;
 struct Settings {
     bool enabled{true};
     bool advanced_mode{}; // Global INI-only AdvancedMode; mirrored into each UI snapshot
@@ -96,7 +98,7 @@ struct Settings {
     bool benchmark_auto_pick{true}; // per-profile, apply a measured winner only on completion
     bool overlay_enabled{true};
     int overlay_position{6}; // selected type 1..6; legacy 0 migrates to disabled/bottom
-    float menu_scale{1.F}; // physical headset interface multiplier, 0.5 to 1.25
+    float menu_scale{kDefaultMenuScale}; // physical headset interface multiplier, 0.5 to 1.25
     float menu_offset_x{}; // common-FOV centre offset, normalized -1 to 1
     float menu_offset_y{};
     std::array<GenerationPreferences, kGenerationProfileCount> generation_profiles{default_generation_profiles()};
@@ -264,8 +266,8 @@ bool initialize_user_configuration() noexcept;
 bool write_configuration_sections(const std::filesystem::path& path, std::string_view sections) noexcept;
 bool benchmark_enabled() noexcept; // controller/UI only; never called by frame sampling
 
-constexpr int generation_ui_index(int mode) noexcept { return mode==4 ? 1 : mode==3 ? 2 : mode==1 ? 3 : mode==2 ? 4 : 0; }
-constexpr int generation_from_ui(int index) noexcept { return index==1 ? 4 : index==2 ? 3 : index==3 ? 1 : index==4 ? 2 : 0; }
+constexpr int generation_ui_index(int mode) noexcept { return mode==3 ? 1 : mode==1 ? 2 : mode==2 ? 3 : mode==4 ? 4 : 0; }
+constexpr int generation_from_ui(int index) noexcept { return index==1 ? 3 : index==2 ? 1 : index==3 ? 2 : index==4 ? 4 : 0; }
 void select_generation(Settings& value, int generation, int ofxr_engine) noexcept;
 Settings sanitize(Settings value) noexcept;
 // OFXR's FidelityFX, 0.2.1 and 0.3.0 engines and Hybrid: the routes whose

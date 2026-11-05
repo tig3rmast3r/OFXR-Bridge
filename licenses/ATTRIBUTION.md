@@ -14,6 +14,8 @@ original licence preserved as OFXR-LGPL-3.0.txt.
 Accepted OptiScaler V33034 components and their extracted shaders: GPL3;
 licence preserved as OptiScaler-GPL-3.0.txt and in the NR source notices.
 Dear ImGui: MIT, notice preserved.
+Atkinson Hyperlegible Next and Mono (settings panel fonts, static Latin subsets): SIL OFL 1.1,
+licence preserved as Atkinson-Hyperlegible-OFL.txt.
 RenoDX colour composition: notice in src/neural/licenses/RenoDX_ATTRIBUTION.txt.
 Khronos Vulkan headers: Apache2/MIT notices preserved.
 NVIDIA DLSS SDK/runtime and AMD FidelityFX runtime: original vendor licences

@@ -1673,8 +1673,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
             bool captured = false;
             if (parsed_arguments) {
                 for (int index = 1; index + 1 < argument_count; ++index)
-                    if (std::wstring_view(parsed_arguments[index]) == L"--settings-preview")
-                        captured = xrfg::autonomous::save_settings_preview(parsed_arguments[index + 1]);
+                    if (std::wstring_view(parsed_arguments[index]) == L"--settings-preview") {
+                        const bool more = index + 2 < argument_count;
+                        captured = xrfg::autonomous::save_settings_preview(parsed_arguments[index + 1],
+                            more ? _wtoi(parsed_arguments[index + 2]) : 0,
+                            index + 3 < argument_count && std::wstring_view(parsed_arguments[index + 3]) == L"headset");
+                    }
                 LocalFree(parsed_arguments);
             }
             xrfg::autonomous::close_settings_window();

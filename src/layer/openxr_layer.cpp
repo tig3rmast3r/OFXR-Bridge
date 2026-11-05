@@ -17757,10 +17757,12 @@ XrResult layer_end_frame_impl(
         const auto debug_keys=xrfg::autonomous::keybinds();
         const xrfg::KeybindChord debug_chord{MOD_CONTROL|MOD_ALT,VK_F6};
         const bool f6_down=!debug_keys.suspended && !xrfg::keybind_assigned(debug_keys.bindings,debug_chord) && xrfg::keybind_matches(debug_chord,xrfg::physical_key_down);
-        if (f6_down && !state->luke_afw_f6_down) {
-            const auto base = xrfg::autonomous::snapshot().desired;
-            auto edited = base; edited.afw_debug = !base.afw_debug;
-            const bool accepted = xrfg::autonomous::request_changes(base, edited);
+        // Debug framewarp needs AdvancedMode=1, the same as its switch.
+        const auto base = f6_down && !state->luke_afw_f6_down
+            ? std::optional{xrfg::autonomous::snapshot().desired} : std::nullopt;
+        if (base && base->advanced_mode) {
+            auto edited = *base; edited.afw_debug = !base->afw_debug;
+            const bool accepted = xrfg::autonomous::request_changes(*base, edited);
             if (accepted) xrfg::autonomous::apply_runtime_settings();
             const auto debug = xrfg::embedded::afw_snapshot().desired.debug;
             xrfg::bridge_flight_logger().event(

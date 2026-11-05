@@ -27,7 +27,7 @@ struct Frame {
         for(auto* t:ImGui::GetPlatformIO().Textures){if(t->Status==ImTextureStatus_WantDestroy){t->SetTexID(ImTextureID_Invalid);t->SetStatus(ImTextureStatus_Destroyed);}else if(t->Status==ImTextureStatus_WantCreate||t->Status==ImTextureStatus_WantUpdates){t->SetTexID(static_cast<ImTextureID>(t->UniqueID+1));t->SetStatus(ImTextureStatus_OK);}}
     }
     ImGuiWindow* popup(){for(auto* w:context->Windows)if(w->Active && (w->Flags&ImGuiWindowFlags_Popup) && std::strstr(w->Name,"##Combo"))return w;return nullptr;}
-    void open(){ImGui::SetCurrentContext(context);auto* w=ImGui::FindWindowByName("Profile test");check(w!=nullptr,"desktop header rendered");ImGui::ActivateItemByID(w->GetID("Settings"));draw();draw(true);check(popup()!=nullptr,"profile dropdown opens through real ImGui navigation");}
+    void open(){ImGui::SetCurrentContext(context);auto* w=ImGui::FindWindowByName("Profile test");check(w!=nullptr,"desktop header rendered");ImGui::ActivateItemByID(w->GetID("##Settings"));draw();draw(true);check(popup()!=nullptr,"profile dropdown opens through real ImGui navigation");}
     void choose(const char* name){auto* w=popup();check(w!=nullptr,"profile list visible");ImGui::ActivateItemByID(w->GetID(name));draw();draw();}
 };
 }

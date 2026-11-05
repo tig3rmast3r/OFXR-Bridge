@@ -4,7 +4,8 @@
 #include <functional>
 
 namespace xrfg::autonomous {
-void apply_settings_style();
+// Palette, metrics and, on first use in a context, the embedded fonts.
+void apply_settings_style(bool headset=false);
 
 // Keep one state per ImGui context. Pending edits are rebased onto changes from
 // the other UI, and publication merges only edited fields under the IPC mutex.
@@ -24,6 +25,13 @@ struct SettingsWidgetState {
     std::filesystem::path dlssg_executable;
     int dlssg_model{}; // 0 driver default, 1 A, 2 C; driver writes are explicit only
     std::string dlssg_profile_status;
+    int section{}; // selected entry of the left rail
+    double reset_armed_until{}; // Reset defaults needs a second click before this ImGui time
+    const char* help_title{}; // help for what is hovered or focused this frame
+    const char* help_body{};
+    const char* footer_help_title{}; // from the headset footer, which draws after the panel
+    const char* footer_help_body{};
+    char help_buffer[420]{};
 };
 
 struct SettingsWidgetOptions {
@@ -37,6 +45,10 @@ bool publish_settings_widgets(SettingsWidgetState& ui) noexcept;
 // Close/focus-loss is also the end of an edit; commit a held resolution even
 // when the hidden menu will not draw the release event.
 void finish_settings_widget_edits(SettingsWidgetState& ui) noexcept;
+// Two clicks within a few seconds. True when the defaults were restored.
+bool render_reset_defaults(SettingsWidgetState& ui);
+// Shows help for a control outside the panel on the next frame.
+void show_settings_help(SettingsWidgetState& ui,const char* title,const char* body) noexcept;
 
 // The caller owns the current ImGui context, frame and containing window. This
 // function owns no GPU or platform resources and draws the same options in both

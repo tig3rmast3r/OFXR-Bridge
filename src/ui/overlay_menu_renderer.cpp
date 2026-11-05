@@ -475,8 +475,7 @@ HRESULT OverlayMenuRenderer::initialize(ID3D12Device* device12,ID3D12CommandQueu
         Impl::ContextScope scope(candidate->imgui);auto& io=ImGui::GetIO();
         io.IniFilename=nullptr;io.LogFilename=nullptr;io.DisplaySize=ImVec2(float(width),float(height));
         io.ConfigFlags=ImGuiConfigFlags_NavEnableKeyboard|ImGuiConfigFlags_NoMouseCursorChange;
-        autonomous::apply_settings_style();auto& style=ImGui::GetStyle();
-        style.WindowPadding=ImVec2(12,12);style.ItemSpacing=ImVec2(8,8);
+        autonomous::apply_settings_style(true);
         if(device11) {
             candidate->dx11_ready=ImGui_ImplDX11_Init(device11,candidate->immediate11.Get());
             if(!candidate->dx11_ready)return E_FAIL;

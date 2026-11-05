@@ -272,7 +272,7 @@ void wording() {
     check(interface_state_text(s)=="FSR", "confirmed generated content identifies producer");
     for(int backend=0;backend<4;++backend) {
         auto route=s;route.runtime.generation_mode=0;route.desired.backend=backend;
-        const char* expected[]={"FidelityFX","OFXR 0.2.1","OFXR 0.3.0","OFXR 0.2.13"};
+        const char* expected[]={"FidelityFX","Nvidia 0.2.1","Nvidia 0.3.0","Nvidia 0.2.13"};
         check(interface_state_text(route)==expected[backend],"state identifies the applied OFXR framework");
         check(interface_generation_active(route),"framework label preserves active colour");
     }

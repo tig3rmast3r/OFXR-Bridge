@@ -199,7 +199,7 @@ void codec() {
     require(menu.menu_scale == 1.25F && menu.menu_offset_x == 1.F && menu.menu_offset_y == 0.F,
         "menu presentation bounded without changing game options");
     const auto legacy = xrfg::autonomous::parse_settings("[ofxr]\nbackend=3\n");
-    require(legacy.menu_scale == 1.F && legacy.menu_offset_x == 0.F && legacy.menu_offset_y == 0.F,
+    require(legacy.menu_scale == xrfg::autonomous::kDefaultMenuScale && legacy.menu_offset_x == 0.F && legacy.menu_offset_y == 0.F,
         "existing profiles preserve centred V441-size default");
     desired.nr_local_tone = std::numeric_limits<float>::infinity();
     require(xrfg::autonomous::sanitize(desired).nr_local_tone == 1.F,
@@ -207,9 +207,9 @@ void codec() {
 }
 void route_profiles() {
     using namespace xrfg::autonomous;
-    require(generation_ui_index(0)==0 && generation_ui_index(4)==1 && generation_ui_index(3)==2 && generation_ui_index(1)==3 && generation_ui_index(2)==4,
+    require(generation_ui_index(0)==0 && generation_ui_index(3)==1 && generation_ui_index(1)==2 && generation_ui_index(2)==3 && generation_ui_index(4)==4,
         "Hybrid UI order preserves existing persisted generator IDs");
-    require(generation_from_ui(1)==4 && generation_from_ui(2)==3 && generation_from_ui(3)==1 && generation_from_ui(4)==2,"UI selection maps to stable route IDs");
+    require(generation_from_ui(1)==3 && generation_from_ui(2)==1 && generation_from_ui(3)==2 && generation_from_ui(4)==4,"UI selection maps to stable route IDs");
     Settings hybrid;select_generation(hybrid,0,2);hybrid.scale=0;hybrid.motion_vectors=0;hybrid=sanitize(hybrid);
     select_generation(hybrid,3,2);hybrid.scale=1;hybrid.lower_vram=1;hybrid.hybrid_backend=1;hybrid=sanitize(hybrid);
     select_generation(hybrid,1,2);hybrid.native_scale=42;hybrid=sanitize(hybrid);

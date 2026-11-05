@@ -59,7 +59,9 @@ inline void apply_runtime_settings() {
     e.native_scale=static_cast<unsigned>(s.native_scale);
     if (!embedded::request(e)) return;
     embedded::AfwSettings a{};
-    a.mode=s.afw_mode; a.debug=s.afw_debug;
+    // The switch lives in Advanced: without AdvancedMode=1 nothing could turn a
+    // saved tint off, so it stays in the profile but does not apply.
+    a.mode=s.afw_mode; a.debug=s.afw_debug&&s.advanced_mode;
     a.clear_before_warping=s.afw_clear_before_warping;
     a.ignore_motion_threshold=s.afw_ignore_motion_threshold;
     a.depth_dilate_mode=s.afw_depth_dilate_mode; a.shading_rate=s.afw_shading_rate;

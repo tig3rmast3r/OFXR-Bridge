@@ -14,8 +14,8 @@ std::string label(const std::filesystem::path& file) {
 }
 bool render_desktop_profile_picker(DesktopProfiles& profiles,SettingsWidgetState& ui,ScopedConfigurationSelection& selection) {
     bool changed{};
-    ImGui::SetNextItemWidth((std::min)(ImGui::GetContentRegionAvail().x,420.F));
-    if(ImGui::BeginCombo("Settings",label(profiles.selected()).c_str())) {
+    ImGui::SetNextItemWidth(280.F);
+    if(ImGui::BeginCombo("##Settings",label(profiles.selected()).c_str())) {
         if(ImGui::IsWindowAppearing())profiles.refresh();
         const auto choose=[&](const std::filesystem::path& file) {
             const auto name=label(file);const bool selected=same_profile_file(file,profiles.selected());

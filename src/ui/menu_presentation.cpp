@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace xrfg {
 namespace {
@@ -34,7 +35,7 @@ MenuPresentationLayout calculate_menu_presentation(MenuPresentationFov fov,
     if (fov.right - fov.left <= .0001F || fov.up - fov.down <= .0001F) return result;
     result.view_width = distance * (fov.right - fov.left);
     result.view_height = distance * (fov.up - fov.down);
-    result.scale = std::clamp(finite_or(settings.menu_scale, 1.F), .5F, 1.25F);
+    result.scale = std::clamp(finite_or(settings.menu_scale, autonomous::kDefaultMenuScale), .5F, 1.25F);
     result.width = .80F * std::min(result.view_width, result.view_height * (4.F / 3.F)) * result.scale;
     result.height = result.width * .75F;
     const auto limit_x = offset_limit(result.width, result.view_width);
@@ -134,26 +135,59 @@ MenuDragResult update_menu_drag(MenuPresentationInteraction& interaction,
 
 bool render_menu_footer(autonomous::SettingsWidgetState& widgets,
     MenuPresentationInteraction& interaction) {
-    const auto available = ImGui::GetContentRegionAvail().x;
-    const auto& style = ImGui::GetStyle();
+    constexpr float label_size = 16.F, step = .05F, spacing = 8.F;
     constexpr char reset_label[] = "Reset position / size";
-    const auto reset_width = ImGui::CalcTextSize(reset_label).x + style.FramePadding.x * 2;
-    const auto label_width = ImGui::CalcTextSize("Interface size").x;
-    ImGui::PushItemWidth(std::max(120.F, available - reset_width - label_width - style.ItemSpacing.x * 3));
-    const bool changed_scale = ImGui::SliderFloat("Interface size", &widgets.draft.menu_scale,
-        .5F, 1.25F, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-    interaction.footer_scale_editing = ImGui::IsItemActive();
-    widgets.scale_editing |= interaction.footer_scale_editing;
-    ImGui::PopItemWidth();
+    constexpr char size_help[] = "Scales the headset panel from 0.50x to 1.25x. Smaller keeps the edges within easy eye reach.";
+    interaction.footer_scale_editing = false;
+    ImGui::PushFont(ImGui::GetFont(), label_size);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 4));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(spacing, 4));
+    const auto& style = ImGui::GetStyle();
+    const auto chord = autonomous::keybinds().bindings[KeybindAction::open_interface];
+    char key[16] = "Menu key";
+    if (!chord.modifiers && chord.key >= 0x70 && chord.key <= 0x87)
+        std::snprintf(key, sizeof(key), "F%u", chord.key - 0x6F);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%s menu, Esc close, drag empty space to move", key);
+    const auto text_width = [&](const char* text) {
+        return ImGui::CalcTextSize(text).x + style.FramePadding.x * 2;
+    };
+    const float button = ImGui::GetFrameHeight();
+    const float group = text_width("Click again to reset") + ImGui::CalcTextSize("Size").x +
+        button * 2 + ImGui::CalcTextSize("0.00x").x + text_width(reset_label) + spacing * 5;
+    const float right = ImGui::GetWindowWidth() - 12.F;
     ImGui::SameLine();
-    bool changed = changed_scale;
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), right - group));
+    bool changed = autonomous::render_reset_defaults(widgets);
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Size");
+    const auto resize = [&](const char* label, float direction) {
+        ImGui::SameLine();
+        const bool pressed = ImGui::Button(label, ImVec2(button, button));
+        if (ImGui::IsItemHovered()) autonomous::show_settings_help(widgets, "Interface size", size_help);
+        if (!pressed) return;
+        const float steps = std::round(widgets.draft.menu_scale / step) + direction;
+        widgets.draft.menu_scale = std::clamp(steps * step, .5F, 1.25F);
+        changed = true;
+    };
+    resize("-###Smaller size", -1);
+    char scale[16];
+    std::snprintf(scale, sizeof(scale), "%.2fx", widgets.draft.menu_scale);
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(scale);
+    resize("+###Larger size", 1);
+    ImGui::SameLine();
     if (ImGui::Button(reset_label)) {
-        widgets.draft.menu_scale = 1.F;
+        widgets.draft.menu_scale = autonomous::kDefaultMenuScale;
         widgets.draft.menu_offset_x = widgets.draft.menu_offset_y = 0.F;
         changed = true;
         reset_menu_drag(interaction);
         widgets.scale_editing = false;
     }
+    ImGui::PopStyleVar(2);
+    ImGui::PopFont();
     widgets.dirty |= changed;
     return autonomous::publish_settings_widgets(widgets);
 }

@@ -710,7 +710,7 @@ std::string build_runtime_ini(
         "\r\nenabled=" + std::string(desired.enabled ? "1" : "0") +
         "\r\nnvidia_route=" + route+"\r\nrife_multiplier="+std::to_string(multiplier)+"\r\nrife_model="+std::to_string(desired.frame_generation==4?desired.rife_model:-1)+"\r\nrife_resolution="+std::to_string(desired.rife_resolution));
     result += "\r\n[experimental]\r\nluke_afw_mode=" + std::to_string(desired.afw_mode) +
-        "\r\nluke_afw_debug=" + std::string(desired.afw_debug ? "1" : "0") +
+        "\r\nluke_afw_debug=" + std::string(desired.afw_debug && desired.advanced_mode ? "1" : "0") +
         "\r\nluke_afw_clear_before_warping=" + (desired.afw_clear_before_warping ? "1" : "0") +
         "\r\nluke_afw_ignore_motion_threshold=" + std::to_string(desired.afw_ignore_motion_threshold) +
         "\r\nluke_afw_depth_dilate_mode=" + std::to_string(desired.afw_depth_dilate_mode) + "\r\n" +
