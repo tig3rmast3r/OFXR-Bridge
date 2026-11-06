@@ -16,6 +16,9 @@
 #include <cstring>
 #include <stdexcept>
 #include <charconv>
+#include <chrono>
+#include <condition_variable>
+#include <thread>
 
 namespace xrfg { namespace {
 using Microsoft::WRL::ComPtr;
@@ -51,12 +54,38 @@ class Worker {
     std::string line_;
     std::atomic<bool> live_{};
     bool fraction_batch_{};
+    bool memory_after_inference_{}; // protected by the transaction mutex
     std::atomic<bool> optimizing_{}, tensorrt_{};
     std::atomic<unsigned> optimization_error_{};
     std::atomic<std::uint64_t> execution_updated_ms_{};
     std::atomic<std::uint64_t> memory_until_{};
     std::mutex memory_mutex_;
     RifeMemoryStatus memory_{};
+    std::mutex memory_wakeup_mutex_;
+    std::condition_variable memory_wakeup_;
+    std::jthread memory_sampler_;
+    void sample_memory(std::stop_token stop) noexcept {
+        SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
+        std::unique_lock wake(memory_wakeup_mutex_);
+        while(!stop.stop_requested()) {
+            memory_wakeup_.wait_for(wake,std::chrono::seconds(1),[&]{return stop.stop_requested() || GetTickCount64()<memory_until_.load(std::memory_order_relaxed);});
+            if(stop.stop_requested())break;
+            if(GetTickCount64()>=memory_until_.load(std::memory_order_relaxed))continue;
+            wake.unlock();
+            // Never wait behind an inference or send concurrent pipe messages.
+            // Active inference can still piggyback the existing memory receipt.
+            {
+                std::unique_lock transaction(mutex_,std::try_to_lock);
+                if(transaction.owns_lock() && alive()) {
+                    bool stale{};
+                    {std::scoped_lock sample(memory_mutex_);stale=GetTickCount64()-memory_.updated_ms>=1000;}
+                    if(stale)request_locked("{\"op\":\"memory\"}");
+                }
+            }
+            wake.lock();
+            memory_wakeup_.wait_for(wake,std::chrono::seconds(1),[&]{return stop.stop_requested();});
+        }
+    }
     static bool number(const std::string& text,const char* key,std::uint64_t& out) noexcept {
         auto at=text.find(key);if(at==std::string::npos)return false;
         at=text.find(':',at);if(at==std::string::npos)return false;
@@ -164,9 +193,14 @@ public:
             TerminateProcess(process_.value,1);throw E_FAIL;
         }
         ResumeThread(thread.value);child_input.reset();child_output.reset();
-        try{const auto hello=read(60000);if(hello.find("\"protocol\": 2")==std::string::npos)throw E_FAIL;fraction_batch_=boolean(hello,"\"fraction_batch\"");live_=true;}catch(...){stop();throw;}
+        try{const auto hello=read(60000);if(hello.find("\"protocol\": 2")==std::string::npos)throw E_FAIL;fraction_batch_=boolean(hello,"\"fraction_batch\"");live_=true;
+            memory_sampler_=std::jthread([this](std::stop_token token){sample_memory(token);});
+        }catch(...){stop();throw;}
     }
-    ~Worker(){stop();}
+    ~Worker(){
+        if(memory_sampler_.joinable()){memory_sampler_.request_stop();memory_wakeup_.notify_all();memory_sampler_.join();}
+        stop();
+    }
     bool alive() const noexcept {return live_.load(std::memory_order_acquire);}
     bool fraction_batch() const noexcept {return fraction_batch_;}
     RifeExecutionStatus execution() const noexcept {
@@ -179,7 +213,7 @@ public:
     }
     RifeMemoryStatus memory(bool request) noexcept {
         const auto now=GetTickCount64();
-        if(request)memory_until_.store(now+2000,std::memory_order_relaxed);
+        if(request){memory_until_.store(now+2000,std::memory_order_relaxed);memory_wakeup_.notify_one();}
         std::unique_lock lock(memory_mutex_,std::try_to_lock);
         RifeMemoryStatus result;
         if(lock.owns_lock())result=memory_;
@@ -190,18 +224,32 @@ public:
     HANDLE process()const{return process_.value;}
     HRESULT request(const std::string& message,std::int32_t* backend_flags=nullptr) noexcept {
         std::scoped_lock lock(mutex_);
+        return request_locked(message,backend_flags);
+    }
+private:
+    HRESULT request_locked(const std::string& message,std::int32_t* backend_flags=nullptr) noexcept {
         if(!live_)return E_FAIL;
         try{
             auto text=message;
             const bool inference=text.find("\"op\":\"infer\"")!=std::string::npos || text.find("\"op\":\"infer_batch\"")!=std::string::npos;
+            if(text.find("\"op\":\"configure\"")!=std::string::npos || text.find("\"op\":\"release\"")!=std::string::npos)
+                memory_after_inference_=false;
             if(GetTickCount64()<memory_until_.load(std::memory_order_relaxed) && inference){
                 std::scoped_lock sample(memory_mutex_);
-                if(GetTickCount64()-memory_.updated_ms>=1000){text.pop_back();text+=",\"memory\":true}";}
+                // An idle pre-CUDA receipt must not suppress the first sample
+                // after a configuration actually allocates inference resources.
+                if(!memory_after_inference_ || GetTickCount64()-memory_.updated_ms>=1000){text.pop_back();text+=",\"memory\":true}";}
             }
             text+="\n";DWORD written{};
             if(!WriteFile(input_.value,text.data(),static_cast<DWORD>(text.size()),&written,nullptr)||written!=text.size())throw E_FAIL;
             const auto reply=read(30000); // first model graph warm-up may take seconds
-            if(reply.find("\"ok\": true")==std::string::npos)throw E_FAIL;
+            if(reply.find("\"ok\": true")==std::string::npos){
+                // An older/custom worker may lack this diagnostic command.
+                // An explicit refusal leaves memory unavailable, never kills
+                // a functioning inference worker or changes its execution state.
+                if(message=="{\"op\":\"memory\"}")return E_NOTIMPL;
+                throw E_FAIL;
+            }
             if(inference) {
                 const bool optimizing=boolean(reply,"\"optimizing\"");
                 optimizing_.store(optimizing,std::memory_order_relaxed);
@@ -226,6 +274,7 @@ public:
             if(number(reply,"\"vram_private\"",usage) && number(reply,"\"torch_reserved\"",reserved)){
                 std::scoped_lock sample(memory_mutex_);
                 memory_={GetTickCount64(),usage,reserved,GetProcessId(process_.value),true,true};
+                if(inference)memory_after_inference_=true;
             }
             return S_OK;
         }catch(HRESULT hr){stop();return hr;}catch(...){stop();return E_FAIL;}

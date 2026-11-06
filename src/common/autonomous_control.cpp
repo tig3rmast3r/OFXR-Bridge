@@ -946,7 +946,8 @@ void csv_mib(std::ostream& stream,bool valid,std::uint64_t bytes) {
     else stream<<"N/A";
 }
 bool same_trial(const Settings& a,const Settings& b) {
-    return a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation && a.rife_resolution==b.rife_resolution && a.rife_model==b.rife_model && a.rife_multiplier==b.rife_multiplier &&
+    return a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
+        (a.frame_generation!=4 || (a.rife_resolution==b.rife_resolution && a.rife_model==b.rife_model && a.rife_multiplier==b.rife_multiplier)) &&
         a.triple_frame_gen==b.triple_frame_gen && a.frame_multiplier==b.frame_multiplier && a.prefer_fps==b.prefer_fps &&
         a.separate_synthesis==b.separate_synthesis && a.lower_vram==b.lower_vram &&
         a.afw_mode==b.afw_mode && (!a.afw_mode || (a.afw_shading_rate==b.afw_shading_rate &&

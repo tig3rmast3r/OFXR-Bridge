@@ -7,7 +7,8 @@ struct RifeMemoryStatus {
     std::uint32_t process_id{};
     bool active{}, valid{};
 };
-// Nonblocking cached telemetry; requests are serviced by the next inference.
+// Nonblocking cached telemetry; idle workers sample on a background CPU thread.
+// Active inference may also provide a receipt. Neither path adds a GPU fence.
 RifeMemoryStatus rife_memory_for_adapter(LUID adapter,bool request) noexcept;
 struct RifeExecutionStatus {
     std::uint64_t updated_ms{};

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.891.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.892.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1774,6 +1774,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             target_link_libraries(xrfg_rife_tensorrt_status_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
             set(XRFG_TEST_RIFE_RUNTIME "" CACHE PATH "Isolated portable RIFE runtime for integration tests")
             if(XRFG_TEST_RIFE_RUNTIME)
+                add_test(NAME xrfg_rife_worker_memory_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
+                    -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_worker_memory_tests.py")
                 add_test(NAME xrfg_rife_trt_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
                     -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_trt_python_tests.py")
                 add_test(NAME xrfg_rife_runtime_setup COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
@@ -1784,6 +1786,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             endif()
             add_test(NAME xrfg_rife_stereo_gpu COMMAND xrfg_d3d12_history_tests rife)
             add_test(NAME xrfg_rife_async_gpu COMMAND xrfg_d3d12_history_tests rife-async)
+            add_test(NAME xrfg_rife_idle_memory_gpu COMMAND xrfg_d3d12_history_tests rife-memory)
+            set_tests_properties(xrfg_rife_idle_memory_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
             add_test(NAME xrfg_rife_eye_queue_gpu COMMAND xrfg_d3d12_history_tests rife-eye-queue)
             set_tests_properties(xrfg_rife_eye_queue_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
             add_test(NAME xrfg_rife_multiframe_gpu COMMAND xrfg_d3d12_history_tests rife-multi)

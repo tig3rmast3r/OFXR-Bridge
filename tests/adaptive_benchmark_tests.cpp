@@ -83,6 +83,22 @@ void controller(bool modern,bool full,bool luke,double base,double two,double th
     if(luke)require(layout.find("AFW 1x1")==std::string::npos && layout.find("AFW 2x2")==std::string::npos &&
         layout.find("OSR / only")!=std::string::npos && layout.find("OSR cheap")!=std::string::npos,"CSV distinguishes OSR normal/cheap without AFW");
     require(std::count(layout.begin(),layout.end(),'\n')==11,"CSV retains six statistics and four memory rows");
+    // The final RIFE quality differs from the quality saved in earlier optical
+    // trials. Their FPS/latency/memory must still survive every CSV rewrite.
+    const auto fps_line=layout.find("Output FPS median,");
+    require(fps_line!=std::string::npos,"summary FPS row exists");
+    const auto first_value=fps_line+std::string_view("Output FPS median,").size();
+    const auto first_cell=layout.substr(first_value,layout.find(',',first_value)-first_value);
+    require(first_cell!="n.a." && first_cell!="N/A","RIFE quality changes must not erase completed reference trial statistics");
+    const auto prior_columns=modern?26U:8U;
+    auto at=first_value;
+    for(unsigned column=0;column<prior_columns;++column){
+        const auto end=layout.find_first_of(",\n",at);
+        require(end!=std::string::npos,"reference/optical columns exist");
+        const auto cell=layout.substr(at,end-at);
+        require(cell!="n.a." && cell!="N/A","all completed pre-RIFE optical trials survive the final quality");
+        at=end+1;
+    }
     if(!multipliers[3])require(layout.find("RIFE Very High 3X")!=std::string::npos && layout.find("n.a.")!=std::string::npos,"pruned3X tiers retain empty export cells");
     require(layout.find("4X")==std::string::npos,"no4X columns in temporary suite");
     const auto details=read(layout_path.parent_path()/(layout_path.stem().wstring()+L"-details.csv"));

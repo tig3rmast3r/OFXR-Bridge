@@ -206,6 +206,18 @@ class Runner:
 
     def command(self, request):
         op = request["op"]
+        if op == "memory":
+            # A live worker need not have initialized CUDA yet. Its GPU-private
+            # allocation is then genuinely zero, not an unavailable inference.
+            if self.device is None:
+                return {"vram_private": 0, "torch_reserved": 0}
+            if self.memory is None:
+                return {}
+            usage = self.memory.usage()
+            if usage is None:
+                return {}
+            return {"vram_private": max(0, usage-sum(self.import_charges.values())),
+                    "torch_reserved": torch.cuda.memory_reserved(self.device)}
         if op == "configure":
             enabled = request.get("optimize") is True
             if self.configs and enabled != self.optimization_enabled:

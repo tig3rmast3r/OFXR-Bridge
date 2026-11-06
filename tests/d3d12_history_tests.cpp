@@ -6142,6 +6142,34 @@ int main(int argc, char** argv) {
         if(argc>1 && std::string_view(argv[1])=="rife-eye-queue") {
             D3D12WarpFixture fixture(true);test_rife_eye_queue(fixture);return 0;
         }
+        if(argc>1 && std::string_view(argv[1])=="rife-memory") {
+            D3D12WarpFixture fixture(true);
+            xrfg::D3D12Rife retained;
+            require_hresult(retained.initialize(fixture.device(),fixture.queue(),kFormat,3,.18F),"idle worker initialize");
+            const auto sample=[&](std::uint64_t after) {
+                const auto deadline=GetTickCount64()+4000;
+                xrfg::RifeMemoryStatus value;
+                do {
+                    const auto before=GetTickCount64();
+                    value=xrfg::rife_memory_for_adapter(fixture.device()->GetAdapterLuid(),true);
+                    require(GetTickCount64()-before<100,"cached VRAM request blocked on worker IPC");
+                    if(value.active && value.valid && value.updated_ms>after)return value;
+                    Sleep(10);
+                }while(GetTickCount64()<deadline);
+                throw std::runtime_error("idle worker never returned a fresh VRAM receipt");
+            };
+            const auto empty=sample(0);
+            require(empty.process_id && !empty.private_bytes && !empty.reserved_bytes,"worker before CUDA must report measured zero private GPU bytes");
+            test_rife_stereo(fixture,3,256,128,xrfg::D3D12NvidiaInputScale::fifth,false,true);
+            const auto used=sample(empty.updated_ms);
+            require(used.private_bytes>=used.reserved_bytes && used.private_bytes>0,"idle worker retained GPU allocation must remain counted");
+            Sleep(5200); // exceed the old inference-only receipt lifetime
+            const auto idle=sample(used.updated_ms+5000);
+            require(idle.private_bytes>0,"idle VRAM must refresh without another inference");
+            fixture.require_no_debug_errors();
+            std::cout<<"RIFE VRAM before CUDA="<<empty.private_bytes<<" after inference="<<used.private_bytes<<" idle="<<idle.private_bytes<<" PASS\n";
+            return 0;
+        }
         if(argc>1 && std::string_view(argv[1])=="rife-async") {
             D3D12WarpFixture fixture(true);
             for(int model:{2,3,4})test_rife_stereo(fixture,model,256,128,xrfg::D3D12NvidiaInputScale::fifth,false,true);
