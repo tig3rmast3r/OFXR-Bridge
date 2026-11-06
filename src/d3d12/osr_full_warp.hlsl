@@ -669,6 +669,29 @@ static uint g_pick = 0;
 static uint g_pick_word = 0;
 static uint g_pick_tag = 0;
 static float2 g_pick_at = 0;
+// A bounded stereo gap with a near surface on one side and a far surface on
+// the other exposes the BACKGROUND. A silhouette's unreliable motion can move
+// an old foreground texel into that strip; agreement with its own old depth is
+// insufficient there. Use only the completed current stereo depth (no reads
+// from concurrently resolving neighbours).
+bool gap_background(int2 c, out float background) {
+    background = 0;
+    bool clear = false;
+    uint left = 0, right = 0;
+    const int reach = max(1, int((MaxRun * DepthSize.x + ColorSize.x - 1) / ColorSize.x));
+    [loop] for (int k = 1; k <= reach && (left == 0 || right == 0); ++k) {
+        if (left == 0 && c.x >= k) left = StereoDepth.Load(int3(c - int2(k, 0), 0));
+        if (right == 0 && c.x + k < int(DepthSize.x)) right = StereoDepth.Load(int3(c + int2(k, 0), 0));
+        if ((left == 0 && c.x < k) ||
+            (right == 0 && c.x + k >= int(DepthSize.x))) break;
+    }
+    if (left != 0 && right != 0) {
+        const float a = asfloat(left), b = asfloat(right);
+        background = min(a, b);
+        clear = max(a, b) > background * EdgeRatio + FarDepth;
+    }
+    return clear;
+}
 void resolve_pixel(uint3 id) {
     g_pick = 0;
     if (any(id.xy >= ColorSize)) return;
@@ -683,15 +706,46 @@ void resolve_pixel(uint3 id) {
     // current stereo warp cannot provide this destination surface. A valid
     // current pixel must not inherit a predicted position, fringe or colour
     // from an older eye, including sky and near camera-attached surfaces.
-    if (resolve_image(StereoDepth, SourceDepth, SourceColor, BackwardSource,
-            SourceDejitter, false, c, ndc, color, word) &&
-        !source_halo_stale(g_fetch_position, g_fetch_depth, ndc)) {
+    const bool source_surface = resolve_image(StereoDepth, SourceDepth, SourceColor,
+        BackwardSource, SourceDejitter, false, c, ndc, color, word);
+    // A rejected anti-aliased source colour can still have trustworthy geometry.
+    // Keep its destination depth to prevent a historical object from painting
+    // over the background simply because the colour at that edge was unusable.
+    const uint source_surface_word = word;
+    if (source_surface && !source_halo_stale(g_fetch_position, g_fetch_depth, ndc)) {
         g_pick=1;g_pick_at=g_fetch_position;g_pick_word=word;g_pick_tag=TagStereo;
         WarpedOut[id.xy] = color;
         ResolvedOut[id.xy] = (word & ~3u) | TagStereo;
         return;
     }
     if (history && resolve_history(c, depth_pixel, ndc, true, color, word)) {
+        const float historical_depth = asfloat(word & ~3u);
+        float background = source_surface ? asfloat(source_surface_word & ~3u) : 0;
+        bool known_background = source_surface;
+        const bool check_background = historical_depth < LockedDepth;
+        if (check_background && historical_depth > SkyDepth && !known_background)
+            known_background = gap_background(c, background);
+        // Preserve the existing hard-near side-face handling. For farther
+        // disocclusions the old foreground must not leak into revealed sky or
+        // background. Try this eye's actual background at the camera-correct
+        // ray before asking inpaint to invent it; no motion-contaminated offset.
+        // At a rejected source-colour halo even a background-depth texel can
+        // carry foreground colour: DLSS colour and depth have different edge
+        // footprints. Use the historical camera ray for this known surface,
+        // rather than an object-motion offset from the adjacent silhouette.
+        if (check_background && known_background && (source_surface ||
+            historical_depth > background * (1.0 + DepthTolerance) + FarDepth)) {
+            float4 clean = 0;
+            if (!fetch(HistoryDepth, HistoryColor, BackwardHistory, ndc, background,
+                    HistoryDejitter, true, clean)) {
+                WarpedOut[id.xy] = 0;
+                ResolvedOut[id.xy] = (word & ~3u) | TagMoved;
+                return;
+            }
+            color = clean;
+            word = asuint(background) & ~3u;
+            g_history_position = g_fetch_position;
+        }
         // A camera-attached surface (the first-person weapon) keeps its screen
         // place; both tests below reproject it as world geometry, which it is
         // not. While strafing they failed on the weapon's own side faces that

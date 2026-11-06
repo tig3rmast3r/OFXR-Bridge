@@ -128,8 +128,50 @@ void refresh(unsigned eye) {
     check(filled>100,"freshly retained eye fills next occlusion");
     std::printf("history continues recording eye=%u filled=%u PASS\n",eye,filled);
 }
+void background_strip(unsigned eye,bool lower,int side,bool halo=false,bool mixed_depth=false) {
+    Fixture f;auto old=solid(grey(128)),current=solid(grey(128));warm(f,old);
+    std::vector<float> old_depth(width*height,.02F),depth(width*height,.02F);
+    std::vector<UINT> motion(width*height,0);
+    for(UINT y=16;y<56;++y)for(UINT x=64;x<80;++x) {
+        current[y*width+x]=grey(220);depth[y*width+x]=.2F;
+        const UINT previous=UINT(int(x)+side*16);
+        old[y*width+previous]=grey(220);old_depth[y*width+previous]=mixed_depth?.02F:.2F;
+        // A bad silhouette vector moves an old bright object into the newly
+        // exposed BACKGROUND strip. Its old colour/depth agree with each other,
+        // so generic historical visibility alone must not accept it there.
+        motion[y*width+previous]=halo ? (side>0?0x5000u:0xd000u) :
+            (side>0?0x4d00u:0xcd00u); // half +/-32 for colour halo, +/-20 for gap
+    }
+    auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    begin(f);f.upload(f.color.Get(),old.data());f.upload(f.depth.Get(),old_depth.data());f.upload(field.Get(),motion.data());
+    auto saved=inputs(f,1-eye,true);saved.source_motion=field.Get();
+    xrfg::OsrFullHistory kept{};kept.publication=20;
+    f.warp.record_history_update(f.list.Get(),saved,kept);submit(f);f.warp.commit();
+    auto in=inputs(f,eye,true,lower);in.locked_depth=2;
+    // Exact depth-dependent stereo disparity: object moves16px; background1.6px.
+    // History's unchanged target camera sees clean background at x70..73.
+    in.forward_stereo[8]=side*1.25F;in.backward_source[8]=-side*1.25F;
+    const UINT first=halo?(side>0?64u:79u):70u;
+    auto without=in;without.use_history=without.use_history_motion=false;
+    const auto pure=render(f,without,current,depth);
+    const auto result=render(f,in,current,depth);unsigned checked=0;
+    check(result.history_allowed==1,"disocclusion test retains valid history");
+    for(UINT y=24;y<48;++y)for(UINT x=first;x<first+(halo?1u:3u);++x) {
+        const auto i=y*width+x;++checked;
+        check((pure.mask[i]&3)!=1,"target is a missing or rejected current region");
+        if(result.color[i]!=grey(128)) {
+            std::fprintf(stderr,"background strip eye=%u lower=%u side=%d x=%u y=%u expected128 actual%u tag%u\n",
+                eye,lower,side,x,y,result.color[i]&255,result.mask[i]&3);
+            check(false,"revealed background must not inherit the bright historical foreground");
+        }
+    }
+    std::printf("background strip eye=%u lower=%u side=%d halo=%u mixed-depth=%u pixels=%u PASS\n",eye,lower,side,halo,mixed_depth,checked);
+}
 }
 int main() {
+    for(unsigned eye:{0u,1u})for(bool lower:{false,true})for(int side:{-1,1})background_strip(eye,lower,side);
+    for(unsigned eye:{0u,1u})for(bool lower:{false,true})for(int side:{-1,1})background_strip(eye,lower,side,true);
+    for(unsigned eye:{0u,1u})for(bool lower:{false,true})for(int side:{-1,1})background_strip(eye,lower,side,true,true);
     for(unsigned eye:{0u,1u}) {
         for(bool lower:{false,true}) {
             for(float depth:{.04F,.4F,0.F})visible(eye,lower,depth);

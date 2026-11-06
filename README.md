@@ -188,6 +188,10 @@ Luke Ross's Legacy AER mode renders one eye per frame, alternating. OFXR
 rebuilds the other eye from the colour, depth and camera of the eye the game
 rendered, so the headset gets a full stereo pair every frame.
 
+On nightly, OSR preserves the current stereo warp wherever it resolves and uses
+history only to fill missing surfaces. See the [OSR update history](docs/OSR_HISTORY.md)
+for the character-tremble and object-contour corrections.
+
 **Reconstruction** has three choices:
 
 | Reconstruction | |
