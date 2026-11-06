@@ -167,7 +167,7 @@ int main() {
     auto exposure = solid(0xff080870u);
     r = f.frame(1, exposure, 0.2F);
     no_cut(r, "exposure-only flash is not a cut");
-    check((r.center & 0xffffffu) == (red[0] & 0xffffffu), "fixture actually exercises history-first resolve");
+    check((r.center & 0xffffffu) == (exposure[0] & 0xffffffu), "history stays recorded without replacing current exposure");
     no_cut(f.frame(0, red, 0.2F), "exposure return is not a cut");
     auto local = red;
     std::fill(local.begin(), local.begin() + width * 7, 0xffffffffu);
