@@ -15,6 +15,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -33,6 +34,11 @@ constexpr std::uint64_t kMaximumBytes = 1280ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaximumImages = 48;
 constexpr std::size_t kMaximumNrImages = 48;
 constexpr std::uint64_t kMaximumNrBytes = 768ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kMaximumDeliveryBytes=1024ULL*1024ULL*1024ULL;
+constexpr std::size_t kMaximumDeliveryImages=32,kMaximumDeliveries=8;
+int capture_pool(std::string_view stage) {
+    return stage.starts_with("nr_")?1:stage.starts_with("fg_delivery_")?2:0;
+}
 
 struct Shot {
     TwoFrameImageInfo info{};
@@ -67,6 +73,12 @@ struct TimelineShot {
 
 struct Session {
     std::mutex mutex;
+    std::condition_variable delivery_changed;
+    std::vector<TwoFrameDelivery> deliveries;
+    std::vector<TwoFrameDeliveryView> delivery_views;
+    bool want_deliveries{},accept_deliveries{true};
+    std::uint64_t delivery_allocated{};
+    ComPtr<ID3D12Device> footprint_device; // CPU staging layout only; never a native binding
     std::vector<std::shared_ptr<Shot>> shots;
     std::vector<ContractShot> contracts;
     std::vector<TwoFrameNativeDlssgEvaluation> native_dlssg_evaluations;
@@ -91,6 +103,7 @@ struct Manager {
     std::mutex mutex;
     std::shared_ptr<Session> session;
     std::atomic_bool has_session{};
+    std::atomic_bool delivery_active{};
     std::atomic_uint32_t active_frame{};
     bool pending_start{};
     DiagnosticKeyEdge capture_key;
@@ -212,6 +225,7 @@ std::shared_ptr<Shot> prepare_shot(
     {
         std::scoped_lock lock(session->mutex);
         if (session->sealed) return {};
+        if(device && !session->footprint_device)session->footprint_device=device;
         if (!session->stage_budget.accept(info.stage)) {
             ++session->suppressed_upstream_images;
             return {};
@@ -256,11 +270,13 @@ std::shared_ptr<Shot> prepare_shot(
             shot->status = E_OUTOFMEMORY;
         } else {
             std::scoped_lock lock(session->mutex);
-            if ((std::string_view(info.stage).starts_with("nr_") ? session->nr_allocated : session->allocated) + shot->bytes >
-                (std::string_view(info.stage).starts_with("nr_") ? kMaximumNrBytes : kMaximumBytes)) {
+            const auto pool=capture_pool(info.stage);
+            auto& allocated=pool==1?session->nr_allocated:pool==2?session->delivery_allocated:session->allocated;
+            const auto limit=pool==1?kMaximumNrBytes:pool==2?kMaximumDeliveryBytes:kMaximumBytes;
+            if (allocated + shot->bytes > limit) {
                 shot->status = E_OUTOFMEMORY;
             } else {
-                (std::string_view(info.stage).starts_with("nr_") ? session->nr_allocated : session->allocated) += shot->bytes;
+                allocated += shot->bytes;
             }
         }
         if (SUCCEEDED(shot->status) && cpu_description) {
@@ -284,8 +300,8 @@ std::shared_ptr<Shot> prepare_shot(
     {
         std::scoped_lock lock(session->mutex);
         if (!session->sealed && std::count_if(session->shots.begin(),session->shots.end(),[&](const auto& existing){
-                return std::string_view(existing->info.stage).starts_with("nr_")==std::string_view(info.stage).starts_with("nr_");
-            }) < (std::string_view(info.stage).starts_with("nr_") ? kMaximumNrImages : kMaximumImages))
+                return capture_pool(existing->info.stage)==capture_pool(info.stage);
+            }) < (capture_pool(info.stage)==1?kMaximumNrImages:capture_pool(info.stage)==2?kMaximumDeliveryImages:kMaximumImages))
             session->shots.push_back(shot);
         else {
             ++session->dropped_images;
@@ -342,6 +358,8 @@ void write_session(const std::shared_ptr<Session>& session) {
     std::vector<TwoFrameNativeDlssgEvaluation> native_dlssg_evaluations;
     std::vector<TwoFrameNrEvaluation> nr_evaluations;
     std::vector<TimelineShot> timeline;
+    std::vector<TwoFrameDelivery> deliveries;
+    std::vector<TwoFrameDeliveryView> delivery_views;
     {
         std::scoped_lock lock(session->mutex);
         shots = session->shots;
@@ -349,6 +367,18 @@ void write_session(const std::shared_ptr<Session>& session) {
         contracts = session->contracts;
         native_dlssg_evaluations = session->native_dlssg_evaluations;
         timeline = session->timeline;
+        deliveries=session->deliveries;delivery_views=session->delivery_views;
+    }
+    std::ofstream delivery_manifest(session->directory/L"fg-deliveries.tsv",std::ios::binary);
+    delivery_manifest<<"token\tpacket\tkind\tsource_cycle\tsource_owner\tsource_serial\tgenerated_index\tcontent_time\tsubmitted_time\tentered_ns\treturned_ns\tresult\tlayer_count\tcompleted\tconfirmed\tcopy_result\n";
+    for(const auto& d:deliveries)delivery_manifest<<d.token<<'\t'<<d.packet<<'\t'<<d.kind<<'\t'<<d.source_cycle<<'\t'<<d.source_owner<<'\t'<<d.source_serial<<'\t'<<d.generated_index<<'\t'<<d.content_time<<'\t'<<d.submitted_time<<'\t'<<d.entered_ns<<'\t'<<d.returned_ns<<'\t'<<d.result<<'\t'<<d.layer_count<<'\t'<<d.completed<<'\t'<<d.confirmed<<'\t'<<d.copy_result<<'\n';
+    std::ofstream delivery_views_manifest(session->directory/L"fg-delivery-views.tsv",std::ios::binary);
+    delivery_views_manifest<<"token\tlayer\tview\tvirtual_chain\tnative_chain\tgeneration\tsource_index\tnative_index\tslice\treference_token\tpose_xyz_xyzw\tfov_lr_ud\trect_xywh\timage_api\timage_result\n";
+    delivery_views_manifest<<std::setprecision(9);
+    for(const auto& v:delivery_views){
+        delivery_views_manifest<<v.token<<'\t'<<v.layer<<'\t'<<v.view<<'\t'<<v.virtual_chain<<'\t'<<v.native_chain<<'\t'<<v.generation<<'\t'<<v.source_index<<'\t'<<v.native_index<<'\t'<<v.slice<<'\t'<<v.reference_token;
+        auto array=[&](const auto& a){delivery_views_manifest<<'\t';for(std::size_t i=0;i<a.size();++i){if(i)delivery_views_manifest<<',';delivery_views_manifest<<a[i];}};
+        array(v.pose);array(v.fov);array(v.rect);delivery_views_manifest<<'\t'<<v.image_api<<'\t'<<v.image_result<<'\n';
     }
     std::ofstream native_manifest(session->directory / L"native-dlssg-evaluations.tsv", std::ios::binary);
     native_manifest << "frame\tstream\tpublication\tserial\tprevious_serial\treset\tdirect\tresult\tcount\tindex\tflags"
@@ -597,6 +627,10 @@ void write_session(const std::shared_ptr<Session>& session) {
     summary << "V576 DLSS-G stages: aligned_previous / packed_current / packed_motion / packed_depth -> ngx_generated -> composed_output.\n"
         << "One pair per stream, at most two streams. Native stage swapchain is resource identity, not XR handle.\n"
         << "native_dlssg_pair: original A/B pose/projection. native_dlssg_output_camera: B -> output-to-B quaternion, mode = output index.\n";
+    summary<<"V885 manual F8: separate max8 private-endpoint packets,32images/1GiB, up to1second after the AFW capture closes. fg_delivery_original is the already reconstructed real FG input; fg_delivery_interpolated is temporal frame generation, unknown remains explicit.\n"
+        <<"Join manifest stream to fg-deliveries.tsv token, then fg-delivery-views.tsv token/view/slice. Images are the actual waited native target after its copy, before release. Pose/FOV/rect are the owned submitted projection. content_time and native submitted_time differ deliberately.\n"
+        <<"Native End result/completed/layer_count prove acceptance only, not physical headset visibility. Pending/refused/empty remain explicit. Reused already-released targets are never read again; reference_token names an earlier captured identical generation,0 means unavailable. No new copy or CPU wait at native End.\n"
+        <<"generated_index is the actual submitted output ordinal (1-based,0 for real or unavailable), not a guessed fraction. Source cycle/owner/serial permit temporal joins; missing identity stays0. V886 image_api/image_result report actual readback method and result per view. Native D3D11 uses the existing private-copy owner thread to copy waited targets to staging and Map CPU bytes before release; this adds synchronous GPU readback only during F8. D12 remains fenced readback. A layout-only D12 device never changes the native binding or supplies image contents. Capture readbacks add GPU work during F8; do not benchmark pacing inside the capture.\n";
     std::ofstream settings(session->directory / L"settings.txt", std::ios::binary);
     settings << session->settings;
     OutputDebugStringA(message.c_str());
@@ -645,6 +679,8 @@ std::uint32_t two_frame_capture_begin_end_frame() noexcept {
             !diagnostic_ring_enabled) {
             if (state.writer.joinable()) state.writer.join();
             state.session = std::make_shared<Session>();
+            state.session->want_deliveries=true;
+            state.delivery_active.store(true,std::memory_order_release);
             state.has_session.store(true,std::memory_order_relaxed);
             state.session->directory = capture_directory();
             state.session->settings = capture_settings();
@@ -682,12 +718,23 @@ void two_frame_capture_finish_end_frame(std::uint32_t frame) noexcept {
         if (!completed && state.observed_end_frames < 8) return;
         state.active_frame = 0;
         const auto session = state.session;
-        {
+        if(!session->want_deliveries) {
             std::scoped_lock session_lock(session->mutex);
             session->sealed = true;
         }
         state.writer = std::thread([session] {
             try {
+                if(session->want_deliveries){
+                    std::unique_lock lock(session->mutex);
+                    session->delivery_changed.wait_for(lock,std::chrono::seconds(1),[&]{
+                        return session->deliveries.size()>=kMaximumDeliveries && std::all_of(session->deliveries.begin(),session->deliveries.end(),[](const auto& d){return d.completed;});
+                    });
+                    session->accept_deliveries=false;manager().delivery_active.store(false,std::memory_order_release);
+                    // Only CPU command recording may hold this gate. GPU
+                    // completion belongs to write_session's existing fences.
+                    session->delivery_changed.wait(lock,[&]{return std::none_of(session->deliveries.begin(),session->deliveries.end(),[](const auto& d){return d.recording;});});
+                    session->sealed=true;
+                }
                 write_session(session);
             } catch (...) {
                 session->safe_to_release.store(false);
@@ -716,6 +763,102 @@ bool two_frame_capture_active() noexcept {
 
 bool two_frame_capture_images_active() noexcept {
     return manager().active_frame.load() != 0;
+}
+
+bool two_frame_capture_delivery_active() noexcept {
+    return manager().delivery_active.load(std::memory_order_acquire) && bridge_flight_logger().enabled();
+}
+std::uint64_t two_frame_capture_claim_delivery(TwoFrameDelivery info) noexcept {
+    if(!two_frame_capture_delivery_active())return 0;
+    try{
+        auto& state=manager();std::scoped_lock lock(state.mutex);auto session=state.session;
+        if(!session)return 0;std::scoped_lock capture(session->mutex);
+        if(session->sealed || !session->want_deliveries || !session->accept_deliveries || session->deliveries.size()>=kMaximumDeliveries)return 0;
+        static std::atomic_uint64_t identifiers{};
+        info.token=++identifiers;info.recording=true;
+        session->deliveries.push_back(info);return info.token;
+    }catch(...){return 0;}
+}
+void two_frame_capture_delivery_view(TwoFrameDeliveryView view,ID3D12Device* device,
+    ID3D12GraphicsCommandList* list,ID3D12Resource* source,D3D12_RESOURCE_STATES source_state) noexcept {
+    if(!view.token)return;
+    try{
+        std::shared_ptr<Session> session;
+        {auto& state=manager();std::scoped_lock lock(state.mutex);session=state.session;}
+        if(!session)return;
+        TwoFrameDelivery delivery;
+        {std::scoped_lock lock(session->mutex);
+         const auto found=std::find_if(session->deliveries.begin(),session->deliveries.end(),[&](const auto& d){return d.token==view.token && d.recording;});
+         if(session->sealed || found==session->deliveries.end() || session->delivery_views.size()>=kMaximumDeliveryImages)return;
+         delivery=*found;
+         if(device && list && source)view.image_api=12;
+         if(!source && !view.image_api)for(auto it=session->delivery_views.rbegin();it!=session->delivery_views.rend();++it){
+             if(it->virtual_chain==view.virtual_chain && it->native_chain==view.native_chain &&
+                it->generation==view.generation && it->source_index==view.source_index &&
+                it->native_index==view.native_index && it->slice==view.slice){
+                 const auto token=it->reference_token?it->reference_token:it->token;
+                 if(std::any_of(session->shots.begin(),session->shots.end(),[&](const auto& s){return s->info.stream==token && s->info.swapchain==view.virtual_chain && capture_pool(s->info.stage)==2 && s->info.slice==view.slice && SUCCEEDED(s->status);}))view.reference_token=token;
+                 break;
+             }
+         }
+         session->delivery_views.push_back(view);
+        }
+        if(!device || !list || !source)return; // already released/unsupported; explicit metadata only
+        TwoFrameImageInfo info;info.stage=delivery.kind==0?"fg_delivery_original":delivery.kind==1?"fg_delivery_interpolated":"fg_delivery_unknown";
+        info.stream=view.token;info.capture_serial=delivery.packet;info.display_time=delivery.content_time;
+        info.swapchain=view.virtual_chain;info.eye=view.view<2?static_cast<int>(view.view):-1;info.slice=view.slice;
+        info.x=view.rect[0];info.y=view.rect[1];info.width=view.rect[2];info.height=view.rect[3];
+        auto shot=prepare_shot(session,0,info,device,source);
+        if(shot){record_copy(*shot,list,source,source_state);
+            if(SUCCEEDED(shot->status))shot->producer_list=list;}
+        {std::scoped_lock lock(session->mutex);for(auto& v:session->delivery_views)
+            if(v.token==view.token && v.layer==view.layer && v.view==view.view)v.image_result=shot?shot->status:E_OUTOFMEMORY;}
+    }catch(...){}
+}
+void two_frame_capture_delivery_view_d3d11(TwoFrameDeliveryView view,
+    ID3D11DeviceContext* context,ID3D11Texture2D* source) noexcept {
+    if(!view.token)return;
+    view.image_api=context && source?11:0;
+    two_frame_capture_delivery_view(view,nullptr,nullptr,nullptr,D3D12_RESOURCE_STATE_COMMON);
+    if(!view.image_api)return;
+    try {
+        std::shared_ptr<Session> session;
+        {auto& state=manager();std::scoped_lock lock(state.mutex);session=state.session;}
+        if(!session)return;TwoFrameDelivery delivery;
+        {std::scoped_lock lock(session->mutex);
+         const auto found=std::find_if(session->deliveries.begin(),session->deliveries.end(),[&](const auto& d){return d.token==view.token && d.recording;});
+         if(session->sealed || found==session->deliveries.end() ||
+            std::none_of(session->delivery_views.begin(),session->delivery_views.end(),[&](const auto& v){return v.token==view.token && v.layer==view.layer && v.view==view.view && v.image_api==11;}))return;
+         delivery=*found;}
+        TwoFrameImageInfo info;info.stage=delivery.kind==0?"fg_delivery_original":delivery.kind==1?"fg_delivery_interpolated":"fg_delivery_unknown";
+        info.stream=view.token;info.capture_serial=delivery.packet;info.display_time=delivery.content_time;
+        info.swapchain=view.virtual_chain;info.eye=view.view<2?static_cast<int>(view.view):-1;info.slice=view.slice;
+        info.x=view.rect[0];info.y=view.rect[1];info.width=view.rect[2];info.height=view.rect[3];
+        const auto result=two_frame_capture_record_d3d11(info,nullptr,context,source);
+        {std::scoped_lock lock(session->mutex);for(auto& v:session->delivery_views)
+            if(v.token==view.token && v.layer==view.layer && v.view==view.view)v.image_result=result;}
+    }catch(...){}
+}
+void two_frame_capture_finish_delivery_copy(std::uint64_t token,HRESULT result) noexcept {
+    if(!token)return;
+    try{
+        std::shared_ptr<Session> session;{auto& state=manager();std::scoped_lock lock(state.mutex);session=state.session;}
+        if(!session)return;std::scoped_lock lock(session->mutex);
+        for(auto& d:session->deliveries)if(d.token==token){d.recording=false;d.copy_result=result;}
+        if(FAILED(result))for(auto& s:session->shots)if(s->info.stream==token && capture_pool(s->info.stage)==2 && !s->fence)s->status=result;
+        session->delivery_changed.notify_all();
+    }catch(...){}
+}
+void two_frame_capture_complete_delivery(std::uint64_t token,std::int32_t result,std::uint32_t layers,
+    std::int64_t submitted,std::int64_t entered,std::int64_t returned,bool confirmed) noexcept {
+    if(!token)return;
+    try{
+        std::shared_ptr<Session> session;{auto& state=manager();std::scoped_lock lock(state.mutex);session=state.session;}
+        if(!session)return;std::scoped_lock lock(session->mutex);
+        if(session->sealed)return;
+        for(auto& d:session->deliveries)if(d.token==token && !d.completed){d.completed=true;d.result=result;d.layer_count=layers;d.submitted_time=submitted;d.entered_ns=entered;d.returned_ns=returned;d.confirmed=confirmed;}
+        session->delivery_changed.notify_all();
+    }catch(...){}
 }
 
 std::uint64_t two_frame_capture_claim_nr(std::uint64_t handle) noexcept {
@@ -890,21 +1033,37 @@ void two_frame_capture_record_ng_x(
 
 HRESULT two_frame_capture_record_d3d11(const TwoFrameImageInfo& info,
     ID3D12Device* footprint_device,ID3D11DeviceContext* context,ID3D11Texture2D* source) noexcept {
-    if (!two_frame_capture_images_active()) return S_FALSE;
+    const bool delivery=info.stage && std::string_view(info.stage).starts_with("fg_delivery_");
+    if (!two_frame_capture_images_active() && !delivery) return S_FALSE;
     try {
-        if (!footprint_device||!context||!source) return E_INVALIDARG;
+        if (!context||!source) return E_INVALIDARG;
         std::shared_ptr<Session> session;std::uint32_t frame{};
         {auto& state=manager();std::scoped_lock lock(state.mutex);session=state.session;frame=state.active_frame;}
-        if(!session||!frame)return S_FALSE;
+        if(!session || (!frame && !delivery))return S_FALSE;
+        if(delivery){std::scoped_lock lock(session->mutex);
+            if(session->sealed || std::none_of(session->deliveries.begin(),session->deliveries.end(),[&](const auto& d){return d.token==info.stream && d.recording;}))return S_FALSE;
+            frame=0;}
         ComPtr<ID3D11Device> owner,context_device;source->GetDevice(&owner);context->GetDevice(&context_device);
         ComPtr<IUnknown> oi,ci;
         if(!owner||!context_device||FAILED(owner.As(&oi))||FAILED(context_device.As(&ci))||oi.Get()!=ci.Get())return E_INVALIDARG;
+        ComPtr<ID3D12Device> layout_device=footprint_device;
+        if(!layout_device && delivery){
+            {std::scoped_lock lock(session->mutex);layout_device=session->footprint_device;}
+            if(!layout_device){
+                ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> adapter;
+                HRESULT result=owner.As(&dxgi);if(SUCCEEDED(result))result=dxgi->GetAdapter(&adapter);
+                if(SUCCEEDED(result))result=D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&layout_device));
+                if(FAILED(result))return result;
+                {std::scoped_lock lock(session->mutex);if(!session->footprint_device)session->footprint_device=layout_device;}
+            }
+        }
+        if(!layout_device)return E_INVALIDARG;
         D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
         if(desc.SampleDesc.Count!=1||info.slice>=desc.ArraySize||!desc.MipLevels)return E_INVALIDARG;
         D3D12_RESOURCE_DESC converted{};converted.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         converted.Width=desc.Width;converted.Height=desc.Height;converted.DepthOrArraySize=static_cast<UINT16>(desc.ArraySize);
         converted.MipLevels=static_cast<UINT16>(desc.MipLevels);converted.Format=desc.Format;converted.SampleDesc.Count=1;
-        auto shot=prepare_shot(session,frame,info,footprint_device,nullptr,&converted);
+        auto shot=prepare_shot(session,frame,info,layout_device.Get(),nullptr,&converted);
         if(!shot)return E_OUTOFMEMORY;if(FAILED(shot->status))return shot->status;
         auto staging_desc=desc;staging_desc.MipLevels=staging_desc.ArraySize=1;
         staging_desc.Usage=D3D11_USAGE_STAGING;staging_desc.BindFlags=staging_desc.MiscFlags=0;

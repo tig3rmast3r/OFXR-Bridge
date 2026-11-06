@@ -5,6 +5,7 @@
 #include "xrfg/private_pacing_buffer.hpp"
 #include "xrfg/private_refresh_wait_policy.hpp"
 #include "xrfg/two_output_schedule.hpp"
+#include "xrfg/two_frame_capture.hpp"
 
 #include <algorithm>
 #include <array>
@@ -108,6 +109,8 @@ struct PrivateOpenXrRuntime::Impl {
         std::uint64_t policy_epoch{};
         bool pair_previous{}; // submit for the previous frame's slot time (pair_next_end_with_previous)
         XrTime content_time{}; // submit for this display time (set_next_end_content_time)
+        std::uint64_t capture_token{};
+        bool capture_recording{};
     };
     struct WaitResult {
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
@@ -298,6 +301,8 @@ struct PrivateOpenXrRuntime::Impl {
         stopping=true;fifo->stop();changed.notify_all();
     }
     void retire(const std::shared_ptr<Packet>& packet) {
+        if(packet->capture_recording){two_frame_capture_finish_delivery_copy(packet->capture_token,E_ABORT);packet->capture_recording=false;}
+        if(packet->capture_token)two_frame_capture_complete_delivery(packet->capture_token,XR_ERROR_RUNTIME_FAILURE,0,0,0,0,false);
         {std::scoped_lock lock(mutex);
          for(auto& lease:packet->leases) {
              if(!lease.source_released && lease.chain->images[lease.image].readers)
@@ -433,6 +438,48 @@ struct PrivateOpenXrRuntime::Impl {
         },copy.value);
         return true;
     }
+    void begin_capture(Packet& packet) noexcept {
+        if(!two_frame_capture_delivery_active() || packet.capture_token)return;
+        if(std::none_of(packet.copies.begin(),packet.copies.end(),[](const auto& c){return std::holds_alternative<XrCompositionLayerProjection>(c.value);}))return;
+        TwoFrameDelivery info;info.packet=packet.sequence;info.content_time=packet.content_time?packet.content_time:packet.info.displayTime;
+        if(packet.delivery){info.kind=packet.delivery->synthetic?1:0;info.source_cycle=packet.delivery->capture_cycle;
+            info.source_owner=packet.delivery->capture_owner;info.source_serial=packet.delivery->capture_serial;
+            info.generated_index=packet.delivery->capture_generated_index;}
+        packet.capture_token=two_frame_capture_claim_delivery(info);packet.capture_recording=packet.capture_token!=0;
+    }
+    void capture_views(Packet& packet,ID3D12GraphicsCommandList* commands) noexcept {
+        if(!packet.capture_token)return;
+        for(std::size_t layer=0;layer<packet.copies.size();++layer){
+            const auto& copy=packet.copies[layer];if(!std::holds_alternative<XrCompositionLayerProjection>(copy.value))continue;
+            for(std::size_t v=0;v<copy.views.size();++v){
+                const auto& view=copy.views[v];
+                for(auto& target:packet.targets){
+                    auto chain=target->chain.lock();if(!chain)continue;auto& endpoint=destination(*chain);
+                    if(view.subImage.swapchain!=endpoint.handle)continue;
+                    TwoFrameDeliveryView info;info.token=packet.capture_token;info.layer=static_cast<unsigned>(layer);info.view=static_cast<unsigned>(v);
+                    info.virtual_chain=xr_handle_bits(chain->handle);info.native_chain=xr_handle_bits(endpoint.handle);
+                    info.generation=target->source_generation;info.source_index=target->source;info.native_index=target->index;info.slice=view.subImage.imageArrayIndex;
+                    info.pose={view.pose.position.x,view.pose.position.y,view.pose.position.z,view.pose.orientation.x,view.pose.orientation.y,view.pose.orientation.z,view.pose.orientation.w};
+                    info.fov={view.fov.angleLeft,view.fov.angleRight,view.fov.angleUp,view.fov.angleDown};
+                    info.rect={view.subImage.imageRect.offset.x,view.subImage.imageRect.offset.y,view.subImage.imageRect.extent.width,view.subImage.imageRect.extent.height};
+                    // Released/repeated targets are immutable but no longer
+                    // ours to read. Reference their earlier witness instead.
+                    auto* image=commands && !target->released && target->index<endpoint.real12.size()?endpoint.real12[target->index].Get():nullptr;
+                    if(!commands && context11 && !target->released && target->index<endpoint.real11.size())
+                        two_frame_capture_delivery_view_d3d11(info,context11.Get(),endpoint.real11[target->index].Get());
+                    else two_frame_capture_delivery_view(info,device12.Get(),commands,image,chain->image_state);
+                    break;
+                }
+            }
+        }
+    }
+    void finish_capture_copy(Packet& packet,HRESULT result) noexcept {
+        if(packet.capture_recording){two_frame_capture_finish_delivery_copy(packet.capture_token,result);packet.capture_recording=false;}
+    }
+    void observe_capture(Packet& packet,const XrFrameEndInfo& end,XrResult result,std::int64_t entered,std::int64_t returned) noexcept {
+        if(packet.capture_token)two_frame_capture_complete_delivery(packet.capture_token,result,end.layerCount,end.displayTime,entered,returned,
+            packet.delivery && packet.delivery->synthetic_confirmed.load(std::memory_order_acquire));
+    }
     XrResult publish(Packet& packet) {
         const bool diagnostic=tracing();
         std::vector<std::shared_ptr<PreparedTarget>> targets;
@@ -466,6 +513,7 @@ struct PrivateOpenXrRuntime::Impl {
         if(diagnostic)trace(12,packet.sequence);
         if(!targets.empty()) {
             std::scoped_lock gpu(copy_mutex);
+            begin_capture(packet);
             const auto copy_started=clock_ns();
             HRESULT copied=S_OK;
             if(d12()) {
@@ -485,12 +533,16 @@ struct PrivateOpenXrRuntime::Impl {
                     list->ResourceBarrier(2,barriers);list->CopyResource(endpoint.real12[target->index].Get(),image.d12.Get());
                     for(auto& b:barriers)std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(2,barriers);
                 }
+                if(SUCCEEDED(copied))capture_views(packet,list.Get());
                 if(SUCCEEDED(copied) && measure) {
                     list->EndQuery(copy_clock_heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,1);
                     list->ResolveQueryData(copy_clock_heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,0,2,copy_clock_readback.Get(),0);
                 }
                 if(SUCCEEDED(copied))copied=list->Close();
-                if(SUCCEEDED(copied)){ID3D12CommandList* lists[]={list.Get()};queue12->ExecuteCommandLists(1,lists);copied=queue12->Signal(copy12.Get(),copy_serial+1);if(SUCCEEDED(copied))++copy_serial;}
+                if(SUCCEEDED(copied)){ID3D12CommandList* lists[]={list.Get()};queue12->ExecuteCommandLists(1,lists);
+                    if(packet.capture_token)two_frame_capture_submission(queue12.Get(),1,lists);
+                    copied=queue12->Signal(copy12.Get(),copy_serial+1);if(SUCCEEDED(copied))++copy_serial;}
+                finish_capture_copy(packet,copied);
                 if(diagnostic)trace(13,packet.sequence);
                 if(SUCCEEDED(copied))copied=await(copy12.Get(),copy_serial,false);
                 if(SUCCEEDED(copied) && measure)report_copy_clock(packet.sequence);
@@ -501,15 +553,17 @@ struct PrivateOpenXrRuntime::Impl {
                     if(target->index>=endpoint.real11.size()){copied=E_INVALIDARG;break;}
                     context11->CopyResource(endpoint.real11[target->index].Get(),chain.images[target->source].d11.Get());
                 }
+                if(SUCCEEDED(copied))capture_views(packet,nullptr); // F8 only, on this existing D11 copy owner thread
                 if(SUCCEEDED(copied)){copied=context11->Signal(copy11.Get(),copy_serial+1);if(SUCCEEDED(copied))++copy_serial;}
                 context11->Flush();if(diagnostic)trace(13,packet.sequence);
+                finish_capture_copy(packet,copied);
                 if(SUCCEEDED(copied))copied=await(copy11.Get(),copy_serial,false);
             }
             packet.work_ns+=clock_ns()-copy_started;
             if(diagnostic)trace(14,packet.sequence);
             if(SUCCEEDED(copied))for(auto& target:targets)target->complete=true;
             if(XR_SUCCEEDED(result))result=xr(copied);
-        }
+        }else{begin_capture(packet);capture_views(packet,nullptr);finish_capture_copy(packet,S_OK);}
         return result;
     }
     XrResult release_prepared(Packet& packet) {
@@ -736,6 +790,7 @@ struct PrivateOpenXrRuntime::Impl {
                 }
                 if(adaptive && tracing())options.trace(38,packet->sequence,prefetch_next?1:0,prefetched?1:0);
                 const auto entered=clock_ns();result=options.real.end(options.real.session,&end);const auto returned=clock_ns();begun=false;
+                observe_capture(*packet,end,result,entered,returned);
                 if(packet->delivery)packet->delivery->completed(result==XR_SUCCESS && end.layerCount,
                     entered,returned,prediction_qpc(prediction).value_or(0),packet->prepared_at);
                 if(options.accepted_output && result==XR_SUCCESS && end.layerCount)options.accepted_output(returned);
@@ -939,6 +994,7 @@ struct PrivateOpenXrRuntime::Impl {
                     if(options.trace)options.trace(3,packet->sequence,end.displayTime,prediction.predictedDisplayTime);
                     if(!sleep_until(deadline,1'250'000)){retire(packet);fifo->retire();break;}
                     const auto entered=clock_ns();result=options.real.end(options.real.session,&end);const auto returned=clock_ns();begun=false;
+                    observe_capture(*packet,end,result,entered,returned);
                     if(packet->adaptive_buffer && result==XR_SUCCESS && end.layerCount) {
                         auto late=std::max(std::int64_t{},returned-deadline);
                         if(director_buffer_target && !refill)
@@ -1180,6 +1236,7 @@ struct PrivateOpenXrRuntime::Impl {
                     const auto at_end=clock_ns();
                     result=options.real.end(options.real.session,&end);begun=false;
                     const auto returned=clock_ns();
+                    observe_capture(*packet,end,result,at_end,returned);
                     if(packet->adaptive_buffer && result==XR_SUCCESS && end.layerCount) {
                         if(!directed)framework_clock.submitted(point(deadline-framework_shift),std::chrono::nanoseconds(physical),point(returned-framework_shift));
                         auto late=std::max(std::int64_t{},returned-deadline);

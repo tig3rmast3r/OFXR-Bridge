@@ -2,6 +2,7 @@
 #include "xrfg/openxr_fps_overlay.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/benchmark_log.hpp"
+#include "xrfg/two_frame_capture.hpp"
 #include "xrfg/elliott_meter.hpp"
 #include "xrfg/presented_output_rate.hpp"
 #include "xrfg/accepted_scene_rate.hpp"
@@ -1179,10 +1180,16 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
     if (measure && !synthetic && nonempty && impl_->converter)
         if (!impl_->converter(impl_->converter_user, info->displayTime, display)) display = 0;
     std::shared_ptr<InterfaceDeliveryReceipt> delivery;
-    if(measure && nonempty && stamp.cycle && impl_->private_delivery_end) {
-        stamp.cycle->require_native_delivery();
+    const bool capture_delivery=two_frame_capture_delivery_active();
+    if(nonempty && impl_->private_delivery_end && ((measure && stamp.cycle)||capture_delivery)) {
+        if(measure && stamp.cycle)stamp.cycle->require_native_delivery();
         try {delivery=std::make_shared<InterfaceDeliveryReceipt>(synthetic);
-            stamp.cycle->attach_native_delivery(delivery);}catch(...) {} // Missing receipt stays N/A.
+            if(capture_delivery){
+                delivery->capture_cycle=stamp.cycle?stamp.cycle->started_ns:0;
+                delivery->capture_owner=stamp.scene_owner;delivery->capture_serial=stamp.scene_serial;
+                delivery->capture_generated_index=synthetic?native_output+1:0;
+            }
+            if(measure && stamp.cycle)stamp.cycle->attach_native_delivery(delivery);}catch(...) {} // Missing receipt stays N/A.
     }
     // Preserve the measured private-End boundary: admission is still part of
     // delivery even though its wait now happens before the optional UI lock.

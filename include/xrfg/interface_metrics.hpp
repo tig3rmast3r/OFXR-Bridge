@@ -17,6 +17,9 @@ std::int64_t interface_qpc_ns(std::int64_t ticks) noexcept;
 // owns no cycle, overlay or session, so retained packets cannot form a cycle.
 struct InterfaceDeliveryReceipt {
     const bool synthetic;
+    // F8-only identity, frozen before private submission. No timing policy.
+    std::uint64_t capture_cycle{},capture_owner{},capture_serial{};
+    std::uint32_t capture_generated_index{};
     std::atomic<bool> synthetic_confirmed{false};
     std::atomic<int> outcome{0}; // 0 pending, 1 nonempty native success, -1 failure/empty
     std::int64_t entered_ns{},returned_ns{},display_ns{},prepared_ns{};

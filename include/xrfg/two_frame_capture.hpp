@@ -53,6 +53,36 @@ struct TwoFrameImageInfo {
     float jitter_y{};
 };
 
+// Manual F8 only. Actual private endpoint images, separate bounded reserve.
+// A token belongs to one capture and one prepared packet; late calls from an
+// older capture cannot append to a newer one. No callbacks touch the GPU at End.
+struct TwoFrameDelivery {
+    std::uint64_t token{},packet{},source_cycle{},source_owner{},source_serial{};
+    std::uint32_t generated_index{};
+    std::int32_t kind{-1}; // 0 real FG input (already stereo reconstructed), 1 interpolated, -1 unknown
+    std::int64_t content_time{},submitted_time{},entered_ns{},returned_ns{};
+    std::int32_t result{},copy_result{};
+    std::uint32_t layer_count{};
+    bool recording{},completed{},confirmed{};
+};
+struct TwoFrameDeliveryView {
+    std::uint64_t token{},virtual_chain{},native_chain{},generation{},reference_token{};
+    std::uint32_t layer{},view{},source_index{},native_index{},slice{};
+    std::array<float,7> pose{}; // position xyz, orientation xyzw
+    std::array<float,4> fov{}; // left,right,up,down
+    std::array<std::int32_t,4> rect{};
+    std::int32_t image_api{},image_result{S_FALSE}; // 0 metadata/repeat,11 CPU staging,12 fenced readback
+};
+[[nodiscard]] bool two_frame_capture_delivery_active() noexcept;
+[[nodiscard]] std::uint64_t two_frame_capture_claim_delivery(TwoFrameDelivery) noexcept;
+void two_frame_capture_delivery_view(TwoFrameDeliveryView,ID3D12Device*,
+    ID3D12GraphicsCommandList*,ID3D12Resource*,D3D12_RESOURCE_STATES) noexcept;
+void two_frame_capture_delivery_view_d3d11(TwoFrameDeliveryView,
+    ID3D11DeviceContext*,ID3D11Texture2D*) noexcept;
+void two_frame_capture_finish_delivery_copy(std::uint64_t,HRESULT) noexcept;
+void two_frame_capture_complete_delivery(std::uint64_t,std::int32_t,std::uint32_t,
+    std::int64_t,std::int64_t,std::int64_t,bool) noexcept;
+
 struct TwoFrameGuideContract {
     // Current / exact previous-opposite / exact previous-same producer receipt.
     // Diagnostic metadata only; original cameras, guides and XR poses unchanged.

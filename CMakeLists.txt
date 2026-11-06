@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.884.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.886.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -821,6 +821,13 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     target_link_libraries(xrfg_steamvr_delivery PUBLIC d3d11 d3d12 dxgi)
     if(XRFG_BUILD_TESTS)
         add_executable(xrfg_private_openxr_runtime_tests tests/private_openxr_runtime_tests.cpp)
+        add_executable(xrfg_private_fg_capture_tests tests/private_fg_capture_tests.cpp)
+        target_include_directories(xrfg_private_fg_capture_tests PRIVATE include "${XRFG_OPENXR_SDK_ROOT}/include")
+        target_compile_definitions(xrfg_private_fg_capture_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_compile_features(xrfg_private_fg_capture_tests PRIVATE cxx_std_20)
+        target_link_libraries(xrfg_private_fg_capture_tests PRIVATE xrfg_steamvr_delivery xrfg_d3d12_history)
+        add_test(NAME xrfg_private_fg_capture COMMAND xrfg_private_fg_capture_tests)
+        set_tests_properties(xrfg_private_fg_capture PROPERTIES TIMEOUT 25 RUN_SERIAL TRUE)
         add_executable(xrfg_private_release_readiness_tests tests/private_release_readiness_tests.cpp)
         target_link_libraries(xrfg_private_release_readiness_tests PRIVATE xrfg_steamvr_delivery xrfg_d3d12_history)
         target_compile_features(xrfg_private_release_readiness_tests PRIVATE cxx_std_20)
