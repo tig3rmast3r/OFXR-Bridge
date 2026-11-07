@@ -410,6 +410,8 @@ public:
         ID3D12CommandQueue* queue) noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
+    // Observer only: a real native RIFE worker exists, not merely a layer flag.
+    [[nodiscard]] bool asynchronous_rife_enabled() const noexcept;
 
     // Panel-only endpoint selection (djules75 V510). Remains off for eye images.
     void set_flat_panel(bool enabled) noexcept;

@@ -1452,6 +1452,13 @@ bool async_rife_queue(const SessionState& state) noexcept {
         state.d3d12_synthesis_queue.Get()!=state.d3d12_queue.Get();
 }
 
+// Luke's D11 bridge has its own isolated post-reconstruction producer lane.
+// Keep this policy identical at creation and at a drained settings change;
+// the generic native-D12 predicate deliberately excludes this bridge.
+bool async_luke_rife_queue(const SessionState& state, bool isolated, int model) noexcept {
+    return isolated && state.private_runtime && !state.pipelined_presenter_mode && model>=0;
+}
+
 // The application has released one of its images: mark where its queue
 // stands, for the join before a downstream xrEndFrame that names it. See
 // SessionState::binding_queue. Nothing waits here.
@@ -4006,8 +4013,8 @@ create_d3d11_frame_generation_swapchains(
         auto synthesis_options=session->nvidia_options;
         // Async RIFE owns a distinct per-eye queue. Keep ingress/AFW on the
         // capture lane; only immutable post-AFW work may leave the GPU lock.
-        const bool asynchronous_luke_rife=isolated_luke && session->private_runtime &&
-            !session->pipelined_presenter_mode && synthesis_options.rife_model>=0;
+        const bool asynchronous_luke_rife=async_luke_rife_queue(
+            *session,isolated_luke,synthesis_options.rife_model);
         synthesis_options.rife_async=asynchronous_luke_rife;
         auto synthesizer = std::make_shared<xrfg::D3D12FrameSynthesizer>();
         const xrfg::D3D12OpticalFlowBackend backend =
@@ -16715,8 +16722,22 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
                 lock.lock();
             }
         }
+        auto synthesis_options=options;
+        if(chain->frame_generation && state->graphics_binding==SessionGraphicsBinding::d3d11)
+            synthesis_options.rife_async=async_luke_rife_queue(*state,
+                chain->frame_generation->isolated_luke_synthesis,options.rife_model);
         if (chain->frame_generation && chain->frame_generation->synthesizer) {
             if (chain->frame_generation->afw_source_synthesizer) {
+                // Copy ingress and the primary generator share source history.
+                // Retire every old consumer against its own completion receipt
+                // before either helper drains that shared history. Draining the
+                // first helper while the other still owns its rolling lease
+                // reports ERROR_BUSY even after all physical outputs retired.
+                result=chain->frame_generation->synthesizer->retire_previous();
+                if(SUCCEEDED(result) && chain->frame_generation->afw_temporal_synthesizer)
+                    result=chain->frame_generation->afw_temporal_synthesizer->retire_previous();
+                if(SUCCEEDED(result))result=chain->frame_generation->afw_source_synthesizer->retire_previous();
+                if(FAILED(result))break;
                 result = chain->frame_generation->afw_source_synthesizer->wait_for_idle();
                 if (SUCCEEDED(result))
                     result = chain->frame_generation->afw_source_synthesizer->retire_previous();
@@ -16727,7 +16748,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             if(SUCCEEDED(result) && !control.desired.enabled)
                 result=synthesis->suspend_flow_resources();
             if (SUCCEEDED(result) && changed && !chain->panel_source) {
-                result = synthesis->reconfigure(backend, options,
+                result = synthesis->reconfigure(backend, synthesis_options,
                     state->luke_afw_enabled
                         ? xrfg::D3D12FrameGenerationMode::ofxr
                         : generation_mode);
@@ -16741,9 +16762,12 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
                 result=temporal->suspend_flow_resources();
             if (SUCCEEDED(result) && changed && !chain->panel_source) {
                 result = temporal->reconfigure(
-                    backend, options, xrfg::D3D12FrameGenerationMode::ofxr);
+                    backend, synthesis_options, xrfg::D3D12FrameGenerationMode::ofxr);
             }
         }
+        if(SUCCEEDED(result) && chain->frame_generation &&
+            state->graphics_binding==SessionGraphicsBinding::d3d11)
+            chain->frame_generation->asynchronous_luke_rife=synthesis_options.rife_async;
         if (SUCCEEDED(result) && chain->frame_generation &&
             chain->frame_generation->afw_final_history) {
             result = !control.desired.enabled || !afw_needed

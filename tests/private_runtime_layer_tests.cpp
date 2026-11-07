@@ -1289,9 +1289,21 @@ int main(int argc,char** argv) {
             rife_overlap_hold_after=f.real_ends.load()+rife_factor-3;
         }
         if(phase_switch && (n-1)%rife_phase_frames==0) {
+            if(rife_luke && n==rife_phase_frames+1) {
+                auto optical=xrfg::autonomous::snapshot().desired;
+                xrfg::autonomous::select_generation(optical,0,2);
+                check(xrfg::autonomous::request(optical),"Luke switch back to optical flow");
+                xrfg::autonomous::apply_runtime_settings();
+                ok(apply_embedded_control(state),"drained Luke optical-flow provider switch");
+                const auto generation=find_swapchain(chain)->frame_generation;
+                check(generation && !generation->asynchronous_luke_rife &&
+                    !generation->afw_temporal_synthesizer->asynchronous_rife_enabled(),
+                    "optical flow retained the old RIFE worker or wrapper policy");
+            }
             constexpr unsigned factors[]{2,3,4,3,2};
             rife_phase_factor=factors[(n-1)/rife_phase_frames];
             auto desired=xrfg::autonomous::snapshot().desired;
+            if(rife_luke)xrfg::autonomous::select_generation(desired,4,2);
             if(ofxr_switch)desired.frame_multiplier=int(rife_phase_factor);
             else desired.rife_multiplier=rife_phase_factor;
             if(rife_luke){constexpr int percentages[]{10,15,21,30,15};desired.rife_resolution=percentages[(n-1)/rife_phase_frames];}
@@ -1302,6 +1314,18 @@ int main(int argc,char** argv) {
             if(rife_luke)check(state->nvidia_options.rife_resolution_percent==desired.rife_resolution,
                 "RIFE percentage change did not reach the native model setup");
             rife_phase_start=f.real_ends.load();
+        }
+        if(rife_luke && rife_switch && n==5) {
+            xr_ok(wait_for_synthesis_handoff(state),"Quality-only old worker completion");
+            if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"Quality-only old presenter drain");
+            xr_ok(f.transport->drain(),"Quality-only old physical outputs drain");
+            auto desired=xrfg::autonomous::snapshot().desired;
+            desired.rife_resolution=18; // same multiplier/output shape: no creation-policy rescue
+            check(xrfg::autonomous::request(desired),"Luke Quality-only change");
+            xrfg::autonomous::apply_runtime_settings();
+            const auto quality_result=apply_embedded_control(state);
+            if(FAILED(quality_result))std::fprintf(stderr,"LUKE_QUALITY_RESULT=%08x\n",unsigned(quality_result));
+            ok(quality_result,"drained Luke Quality-only reconfiguration");
         }
         if(rife_bank_switch && ((n-1)%rife_phase_frames==0 || (n-1)%rife_phase_frames==4 || (n-1)%rife_phase_frames==8)) {
             const unsigned epoch_offset=(n-1)%rife_phase_frames;
@@ -1767,6 +1791,16 @@ int main(int argc,char** argv) {
             xr_ok(wait_for_synthesis_handoff(state),"RIFE phase worker complete");
             if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"RIFE phase presenter drained");
             xr_ok(f.transport->drain(),"RIFE phase physical output drained");
+            if(rife_luke) {
+                const auto generation=find_swapchain(chain)->frame_generation;
+                check(generation && generation->asynchronous_luke_rife &&
+                    generation->afw_temporal_synthesizer->asynchronous_rife_enabled(),
+                    "Luke reconfiguration silently replaced the actual RIFE worker with synchronous execution");
+                check(generation->afw_temporal_synthesizer->submission_queue().Get()!=state->luke_synthesis_queue.Get() &&
+                    !generation->afw_source_synthesizer->asynchronous_rife_enabled(),
+                    "Luke temporal worker must own its queue while copy-only ingress stays synchronous");
+                std::puts("LUKE_RIFE_RECONFIGURE actual asynchronous worker + independent queue + physical outputs PASS");
+            }
             const auto delivered=f.real_ends.load()-rife_phase_start;
             std::fprintf(stderr,"RIFE_PHASE factor=%u pacing=%d fast=%u inputs=%u delivered=%u\n",rife_phase_factor,rife_pacing,unsigned(rife_fast),rife_phase_frames,delivered);
             if(rife_bank_switch) {

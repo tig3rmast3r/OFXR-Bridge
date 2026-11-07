@@ -8347,6 +8347,13 @@ void D3D12FrameSynthesizer::report_pending_submission() const noexcept {
     } catch (...) { }
 }
 
+bool D3D12FrameSynthesizer::asynchronous_rife_enabled() const noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ && impl_->rife && impl_->nvidia_options.rife_async && impl_->rife_thread.joinable();
+    } catch (...) { return false; }
+}
+
 bool D3D12FrameSynthesizer::initialized() const noexcept {
     try {
         std::scoped_lock lock(mutex_);
