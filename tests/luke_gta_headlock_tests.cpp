@@ -43,6 +43,31 @@ int main() {try {
     Memory m;check(xrfg::luke_gta_headlock_layout(module,m),"pinned layout");
     auto state=xrfg::read_luke_gta_headlock(module,m);check(state&&state->active()&&state->render==79&&near(state->yaw_offset,.4F),"effective locked state");
     check(!state->tracking_valid&&m.tracking_reads==0,"disabled diagnostics read tracking memory");
+    {
+        Memory latest;
+        const auto put_header=[&](unsigned at,std::uint32_t value){std::memcpy(latest.blocks[module].data()+at,&value,4);};
+        put_header(0x108,1793909090);put_header(0x100+24+56,110219264);
+        latest.blocks[module+0x1ffd0f]=latest.blocks[module+0x1fedff];
+        latest.blocks[module+0x1fee06]=latest.blocks[module+0x1fdef6];
+        latest.blocks[module+0x1fcba9]={0x48,0x8b,0x3d,0x50,0x99,0x5b,0x00};
+        latest.blocks[module+0xb2d2b]={0x48,0x8d,0x05,0x76,0x90,0x4f,0x00,0x48,0x89,0x06};
+        latest.blocks.erase(module+xrfg::kLukeGtaRuntimePointer);
+        latest.put(module+xrfg::kLukeGtaNovemberLayout.runtime_pointer,std::uint64_t{object});
+        latest.put(object,std::uint64_t{module+xrfg::kLukeGtaNovemberLayout.runtime_vtable});
+        const auto binding=xrfg::luke_gta_headlock_binding(module,latest);
+        check(binding && binding->runtime_pointer==0x7b6500 && binding->runtime_vtable==0x5abda8,
+            "November GTA build must select its own witnessed object layout");
+        auto current=xrfg::read_luke_gta_headlock(module,latest,false,*binding);
+        check(current&&current->active()&&current->render==79,"November effective headlock");
+        check(latest.tracking_reads==0,"normal November reader must not sample tracking diagnostics");
+        latest.blocks[object+0x841118][20]=0;
+        check(!xrfg::read_luke_gta_headlock(module,latest,false,*binding)->active(),"November effective unlock");
+        latest.blocks[module+0x1fcba9][3]^=1;
+        check(!xrfg::luke_gta_headlock_binding(module,latest),"changed owner instruction must refuse November layout");
+        latest.blocks[module+0x1fcba9][3]^=1;
+        latest.blocks[module+0xb2d2b][3]^=1;
+        check(!xrfg::luke_gta_headlock_binding(module,latest),"changed GTA vtable witness must refuse November layout");
+    }
     m=Memory{};
     auto& tracking=m.blocks[object+0x840ab8];tracking.resize(180);
     constexpr unsigned offsets[]{0,48,96,152};

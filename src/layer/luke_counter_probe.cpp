@@ -26,6 +26,7 @@ struct Binding {
 const Binding& binding() { static const Binding value; return value; }
 struct GtaBinding {
     std::uintptr_t base{};bool supported{};
+    LukeGtaRuntimeLayout layout{};
     GtaBinding() noexcept {
         // System DXGI and Luke's proxy may share a basename. Select the
         // already-loaded game-local module explicitly; never load or pin it.
@@ -37,7 +38,9 @@ struct GtaBinding {
         const auto module=GetModuleHandleW(path);
         if(!module||!GetProcAddress(module,"RealVRVersion")||!GetProcAddress(module,"g_rvrShared"))return;
         base=reinterpret_cast<std::uintptr_t>(module);
-        supported=luke_gta_headlock_layout(base,read_self);
+        if(const auto detected=luke_gta_headlock_binding(base,read_self)) {
+            layout=*detected;supported=true;
+        }
     }
 };
 }
@@ -59,7 +62,7 @@ std::optional<LukeGtaHeadlock> query_luke_gta_headlock(bool capture_tracking) no
     if(!b.supported||!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|
         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(b.base),&current)||
         current!=reinterpret_cast<HMODULE>(b.base))return {};
-    auto value=read_luke_gta_headlock(b.base,read_self,capture_tracking);
-    return value?value:read_luke_gta_headlock(b.base,read_self,capture_tracking);
+    auto value=read_luke_gta_headlock(b.base,read_self,capture_tracking,b.layout);
+    return value?value:read_luke_gta_headlock(b.base,read_self,capture_tracking,b.layout);
 }
 } // namespace xrfg
