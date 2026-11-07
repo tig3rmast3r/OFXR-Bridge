@@ -50,6 +50,8 @@ RWTexture2D<float4> LowerMapOut : register(u7);
 // Uniforms: current->history rows0..3, native previous same->history4..7,
 // current->native previous same camera8..11; inverse-projection W columns12/13;
 // row14 = current MV scale.xy, native previous dejitter.zw; row15 reserved.
+// rows16..19: native-old source clip -> current peer clip, camera-local.
+// This keeps the old inverse projection while transferring the stereo baseline.
 Buffer<float4> CurrentHistoryData : register(t11);
 Texture2D<float> NativePreviousDepth : register(t12);
 SamplerState LinearClamp : register(s0);
@@ -731,9 +733,9 @@ float4 current_history_transform(float4 p, uint first) {
     return p.x * CurrentHistoryData[first] + p.y * CurrentHistoryData[first+1] +
            p.z * CurrentHistoryData[first+2] + p.w * CurrentHistoryData[first+3];
 }
-bool current_history(float2 source_at, float source_z,
-    out float4 color, out float2 previous_at) {
-    color = 0; previous_at = 0;
+bool current_history(float2 source_at, float source_z, float2 target_at,
+    out float4 color, out float2 previous_at, out bool screen_locked) {
+    color = 0; previous_at = 0; screen_locked = false;
     bool found=false;
     [unroll] do {
     if ((Flags & 256u) == 0 || SceneState[uint2(4,0)] == 0 ||
@@ -748,9 +750,10 @@ bool current_history(float2 source_at, float source_z,
     const float2 before_at = float2((camera_before.x/camera_before.w+1)*.5*DepthSize.x,
                                     (1-camera_before.y/camera_before.w)*.5*DepthSize.y);
     const float2 camera = before_at-source_at;
-    // Preserve camera-attached/HUD and static subpixel detail on the old path.
+    // Screen attachment changes the coordinate model, NOT the age of the
+    // motion field. Followed characters can animate while sharing the camera.
+    const bool attached = length(camera)>LockedCameraTexels && length(total)<LockedRatio*length(camera);
     // A half native interval below half a colour pixel has no useful deformation.
-    if (length(camera)>LockedCameraTexels && length(total)<LockedRatio*length(camera)) break;
     if (length((total-camera)*float2(ColorSize)/float2(DepthSize)) < 1.0) break;
     const float2 old_at = source_at + total;
     const int2 old_t = int2(floor(old_at-CurrentHistoryData[14].zw));
@@ -762,14 +765,28 @@ bool current_history(float2 source_at, float source_z,
     if (!isfinite(nw) || !isfinite(ow) || nw<=1e-8 || ow<=1e-8) break;
     // Divide by homogeneous VIEW W before mixing: averaging NDC/reversed
     // depths would give the wrong depth for a surface moving toward the camera.
-    const float4 middle = .5*(current_history_transform(now,0)/nw + current_history_transform(old,4)/ow);
+    float4 middle = .5*(current_history_transform(now,0)/nw + current_history_transform(old,4)/ow);
     if (!all(isfinite(middle)) || middle.w<=1e-8) break;
     previous_at=float2((middle.x/middle.w+1)*.5*DepthSize.x,(1-middle.y/middle.w)*.5*DepthSize.y);
+    if (attached) {
+        // Transport BOTH endpoints of the CURRENT vector to this eye. Their
+        // individual depths give individual disparities; old local projection
+        // is retained, so changing FOV is not treated as the same pixel grid.
+        // The camera-local field keeps screen attachments in screen space.
+        const float4 a = mul(now, Forward);
+        const float4 b = current_history_transform(old,16);
+        if (!all(isfinite(a)) || !all(isfinite(b)) || a.w<=1e-8 || b.w<=1e-8) break;
+        const float2 pa=float2((a.x/a.w+1)*.5*DepthSize.x,(1-a.y/a.w)*.5*DepthSize.y);
+        const float2 pb=float2((b.x/b.w+1)*.5*DepthSize.x,(1-b.y/b.w)*.5*DepthSize.y);
+        previous_at=target_at+.5*(pb-pa);
+        middle=.5*(a/nw+b/ow);
+    }
     const float expected=middle.z/middle.w;
     if (any(previous_at<0) || any(previous_at>=float2(DepthSize)) || expected<=SkyDepth || expected>=LockedDepth) break;
     // The SAME existing3% tolerance, now evaluated at the intervening time.
     if (!surface_agrees(HistoryDepth,previous_at,expected,HistoryDejitter)) break;
     color=sample_nearest(HistoryColor,previous_at/float2(DepthSize));
+    screen_locked=attached;
     found=true;
     } while(false);
     return found;
@@ -838,9 +855,10 @@ void resolve_pixel(uint3 id) {
             // Only surfaces visible in both eyes use the new pull. Bands,
             // fringes, HUD/near-camera surfaces and unavailable native history
             // retain their original treatment. No current-eye colour blend.
-            float4 aligned = 0; float2 aligned_at = 0;
-            if (!fringe && current_history(stereo_at, stereo_depth, aligned, aligned_at)) {
-                g_pick=2; g_pick_at=aligned_at; g_pick_word=word; g_pick_tag=TagStereo;
+            float4 aligned = 0; float2 aligned_at = 0; bool aligned_locked=false;
+            if (!fringe && current_history(stereo_at, stereo_depth, depth_pixel, aligned, aligned_at, aligned_locked)) {
+                g_pick=2; g_pick_at=aligned_at;
+                g_pick_word=(word&~3u)|(aligned_locked?HistoryLockedBit:0u); g_pick_tag=TagStereo;
                 WarpedOut[id.xy]=aligned; ResolvedOut[id.xy]=(word&~3u)|TagStereo;
                 return;
             }

@@ -133,7 +133,7 @@ class OsrFullWarp {
         if (FAILED(result)) return result;
         D3D12_HEAP_PROPERTIES upload{}; upload.Type = D3D12_HEAP_TYPE_UPLOAD;
         D3D12_RESOURCE_DESC data{}; data.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        data.Width = 256; data.Height = 1; data.DepthOrArraySize = 1; data.MipLevels = 1;
+        data.Width = 320; data.Height = 1; data.DepthOrArraySize = 1; data.MipLevels = 1;
         data.SampleDesc.Count = 1; data.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         result = device->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &data,
             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&current_history_data_));
@@ -214,7 +214,7 @@ class OsrFullWarp {
             srv.Texture2D = {}; srv.Texture2D.MipLevels = 1;
             if (i == 11) {
                 srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-                srv.Buffer = {}; srv.Buffer.NumElements = 16;
+                srv.Buffer = {}; srv.Buffer.NumElements = 20;
             }
             device->CreateShaderResourceView(srvs[i], &srv, cpu); // null view when absent
             cpu.ptr += increment_;
@@ -255,7 +255,7 @@ public:
         bool reset_history{};
         bool use_history_motion{};
         bool use_current_history_motion{}; // contiguous native span2 only
-        float current_history_data[64]{}; // shader CurrentHistoryData rows0..15
+        float current_history_data[80]{}; // shader CurrentHistoryData rows0..19
         float forward_stereo[16]{};           // source clip -> destination clip
         float forward_history[16]{};          // history clip -> destination clip
         float forward_history_previous[16]{}; // history clip -> clip of that eye's frame before it

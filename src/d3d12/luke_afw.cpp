@@ -2709,6 +2709,13 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     in.current_history_data[57]=guide.scale_y;
                     in.current_history_data[58]=native_same.dejitter[0];
                     in.current_history_data[59]=native_same.dejitter[1];
+                    // Old endpoint keeps its own inverse projection, then the
+                    // current source->peer camera-local stereo transform. The
+                    // two endpoint depths produce a per-pixel transferred field.
+                    const Matrix4x4 native_attached_to_peer = multiply(multiply(multiply(
+                        as_matrix(native_same.camera.clip_to_view), provider_camera.source_view_to_world),
+                        provider_camera.destination_world_to_view), provider_camera.destination_view_to_clip);
+                    std::copy_n(native_attached_to_peer.values,16,in.current_history_data+64);
                 }
                 if (in.use_history_motion) {
                     const Matrix4x4 forward_history_previous = multiply(multiply(multiply(
