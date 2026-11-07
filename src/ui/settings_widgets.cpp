@@ -782,18 +782,18 @@ void reconstruction_setup(Panel& p,const char* title,bool attached,std::initiali
     disclosure_end();
 }
 
-void luke_swapchain_budget(Panel& p) {
+void session_swapchain_budget(Panel& p) {
     const auto& state=p.state;
     if (state.runtime.shared_queue)
         reason(p,"Shared queue: AFW/capture and OFXR share a GPU queue. This may reduce performance.");
     const auto& b=state.runtime.swapchains;
     if (!state.connected || !b.updated_ms || GetTickCount64()-b.updated_ms>3000) {
-        reason(p,"Waiting for a current Luke session inventory.");return;
+        reason(p,"Waiting for a current session inventory.");return;
     }
     char line[96];
     std::snprintf(line,sizeof(line),"Total swapchains: %u",b.total);reason(p,line);
     std::snprintf(line,sizeof(line),"OFXR: %u",b.current+b.synthetic+b.auxiliary_outputs+b.fps+b.meter+b.menu);reason(p,line);
-    std::snprintf(line,sizeof(line),"Game / Luke Ross: %u",b.application);reason(p,line);
+    std::snprintf(line,sizeof(line),"Game: %u",b.application);reason(p,line);
     if(b.unassigned_native) {std::snprintf(line,sizeof(line),"Other / unclassified: %u",b.unassigned_native);reason(p,line);}
     if (const auto warning=swapchain_budget_warning(b);!warning.empty())
         notice(p,Tone::warn,std::string(warning).c_str());
@@ -908,12 +908,6 @@ bool framewarp(Panel& p) {
             disclosure_end();
         }
         changed|=was_open!=draft.luke_advanced;
-    }
-    char total[32]{};
-    if(state.connected && r.swapchains.updated_ms)std::snprintf(total,sizeof(total),"Total %u",r.swapchains.total);
-    if(disclosure(p,"Swapchains",total)) {
-        luke_swapchain_budget(p);
-        disclosure_end();
     }
     if(state.connected) {
         char line[96];
@@ -1058,6 +1052,13 @@ bool logging(Panel& p) {
         ? (draft.diagnostics ? "Logging active" : "Stopping logging...")
         : (draft.diagnostics ? "Starting logging..." : "Logging disabled"));
     changed|=toggle_row(p,"Export status.json","Export status.json",draft.status_json,kHelpJson);
+    char total[32]{};
+    if(state.connected && state.runtime.swapchains.updated_ms)
+        std::snprintf(total,sizeof(total),"Total %u",state.runtime.swapchains.total);
+    if(disclosure(p,"Swapchains",total)) {
+        session_swapchain_budget(p);
+        disclosure_end();
+    }
     return changed;
 }
 

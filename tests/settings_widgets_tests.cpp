@@ -461,23 +461,29 @@ void actual_widgets() {
         require(view->rendered_text.find("Swapchain fallback")!=std::string::npos,
             "status warns even with ownership Details collapsed");
     }
-    tray.activate("/Framewarp_","Swapchains");headset.activate("/Framewarp_","Swapchains");
+    require(tray.rendered_text.find("Swapchains")==std::string::npos && headset.rendered_text.find("Swapchains")==std::string::npos,
+        "inventory is no longer a Reconstruction-only control");
+    status.luke_detected=false;report_runtime(status);
+    tray.select_tab("Logging");headset.select_tab("Logging");
+    tray.activate("/Logging_","Swapchains");headset.activate("/Logging_","Swapchains");
     tray.draw(true);headset.draw(true);
     for(const auto* view:{&tray,&headset}) {
-        require(view->rendered_text.find("Use previous frame (debug only)")<view->rendered_text.find("Total swapchains:"),
-            "expanded swapchain details follow the Luke controls");
+        require(view->rendered_text.find("Diagnostic logging")<view->rendered_text.find("Total swapchains:"),
+            "expanded inventory belongs with diagnostic logging");
         require(view->rendered_text.find("Swapchain fallback")!=std::string::npos,
             "desktop/headset status and warning expose actual fallback");
         require(view->rendered_text.find("Total swapchains: 14")!=std::string::npos &&
             view->rendered_text.find("0x823")!=std::string::npos,
-            "Luke tab exposes handle count and unknown app identity");
+            "Logging exposes handle count and unknown app identity without Luke Ross");
     }
     require(tray.rendered_text.find("OFXR: 11")!=std::string::npos &&
-        tray.rendered_text.find("Game / Luke Ross: 3")!=std::string::npos &&
+        tray.rendered_text.find("Game: 3")!=std::string::npos &&
         tray.rendered_text.find("Counts cover")==std::string::npos,"concise owner split with no healthy boilerplate");
     require(tray.rendered_text.find("Swapchain budget fix")==std::string::npos &&
         headset.rendered_text.find("Swapchain budget fix")==std::string::npos,
         "INI-only startup sharing is absent from desktop and headset UI");
+    status.luke_detected=true;report_runtime(status);
+    tray.select_tab("Reconstruction");headset.select_tab("Reconstruction");
     auto quality_settings=snapshot().desired;quality_settings.afw_mode=3;quality_settings.luke_osr=0;
     require(request(quality_settings),"select Combined for live quality control");
     tray.draw();tray.draw();

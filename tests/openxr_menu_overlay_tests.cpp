@@ -22,6 +22,7 @@ unsigned checks{}, made{}, destroyed{}, max_layers{3}, count_seen{}, menu_seen{}
 bool d11{};
 bool refuse_menu_create{};
 unsigned chain_limit=~0u,menu_releases{};
+unsigned acquire_timeouts{};
 void check(bool pass,const char* message) { ++checks; if (!pass) throw std::runtime_error(message); }
 template<class T> T handle(std::uintptr_t v) { return reinterpret_cast<T>(v); }
 ComPtr<ID3D12Device> device; ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D11Device> device11;
@@ -76,6 +77,7 @@ XrResult XRAPI_CALL images(XrSwapchain s,std::uint32_t capacity,std::uint32_t* c
     }return XR_SUCCESS;
 }
 XrResult XRAPI_CALL acquire(XrSwapchain s,const XrSwapchainImageAcquireInfo*,std::uint32_t* out) {
+    if(acquire_timeouts){--acquire_timeouts;return XR_TIMEOUT_EXPIRED;}
     auto& c=chains.at(s);*out=c.index=c.acquires++%3;return XR_SUCCESS;
 }
 XrResult XRAPI_CALL wait(XrSwapchain s,const XrSwapchainImageWaitInfo* i) {
@@ -191,6 +193,10 @@ int main(int argc,char** argv) {
             check(made==0&&menu_seen==0,"refused menu must release capture and preserve application frame");
             // A second explicit F10 request after budget recovery retries the
             // creation; refusal must not latch menu_attempted for this session.
+            acquire_timeouts=1;
+            overlay.application_frame(&frame);overlay.end_frame(&frame,false);
+            check(made==1&&menu_seen==0&&chains.begin()->second.waits==0&&chains.begin()->second.releases==0,
+                "busy optional acquire must not wait, draw, release or publish an unacquired image");
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             check(made==1&&menu_seen==0,"positive wait timeout cannot publish menu");
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);

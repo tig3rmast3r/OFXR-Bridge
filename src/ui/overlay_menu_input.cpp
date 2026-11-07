@@ -25,6 +25,7 @@ constexpr UINT control_message=WM_APP+0x4B3;
 constexpr WPARAM control_cookie=0x4F465852;
 thread_local unsigned bypass_depth{};
 thread_local unsigned window_dispatch_depth{},capture_transition_depth{};
+thread_local HRAWINPUT current_raw_message{};
 struct Bypass {Bypass(){++bypass_depth;}~Bypass(){--bypass_depth;}};
 struct WindowDispatch {
     unsigned saved_bypass{bypass_depth};
@@ -254,7 +255,11 @@ bool key_locked(State& s,unsigned code,bool down) {
 }
 RawDecision process_raw_locked(State& s,HRAWINPUT handle,const RAWINPUT& raw) {
     if(s.owners.empty())return {handle};
-    if(handle)for(const auto& cached:s.decisions)if(cached.handle==handle)return cached;
+    // A mod may read input without forwarding WM_INPUT to our WndProc.
+    // Deduplicate only within our exact message dispatch: Windows recycles
+    // HRAWINPUT values, so retaining one outside it can freeze later packets.
+    const bool cache=handle && handle==current_raw_message;
+    if(cache)for(const auto& cached:s.decisions)if(cached.handle==handle)return cached;
     RawDecision decision{handle};bool open=blocking_locked(s);
     if(raw.header.dwType==RIM_TYPEKEYBOARD) {
         auto code=key_code(raw.data.keyboard);bool down=!(raw.data.keyboard.Flags&RI_KEY_BREAK);
@@ -286,7 +291,7 @@ RawDecision process_raw_locked(State& s,HRAWINPUT handle,const RAWINPUT& raw) {
         if(!open&&decision.allowed_mouse_ups!=mouse.usButtonFlags)
             decision.suppress=false;
     }
-    if(handle)s.decisions[s.decision_cursor++%s.decisions.size()]=decision;
+    if(cache)s.decisions[s.decision_cursor++%s.decisions.size()]=decision;
     return decision;
 }
 void sanitize(RAWINPUT& raw,const RawDecision& decision) {
@@ -495,6 +500,11 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wp,LPARAM lp) {
     if(message==WM_KILLFOCUS||(message==WM_ACTIVATEAPP&&!wp)||message==WM_CANCELMODE||message==WM_NCDESTROY||
         (message==WM_CAPTURECHANGED&&reinterpret_cast<HWND>(lp)!=window))request_close();
     if(message==WM_INPUT) {
+        struct RawMessageScope {
+            HRAWINPUT previous{current_raw_message};
+            explicit RawMessageScope(HRAWINPUT value){current_raw_message=value;}
+            ~RawMessageScope(){current_raw_message=previous;}
+        } raw_scope(reinterpret_cast<HRAWINPUT>(lp));
         RawDecision decision{};UINT size{};
         {Bypass bypass;GetRawInputData(reinterpret_cast<HRAWINPUT>(lp),RID_INPUT,nullptr,&size,sizeof(RAWINPUTHEADER));}
         if(size>=sizeof(RAWINPUTHEADER)&&size<1024*1024) {

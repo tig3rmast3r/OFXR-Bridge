@@ -254,6 +254,59 @@ static int panel_metadata_contract() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route=="overlay-image-identity") {
+        xrfg_fixture::ControlProfile profile;
+        for(bool d12:{true,false}) {
+            Fixture f(d12);f.throttled=false;f.native_image_count=1;f.unblock();
+            const auto projection_chain=f.make_chain(),menu_chain=f.make_chain(),meter_chain=f.make_chain();
+            f.inspect_layers=[&](const XrFrameEndInfo* info) {
+                const auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+                const auto frame=unsigned(p->views[0].pose.position.x);
+                std::scoped_lock gpu(f.gpu);
+                for(unsigned i=1;i<info->layerCount;++i) {
+                    const auto* q=reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[i]);
+                    const auto expected=q->pose.position.x==100?50+frame:150+(frame/3)*3;
+                    check(f.read_pixel(f.chains.at(q->subImage.swapchain))==expected,
+                        "equal-sized menu and meter pixels must follow source identity, not layer ordinal/native image index");
+                }
+            };
+            for(unsigned frame=1;frame<=12;++frame) {
+                if(frame%4==1)xr_ok(f.transport->set_director_enabled(((frame-1)/4)%2),"switch UI transport policy");
+                f.write(projection_chain,20+frame);f.write(menu_chain,50+frame);
+                if(frame==1 || frame%3==0)f.write(meter_chain,150+(frame/3)*3);
+                f.begin_virtual();
+                XrCompositionLayerProjectionView view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+                view.pose.orientation.w=1;view.pose.position.x=float(frame);view.subImage.swapchain=projection_chain;view.subImage.imageRect.extent={1,1};
+                XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=1;projection.views=&view;
+                XrCompositionLayerQuad menu{XR_TYPE_COMPOSITION_LAYER_QUAD};menu.space=projection.space;menu.pose.orientation.w=1;menu.pose.position.x=100;menu.size={1,1};menu.subImage.swapchain=menu_chain;menu.subImage.imageRect.extent={1,1};
+                auto meter=menu;meter.pose.position.x=200;meter.subImage.swapchain=meter_chain;
+                std::array<const XrCompositionLayerBaseHeader*,3> layers={reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),reinterpret_cast<const XrCompositionLayerBaseHeader*>(frame%2?&menu:&meter),reinterpret_cast<const XrCompositionLayerBaseHeader*>(frame%2?&meter:&menu)};
+                XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=epoch+ns()+period;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=3;end.layers=layers.data();
+                xr_ok(f.transport->end_frame(&end),"two independent UI sources accepted");
+                f.wait_count(frame);
+            }
+            xr_ok(f.transport->drain(),"UI identity drain");
+        }
+        std::puts("Menu/meter source identity, reordered equal-sized quads, repeated images and policy changes D11+D12 PASS");return 0;
+    }
+    if(route=="ordinary-swapchain-inventory") {
+        xrfg_fixture::ControlProfile profile;
+        Fixture f(true);
+        auto dispatch=std::make_shared<Dispatch>();dispatch->steamvr_runtime=true;
+        auto state=std::make_shared<SessionState>(dispatch);
+        state->handle=reinterpret_cast<XrSession>(2);state->private_runtime=f.transport;
+        state->luke_afw_enabled=false;
+        const auto chain=f.make_chain();
+        const auto count=f.chains.size();
+        const auto inventory=session_swapchain_inventory(state,nullptr);
+        check(inventory.updated_ms && inventory.total==1 && inventory.unassigned_native==1,
+            "non-Luke/UEVR session must report its observed native endpoint");
+        check(f.chains.size()==count,"inventory must not allocate any XR images");
+        xr_ok(f.transport->destroy_swapchain(chain),"inventory source cleanup");
+        state->next_swapchain_inventory_ms=0;
+        check(session_swapchain_inventory(state,nullptr).total==0,"inventory drops destroyed native endpoints");
+        std::puts("Ordinary/UEVR swapchain inventory without Luke PASS");return 0;
+    }
     if(route=="rife-output-banks")return rife_output_banks_test(false);
     if(route=="rife-output-bank-policy")return rife_output_banks_test(true);
     if(route=="rife-source-handoff") {
@@ -913,7 +966,7 @@ int main(int argc,char** argv) {
         const auto expected_native=source_count*(unshared_budget?6U:2U);
         check(f.chains.size()==expected_native,"startup flag preserves old native allocation or opts into one sink per source");
         state->next_swapchain_inventory_ms=0;
-        const auto budget=luke_swapchain_inventory(state,nullptr);
+        const auto budget=session_swapchain_inventory(state,nullptr);
         check(budget.total==f.chains.size() && budget.application==source_count &&
             budget.current+budget.synthetic==expected_native-source_count && !budget.unassigned_native,
             "inventory deduplicates private output tokens into actual native owners");

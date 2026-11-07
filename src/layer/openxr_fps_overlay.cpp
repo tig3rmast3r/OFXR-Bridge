@@ -286,7 +286,8 @@ struct OpenXrFpsOverlay::Impl {
         if (!menu_acquired) {
             XrSwapchainImageAcquireInfo info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
             const auto result = acquire(menu_swapchain, &info, &menu_index);
-            if (XR_FAILED(result)) return menu_failure(2, result);
+            if (result == XR_TIMEOUT_EXPIRED) return false;
+            if (result != XR_SUCCESS) return menu_failure(2, result);
             menu_acquired = true; menu_waited = false;
         }
         if (menu_index >= menu_images.size()) { close_menu(); return false; }
@@ -558,7 +559,9 @@ struct OpenXrFpsOverlay::Impl {
     bool upload(const FpsSnapshot& snapshot) {
         if (!acquired) {
             XrSwapchainImageAcquireInfo info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-            if (XR_FAILED(acquire(swapchain, &info, &index))) { disabled = true; return false; }
+            const auto result=acquire(swapchain, &info, &index);
+            if(result==XR_TIMEOUT_EXPIRED)return false;
+            if(result!=XR_SUCCESS){disabled=true;return false;}
             acquired = true;
             waited = false;
         }
@@ -702,7 +705,9 @@ struct OpenXrFpsOverlay::Impl {
     bool upload_meter(const std::vector<std::uint32_t>& pixels, unsigned rows) {
         if (!meter.acquired) {
             XrSwapchainImageAcquireInfo info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-            if (XR_FAILED(acquire(meter.swapchain, &info, &meter.index))) { meter.failed = true; return false; }
+            const auto result=acquire(meter.swapchain, &info, &meter.index);
+            if(result==XR_TIMEOUT_EXPIRED)return false;
+            if(result!=XR_SUCCESS){meter.failed=true;return false;}
             meter.acquired = true;
             meter.waited = false;
         }

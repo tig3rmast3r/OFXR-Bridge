@@ -313,13 +313,16 @@ public:
 };
 Channel& channel() {
     if(process_profile_bound.load(std::memory_order_acquire)) {
-        static Channel runtime(process_profile);return runtime;
+        // XR session/overlay objects can outlive ordinary static destructors
+        // during DLL detach. The OS releases this process-lifetime mapping;
+        // no late overlay destructor may observe an already unmapped Channel.
+        static auto* runtime=new Channel(process_profile);return *runtime;
     }
     const auto file=configuration_path();
-    static std::mutex mutex;
-    static std::map<std::filesystem::path,std::unique_ptr<Channel>> instances;
-    std::scoped_lock lock(mutex);
-    auto& instance=instances[file];if(!instance)instance=std::make_unique<Channel>(file);
+    static auto* mutex=new std::mutex;
+    static auto* instances=new std::map<std::filesystem::path,std::unique_ptr<Channel>>;
+    std::scoped_lock lock(*mutex);
+    auto& instance=(*instances)[file];if(!instance)instance=std::make_unique<Channel>(file);
     return *instance;
 }
 struct Lock {

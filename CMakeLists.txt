@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.892.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.893.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -866,7 +866,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     target_compile_features(xrfg_fps_overlay PUBLIC cxx_std_20)
     target_compile_definitions(xrfg_fps_overlay PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN
         XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_PLATFORM_WIN32)
-    target_link_libraries(xrfg_fps_overlay PUBLIC xrfg_native_result xrfg_core xrfg_steamvr_delivery d3d11 d3d12 dxgi)
+    target_link_libraries(xrfg_fps_overlay PUBLIC xrfg_native_result xrfg_core xrfg_steamvr_delivery xrfg_d3d12_history d3d11 d3d12 dxgi)
     if(MSVC)
         target_compile_options(xrfg_fps_overlay PRIVATE /W4 /permissive- /EHsc)
     endif()
@@ -1369,6 +1369,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_executable(xrfg_three_slot_d3d12_tests tests/three_slot_d3d12_tests.cpp
             src/common/embedded_control.cpp)
         add_executable(xrfg_private_runtime_layer_tests tests/private_runtime_layer_tests.cpp src/common/embedded_control.cpp)
+        add_test(NAME xrfg_ordinary_swapchain_inventory COMMAND xrfg_private_runtime_layer_tests ordinary-swapchain-inventory)
+        add_test(NAME xrfg_overlay_image_identity COMMAND xrfg_private_runtime_layer_tests overlay-image-identity)
+        set_tests_properties(xrfg_overlay_image_identity PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         foreach(shape native-split native-array native-packed luke-split)
             foreach(format rgba8 rgba16f)
                 add_test(NAME xrfg_steamvr_vram_${shape}_${format}

@@ -91,6 +91,7 @@ struct Fixture {
     std::function<void(std::uint64_t)> preparation_callback;
     std::function<void(std::uint64_t)> prepared_callback;
     std::function<void(XrSwapchain,unsigned)> image_wait_callback;
+    std::function<void(const XrFrameEndInfo*)> inspect_layers;
     std::function<D3D12_RESOURCE_STATES()> create_state;
     std::vector<unsigned> pixels,overlay_pixels,right_pixels;
     std::vector<std::array<XrSwapchain,2>> stereo_handles;
@@ -284,6 +285,7 @@ struct Fixture {
                 overlay_color=f.read_pixel(f.chains.at(quad->subImage.swapchain));has_overlay=true;
             }
         }
+        if(f.inspect_layers)f.inspect_layers(info);
         std::array<float,2> panels{};unsigned panel_count{};
         for(unsigned i=0;i<info->layerCount;++i)if(info->layers[i]&&info->layers[i]->type==XR_TYPE_COMPOSITION_LAYER_QUAD) {
             if(panel_count<2)panels[panel_count]=reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[i])->pose.position.x;

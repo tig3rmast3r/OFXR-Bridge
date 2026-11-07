@@ -123,25 +123,25 @@ void luke_aux_private_test(bool private_path=true, bool afw=true) {
         check(a->composition_images[0]!=b->composition_images[0] && b->composition_images[0]!=c->composition_images[0],
             "retained producer snapshots aliased");
         check(a->composition_images[0]->public_output!=nullptr || !enabled,"missing private publication owner");
-        const auto inventory=luke_swapchain_inventory(s,&a->info);
+        const auto inventory=session_swapchain_inventory(s,&a->info);
         if(afw) {
             // The physical frame here names private outputs, whereas inventory
             // samples real app metadata. Mark this source's observed app role.
             app->diagnostic_layer_roles=2;s->next_swapchain_inventory_ms=0;
-            const auto observed=luke_swapchain_inventory(s,nullptr);
+            const auto observed=session_swapchain_inventory(s,nullptr);
             check(observed.application==1 && observed.auxiliary==1 && observed.other==0 &&
                 observed.auxiliary_outputs==(enabled?1u:3u) && observed.total==(enabled?2u:4u) &&
                 observed.private_snapshots==(enabled?3u:0u),"live inventory counts private tokens as XR handles");
             auto extra=std::make_shared<SwapchainState>(s,ci);extra->handle=reinterpret_cast<XrSwapchain>(0x823);
             {std::scoped_lock lock(g_state_mutex);g_swapchains[extra->handle]=extra;}
             s->next_swapchain_inventory_ms=0;
-            const auto unknown=luke_swapchain_inventory(s,nullptr);
+            const auto unknown=session_swapchain_inventory(s,nullptr);
             check(unknown.other==1 && std::string_view(unknown.details).find("0x823")!=std::string_view::npos &&
                 xrfg::autonomous::swapchain_budget_warning(unknown).starts_with("Unclassified"),
                 "foreign/unclassified app handle not identified");
             {std::scoped_lock lock(g_state_mutex);g_swapchains.erase(extra->handle);}
             s->luke_aux_budget_inline=true;
-            const auto fallback=luke_swapchain_inventory(s,nullptr);
+            const auto fallback=session_swapchain_inventory(s,nullptr);
             check(fallback.fallback && xrfg::autonomous::swapchain_budget_warning(fallback).starts_with("Swapchain fallback"),
                 "fallback hidden by inventory throttle");
             s->luke_aux_budget_inline=false;
@@ -150,7 +150,7 @@ void luke_aux_private_test(bool private_path=true, bool afw=true) {
             while(!locked)std::this_thread::yield();
             s->next_swapchain_inventory_ms=0;
             const auto started=std::chrono::steady_clock::now();
-            const auto busy=luke_swapchain_inventory(s,nullptr);
+            const auto busy=session_swapchain_inventory(s,nullptr);
             const auto elapsed=std::chrono::steady_clock::now()-started;
             unlock=true;owner.join();
             check(busy.updated_ms==unknown.updated_ms && elapsed<std::chrono::milliseconds(100),

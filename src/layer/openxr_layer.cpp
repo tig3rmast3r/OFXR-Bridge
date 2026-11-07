@@ -6349,7 +6349,7 @@ XrResult layer_create_session_impl(
     try {
         state->fps_overlay = std::make_unique<xrfg::OpenXrFpsOverlay>(
             instance, created_session, create_info ? create_info->systemId : 0,
-            state->dispatch->get_instance_proc_addr, content_end_frame,
+            state->private_runtime ? private_overlay_get_proc : state->dispatch->get_instance_proc_addr, content_end_frame,
             state->d3d12_device.Get(), runtime_queue(*state),
             state->d3d11_device.Get(), current_layer_directory() / L"ofxr_bridge.ini", true, nullptr, nullptr,
             [](void* user, XrTime time, std::int64_t& ns) {
@@ -13992,12 +13992,12 @@ XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& s
 // Once per second, CPU-only, and never wait for a producer/presenter lock.
 // A busy owner keeps the preceding complete snapshot; partial counts are not
 // reported as an unexplained resource or as proof of runtime headroom.
-xrfg::autonomous::SwapchainBudgetStatus luke_swapchain_inventory(
+xrfg::autonomous::SwapchainBudgetStatus session_swapchain_inventory(
     const std::shared_ptr<SessionState>& state,const XrFrameEndInfo* frame) {
     auto previous=state->swapchain_budget;
     previous.fallback=state->luke_aux_budget_inline.load();
     const auto now=GetTickCount64();
-    if (!state->luke_afw_enabled || now<state->next_swapchain_inventory_ms) return previous;
+    if (now<state->next_swapchain_inventory_ms) return previous;
     state->next_swapchain_inventory_ms=now+1000;
     xrfg::autonomous::SwapchainBudgetStatus out{};out.fallback=previous.fallback;
     std::vector<xrfg::PrivateOpenXrRuntime::SwapchainMapping> native_mapping;
@@ -17097,7 +17097,7 @@ XrResult layer_end_frame_impl(
         state->next_snapshot_retirement_ms=now+100;
         xrfg::retire_disabled_dlss_motion_vector_resources();
     }
-    runtime_report_scope.budget=luke_swapchain_inventory(state,end_info);
+    runtime_report_scope.budget=session_swapchain_inventory(state,end_info);
     observe_application_frame_thread(*state, true);
     release_pending_bridge_images(state);
     if (presenter_forbidden(*state)) {

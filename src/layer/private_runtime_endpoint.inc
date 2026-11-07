@@ -32,6 +32,9 @@ XrResult XRAPI_CALL private_runtime_enumerate(XrSwapchain handle,std::uint32_t c
 XrResult XRAPI_CALL private_runtime_acquire(XrSwapchain handle,const XrSwapchainImageAcquireInfo* info,std::uint32_t* index) {
     const auto state=private_chain_owner(handle);return state?state->private_runtime->acquire_image(handle,info,index):XR_ERROR_HANDLE_INVALID;
 }
+XrResult XRAPI_CALL private_overlay_acquire(XrSwapchain handle,const XrSwapchainImageAcquireInfo* info,std::uint32_t* index) {
+    const auto state=private_chain_owner(handle);return state?state->private_runtime->try_acquire_image(handle,info,index):XR_ERROR_HANDLE_INVALID;
+}
 XrResult XRAPI_CALL private_runtime_wait_image(XrSwapchain handle,const XrSwapchainImageWaitInfo* info) {
     const auto state=private_chain_owner(handle);return state?state->private_runtime->wait_image(handle,info):XR_ERROR_HANDLE_INVALID;
 }
@@ -53,6 +56,15 @@ XrResult XRAPI_CALL private_runtime_get_proc(XrInstance instance,const char* nam
     PRIVATE_PROC("xrReleaseSwapchainImage",private_runtime_release)
 #undef PRIVATE_PROC
     return dispatch->get_instance_proc_addr(instance,name,function);
+}
+
+// Optional UI must not wait for image readers while holding the UI/game GPU
+// locks. Keep the application's public acquire contract unchanged.
+XrResult XRAPI_CALL private_overlay_get_proc(XrInstance instance,const char* name,PFN_xrVoidFunction* function) {
+    if(name && function && std::strcmp(name,"xrAcquireSwapchainImage")==0){
+        *function=reinterpret_cast<PFN_xrVoidFunction>(private_overlay_acquire);return XR_SUCCESS;
+    }
+    return private_runtime_get_proc(instance,name,function);
 }
 
 HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
