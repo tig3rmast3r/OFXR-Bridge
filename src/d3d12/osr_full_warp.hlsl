@@ -436,6 +436,20 @@ bool surface_agrees(Texture2D<float> image, float2 p, float expected, float2 dej
     return agrees;
 }
 
+// A visible foreground fringe may use current motion only when EVERY depth
+// tap under the colour footprint agrees. Unlike surface_agrees (any tap), this
+// cannot certify the foreground using one neighbour while reading background.
+// Uses the existing correspondence tolerance; no widening or guide filtering.
+bool surface_quad_agrees(Texture2D<float> image, float2 p, float expected, float2 dejitter) {
+    const int2 base=int2(floor(p-dejitter-.5));
+    bool same=true;
+    [unroll] for(int y=0;y<2;++y) [unroll] for(int x=0;x<2;++x) {
+        const float z=image.Load(int3(clamp(base+int2(x,y),int2(0,0),int2(DepthSize)-1),0));
+        same=same && isfinite(z) && z>=0 && abs(z-expected)<=DepthTolerance*max(z,expected)+FarDepth;
+    }
+    return same;
+}
+
 // Where the last successful fetch() read its image: scene position in depth
 // texels and the expected depth. Per thread; read by resolve_history.
 static float2 g_fetch_position = 0;
@@ -733,13 +747,14 @@ float4 current_history_transform(float4 p, uint first) {
     return p.x * CurrentHistoryData[first] + p.y * CurrentHistoryData[first+1] +
            p.z * CurrentHistoryData[first+2] + p.w * CurrentHistoryData[first+3];
 }
-bool current_history(float2 source_at, float source_z, float2 target_at,
+bool current_history(float2 source_at, float source_z, float2 target_at, bool strict_surface,
     out float4 color, out float2 previous_at, out bool screen_locked) {
     color = 0; previous_at = 0; screen_locked = false;
     bool found=false;
     [unroll] do {
     if ((Flags & 256u) == 0 || SceneState[uint2(4,0)] == 0 ||
         source_z <= SkyDepth || source_z >= LockedDepth) break;
+    [branch] if(strict_surface && !surface_quad_agrees(SourceDepth,source_at,source_z,SourceDejitter)) break;
     const int2 t = int2(floor(source_at - SourceDejitter));
     if (any(t < 0) || any(t >= int2(DepthSize))) break;
     const float2 total = HistoryMotion.Load(int3(t,0)) * CurrentHistoryData[14].xy;
@@ -785,6 +800,7 @@ bool current_history(float2 source_at, float source_z, float2 target_at,
     if (any(previous_at<0) || any(previous_at>=float2(DepthSize)) || expected<=SkyDepth || expected>=LockedDepth) break;
     // The SAME existing3% tolerance, now evaluated at the intervening time.
     if (!surface_agrees(HistoryDepth,previous_at,expected,HistoryDejitter)) break;
+    [branch] if(strict_surface && !surface_quad_agrees(HistoryDepth,previous_at,expected,HistoryDejitter)) break;
     color=sample_nearest(HistoryColor,previous_at/float2(DepthSize));
     screen_locked=attached;
     found=true;
@@ -852,11 +868,20 @@ void resolve_pixel(uint3 id) {
                     hole = hole || v == 0;
                 }
             const bool fringe = hole || (nearest != 0 && asfloat(nearest) > asfloat(farthest) * EdgeRatio + FarDepth);
-            // Only surfaces visible in both eyes use the new pull. Bands,
-            // fringes, HUD/near-camera surfaces and unavailable native history
-            // retain their original treatment. No current-eye colour blend.
+            // The CURRENT field can also move a visible foreground edge.
+            // Protect genuine own-eye occlusions: never replace a nearer own
+            // surface with the other eye's background, nor trust a background
+            // pixel just because it neighbours a foreground splat.
+            bool foreground_edge=false;
+            [branch] if(fringe && nearest!=0 && (Flags&256u)!=0) {
+                const uint old_surface=HistorySplat.Load(int3(c,0));
+                const float old_depth=asfloat(old_surface&~3u);
+                const float nearest_depth=asfloat(nearest);
+                foreground_edge=abs(zs-nearest_depth)<=DepthTolerance*max(zs,nearest_depth)+FarDepth &&
+                    (old_surface==0 || old_depth<=zs*(1+DepthTolerance)+FarDepth);
+            }
             float4 aligned = 0; float2 aligned_at = 0; bool aligned_locked=false;
-            if (!fringe && current_history(stereo_at, stereo_depth, depth_pixel, aligned, aligned_at, aligned_locked)) {
+            if ((!fringe || foreground_edge) && current_history(stereo_at, stereo_depth, depth_pixel, fringe, aligned, aligned_at, aligned_locked)) {
                 g_pick=2; g_pick_at=aligned_at;
                 g_pick_word=(word&~3u)|(aligned_locked?HistoryLockedBit:0u); g_pick_tag=TagStereo;
                 WarpedOut[id.xy]=aligned; ResolvedOut[id.xy]=(word&~3u)|TagStereo;

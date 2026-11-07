@@ -160,6 +160,52 @@ void transported_depth(unsigned eye,bool low) {
     std::printf("depth transport eye=%u lower=%u shifts=%u/%u PASS\n",eye,low,shifts[0],shifts[1]);
 }
 
+// A newly visible moving foreground edge must follow the CURRENT field rather
+// than reuse stale history motion. Background/ambiguous/nearer-own cases retain
+// established handling. Distinct current colour catches a current-warp shortcut.
+void trusted_edge(unsigned eye,bool low,unsigned refusal) {
+    Fixture f;std::vector<UINT> old(width*height),current(width*height),zero(width*height,0),field_data(width*height,0);
+    std::vector<float> now(width*height,.1F),native(width*height,.1F),peer(width*height,.1F);
+    for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
+        old[y*width+x]=grey(25+(x*3+y*7)%35);
+        if(x>=62&&x<70){old[y*width+x]=grey(160+(x*3+y*5)%70);peer[y*width+x]=.2F;}
+        if(x>=64&&x<72)native[y*width+x]=.2F;
+        if(x>=60&&x<68){now[y*width+x]=.2F;field_data[y*width+x]=0x4400u;}
+    }
+    for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
+        current[y*width+x]=old[y*width+std::min(x+2,width-1)]^0x00100000u;
+        if(refusal==1&&x==63)peer[y*width+x]=.1F; // one neighbour contradicts the fetched history surface
+        if(refusal==2&&x==60){peer[y*width+x]=.4F;old[y*width+x]=grey(230);} // protect nearer own-eye geometry
+    }
+    warm(f,old);auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    begin(f);f.upload(field.Get(),zero.data());submit(f);
+    const auto seed=[&](unsigned target,const std::vector<float>& depths){
+        begin(f);f.upload(f.color.Get(),old.data());f.upload(f.depth.Get(),depths.data());
+        auto in=inputs(f,target);in.source_motion=field.Get();xrfg::OsrFullHistory kept{};
+        kept.publication=target==eye?101:102;kept.stream=target==eye?11:22;kept.epoch=target==eye?3:4;
+        f.warp.record_history_update(f.list.Get(),in,kept);submit(f);f.warp.commit();
+    };
+    seed(eye,native);seed(1-eye,peer);begin(f);f.upload(field.Get(),field_data.data());submit(f);
+    auto in=inputs(f,eye);in.lower_quality=low;in.source_motion=field.Get();
+    in.use_current_history_motion=xrfg::osr_full_current_motion_usable({103,11,3},{102,22,4},{101,11,3},{102,22,4},{101,11,3},2,true,false);
+    check(in.use_current_history_motion,"trusted edge uses production gate");
+    for(unsigned m:{0u,1u,2u,4u})for(unsigned i=0;i<4;++i)in.current_history_data[m*16+i*5]=1;
+    in.current_history_data[50]=in.current_history_data[54]=1;in.current_history_data[56]=in.current_history_data[57]=1;
+    const auto output=render_with_inputs(f,in,current,now);
+    in.use_current_history_motion=false;const auto legacy=render_with_inputs(f,in,current,now);
+    unsigned differences=0;
+    for(UINT y=12;y<height-12;++y) {
+        const auto at=y*width+60;
+        if(refusal)check(output[at]==legacy[at],"ambiguous edge / nearer own history must retain legacy result");
+        else {
+            check(output[at]==old[y*width+62],"visible foreground edge uses current motion and PREVIOUS own-eye colour");
+            if(output[at]!=legacy[at])++differences;
+        }
+    }
+    if(!refusal)check(differences>0,"edge fixture would fail the V906 blanket fringe veto");
+    std::printf("trusted edge eye=%u lower=%u refusal=%u changed=%u PASS\n",eye,low,refusal,differences);
+}
+
 }
 int main() {
     for(unsigned eye:{0u,1u})for(bool lower:{false,true}) {
@@ -175,6 +221,7 @@ int main() {
         current_vectors(eye,lower,.2F,false,true,false,false,true);
         current_vectors(eye,lower,.2F,false,false,false,false,false,1.125F);
         transported_depth(eye,lower);
+        trusted_edge(eye,lower,0);trusted_edge(eye,lower,1);trusted_edge(eye,lower,2);
     }
     std::puts("OSR current native vectors: both eyes/qualities, own-eye colour, temporal depth and conservative fallbacks PASS");return 0;
 }
