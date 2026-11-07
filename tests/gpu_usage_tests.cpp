@@ -35,6 +35,21 @@ int main(){try {
     check(autonomous::interface_gpu_text(view,3100)=="GPU N/A","stale GPU sample expires");
     view.connected=false;check(autonomous::interface_gpu_text(view,100)=="GPU N/A","disconnected GPU sample hidden");
 
+    view.connected=true;view.runtime.cpu_usage={100,37,true};
+    check(autonomous::interface_cpu_text(view,100)=="CPU 37%","fresh CPU percentage");
+    check(autonomous::interface_cpu_text(view,3100)=="CPU N/A","stale CPU expires");
+    check(autonomous::interface_cpu_text(view,99)=="CPU N/A","future CPU sample rejected");
+    view.runtime.cpu_usage.percent=0;
+    check(autonomous::interface_cpu_text(view,100)=="CPU 0%","measured CPU idle is valid");
+    for(float invalid:{-1.f,101.f,std::numeric_limits<float>::quiet_NaN()}) {
+        view.runtime.cpu_usage.percent=invalid;
+        check(autonomous::interface_cpu_text(view,100)=="CPU N/A","invalid CPU value rejected");
+    }
+    view.runtime.cpu_usage={100,37,true};view.connected=false;
+    check(autonomous::interface_cpu_text(view,100)=="CPU N/A","disconnected CPU hidden");
+    view.connected=true;view.runtime.cpu_usage.valid=false;
+    check(autonomous::interface_cpu_text(view,100)=="CPU N/A","unavailable CPU hidden");
+
     Microsoft::WRL::ComPtr<IDXGIFactory4> factory;Microsoft::WRL::ComPtr<IDXGIAdapter1> gpu;
     check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))),"DXGI factory");
     DXGI_ADAPTER_DESC1 desc{};
@@ -42,17 +57,21 @@ int main(){try {
         gpu->GetDesc1(&desc);if(!(desc.Flags&DXGI_ADAPTER_FLAG_SOFTWARE))break;gpu.Reset();
     }
     check(gpu!=nullptr,"hardware adapter for live read-only counter check");
-    GpuUsageSampler sampler;GpuUsageStatus live{};
+    GpuUsageSampler sampler;GpuUsageStatus live{};CpuUsageStatus cpu{};
+    check(!sampler.cpu_usage().valid,"CPU starts unavailable until an interval is measured");
     const auto deadline=GetTickCount64()+8000;
     std::uint64_t worst_call_us{};
     while(GetTickCount64()<deadline) {
         const auto entered=std::chrono::steady_clock::now();live=sampler.request(desc.AdapterLuid);
         const auto us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-entered).count();
         worst_call_us=std::max(worst_call_us,std::uint64_t(us));
-        if(live.valid)break;
+        cpu=sampler.cpu_usage();
+        if(live.valid && cpu.valid)break;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     check(live.valid && live.percent>=0 && live.percent<=100,"live selected-adapter PDH interval must produce a real sample");
+    check(cpu.valid && cpu.percent>=0 && cpu.percent<=100,"live CPU counter interval produces measured usage");
+    std::cout<<"CPU live="<<cpu.percent<<"%\n";
     std::cout<<"GPU live="<<live.percent<<"% cached request max="<<worst_call_us<<"us; aggregation, unavailable, stale and idle contracts PASS\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

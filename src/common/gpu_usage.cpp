@@ -38,6 +38,29 @@ GpuUsageStatus gpu_busiest_engine(std::span<const GpuEngineSample> samples,LUID 
 }
 
 namespace {
+// Independent CPU query: a missing GPU counter must not hide CPU usage.
+struct CpuCounter {
+    PDH_HQUERY query{};
+    PDH_HCOUNTER counter{};
+    ~CpuCounter(){close();}
+    void close(){if(query)PdhCloseQuery(query);query=nullptr;counter=nullptr;}
+    CpuUsageStatus collect() {
+        if(!query) {
+            if(PdhOpenQueryW(nullptr,0,&query)!=ERROR_SUCCESS)return {};
+            if(PdhAddEnglishCounterW(query,L"\\Processor Information(_Total)\\% Processor Time",0,&counter)!=ERROR_SUCCESS ||
+               PdhCollectQueryData(query)!=ERROR_SUCCESS)close();
+            return {}; // prime the interval; startup is unavailable, not idle
+        }
+        PDH_FMT_COUNTERVALUE value{};
+        if(PdhCollectQueryData(query)!=ERROR_SUCCESS ||
+           PdhGetFormattedCounterValue(counter,PDH_FMT_DOUBLE,nullptr,&value)!=ERROR_SUCCESS ||
+           (value.CStatus!=PDH_CSTATUS_VALID_DATA && value.CStatus!=PDH_CSTATUS_NEW_DATA) ||
+           !std::isfinite(value.doubleValue) || value.doubleValue<0) {
+            close();return {};
+        }
+        return {GetTickCount64(),static_cast<float>(std::clamp(value.doubleValue,0.,100.)),true};
+    }
+};
 struct Counter {
     PDH_HQUERY query{};
     PDH_HCOUNTER counter{};
@@ -84,17 +107,18 @@ struct GpuUsageSampler::Impl {
     LUID adapter{};
     std::uint64_t requested_ms{};
     GpuUsageStatus cached{};
+    CpuUsageStatus cpu_cached{};
     std::jthread worker;
     ~Impl(){if(worker.joinable()){worker.request_stop();changed.notify_all();worker.join();}}
     void run(std::stop_token stop) noexcept {
         try {
             SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
-            Counter counter;LUID selected{};
+            Counter counter;CpuCounter cpu;LUID selected{};
             std::unique_lock lock(mutex);
             while(!stop.stop_requested()) {
                 const auto now=GetTickCount64();
                 if(!requested_ms || now-requested_ms>=3000) {
-                    counter.close();cached={};
+                    counter.close();cpu.close();cached={};cpu_cached={};
                     changed.wait_for(lock,std::chrono::seconds(1));continue;
                 }
                 const auto wanted=adapter;
@@ -104,7 +128,9 @@ struct GpuUsageSampler::Impl {
                 GpuUsageStatus result{};
                 if(prime)counter.open();
                 else result=counter.collect(wanted);
+                const auto cpu_result=cpu.collect();
                 lock.lock();
+                cpu_cached=cpu_result;
                 if(same(adapter,wanted))cached=result;
                 changed.wait_for(lock,std::chrono::seconds(1),[&]{return stop.stop_requested() || !same(adapter,selected);});
             }
@@ -127,4 +153,15 @@ GpuUsageStatus GpuUsageSampler::request(LUID adapter) noexcept {
         return s.cached;
     }catch(...){return {};}
 }
+CpuUsageStatus GpuUsageSampler::cpu_usage() noexcept {
+    try {
+        auto& s=*impl_;std::unique_lock lock(s.mutex,std::try_to_lock);
+        if(!lock.owns_lock())return {};
+        const auto now=GetTickCount64();
+        if(!s.requested_ms || now<s.requested_ms || now-s.requested_ms>=3000 ||
+           !s.cpu_cached.valid || now<s.cpu_cached.updated_ms || now-s.cpu_cached.updated_ms>=3000)return {};
+        return s.cpu_cached;
+    }catch(...){return {};}
+}
+
 }

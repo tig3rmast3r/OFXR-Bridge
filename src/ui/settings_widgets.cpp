@@ -1253,10 +1253,11 @@ void status_pane(Panel& p) {
     const auto& memory=state.runtime.video_memory;
     const double vram_percent=memory.budget_bytes ? 100.*double(memory.used_bytes)/double(memory.budget_bytes) : 0;
     resource_bar(p,"GPU",interface_gpu_text(state,now),state.runtime.gpu_usage.percent,{base.x+left,base.y+y},width);
-    resource_bar(p,"VRAM",interface_vram_text(state),vram_percent,{base.x+left,base.y+y+label+4},width);
-    constexpr Help resources{"GPU and VRAM","GPU: busiest physical engine on the rendering adapter, across all processes, sampled about once per second. VRAM: dedicated memory against the DXGI budget, shared imports counted once."};
-    label_help(p,resources,{base.x+left,base.y+y},{base.x+left+width,base.y+y+label*2+4});
-    y+=label*2+16;
+    resource_bar(p,"CPU",interface_cpu_text(state,now),state.runtime.cpu_usage.percent,{base.x+left,base.y+y+label+4},width);
+    resource_bar(p,"VRAM",interface_vram_text(state),vram_percent,{base.x+left,base.y+y+(label+4)*2},width);
+    constexpr Help resources{"GPU, CPU and VRAM","CPU: total system processor time across all processes and logical processors, sampled about once per second. GPU: busiest physical engine on the rendering adapter, across all processes, sampled about once per second. VRAM: dedicated memory against the DXGI budget, shared imports counted once."};
+    label_help(p,resources,{base.x+left,base.y+y},{base.x+left+width,base.y+y+label*3+8});
+    y+=label*3+20;
     ImGui::GetWindowDrawList()->AddLine({base.x,base.y+y},{base.x+kStatusWidth,base.y+y},p.c.soft,p.m.border);
     y+=12;
 

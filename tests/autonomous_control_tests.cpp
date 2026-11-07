@@ -489,9 +489,12 @@ int wmain(int count, wchar_t** arguments) {
         using xrfg::autonomous::OverlaySwapchain;
         xrfg::autonomous::report_runtime({}); // current reporter takes over the completed peer fixture
         xrfg::autonomous::report_gpu_usage({GetTickCount64(),83,true});
+        xrfg::autonomous::report_cpu_usage({GetTickCount64(),37,true});
         xrfg::autonomous::report_runtime({});
         require(xrfg::autonomous::snapshot().runtime.gpu_usage.valid && xrfg::autonomous::snapshot().runtime.gpu_usage.percent==83,
             "ordinary runtime heartbeats preserve independently sampled GPU telemetry over IPC");
+        require(xrfg::autonomous::snapshot().runtime.cpu_usage.valid && xrfg::autonomous::snapshot().runtime.cpu_usage.percent==37,
+            "ordinary runtime heartbeats preserve independently sampled CPU telemetry over IPC");
         xrfg::autonomous::report_overlay_limit(OverlaySwapchain::menu,true);
         xrfg::autonomous::report_overlay_limit(OverlaySwapchain::meter,true);
         require(xrfg::autonomous::snapshot().runtime.overlay_limit_mask==6,"independent overlay refusals reach shared UI");

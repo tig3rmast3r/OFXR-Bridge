@@ -1,5 +1,6 @@
 #pragma once
 #include "xrfg/gpu_usage_status.hpp"
+#include "xrfg/cpu_usage_status.hpp"
 #include "xrfg/keybinds.hpp"
 
 #include <array>
@@ -171,6 +172,7 @@ struct RuntimeStatus {
     unsigned dlssg_preset_request{}; // frozen process-start profile, not active NGX model proof
     VideoMemoryStatus video_memory{};
     GpuUsageStatus gpu_usage{};
+    CpuUsageStatus cpu_usage{};
     bool luke_shared_swapchains{}, luke_shared_swapchains_forced{}; // active session, not requested next launch
     bool vdxr_runtime{}, vdxr_legacy{true}; // active startup transport, not next-launch preference
     std::uint32_t buffer_capacity{}; // active admission capacity; zero for native Legacy/AFW-only
@@ -238,6 +240,8 @@ Settings merge_changes(Settings current, const Settings& base, const Settings& d
 void report_runtime(RuntimeStatus status) noexcept;
 void report_video_memory(VideoMemoryStatus value) noexcept;
 void report_gpu_usage(GpuUsageStatus value) noexcept;
+void report_cpu_usage(CpuUsageStatus value) noexcept;
+std::string interface_cpu_text(const Snapshot& value,std::uint64_t now_ms);
 std::string interface_vram_text(const Snapshot& value);
 std::string interface_gpu_text(const Snapshot& value,std::uint64_t now_ms);
 bool interface_generation_active(const Snapshot& value) noexcept;

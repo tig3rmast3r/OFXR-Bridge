@@ -1,5 +1,6 @@
 #pragma once
 #include "xrfg/gpu_usage_status.hpp"
+#include "xrfg/cpu_usage_status.hpp"
 #include <windows.h>
 #include <memory>
 #include <span>
@@ -22,6 +23,7 @@ public:
     GpuUsageSampler();
     ~GpuUsageSampler();
     GpuUsageStatus request(LUID) noexcept;
+    CpuUsageStatus cpu_usage() noexcept; // same visibility lease and worker
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

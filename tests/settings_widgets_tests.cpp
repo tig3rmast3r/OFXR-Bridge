@@ -649,12 +649,19 @@ void automatic_buttons() {
 void gpu_telemetry_and_quality() {
     Snapshot sample;sample.connected=true;
     sample.runtime.heartbeat_ms=GetTickCount64();sample.runtime.gpu_usage={GetTickCount64(),81,true};
+    sample.runtime.cpu_usage={GetTickCount64(),37,true};
     sample.runtime.video_memory={GetTickCount64(),60,100,40,20,10,123,true,true};
     for(bool compact:{false,true}) {
         Context ui(compact?ImVec2(1024,768):ImVec2(690,900),compact);
         ui.injected_snapshot=&sample;ui.draw();ui.draw(true);
         require(ui.rendered_text.find("VRAM")!=std::string::npos && ui.rendered_text.find("60%")!=std::string::npos && ui.rendered_text.find("81%")!=std::string::npos,
             "desktop and headset headers both render independently measured memory and GPU percentage");
+        const auto gpu=ui.rendered_text.find("GPU"),cpu=ui.rendered_text.find("CPU"),vram=ui.rendered_text.find("VRAM");
+        require(gpu<cpu && cpu<vram && ui.rendered_text.find("37%")!=std::string::npos,
+            "CPU meter is below GPU and above VRAM on desktop and headset");
+        sample.runtime.cpu_usage.updated_ms=GetTickCount64()-4000;ui.draw(true);
+        require(ui.rendered_text.find("37%")==std::string::npos,"stale CPU utilization is hidden");
+        sample.runtime.cpu_usage.updated_ms=GetTickCount64();
         sample.runtime.gpu_usage.updated_ms=GetTickCount64()-4000;ui.draw(true);
         require(ui.rendered_text.find("81%")==std::string::npos,"stale utilization is not kept indefinitely");
         sample.runtime.gpu_usage.updated_ms=GetTickCount64();

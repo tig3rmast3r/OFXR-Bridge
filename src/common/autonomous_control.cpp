@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 87201;
+constexpr std::uint32_t kAbi = 90001;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1326,6 +1326,7 @@ void report_runtime(RuntimeStatus status) noexcept {
             status.telemetry = connection.data->snapshot.runtime.telemetry;
             status.video_memory = connection.data->snapshot.runtime.video_memory;
             status.gpu_usage = connection.data->snapshot.runtime.gpu_usage;
+            status.cpu_usage = connection.data->snapshot.runtime.cpu_usage;
         }
         connection.data->snapshot.runtime = status;
 #ifdef _WIN32
@@ -1348,6 +1349,20 @@ void report_gpu_usage(GpuUsageStatus value) noexcept {
         if(runtime.process_id && runtime.process_id!=GetCurrentProcessId())return;
         runtime.gpu_usage=value;
     }catch(...){}
+}
+void report_cpu_usage(CpuUsageStatus value) noexcept {
+    try {
+        auto& c=channel();Lock lock(c);if(!lock.acquired)return;
+        auto& runtime=c.data->snapshot.runtime;
+        if(runtime.process_id && runtime.process_id!=GetCurrentProcessId())return;
+        runtime.cpu_usage=value;
+    }catch(...){}
+}
+std::string interface_cpu_text(const Snapshot& value,std::uint64_t now) {
+    const auto& cpu=value.runtime.cpu_usage;
+    if(!value.connected || !cpu.valid || !cpu.updated_ms || now<cpu.updated_ms || now-cpu.updated_ms>=3000 ||
+       !std::isfinite(cpu.percent) || cpu.percent<0 || cpu.percent>100)return "CPU N/A";
+    char text[32]{};std::snprintf(text,sizeof(text),"CPU %.0f%%",cpu.percent);return text;
 }
 std::string interface_gpu_text(const Snapshot& value,std::uint64_t now) {
     const auto& gpu=value.runtime.gpu_usage;

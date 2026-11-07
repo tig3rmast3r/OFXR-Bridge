@@ -2407,6 +2407,7 @@ void log_video_memory(
             rife_memory=xrfg::rife_memory_for_adapter(description.AdapterLuid,true);
             const auto gpu=session.gpu_usage.request(description.AdapterLuid);
             if(gpu.valid)xrfg::autonomous::report_gpu_usage(gpu);
+            xrfg::autonomous::report_cpu_usage(session.gpu_usage.cpu_usage());
         }
         const auto total=local.CurrentUsage+(rife_memory.valid?rife_memory.private_bytes:0);
         xrfg::autonomous::report_video_memory({GetTickCount64(),total,local.Budget,

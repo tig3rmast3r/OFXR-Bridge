@@ -34,6 +34,16 @@ int main(int argc,char** argv){try{
     gpu_sample.runtime.video_memory={1000,60,100,40,20,10,123,true,true};
     auto gpu_pixels=rasterize_elliott_meter(gpu_sample,1000,false,false);
     check(gpu_pixels!=pixels,"GPU and VRAM telemetry are drawn in the meter header");
+    gpu_sample.runtime.cpu_usage={1000,37,true};
+    auto cpu_pixels=rasterize_elliott_meter(gpu_sample,1000,false,false);
+    check(cpu_pixels!=gpu_pixels,"CPU percentage is drawn in the shared bottom/controller meter raster");
+    check(std::equal(gpu_pixels.begin()+1024*50,gpu_pixels.end(),cpu_pixels.begin()+1024*50),
+        "CPU header does not move or cover FPS, timing or status rows");
+    auto cpu_other=gpu_sample;cpu_other.runtime.cpu_usage.percent=82;
+    check(rasterize_elliott_meter(cpu_other,1000,false,false)!=cpu_pixels,"changing CPU percentage updates meter pixels");
+    auto cpu_unavailable=gpu_sample;cpu_unavailable.runtime.cpu_usage.valid=false;
+    check(rasterize_elliott_meter(gpu_sample,4000,false,false)==rasterize_elliott_meter(cpu_unavailable,4000,false,false),
+        "stale CPU percentage renders the unavailable label");
     check(std::equal(pixels.begin()+1024*50,pixels.end(),gpu_pixels.begin()+1024*50),
         "adjacent GPU label does not move or cover the existing metric rows");
     check(pixels.size()==1024*512&&rows>250&&rows<=512,"two metric rows and diagnostics fit");
