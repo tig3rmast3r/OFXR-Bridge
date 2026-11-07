@@ -3403,7 +3403,7 @@ struct CreatedPrivateSwapchain {
     CreatedPrivateSwapchain* output,
     XrResult* refusal = nullptr,
     D3D12_RESOURCE_STATES image_state=D3D12_RESOURCE_STATE_COMMON,
-    bool generation_output=false) {
+    bool generation_output=false,bool auxiliary_output=false) {
     if (refusal != nullptr) {
         *refusal = XR_SUCCESS;
     }
@@ -3418,15 +3418,22 @@ struct CreatedPrivateSwapchain {
     // Keep every private GPU output independent; only its final native sink is
     // shared by compatible outputs of THIS source, through the existing FIFO.
     // Other Luke games opt into generation-output sharing at session startup;
-    // auxiliary outputs keep their existing independent publication contract.
+    // Luke auxiliary outputs keep their existing publication contract.
     const bool luke_publication=state->session->private_runtime && state->session->luke_afw_enabled &&
         state->session->luke_shared_swapchains && (state->session->luke_outlaws_preframe || generation_output) &&
         !create_info.next && !create_info.createFlags && create_info.arraySize==1 && create_info.faceCount==1 &&
         (create_info.usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
         !(create_info.usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    // UEVR auxiliary snapshots already have independent private GPU images
+    // and endpoint reader leases. Share only their final native destination,
+    // scoped to this source, as for projection outputs. Never share sources.
+    const bool auxiliary_publication=auxiliary_output && state->session->private_runtime &&
+        state->session->uevr_application && !state->session->luke_afw_enabled &&
+        state->session->graphics_binding==SessionGraphicsBinding::d3d12 &&
+        !state->session->d3d11_bridge && !state->session->vulkan_bridge;
     XrResult result = state->session->private_runtime
         ? state->session->private_runtime->create_swapchain(&create_info,&handle,image_state,1,
-            ((generation_output && state->pooled_publication) || luke_publication)?state->handle:XR_NULL_HANDLE,
+            ((generation_output && state->pooled_publication) || luke_publication || auxiliary_publication)?state->handle:XR_NULL_HANDLE,
             generation_output && state->session->graphics_binding==SessionGraphicsBinding::d3d11
                 ? state->session->d3d12_device.Get():nullptr)
         : dispatch->create_swapchain(state->session->handle,&create_info,&handle);
@@ -14339,7 +14346,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                     }
                     candidate=std::move(retained);
                 } else {
-                    // Native/other-runtime ownership keeps distinct XR handles.
+                    // Every snapshot has a distinct virtual image. UEVR D12
+                    // snapshots share only a source-scoped native destination.
                     candidate = std::make_shared<CompositionImageSlot>();
                     auto info = chain->create_info;
                     info.next = nullptr;
@@ -14348,7 +14356,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                     CreatedPrivateSwapchain created;
                     XrResult refusal=XR_SUCCESS;
                     const XrResult created_result = with_runtime_entry(session.get(), [&] {
-                        return create_private_swapchain(chain, info, &created,&refusal)
+                        return create_private_swapchain(chain, info, &created,&refusal,
+                            D3D12_RESOURCE_STATE_COMMON,false,true)
                             ? XR_SUCCESS : XR_ERROR_RUNTIME_FAILURE;
                     });
                     if (XR_FAILED(created_result)) {
@@ -17561,7 +17570,7 @@ XrResult layer_end_frame_impl(
             }
         }
     }
-    if (manually_disarmed ||
+    if (manually_disarmed || state->generation_budget_exhausted.load(std::memory_order_acquire) ||
         ((generation_cooling_down || !state->menu_enabled) &&
           !afw_selected)) {
         return bypass_generation(manually_disarmed
@@ -18009,6 +18018,11 @@ XrResult layer_end_frame_impl(
         const XrResult handoff = handoff_three_slot_frame(
             state, end_info, current_snapshot, projection_mappings, metadata_pairable,
             completed_afw);
+        // Auxiliary admission may have retired the complete generation budget.
+        // This frame and later frames must use real-image delivery, never hand
+        // a job to a worker whose generators were just destroyed.
+        if(XR_FAILED(handoff) && state->generation_budget_exhausted.load(std::memory_order_acquire))
+            return bypass_generation(GenerationPrepareReason::missing_generation);
         if (XR_SUCCEEDED(handoff)) {
             commit_luke_pair(projection_mappings, luke.identity);
             if (luke.identity)

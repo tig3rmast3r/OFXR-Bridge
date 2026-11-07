@@ -1,6 +1,7 @@
 // Exercise production auxiliary capture/selection against real endpoint reader
 // leases. The preparer gate is before its source copy, not a synthetic sleep.
 static int auxiliary_slot_selection_test(unsigned mode) {
+    const bool pooled_budget=mode==3;if(pooled_budget)mode=2;
     xrfg_fixture::ControlProfile profile;
     Fixture f(true); f.throttled=false;
     const auto projection=f.make_chain(); f.write(projection,10);
@@ -24,6 +25,8 @@ static int auxiliary_slot_selection_test(unsigned mode) {
     state->handle=reinterpret_cast<XrSession>(2);state->graphics_binding=SessionGraphicsBinding::d3d12;
     state->vdxr_legacy=false;state->private_runtime=f.transport;
     state->d3d12_device=f.device12;state->d3d12_queue=f.queue;
+    state->uevr_application=pooled_budget;
+    if(pooled_budget)f.native_chain_limit=3; // app eye + app UI + one shared UI publication sink
     XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};ci.format=DXGI_FORMAT_R8G8B8A8_UNORM;
     ci.width=ci.height=ci.arraySize=ci.faceCount=ci.mipCount=ci.sampleCount=1;
     ci.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
@@ -86,6 +89,7 @@ static int auxiliary_slot_selection_test(unsigned mode) {
     check(f.positions.size()==queued+1,"every auxiliary frame delivered once");
     for(unsigned i=0;i<=queued;++i)check(f.positions[i]==float(i+1),"projection geometry/order retained through auxiliary selection");
     unsigned allocated{};for(const auto& slot:app->composition_capture->outputs)allocated+=bool(slot);
+    if(pooled_budget)check(f.chains.size()==3,"three retained UI snapshots must use one native destination");
     newest.reset();destroy_composition_capture(app);
     {std::scoped_lock lock(g_state_mutex);g_swapchains.erase(source);g_sessions.erase(state->handle);}
     xr_ok(f.transport->destroy_swapchain(source),"auxiliary application source cleanup");
