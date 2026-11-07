@@ -38,8 +38,9 @@ constexpr std::uint32_t kOsrFullMaxRun = 256;
 constexpr float kOsrFullDepthAlignX = 0.36F;
 constexpr float kOsrFullDepthAlignY = 0.0F;
 // A 3x3 depth-texel neighbourhood whose nearest depth exceeds its farthest by
-// this ratio holds a silhouette or thin geometry. The halo and missing-region
-// checks use it; valid current surfaces are never replaced by history.
+// this ratio holds a silhouette or thin geometry; there the destination eye's
+// own previous frame, motion compensated, replaces the warped source when it
+// shows the same surface (osr_full_warp.hlsl EdgeRatio, kept in step).
 constexpr float kOsrFullEdgeRatio = 1.10F;
 // Depth texels around a previous-frame pixel searched for a nearer surface
 // whose anti-aliased halo it may carry; such a pixel is not taken once that
@@ -57,7 +58,7 @@ constexpr float kOsrFullHaloParallax = 0.5F;
 // its composed screen motion is below this fraction of that share; it then
 // cancels the camera's world reprojection. Outside the hard-near range, its
 // measured residual screen motion still advances the history by one AER tick;
-// missing far surfaces can retain their own-eye detail (V889/V890).
+// matching far surfaces can retain their own-eye detail (V888/V889).
 // (osr_full_warp.hlsl LockedCameraTexels, LockedRatio, HistoryLockedBit).
 // Strafing past a gun 30 cm away: share 160-230 texels, composed motion 3-29,
 // which is composition residue at that depth, not the gun's own motion
@@ -123,19 +124,24 @@ inline bool osr_full_history_usable(int effective_mode, std::uint64_t publicatio
 // Flags handed to the shaders (OsrFullConstants::flags).
 constexpr std::uint32_t kOsrFullFlagDebug = 1u;
 constexpr std::uint32_t kOsrFullFlagHistory = 2u;
-// Flag value 4 is retired. History availability no longer permits replacing
-// a valid current surface (V890); it is consulted only for missing regions.
+// The previous frame of this eye is the primary source everywhere it shows the
+// same surface, not only at silhouettes, bands and sky (osr_full_warp.hlsl).
+constexpr std::uint32_t kOsrFullFlagHistoryFirst = 4u;
 // History splat only: a camera-attached texel follows the camera it is attached
 // to, through the matrix in the BackwardSource slot (history clip -> destination
 // clip with that camera held), instead of keeping its screen place. UEVR: the
 // weapon hangs on the game camera, which the head turns away from.
 constexpr std::uint32_t kOsrFullFlagLockedFollows = 64u;
-// Retained input flag for caller compatibility. Since V890 all valid current
-// surfaces, including camera-attached ones, keep their current warp regardless
-// of this flag. History can fill only the missing side.
+// Resolve: where the warp shows a camera-attached surface it stays (V766), the
+// previous frame filling only the side the other eye cannot see; without the
+// flag the previous frame takes it (V768, Kingdom Come Deliverance II's
+// crossbow, attached to the view). UEVR's weapon hangs on the game camera,
+// which the head turns away from: taken from the previous frame it lagged the
+// head and ghosted (Dead Island 2, 2026-11-02; the UEVR fork, on V766, did not).
 constexpr std::uint32_t kOsrFullFlagWarpKeepsAttached = 128u;
 
-inline std::uint32_t osr_full_flags(bool debug, bool history) noexcept {
-    return (debug ? kOsrFullFlagDebug : 0u) | (history ? kOsrFullFlagHistory : 0u);
+inline std::uint32_t osr_full_flags(bool debug, bool history, bool history_first = true) noexcept {
+    return (debug ? kOsrFullFlagDebug : 0u) | (history ? kOsrFullFlagHistory : 0u) |
+        (history && history_first ? kOsrFullFlagHistoryFirst : 0u);
 }
 }  // namespace xrfg

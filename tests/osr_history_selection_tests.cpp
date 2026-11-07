@@ -3,7 +3,6 @@
 #define main retained_scene_cut_main
 #include "osr_scene_cut_tests.cpp"
 #undef main
-#include <limits>
 
 namespace {
 UINT grey(unsigned value) { return 0xff000000u | value | (value << 8) | (value << 16); }
@@ -79,12 +78,8 @@ void stable_overlap(unsigned eye,bool converging) {
     }
     warm(f,previous); auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT);
     seed_history(f,eye,previous,depths,motion,field.Get());
-    // Missing current depth makes this a genuine history-only region. This
-    // retains coverage of equal-depth historical origins after V890 removed
-    // replacement of otherwise-valid current surfaces.
-    const std::vector<float> missing(width*height,std::numeric_limits<float>::quiet_NaN());
     for(unsigned iteration=0;iteration<32;++iteration) {
-        const auto output=render(f,eye,current,missing);
+        const auto output=render(f,eye,current,depths);
         for(UINT y=4;y<height-4;++y) for(UINT x=8;x<width-8;++x) {
             const auto i=y*width+x;
             if(output[i]!=current[i]) {
@@ -113,7 +108,7 @@ void selected_origin_visibility(unsigned eye) {
     const auto output=render(f,eye,current,depths);
     for(UINT y=24;y<48;++y) for(UINT x:{65u,66u}) {
         check(output[y*width+x]==current[y*width+x],
-            "valid current background cannot be replaced by stale foreground");
+            "visibility tests the selected moving origin, not camera-only fallback");
     }
     std::printf("history selection eye=%u selected-origin visibility PASS\n",eye);
 }
@@ -151,8 +146,8 @@ void screen_locked_surface(unsigned eye,float history_depth,float current_depth,
 int main() {
     for(unsigned eye:{0u,1u}) {
         stable_overlap(eye,false); stable_overlap(eye,true); selected_origin_visibility(eye);
-        screen_locked_surface(eye,.04F,.04F,false);
-        screen_locked_surface(eye,.4F,.4F,false);
+        screen_locked_surface(eye,.04F,.04F,true);
+        screen_locked_surface(eye,.4F,.4F,true);
         screen_locked_surface(eye,.4F,.04F,false);
         screen_locked_surface(eye,.08F,.04F,false);
     }

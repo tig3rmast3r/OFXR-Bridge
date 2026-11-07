@@ -11,10 +11,10 @@
 //                          frame, each texel first moved by its object motion
 //      OsrFullSplatOffset  record where in the previous frame each winning
 //                          texel's surface is
-//   3. OsrFullResolve      per colour pixel: keep the valid current source warp
-//                          (Catmull-Rom) unchanged. Only missing or rejected
-//                          source-halo pixels may use same-eye history.
-//                          Otherwise mark a band for inpaint.
+//   3. OsrFullResolve      per colour pixel: the previous frame first where it
+//                          shows the warp's surface (read at the nearest pixel),
+//                          else the source eye (Catmull-Rom), with the halo,
+//                          camera-attached and fringe rules; otherwise a band
 //   4. OsrFullInpaint      fill the bands neither image saw: the background
 //                          mirrored across the run's background edge, or the
 //                          farthest surface found in eight directions
@@ -97,6 +97,9 @@ static const float HaloParallax = 0.5;
 static const float LockedCameraTexels = 1.0;
 static const float LockedRatio = 0.5;
 static const uint HistoryLockedBit = 1u; // in history splat words
+// Mean colour difference (0..1) between the motion-compensated and the
+// camera-only previous frame above which the other eye's warp arbitrates.
+static const float ArbiterGap = 0.02;
 // Colour pixels walked per direction by the background fill of the inpaint.
 static const int FillReach = 48;
 static const int2 FillDirections[8] = {
@@ -601,6 +604,32 @@ bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, o
     return found;
 }
 
+// Would the source eye have seen the surface at (ndc, z) in the destination
+// as the nearest thing along its own ray? If the source holds something
+// farther there, it would have seen this surface had it existed: a nearer
+// surface in the previous frame is stale. If it holds the same or a nearer
+// surface, this surface is one only the destination eye sees, such as the
+// side of a first-person gun 30 cm from the face (Cyberpunk F8 of 2026-11-01
+// 13:40:39: the right half of the pistol replaced by sky every other frame).
+// Outside the source image counts as unseen.
+bool source_sees_not_farther(float2 ndc, float z) {
+    float4 q = mul(float4(ndc, z, 1.0), BackwardSource);
+    bool not_farther = true;
+    if (all(isfinite(q)) && q.w > 1e-8) {
+        float2 p = float2((q.x / q.w + 1.0) * 0.5 * DepthSize.x, (1.0 - q.y / q.w) * 0.5 * DepthSize.y);
+        float expected = max(q.z / q.w, 0.0); // at or beyond a finite far plane is far
+        if (all(isfinite(p)) && all(p >= 0.0) && all(p < float2(DepthSize)) && isfinite(expected)) {
+            float nearest = 0.0;
+            int2 base = int2(floor(p - SourceDejitter - 0.5));
+            [unroll] for (int dy = 0; dy < 2; ++dy)
+                [unroll] for (int dx = 0; dx < 2; ++dx)
+                    nearest = max(nearest, SourceDepth.Load(int3(clamp(base + int2(dx, dy), int2(0, 0), int2(DepthSize) - 1), 0)));
+            not_farther = expected <= SkyDepth || nearest >= expected * (1.0 - DepthTolerance) - FarDepth;
+        }
+    }
+    return not_farther;
+}
+
 // The source-side twin of the history halo rule: a warped pixel within the
 // halo radius of a nearer surface in the source image is the source eye's
 // anti-aliased silhouette carrying the depth behind. Along the destination
@@ -616,6 +645,25 @@ bool source_halo_stale(float2 at_scene, float at_depth, float2 ndc) {
     const float2 toward = halo_direction(SourceDepth, t, at_depth, near);
     return near > at_depth * EdgeRatio + FarDepth &&
         halo_parallax(BackwardSource, ndc, at_depth, near, toward) > HaloParallax;
+}
+
+// Does the previous frame hold a surface at depth z within one texel of
+// at_scene? Fine fringes (hair, foliage edges) have noisy depth: each eye and
+// each frame covers different strands, so the exact texel often shows the
+// background where the warp shows the strand. Taking the other eye there
+// showed its strands every other frame: The Last of Us, Joel's hair against a
+// bright wall, generated frame 34% further from its real neighbours than they
+// are from each other at the fringe (F8 of 2026-11-01 14:45:38).
+bool history_has_surface(float2 at_scene, float z) {
+    const int2 t = int2(floor(at_scene - HistoryDejitter));
+    bool found = false;
+    [unroll] for (int dy = -1; dy <= 1; ++dy)
+        [unroll] for (int dx = -1; dx <= 1; ++dx) {
+            const float zz = HistoryDepth.Load(int3(clamp(t + int2(dx, dy), int2(0, 0), int2(DepthSize) - 1), 0));
+            found = found || (zz <= SkyDepth && z <= SkyDepth) ||
+                abs(zz - z) <= DepthTolerance * max(zz, z) + FarDepth;
+        }
+    return found;
 }
 
 // Did this eye's previous frame look along the same ray? The destination ray
@@ -669,11 +717,6 @@ static uint g_pick = 0;
 static uint g_pick_word = 0;
 static uint g_pick_tag = 0;
 static float2 g_pick_at = 0;
-// A bounded stereo gap with a near surface on one side and a far surface on
-// the other exposes the BACKGROUND. A silhouette's unreliable motion can move
-// an old foreground texel into that strip; agreement with its own old depth is
-// insufficient there. Use only the completed current stereo depth (no reads
-// from concurrently resolving neighbours).
 bool gap_background(int2 c, out float background) {
     background = 0;
     bool clear = false;
@@ -692,6 +735,7 @@ bool gap_background(int2 c, out float background) {
     }
     return clear;
 }
+
 void resolve_pixel(uint3 id) {
     g_pick = 0;
     if (any(id.xy >= ColorSize)) return;
@@ -702,21 +746,154 @@ void resolve_pixel(uint3 id) {
     float4 color = 0;
     uint word = 0;
     const bool history = (Flags & 2u) != 0 && SceneState[uint2(0, 0)] != 0;
-    // Store both real eyes as before, but consult their history only when the
-    // current stereo warp cannot provide this destination surface. A valid
-    // current pixel must not inherit a predicted position, fringe or colour
-    // from an older eye, including sky and near camera-attached surfaces.
-    const bool source_surface = resolve_image(StereoDepth, SourceDepth, SourceColor,
-        BackwardSource, SourceDejitter, false, c, ndc, color, word);
-    // A rejected anti-aliased source colour can still have trustworthy geometry.
-    // Keep its destination depth to prevent a historical object from painting
-    // over the background simply because the colour at that edge was unusable.
-    const uint source_surface_word = word;
-    if (source_surface && !source_halo_stale(g_fetch_position, g_fetch_depth, ndc)) {
-        g_pick=1;g_pick_at=g_fetch_position;g_pick_word=word;g_pick_tag=TagStereo;
-        WarpedOut[id.xy] = color;
-        ResolvedOut[id.xy] = (word & ~3u) | TagStereo;
-        return;
+    const bool source_surface = resolve_image(StereoDepth, SourceDepth, SourceColor, BackwardSource, SourceDejitter, false, c, ndc, color, word);
+    const uint source_surface_word=word;
+    if(source_surface) {
+        const float2 stereo_at = g_fetch_position;
+        const float stereo_depth = g_fetch_depth;
+        // Where the warped source is weakest, this eye's own previous frame,
+        // motion compensated, is the better picture of the same surface and
+        // takes its place as a resolved pixel (not a band):
+        // - Sky-depth content has no parallax, so the previous frame is exact
+        //   for it, still or moving, and carries this eye's own glow and haze;
+        //   the warped source leaves the source eye's glow beside a bright
+        //   object, displaced by its disparity (Cyberpunk neon sign: 14 px of
+        //   glow where the real eye has 2).
+        // - At a silhouette or in thin geometry the depth grid is half the eye
+        //   resolution, so the warped source places edges and blades at that
+        //   granularity and they shimmer against the real eye; the previous
+        //   frame is a real render of them (Cyberpunk bushes, 2026-11-01: the
+        //   previous frame erred 6.6 against the next real frame where the
+        //   warped source erred 9.7).
+        // The previous frame must show the same surface: sky for sky, or a
+        // depth within tolerance of the stereo depth; otherwise the warped
+        // source stands.
+        // This eye's own previous frame, motion compensated, is the primary
+        // source wherever it shows the same surface; the warped other eye
+        // fills the rest. Each eye's DLSS reconstructs sub-pixel detail with
+        // its own jitter sequence, so the other eye's fine pattern differs
+        // from this eye's: in dense foliage, showing it every other frame is
+        // shimmer. Cyberpunk F8 of 2026-11-01 11:12, head still: this eye's
+        // previous frame predicts the next real frame's fine detail with
+        // correlation 0.95, the warped other eye 0.70; AFW's output matches
+        // its previous frame exactly in fine detail. (Rounds 7-11 applied
+        // this only at silhouettes, bands and sky.)
+        if (history && !source_halo_stale(stereo_at,stereo_depth,ndc)) {
+            const float zs = asfloat(word & ~3u);
+            const bool sky = zs <= SkyDepth;
+            // A silhouette in the destination (depth contrast) or a band next
+            // to this pixel (a texel nothing from the source reached). Either
+            // way the source colour here is the source eye's anti-aliased
+            // edge, a blend of the object with the background the source eye
+            // saw beside it, and it lands 1-3 px from the band on both sides
+            // as an outline. The previous frame holds this eye's own blend of
+            // the same edge.
+            uint nearest = 0, farthest = 0xffffffffu;
+            bool hole = false;
+            [unroll] for (int dy = -1; dy <= 1; ++dy)
+                [unroll] for (int dx = -1; dx <= 1; ++dx) {
+                    uint v = StereoDepth.Load(int3(clamp(c + int2(dx, dy), int2(0, 0), int2(DepthSize) - 1), 0));
+                    nearest = max(nearest, v);
+                    farthest = v != 0 ? min(farthest, v) : farthest;
+                    hole = hole || v == 0;
+                }
+            const bool fringe = hole || (nearest != 0 && asfloat(nearest) > asfloat(farthest) * EdgeRatio + FarDepth);
+            const bool prefer = (Flags & 4u) != 0 || sky || fringe;
+            if (prefer) {
+                float4 previous = 0; uint previous_word = 0;
+                if (resolve_history(c, depth_pixel, ndc, true, previous, previous_word)) {
+                    // The object motion applied to the previous frame comes
+                    // from the composed motion vectors, which can be wrong for
+                    // some materials: The Last of Us' menu curtains barely move
+                    // between this eye's frames, yet their vectors claim about a
+                    // stereo disparity, flipping sign with the eye (-41 then
+                    // +32 px), and the moved curtain doubled against the other
+                    // eye (F8 of 2026-11-01 14:28:11). Where the moved and the
+                    // camera-only previous frame differ, the other eye's warp,
+                    // which shows this very instant, decides which is right.
+                    float2 picked_history_at = g_history_position;
+                    float4 still = 0; uint still_word = 0;
+                    if ((previous_word & HistoryLockedBit) == 0 && HistoryOffset.Load(int3(c, 0)) != 0 &&
+                        resolve_history(c, depth_pixel, ndc, false, still, still_word)) {
+                        const float3 third = float3(1.0, 1.0, 1.0) / 3.0;
+                        const float gap = dot(abs(previous.rgb - still.rgb), third);
+                        if (gap > ArbiterGap) {
+                            const float moved_error = dot(abs(previous.rgb - color.rgb), third);
+                            const float still_error = dot(abs(still.rgb - color.rgb), third);
+                            // A colour tie cannot decide the object's temporal
+                            // position. A binary choice made a one-level colour
+                            // change jump a moving texture by its full offset.
+                            // Clear winners retain their own-eye detail. Near
+                            // a tie, fall back continuously to the current
+                            // stereo surface, not a blend of two old positions.
+                            const float confidence = saturate(abs(moved_error - still_error) / gap);
+                            if (still_error < moved_error) {
+                                previous = still; previous_word = still_word;
+                                picked_history_at = g_history_position;
+                            }
+                            previous.rgb = lerp(color.rgb, previous.rgb, confidence);
+                        }
+                    }
+                    // The second, camera-only lookup also updates the lookup
+                    // scratch position. Validate the surface at the origin of
+                    // the colour we actually chose, including when that lookup
+                    // fails or the motion-compensated candidate wins.
+                    const float2 previous_at = picked_history_at;
+                    const float zh = asfloat(previous_word & ~3u);
+                    const bool same = (sky ? zh <= SkyDepth : abs(zh - zs) <= DepthTolerance * max(zh, zs) + FarDepth) ||
+                        history_has_surface(previous_at, zs);
+                    // The previous frame shows a nearer surface than the warp:
+                    // keep it when the source eye could not have seen it.
+                    const bool nearer_unseen = zh > zs * (1.0 + DepthTolerance) + FarDepth &&
+                        source_sees_not_farther(ndc, zh);
+                    // A camera-attached surface keeps its place in this eye's
+                    // previous frame, which knows exactly where it is in this
+                    // eye's view. The warp places it through the stereo
+                    // disparity, hundreds of pixels that near, so a small error
+                    // in the eye separation moves it visibly: in Kingdom Come
+                    // Deliverance II a crossbow 0.09 units away has about 1000
+                    // px of disparity, the warp put it 26 px left of both real
+                    // frames (2.6%, 1.6 mm of separation) and it shimmered
+                    // (F8 of 2026-11-02 09:51:06). Where the warp shows such a
+                    // surface the previous frame is taken; it also covers the
+                    // strip of background the misplaced warp drew over.
+                    const bool attached = (previous_word & HistoryLockedBit) != 0;
+                    // Motion can keep a distant surface stationary on screen
+                    // too: a third-person character followed by the camera.
+                    // Its matching own-eye history is still valid. Reserve the
+                    // special near-object rejection for actual near surfaces;
+                    // otherwise the screen-lock heuristic makes moving clothes
+                    // alternate between this eye's detail and the other eye's
+                    // DLSS reconstruction on every AER publication.
+                    const bool near_attached = attached && zh >= LockedDepth;
+                    const bool warp_attached = (Flags & 128u) == 0 && zs >= LockedDepth;
+                    // At a fringe, depth cannot tell a stale surface from a
+                    // strand the other eye happens to miss: hair and foliage
+                    // edges cover different strands in each eye and frame, and
+                    // the other eye's depth there is as noisy as its colour.
+                    // An edge that really moved has already been dropped by
+                    // the halo rule inside resolve_history, so what survives is
+                    // this eye's own fringe and is taken whatever the warp's
+                    // depth says. Requiring depth agreement let the other eye's
+                    // strands through in both directions: on Joel's hair (The
+                    // Last of Us, F8 of 2026-11-01 14:45:38) 3% of fringe
+                    // pixels flicked to the light background and 4.4% to a
+                    // strand, the generated frame 34% further from its real
+                    // neighbours than they are from each other.
+                    if (warp_attached || (same && !near_attached) || nearer_unseen || (fringe && !attached)) {
+                        g_pick=2;g_pick_at=picked_history_at;g_pick_word=previous_word;g_pick_tag=TagStereo;
+                        WarpedOut[id.xy] = previous;
+                        ResolvedOut[id.xy] = (previous_word & ~3u) | TagStereo;
+                        return;
+                    }
+                }
+            }
+        }
+        if(!source_halo_stale(stereo_at,stereo_depth,ndc)) {
+            g_pick=1;g_pick_at=stereo_at;g_pick_word=word;g_pick_tag=TagStereo;
+            WarpedOut[id.xy]=color;ResolvedOut[id.xy]=(word & ~3u)|TagStereo;
+            return;
+        }
     }
     if (history && resolve_history(c, depth_pixel, ndc, true, color, word)) {
         const float historical_depth = asfloat(word & ~3u);

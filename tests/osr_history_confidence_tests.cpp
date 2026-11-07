@@ -1,5 +1,5 @@
-// Actual shipping OSR passes. A one-level current-colour change must not switch
-// to a different historical temporal position. Current visible pixels win.
+// Actual shipping OSR passes. A one-level view-colour change must not switch
+// a moving pattern by its whole temporal displacement. No game/headset.
 #define main retained_scene_cut_main
 #include "osr_scene_cut_tests.cpp"
 #undef main
@@ -63,7 +63,7 @@ void test(unsigned eye,int shift) {
             const auto delta=static_cast<unsigned>(std::abs(int(pair.first&255)-int(pair.second&255)));
             worst=std::max(worst,delta);large+=delta>8;
         }
-        if(!shift)check(low[index]==grey(119) && high[index]==grey(121),"static visible colour is not replaced by old detail");
+        if(!shift)check(low[index]==pattern[index] && high[index]==pattern[index],"static own-eye detail stays bit-exact");
     }
     std::printf("history confidence eye=%u shift=%d one-level worst=%u jumps>8=%u\n",eye,shift,worst,large);
     check(worst<=8 && !large,"one-level colour perturbation cannot flip moving history by 200 levels");
@@ -74,8 +74,8 @@ void test(unsigned eye,int shift) {
     const auto moved=render(f,eye,advanced);
     for(UINT y=4;y<height-4;++y)for(UINT x=4;x<width-4;++x) {
         const auto index=y*width+x;
-        check(still[index]==pattern[index],"current visible colour stays exact despite incompatible old motion");
-        check(moved[index]==advanced[index],"fresh moving detail stays exact");
+        check(still[index]==pattern[index],"clearly wrong motion still recovers the camera-only history");
+        check(moved[index]==advanced[index],"clearly correct motion keeps the compensated history");
     }
     if(f.info)for(UINT64 j=0;j<f.info->GetNumStoredMessages();++j){
         SIZE_T bytes{};f.info->GetMessage(j,nullptr,&bytes);std::vector<char> data(bytes);

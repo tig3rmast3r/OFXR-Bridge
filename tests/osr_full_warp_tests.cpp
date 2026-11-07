@@ -31,8 +31,9 @@ int main() {
     // Flags.
     check(xrfg::osr_full_flags(false, false) == 0, "no flags");
     check(xrfg::osr_full_flags(true, false) == xrfg::kOsrFullFlagDebug, "debug flag");
-    check(xrfg::osr_full_flags(false, true) == xrfg::kOsrFullFlagHistory, "history is available only for missing regions");
-    check(xrfg::osr_full_flags(true, true) == 3, "debug and missing-region history flags");
+    check(xrfg::osr_full_flags(false, true) == (xrfg::kOsrFullFlagHistory | xrfg::kOsrFullFlagHistoryFirst), "history is primary by default");
+    check(xrfg::osr_full_flags(false, true, false) == xrfg::kOsrFullFlagHistory, "history only at edges when asked");
+    check(xrfg::osr_full_flags(true, true) == 7, "all flags");
     check(static_cast<int>(xrfg::OsrReconstruction::full) == 2, "Full OSR is the third Reconstruction entry");
     // Camera-attached distance. Cyberpunk's reversed projection, near 0.02:
     // depth = 0.02 / distance.

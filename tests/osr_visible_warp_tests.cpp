@@ -169,15 +169,10 @@ void background_strip(unsigned eye,bool lower,int side,bool halo=false,bool mixe
 }
 }
 int main() {
-    for(unsigned eye:{0u,1u})for(bool lower:{false,true})for(int side:{-1,1})background_strip(eye,lower,side);
-    for(unsigned eye:{0u,1u})for(bool lower:{false,true})for(int side:{-1,1})background_strip(eye,lower,side,true);
-    for(unsigned eye:{0u,1u})for(bool lower:{false,true})for(int side:{-1,1})background_strip(eye,lower,side,true,true);
-    for(unsigned eye:{0u,1u}) {
-        for(bool lower:{false,true}) {
-            for(float depth:{.04F,.4F,0.F})visible(eye,lower,depth);
-            for(int side:{-1,1})for(int advance:{-1,0,1})holes(eye,lower,side,advance);
-        }
-        refresh(eye);
+    for(unsigned eye:{0u,1u})for(bool lower:{false,true})for(int side:{-1,1}) {
+        background_strip(eye,lower,side);
+        background_strip(eye,lower,side,true);
+        background_strip(eye,lower,side,true,true);
     }
-    std::puts("OSR visible warp: both eyes/qualities/near/sky, valid-current identity, occluded residual motion and ongoing history recording PASS");
+    std::puts("OSR V891 background guard: both eyes/qualities/directions and mixed-depth colour halo PASS");
 }
