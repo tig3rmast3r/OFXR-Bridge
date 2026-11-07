@@ -28,6 +28,14 @@ int main() {
     check(osr_full_history_usable(3, 104, 100, 100), "age limit inclusive");
     check(!osr_full_history_usable(3, 105, 100, 100), "too old: the scene moved on");
     check(osr_full_history_usable(3, 110, 100, 100, 10), "age limit is a parameter");
+    check(xrfg::osr_full_current_motion_usable(103,102,101,101,2,true,false,true), "current vectors exact contiguous span2");
+    check(!xrfg::osr_full_current_motion_usable(103,102,101,101,1,true,false,true), "span1 not half interpolated");
+    check(!xrfg::osr_full_current_motion_usable(103,100,101,101,2,true,false,true), "peer gap rejects current pull");
+    check(!xrfg::osr_full_current_motion_usable(103,102,99,99,2,true,false,true), "native gap rejects current pull");
+    check(!xrfg::osr_full_current_motion_usable(103,102,101,99,2,true,false,true), "native camera identity must match stored depth");
+    check(!xrfg::osr_full_current_motion_usable(103,102,101,101,2,true,true,true), "reset rejects current pull");
+    check(!xrfg::osr_full_current_motion_usable(103,102,101,101,2,true,false,false), "epoch/stream mismatch rejects current pull");
+    check(!xrfg::osr_full_current_motion_usable(103,102,101,101,2,false,false,true), "missing temporal camera rejects current pull");
     // Flags.
     check(xrfg::osr_full_flags(false, false) == 0, "no flags");
     check(xrfg::osr_full_flags(true, false) == xrfg::kOsrFullFlagDebug, "debug flag");

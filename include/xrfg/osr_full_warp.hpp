@@ -16,6 +16,16 @@ constexpr int normalize_osr_reconstruction(int value) noexcept {
         : static_cast<int>(OsrReconstruction::full);
 }
 
+// The half interval is valid only for uninterrupted native AER span2.
+// Resource histories must describe exactly those publications and camera epoch.
+constexpr bool osr_full_current_motion_usable(std::uint64_t current,
+    std::uint64_t peer, std::uint64_t same, std::uint64_t native_same,
+    unsigned native_span, bool temporal_valid, bool reset,
+    bool matching_stream_epoch) noexcept {
+    return temporal_valid && !reset && matching_stream_epoch && native_span == 2 &&
+        current > 2 && peer == current-1 && same == current-2 && native_same == same;
+}
+
 // Reversed depth is proportional to 1 / distance, so a relative tolerance on
 // it is a relative tolerance on distance. A reprojected texel that finds a
 // source depth within this of the expected one belongs to that surface.

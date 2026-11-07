@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.903.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.904.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2465,6 +2465,14 @@ if(WIN32 AND XRFG_BUILD_TESTS)
  add_dependencies(xrfg_osr_history_selection_tests xrfg_d3d12_history)
  add_test(NAME xrfg_osr_history_selection_gpu COMMAND xrfg_osr_history_selection_tests)
  set_tests_properties(xrfg_osr_history_selection_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+ add_executable(xrfg_osr_current_motion_tests tests/osr_current_motion_tests.cpp)
+ target_include_directories(xrfg_osr_current_motion_tests PRIVATE include src/d3d12 "${XRFG_GENERATED_SHADER_DIR}")
+ target_compile_features(xrfg_osr_current_motion_tests PRIVATE cxx_std_20)
+ target_compile_definitions(xrfg_osr_current_motion_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+ target_link_libraries(xrfg_osr_current_motion_tests PRIVATE d3d12 dxgi)
+ add_dependencies(xrfg_osr_current_motion_tests xrfg_d3d12_history)
+ add_test(NAME xrfg_osr_current_motion_gpu COMMAND xrfg_osr_current_motion_tests)
+ set_tests_properties(xrfg_osr_current_motion_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
  add_executable(xrfg_osr_screen_motion_tests tests/osr_screen_motion_tests.cpp)
  target_include_directories(xrfg_osr_screen_motion_tests PRIVATE include src/d3d12 "${XRFG_GENERATED_SHADER_DIR}")
  target_compile_features(xrfg_osr_screen_motion_tests PRIVATE cxx_std_20)

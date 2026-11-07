@@ -2681,6 +2681,32 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     as_matrix(history.camera.world_to_view)), as_matrix(history.camera.view_to_clip));
                 std::copy_n(forward_history.values, 16, in.forward_history);
                 std::copy_n(backward_history.values, 16, in.backward_history);
+                const auto& native_same = impl_->osr_full.history(source_eye);
+                in.use_current_history_motion = osr_full_current_motion_usable(
+                    guide.publication, history.publication, native_same.publication,
+                    guide.previous_same_native_camera ? guide.previous_same_native_camera->publication : 0,
+                    guide.raw_motion_native_span, temporal_camera_valid, guide.reset,
+                    native_same.stream == guide.stream && history.stream == guide.stream &&
+                    native_same.epoch == guide.epoch && history.epoch == guide.epoch);
+                if (in.use_current_history_motion) {
+                    const Matrix4x4 current_to_history = multiply(multiply(multiply(
+                        provider_camera.source_clip_to_view, provider_camera.source_view_to_world),
+                        as_matrix(history.camera.world_to_view)), as_matrix(history.camera.view_to_clip));
+                    const Matrix4x4 native_to_history = multiply(multiply(multiply(
+                        as_matrix(native_same.camera.clip_to_view), as_matrix(native_same.camera.view_to_world)),
+                        as_matrix(history.camera.world_to_view)), as_matrix(history.camera.view_to_clip));
+                    std::copy_n(current_to_history.values,16,in.current_history_data);
+                    std::copy_n(native_to_history.values,16,in.current_history_data+16);
+                    std::copy_n(previous_same_transform.values,16,in.current_history_data+32);
+                    for (unsigned r=0;r<4;++r) {
+                        in.current_history_data[48+r]=provider_camera.source_clip_to_view.values[r*4+3];
+                        in.current_history_data[52+r]=native_same.camera.clip_to_view[r*4+3];
+                    }
+                    in.current_history_data[56]=guide.scale_x;
+                    in.current_history_data[57]=guide.scale_y;
+                    in.current_history_data[58]=native_same.dejitter[0];
+                    in.current_history_data[59]=native_same.dejitter[1];
+                }
                 if (in.use_history_motion) {
                     const Matrix4x4 forward_history_previous = multiply(multiply(multiply(
                         as_matrix(history.camera.clip_to_view), as_matrix(history.camera.view_to_world)),
@@ -2699,6 +2725,21 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             std::copy_n(provider_camera.source_world_to_view.values, 16, kept.camera.world_to_view.begin());
             std::copy_n(provider_camera.source_view_to_clip.values, 16, kept.camera.view_to_clip.begin());
             std::copy_n(provider_camera.source_clip_to_view.values, 16, kept.camera.clip_to_view.begin());
+            // F8 only: retain the actual native endpoint depth BEFORE this
+            // list overwrites it with the current source. No production readback.
+            if (in.use_current_history_motion && two_frame_capture_active()) {
+                for (unsigned eye : {source_eye, peer_eye}) {
+                    TwoFrameImageInfo snapshot{};
+                    snapshot.stage = eye == source_eye ? "osr_native_previous_depth" : "osr_history_depth";
+                    snapshot.stream = guide.stream;
+                    snapshot.capture_serial = impl_->osr_full.history(eye).publication;
+                    snapshot.eye = static_cast<std::int32_t>(eye);
+                    const auto desc = impl_->osr_full.history_depth(eye)->GetDesc();
+                    snapshot.width = static_cast<std::uint32_t>(desc.Width); snapshot.height = desc.Height;
+                    two_frame_capture_record_ng_x(snapshot, impl_->device.Get(), command_list,
+                        impl_->osr_full.history_depth(eye), impl_->osr_full.history_depth_state(eye));
+                }
+            }
             impl_->osr_full.record_history_update(command_list, in, kept);
             final_color.texture = impl_->osr_full.output();
             final_color.initial_state = D3D12_RESOURCE_STATE_COMMON;
@@ -2706,7 +2747,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             // motion eligibility (bit 1); GPU scene state can veto both. b = publication, c = the history
             // frame's publication.
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
-                (static_cast<std::int64_t>(effective_mode) << 8) | (history_usable ? 1 : 0) | (in.use_history_motion ? 2 : 0),
+                (static_cast<std::int64_t>(effective_mode) << 8) | (history_usable ? 1 : 0) | (in.use_history_motion ? 2 : 0) | (in.use_current_history_motion ? 4 : 0),
                 1310, guide.publication, history.publication);
             // 1312: the de-jitter applied to the source depth this frame:
             // result = float bits of (window fraction x, y) packed high/low,

@@ -64,6 +64,15 @@ struct Bench {
  }
  void record(bool low,unsigned frame,UINT base,bool history){
   auto in=inputs;in.source_eye=frame&1;in.use_history=history;in.use_history_motion=history;in.lower_quality=low;
+  // Optional paired OLD/CURRENT-history cost comparison at the SAME quality.
+  // Test-only switch, never a runtime setting. Uses identity synthetic cameras.
+  if(std::getenv("OFXR_OSR_BENCH_CURRENT_HISTORY")) {
+   in.use_current_history_motion=history && low;
+   in.lower_quality=std::getenv("OFXR_OSR_BENCH_CURRENT_LOWER")!=nullptr;
+   for(unsigned m=0;m<3;++m)for(unsigned i=0;i<4;++i)in.current_history_data[m*16+i*5]=1;
+   in.current_history_data[50]=in.current_history_data[54]=1;
+   in.current_history_data[56]=in.current_history_data[57]=1;
+  }
   auto& warp=low?lower:normal;warp.record(device.Get(),list.Get(),in,queries.Get(),base);
   xrfg::OsrFullHistory kept{};kept.publication=frame+1;kept.motion_scale[0]=kept.motion_scale[1]=1;
   kept.dejitter[0]=in.source_dejitter[0];kept.dejitter[1]=in.source_dejitter[1];

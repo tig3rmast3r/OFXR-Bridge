@@ -46,6 +46,12 @@ RWTexture2D<uint>   OffsetOut   : register(u5);
 RWTexture2D<uint>   SceneState  : register(u6);
 Texture2D<float4> LowerMap : register(t10);
 RWTexture2D<float4> LowerMapOut : register(u7);
+// Resolve only: current motion is bound at t8, not the history's older field.
+// Uniforms: current->history rows0..3, native previous same->history4..7,
+// current->native previous same camera8..11; inverse-projection W columns12/13;
+// row14 = current MV scale.xy, native previous dejitter.zw; row15 reserved.
+Buffer<float4> CurrentHistoryData : register(t11);
+Texture2D<float> NativePreviousDepth : register(t12);
 SamplerState LinearClamp : register(s0);
 
 cbuffer Osr : register(b0) {
@@ -717,6 +723,58 @@ static uint g_pick = 0;
 static uint g_pick_word = 0;
 static uint g_pick_tag = 0;
 static float2 g_pick_at = 0;
+// A CURRENT same-eye vector points two publications back. Reconstruct both
+// endpoints in the peer history camera and interpolate their 3D positions at
+// the intervening publication. The old extrapolation instead used the field
+// from the previous peer frame, and the colour arbiter could cancel it locally.
+float4 current_history_transform(float4 p, uint first) {
+    return p.x * CurrentHistoryData[first] + p.y * CurrentHistoryData[first+1] +
+           p.z * CurrentHistoryData[first+2] + p.w * CurrentHistoryData[first+3];
+}
+bool current_history(float2 source_at, float source_z,
+    out float4 color, out float2 previous_at) {
+    color = 0; previous_at = 0;
+    bool found=false;
+    [unroll] do {
+    if ((Flags & 256u) == 0 || SceneState[uint2(4,0)] == 0 ||
+        source_z <= SkyDepth || source_z >= LockedDepth) break;
+    const int2 t = int2(floor(source_at - SourceDejitter));
+    if (any(t < 0) || any(t >= int2(DepthSize))) break;
+    const float2 total = HistoryMotion.Load(int3(t,0)) * CurrentHistoryData[14].xy;
+    if (!all(isfinite(total)) || any(abs(total)>4096)) break;
+    const float4 now = float4(source_at.x/DepthSize.x*2-1,1-source_at.y/DepthSize.y*2,source_z,1);
+    const float4 camera_before = current_history_transform(now,8);
+    if (!all(isfinite(camera_before)) || camera_before.w <= 1e-8) break;
+    const float2 before_at = float2((camera_before.x/camera_before.w+1)*.5*DepthSize.x,
+                                    (1-camera_before.y/camera_before.w)*.5*DepthSize.y);
+    const float2 camera = before_at-source_at;
+    // Preserve camera-attached/HUD and static subpixel detail on the old path.
+    // A half native interval below half a colour pixel has no useful deformation.
+    if (length(camera)>LockedCameraTexels && length(total)<LockedRatio*length(camera)) break;
+    if (length((total-camera)*float2(ColorSize)/float2(DepthSize)) < 1.0) break;
+    const float2 old_at = source_at + total;
+    const int2 old_t = int2(floor(old_at-CurrentHistoryData[14].zw));
+    if (any(old_t<0) || any(old_t>=int2(DepthSize))) break;
+    const float old_z = NativePreviousDepth.Load(int3(old_t,0));
+    if (!isfinite(old_z) || old_z<=SkyDepth || old_z>=LockedDepth) break;
+    const float4 old = float4(old_at.x/DepthSize.x*2-1,1-old_at.y/DepthSize.y*2,old_z,1);
+    const float nw = dot(now,CurrentHistoryData[12]), ow = dot(old,CurrentHistoryData[13]);
+    if (!isfinite(nw) || !isfinite(ow) || nw<=1e-8 || ow<=1e-8) break;
+    // Divide by homogeneous VIEW W before mixing: averaging NDC/reversed
+    // depths would give the wrong depth for a surface moving toward the camera.
+    const float4 middle = .5*(current_history_transform(now,0)/nw + current_history_transform(old,4)/ow);
+    if (!all(isfinite(middle)) || middle.w<=1e-8) break;
+    previous_at=float2((middle.x/middle.w+1)*.5*DepthSize.x,(1-middle.y/middle.w)*.5*DepthSize.y);
+    const float expected=middle.z/middle.w;
+    if (any(previous_at<0) || any(previous_at>=float2(DepthSize)) || expected<=SkyDepth || expected>=LockedDepth) break;
+    // The SAME existing3% tolerance, now evaluated at the intervening time.
+    if (!surface_agrees(HistoryDepth,previous_at,expected,HistoryDejitter)) break;
+    color=sample_nearest(HistoryColor,previous_at/float2(DepthSize));
+    found=true;
+    } while(false);
+    return found;
+}
+
 void resolve_pixel(uint3 id) {
     g_pick = 0;
     if (any(id.xy >= ColorSize)) return;
@@ -777,6 +835,15 @@ void resolve_pixel(uint3 id) {
                     hole = hole || v == 0;
                 }
             const bool fringe = hole || (nearest != 0 && asfloat(nearest) > asfloat(farthest) * EdgeRatio + FarDepth);
+            // Only surfaces visible in both eyes use the new pull. Bands,
+            // fringes, HUD/near-camera surfaces and unavailable native history
+            // retain their original treatment. No current-eye colour blend.
+            float4 aligned = 0; float2 aligned_at = 0;
+            if (!fringe && current_history(stereo_at, stereo_depth, aligned, aligned_at)) {
+                g_pick=2; g_pick_at=aligned_at; g_pick_word=word; g_pick_tag=TagStereo;
+                WarpedOut[id.xy]=aligned; ResolvedOut[id.xy]=(word&~3u)|TagStereo;
+                return;
+            }
             const bool prefer = (Flags & 4u) != 0 || sky || fringe;
             if (prefer) {
                 float4 previous = 0; uint previous_word = 0;

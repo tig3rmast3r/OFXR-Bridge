@@ -167,7 +167,9 @@ int main() {
     auto exposure = solid(0xff080870u);
     r = f.frame(1, exposure, 0.2F);
     no_cut(r, "exposure-only flash is not a cut");
-    check((r.center & 0xffffffu) == (exposure[0] & 0xffffffu), "history stays recorded without replacing current exposure");
+    // V903 restored the V889 own-eye previous base; exposure alone must
+    // preserve that history rather than impose V890's always-current colour.
+    check((r.center & 0xffffffu) == (red[0] & 0xffffffu), "exposure-only change retains own-eye previous base");
     no_cut(f.frame(0, red, 0.2F), "exposure return is not a cut");
     auto local = red;
     std::fill(local.begin(), local.begin() + width * 7, 0xffffffffu);
