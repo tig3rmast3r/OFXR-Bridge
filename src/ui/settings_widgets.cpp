@@ -903,8 +903,8 @@ bool framewarp(Panel& p) {
             if(!full_osr) {
                 if(draft.advanced_mode)changed|=toggle_row(p,"Clear before framewarp","Clear before framewarp",draft.afw_clear_before_warping,{"Clear before framewarp","Clears the output before warping."});
                 changed|=slider(p,"Ignore motion","Ignore motion",draft.afw_ignore_motion_threshold,0,16,"%.2f",kHelpIgnore);
-                changed|=segmented(p,"Depth dilation","Depth dilation",draft.afw_depth_dilate_mode,{{"Off"},{"Horizontal"},{"Square"}},kHelpDilation);
             }
+            changed|=segmented(p,"Depth dilation","Depth dilation",draft.afw_depth_dilate_mode,{{"Off"},{"Horizontal"},{"Square"}},kHelpDilation);
             disclosure_end();
         }
         changed|=was_open!=draft.luke_advanced;

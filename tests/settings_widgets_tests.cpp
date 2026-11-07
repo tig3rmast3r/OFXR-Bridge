@@ -518,9 +518,17 @@ void actual_widgets() {
     tray.draw();tray.draw(true);
     require(tray.rendered_text.find("AFW shading rate")==std::string::npos &&
         tray.rendered_text.find("Ignore motion")==std::string::npos &&
-        tray.rendered_text.find("Depth dilation")==std::string::npos &&
+        tray.rendered_text.find("Depth dilation")!=std::string::npos &&
         tray.rendered_text.find("Use previous frame (debug only)")!=std::string::npos,
         "Full OSR advanced parameters show only what it uses, Off included");
+    tray.choose("Depth dilation",1,"Horizontal","/Framewarp_");
+    require(snapshot().desired.afw_depth_dilate_mode==1 && snapshot().desired.luke_osr==2,
+        "OSR depth dilation can be selected from the desktop");
+    headset.choose("Depth dilation",2,"Square","/Framewarp_");
+    require(snapshot().desired.afw_depth_dilate_mode==2 && snapshot().desired.luke_osr==2,
+        "OSR depth dilation can be selected from the headset");
+    tray.choose("Depth dilation",0,"Off","/Framewarp_");
+    require(snapshot().desired.afw_depth_dilate_mode==0,"OSR can restore undilated depth");
     tray.activate("/Framewarp_","Use previous frame");tray.draw();tray.draw();
     require(snapshot().desired.afw_mode==1,"Full OSR without the previous frame is the alternate-eye mode");
     tray.activate("/Framewarp_","Use previous frame");tray.draw();tray.draw();
