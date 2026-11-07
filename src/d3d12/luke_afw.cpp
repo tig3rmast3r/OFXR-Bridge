@@ -2682,6 +2682,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 std::copy_n(forward_history.values, 16, in.forward_history);
                 std::copy_n(backward_history.values, 16, in.backward_history);
                 const auto& native_same = impl_->osr_full.history(source_eye);
+                bool adjacent_motion=false;
                 if (guide.previous_opposite_guide && guide.previous_same_native_camera) {
                     const auto identity = [](const auto& frame) noexcept {
                         return OsrFullFrameIdentity{frame.publication, frame.stream, frame.epoch};
@@ -2690,6 +2691,28 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                         identity(guide), identity(history), identity(native_same),
                         identity(*guide.previous_opposite_guide), identity(*guide.previous_same_native_camera),
                         guide.raw_motion_native_span, temporal_camera_valid, guide.reset);
+                    adjacent_motion=osr_full_adjacent_motion_usable(identity(guide),identity(history),
+                        identity(*guide.previous_opposite_guide),guide.raw_motion_native_span,
+                        guide.raw_motion_native_span_confirmed,temporal_camera_valid,guide.reset) &&
+                        osr_full_current_motion_usable(identity(guide),identity(history),identity(native_same),
+                            identity(*guide.previous_opposite_guide),identity(*guide.previous_same_native_camera),
+                            2,temporal_camera_valid,guide.reset);
+                    if(adjacent_motion) {
+                        const auto format=luke_motion_srv_format(guide.motion_vectors->GetDesc().Format);
+                        const auto peer_ms=guide.previous_opposite_guide->frame_time_delta_ms;
+                        adjacent_motion=format!=DXGI_FORMAT_UNKNOWN && std::isfinite(guide.frame_time_delta_ms) &&
+                            std::isfinite(peer_ms) && guide.frame_time_delta_ms>0 && peer_ms>0;
+                        if(adjacent_motion) {
+                            in.adjacent_motion=guide.motion_vectors.Get();
+                            in.adjacent_motion_state=guide.resource_state;
+                            in.adjacent_motion_format=format;
+                            in.current_history_data[60]=float(guide.motion_x+motion_crop_x);
+                            in.current_history_data[61]=float(guide.motion_y+motion_crop_y);
+                            in.current_history_data[62]=1.F;
+                            in.current_history_data[63]=guide.frame_time_delta_ms/(guide.frame_time_delta_ms+peer_ms);
+                        }
+                    }
+                    in.use_current_history_motion=in.use_current_history_motion||adjacent_motion;
                 }
                 if (in.use_current_history_motion) {
                     const Matrix4x4 current_to_history = multiply(multiply(multiply(
@@ -2724,6 +2747,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     std::copy_n(forward_history_previous.values, 16, in.forward_history_previous);
                 }
             }
+            two_frame_capture_timeline("osr_current_motion_interval",in.use_current_history_motion?(in.adjacent_motion?1:2):0,
+                guide.stream,guide.publication,history.publication);
             impl_->osr_full.record(impl_->device.Get(), command_list, in);
             OsrFullHistory kept{};
             kept.publication = guide.publication; kept.stream = guide.stream; kept.epoch = guide.epoch;
@@ -2758,7 +2783,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             // motion eligibility (bit 1); GPU scene state can veto both. b = publication, c = the history
             // frame's publication.
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
-                (static_cast<std::int64_t>(effective_mode) << 8) | (history_usable ? 1 : 0) | (in.use_history_motion ? 2 : 0) | (in.use_current_history_motion ? 4 : 0),
+                (static_cast<std::int64_t>(effective_mode) << 8) | (history_usable ? 1 : 0) | (in.use_history_motion ? 2 : 0) | (in.use_current_history_motion ? 4 : 0) | (in.adjacent_motion ? 8 : 0),
                 1310, guide.publication, history.publication);
             // 1312: the de-jitter applied to the source depth this frame:
             // result = float bits of (window fraction x, y) packed high/low,

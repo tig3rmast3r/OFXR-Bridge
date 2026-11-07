@@ -97,6 +97,7 @@ struct DlssMotionVectorPublication {
     // REAL VR fills its DLSS-fix constants when the list executes, after the
     // evaluation that publishes this guide. Calibration waits for it.
     bool camera_pending{};
+    bool raw_motion_native_span_confirmed{};
 };
 
 // A camera attached to a published frame at its submission.
@@ -229,6 +230,7 @@ struct DlssMotionVectorFrame {
     // placed_motion_rect (x, y, width, height in vector texels, not whole)
     // the part of the vectors that lands on it. MSFS 2024's foveated
     // periphery spreads a few hundred render columns over a whole eye.
+    bool raw_motion_native_span_confirmed{};
     bool placed{};
     std::array<float, 4> placed_motion_rect{};
 };

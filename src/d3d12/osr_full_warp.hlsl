@@ -49,11 +49,13 @@ RWTexture2D<float4> LowerMapOut : register(u7);
 // Resolve only: current motion is bound at t8, not the history's older field.
 // Uniforms: current->history rows0..3, native previous same->history4..7,
 // current->native previous same camera8..11; inverse-projection W columns12/13;
-// row14 = current MV scale.xy, native previous dejitter.zw; row15 reserved.
+// row14 = current MV scale.xy, native previous dejitter.zw;
+// row15 = original N1 field origin.xy, N1 enabled.z, current->peer time fraction.w.
 // rows16..19: native-old source clip -> current peer clip, camera-local.
 // This keeps the old inverse projection while transferring the stereo baseline.
 Buffer<float4> CurrentHistoryData : register(t11);
 Texture2D<float> NativePreviousDepth : register(t12);
+Texture2D<float2> AdjacentMotion : register(t13); // original native current->peer, immutable owned snapshot
 SamplerState LinearClamp : register(s0);
 
 cbuffer Osr : register(b0) {
@@ -780,7 +782,10 @@ bool current_history(float2 source_at, float source_z, float2 target_at, bool st
     if (!isfinite(nw) || !isfinite(ow) || nw<=1e-8 || ow<=1e-8) break;
     // Divide by homogeneous VIEW W before mixing: averaging NDC/reversed
     // depths would give the wrong depth for a surface moving toward the camera.
-    float4 middle = .5*(current_history_transform(now,0)/nw + current_history_transform(old,4)/ow);
+    const bool adjacent=CurrentHistoryData[15].z==1;
+    const float fraction=adjacent?CurrentHistoryData[15].w:.5;
+    float4 middle = adjacent?lerp(current_history_transform(now,0)/nw,current_history_transform(old,4)/ow,fraction):
+        .5*(current_history_transform(now,0)/nw+current_history_transform(old,4)/ow);
     if (!all(isfinite(middle)) || middle.w<=1e-8) break;
     previous_at=float2((middle.x/middle.w+1)*.5*DepthSize.x,(1-middle.y/middle.w)*.5*DepthSize.y);
     if (attached) {
@@ -793,8 +798,21 @@ bool current_history(float2 source_at, float source_z, float2 target_at, bool st
         if (!all(isfinite(a)) || !all(isfinite(b)) || a.w<=1e-8 || b.w<=1e-8) break;
         const float2 pa=float2((a.x/a.w+1)*.5*DepthSize.x,(1-a.y/a.w)*.5*DepthSize.y);
         const float2 pb=float2((b.x/b.w+1)*.5*DepthSize.x,(1-b.y/b.w)*.5*DepthSize.y);
-        previous_at=target_at+.5*(pb-pa);
-        middle=.5*(a/nw+b/ow);
+        previous_at=target_at+fraction*(pb-pa);
+        middle=adjacent?lerp(a/nw,b/ow,fraction):.5*(a/nw+b/ow);
+    }
+    if(adjacent) {
+        // N1 is a direct measured correspondence into THIS eye's last real
+        // colour. Do not half-interpolate its screen position or extrapolate
+        // the previous frame's older field. N2 endpoints above are retained
+        // solely for the same temporal-depth/occlusion guard.
+        uint aw,ah;AdjacentMotion.GetDimensions(aw,ah);
+        const int2 address=t+int2(CurrentHistoryData[15].xy);
+        if(any(address<0)||any(address>=int2(aw,ah)))break;
+        const float2 original=AdjacentMotion.Load(int3(address,0));
+        if(!all(isfinite(original))||any(abs(original)>=65504))break;
+        previous_at=source_at+original*CurrentHistoryData[14].xy+HistoryDejitter-SourceDejitter;
+        if(any(abs(previous_at-source_at)>4096))break;
     }
     const float expected=middle.z/middle.w;
     if (any(previous_at<0) || any(previous_at>=float2(DepthSize)) || expected<=SkyDepth || expected>=LockedDepth) break;

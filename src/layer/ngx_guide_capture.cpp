@@ -962,6 +962,9 @@ public:
         }catch(...) {owner.abort();}
         return true;
     }
+    bool raw_motion_native_span_confirmed(ID3D12Resource* motion) const noexcept {
+        return owner_ && owner_->public_motion_ && motion;
+    }
     std::uint32_t raw_motion_native_span(ID3D12Resource* motion) const noexcept {
         // Owner V602 matched-camera pixel audit verifies the KCD REALVR
         // replacement is N-2 same-eye motion. An unchanged original resource
@@ -1138,7 +1141,10 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     }
     const auto od=output->GetDesc(), mv=motion->GetDesc(), dz=depth->GetDesc();
     DlssMotionVectorPublication g{};
-    if(final_caller_output&&invocation_camera)g.raw_motion_native_span=invocation_camera->raw_motion_native_span(motion.Get());
+    if(final_caller_output&&invocation_camera) {
+        g.raw_motion_native_span=invocation_camera->raw_motion_native_span(motion.Get());
+        g.raw_motion_native_span_confirmed=invocation_camera->raw_motion_native_span_confirmed(motion.Get());
+    }
     // Crimson V561 F8: both retained native fields fit N-2 (same eye), not
     // the adjacent opposite camera advertised by Streamline's clip matrix.
     // Keep the measured field contract separate from camera receipt order.
@@ -1153,13 +1159,14 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
         // whether REAL VR replaced the public call's vectors before this one.
         const auto source=luke_motion_source(PublicMotionScope::outermost_motion(),motion.Get());
         g.raw_motion_native_span=luke_motion_span(source);
+        g.raw_motion_native_span_confirmed=source!=LukeMotionSource::unobserved;
         // a=source (0 unobserved, 1 original N-1, 2 replaced N-2), b=span,
         // c=the evaluation, d=the guide stream. Logged when the source changes.
         static std::atomic_uint reported{~0u};
         if(reported.exchange(static_cast<unsigned>(source),std::memory_order_relaxed)!=static_cast<unsigned>(source))
             log("luke_motion_source",static_cast<unsigned>(source),g.raw_motion_native_span,call,guide_stream);
     }
-    if(observed_motion_span)g.raw_motion_native_span=observed_motion_span;
+    if(observed_motion_span) {g.raw_motion_native_span=observed_motion_span;g.raw_motion_native_span_confirmed=true;}
     g.compose_native_object_history=luke && gta_enhanced_process() && g.raw_motion_native_span==1;
     if(luke&&gta_enhanced_process())
         g.gta_headlock=query_luke_gta_headlock(bridge_flight_logger().enabled());

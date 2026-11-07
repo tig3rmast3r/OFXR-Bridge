@@ -79,7 +79,7 @@ class OsrFullWarp {
     UINT depth_width_{}, depth_height_{}, color_width_{}, color_height_{};
     DXGI_FORMAT format_{DXGI_FORMAT_UNKNOWN};
     static constexpr DXGI_FORMAT kMotionFormat = DXGI_FORMAT_R16G16_FLOAT; // kLukeAfwMotionFormat
-    static constexpr UINT kSrvCount = 13, kUavCount = 8;
+    static constexpr UINT kSrvCount = 14, kUavCount = 8;
     static constexpr UINT kDescriptorsPerBlock = kSrvCount + kUavCount;
     enum Block : UINT { block_clear, block_splat_stereo, block_splat_history, block_splat_offset,
         block_resolve, block_inpaint, block_resolve_map, block_count };
@@ -189,7 +189,8 @@ class OsrFullWarp {
 
     D3D12_GPU_DESCRIPTOR_HANDLE bind(ID3D12Device* device, UINT block,
         const std::array<ID3D12Resource*, kSrvCount>& srvs,
-        const std::array<ID3D12Resource*, kUavCount>& uavs) {
+        const std::array<ID3D12Resource*, kUavCount>& uavs,
+        DXGI_FORMAT adjacent_format=kMotionFormat) {
         auto cpu = heap_->GetCPUDescriptorHandleForHeapStart();
         cpu.ptr += SIZE_T(block) * kDescriptorsPerBlock * increment_;
         auto gpu = heap_->GetGPUDescriptorHandleForHeapStart();
@@ -201,7 +202,7 @@ class OsrFullWarp {
         const DXGI_FORMAT srv_formats[kSrvCount]{DXGI_FORMAT_R32_FLOAT, format_, DXGI_FORMAT_R32_UINT,
             DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_FLOAT, format_, DXGI_FORMAT_R32_UINT, format_,
             kMotionFormat, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT,
-            DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32_FLOAT};
+            DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32_FLOAT, adjacent_format};
         const DXGI_FORMAT uav_formats[kUavCount]{DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, format_,
             DXGI_FORMAT_R32_UINT, format_, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT};
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
@@ -254,7 +255,10 @@ public:
         bool use_history{};
         bool reset_history{};
         bool use_history_motion{};
-        bool use_current_history_motion{}; // contiguous native span2 only
+        bool use_current_history_motion{}; // exact native endpoints; N1 has a separate original field
+        ID3D12Resource* adjacent_motion{}; // immutable original N1 field, not composed same-eye motion
+        D3D12_RESOURCE_STATES adjacent_motion_state{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+        DXGI_FORMAT adjacent_motion_format{kMotionFormat};
         float current_history_data[80]{}; // shader CurrentHistoryData rows0..19
         float forward_stereo[16]{};           // source clip -> destination clip
         float forward_history[16]{};          // history clip -> destination clip
@@ -422,6 +426,7 @@ public:
             constants.flags |= 256u;
             barriers.track(history_depth_[source_eye], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             if (!motion_readable) barriers.transition(in.source_motion, in.source_motion_state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            if(in.adjacent_motion) barriers.transition(in.adjacent_motion,in.adjacent_motion_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         barriers.track(stereo_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         barriers.track(history_splat_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -432,22 +437,24 @@ public:
         const std::array<ID3D12Resource*,kSrvCount> resolve_srvs{in.source_depth,in.source_color,stereo_.resource.Get(),history_splat_.resource.Get(),
              in.use_history?history_depth.resource.Get():nullptr,in.use_history?history_color.resource.Get():nullptr,
              nullptr,nullptr,current_motion?in.source_motion:nullptr,history_offset_.resource.Get(),lower?lower_map_.resource.Get():nullptr,
-             current_motion?current_history_data_.Get():nullptr,current_motion?history_depth_[source_eye].resource.Get():nullptr};
+             current_motion?current_history_data_.Get():nullptr,current_motion?history_depth_[source_eye].resource.Get():nullptr,
+             current_motion?in.adjacent_motion:nullptr};
         if(lower){
             barriers.track(lower_map_,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);barriers.flush(list);
             auto map_srvs=resolve_srvs;map_srvs[10]=nullptr;
             dispatch(list,resolve_map_.Get(),bind(device,block_resolve_map,map_srvs,
-                {nullptr,nullptr,warped_.resource.Get(),resolved_.resource.Get(),nullptr,nullptr,nullptr,lower_map_.resource.Get()}),constants,(color_width_+1)/2,(color_height_+1)/2);
+                {nullptr,nullptr,warped_.resource.Get(),resolved_.resource.Get(),nullptr,nullptr,nullptr,lower_map_.resource.Get()},in.adjacent_motion_format),constants,(color_width_+1)/2,(color_height_+1)/2);
             barriers.uav(warped_.resource.Get());barriers.uav(resolved_.resource.Get());
             barriers.track(lower_map_,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);barriers.flush(list);
         }
         dispatch(list,lower?resolve_lower_.Get():resolve_.Get(),bind(device,block_resolve,resolve_srvs,
-            {nullptr,nullptr,warped_.resource.Get(),resolved_.resource.Get()}),constants,color_width_,color_height_);
+            {nullptr,nullptr,warped_.resource.Get(),resolved_.resource.Get()},in.adjacent_motion_format),constants,color_width_,color_height_);
         mark(4);
         // 4. inpaint
         if (current_motion) {
             barriers.track(history_depth_[source_eye], D3D12_RESOURCE_STATE_COMMON);
             if (!motion_readable) barriers.transition(in.source_motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, in.source_motion_state);
+            if(in.adjacent_motion) barriers.transition(in.adjacent_motion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,in.adjacent_motion_state);
         }
         barriers.track(warped_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         barriers.track(resolved_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);

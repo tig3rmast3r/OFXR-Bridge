@@ -755,6 +755,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->camera_frame_token_valid = publication.camera_frame_token_valid;
         frame->native_production_sequence = publication.native_production_sequence;
         frame->raw_motion_native_span = publication.raw_motion_native_span;
+        frame->raw_motion_native_span_confirmed = publication.raw_motion_native_span_confirmed;
         frame->compose_native_object_history = publication.compose_native_object_history;
         frame->gta_headlock=publication.gta_headlock;
         frame->camera_pending = publication.camera_pending && !publication.camera_data_valid;

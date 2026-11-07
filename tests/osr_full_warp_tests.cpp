@@ -30,6 +30,18 @@ int main() {
     check(osr_full_history_usable(3, 110, 100, 100, 10), "age limit is a parameter");
     check(xrfg::osr_full_current_motion_usable(103,102,101,101,2,true,false,true), "current vectors exact contiguous span2");
     check(!xrfg::osr_full_current_motion_usable(103,102,101,101,1,true,false,true), "span1 not half interpolated");
+    {
+        using I=xrfg::OsrFullFrameIdentity;
+        const I cur{103,11,3},peer{102,22,4};
+        check(xrfg::osr_full_adjacent_motion_usable(cur,peer,peer,1,true,true,false),"confirmed direct N1 accepts exact peer own identity");
+        check(!xrfg::osr_full_adjacent_motion_usable(cur,peer,peer,1,false,true,false),"unobserved default N1 never activates");
+        check(!xrfg::osr_full_adjacent_motion_usable(cur,peer,peer,2,true,true,false),"N2 never uses direct path");
+        check(!xrfg::osr_full_adjacent_motion_usable(cur,peer,{102,22,5},1,true,true,false),"peer epoch mismatch rejects direct");
+        check(!xrfg::osr_full_adjacent_motion_usable(cur,peer,{102,11,3},1,true,true,false),"peer producer mismatch rejects direct");
+        check(!xrfg::osr_full_adjacent_motion_usable(cur,{100,22,4},{100,22,4},1,true,true,false),"peer gap rejects direct");
+        check(!xrfg::osr_full_adjacent_motion_usable(cur,peer,peer,1,true,false,false),"missing native cameras reject direct");
+        check(!xrfg::osr_full_adjacent_motion_usable(cur,peer,peer,1,true,true,true),"reset rejects direct");
+    }
     check(!xrfg::osr_full_current_motion_usable(103,100,101,101,2,true,false,true), "peer gap rejects current pull");
     check(!xrfg::osr_full_current_motion_usable(103,102,99,99,2,true,false,true), "native gap rejects current pull");
     check(!xrfg::osr_full_current_motion_usable(103,102,101,99,2,true,false,true), "native camera identity must match stored depth");

@@ -31,6 +31,17 @@ constexpr bool osr_full_current_motion_usable(std::uint64_t current,
 struct OsrFullFrameIdentity {
     std::uint64_t publication{}, stream{}, epoch{};
 };
+// Original N1 vectors already point at the real peer history. Never infer this
+// contract from the default span1 value of an unobserved producer.
+constexpr bool osr_full_adjacent_motion_usable(OsrFullFrameIdentity current,
+    OsrFullFrameIdentity peer, OsrFullFrameIdentity expected_peer,
+    unsigned native_span, bool confirmed, bool temporal_valid, bool reset) noexcept {
+    return confirmed && native_span==1 && temporal_valid && !reset &&
+        current.publication>2 && current.stream && current.epoch &&
+        peer.publication==current.publication-1 && peer.stream && peer.epoch &&
+        peer.publication==expected_peer.publication && peer.stream==expected_peer.stream &&
+        peer.epoch==expected_peer.epoch;
+}
 constexpr bool osr_full_current_motion_usable(OsrFullFrameIdentity current,
     OsrFullFrameIdentity peer, OsrFullFrameIdentity same,
     OsrFullFrameIdentity expected_peer, OsrFullFrameIdentity expected_same,

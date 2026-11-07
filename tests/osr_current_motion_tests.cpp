@@ -59,7 +59,7 @@ void save(Fixture& f,unsigned eye,const std::vector<UINT>& color,float z,ID3D12R
     xrfg::OsrFullHistory kept{};kept.publication=identity.publication;kept.stream=identity.stream;kept.epoch=identity.epoch;
     f.warp.record_history_update(f.list.Get(),in,kept);submit(f);f.warp.commit();
 }
-void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=false,bool zero=false,bool hard_near=false,bool reverse=false,bool screen_locked=false,float history_scale=1.F) {
+void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=false,bool zero=false,bool hard_near=false,bool reverse=false,bool screen_locked=false,float history_scale=1.F,bool adjacent=false) {
     Fixture f;std::vector<UINT> previous(width*height),current(width*height),motion(width*height,0);
     for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
         previous[y*width+x]=grey(35+(x*7+y*11)%90);
@@ -75,7 +75,7 @@ void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=fa
         same_id{publication-2,streams[eye],epochs[eye]},peer_id{publication-1,streams[1-eye],epochs[1-eye]};
     save(f,eye,previous,invalid_native?.9F:native_z,field.Get(),same_id);
     save(f,1-eye,previous,middle_z,field.Get(),peer_id);
-    const int dx=zero?0:(reverse?-2:2),dy=zero?0:(reverse?1:-1);
+    const int dx=zero?0:(adjacent?(reverse?-3:3):(reverse?-2:2)),dy=zero?0:(adjacent?(reverse?-2:2):(reverse?1:-1));
     for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
         const auto sx=std::clamp(int(x)+dx,0,int(width)-1),sy=std::clamp(int(y)+dy,0,int(height)-1);
         current[y*width+x]=previous[sy*width+sx]^0x00100000u;
@@ -88,6 +88,7 @@ void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=fa
     in.use_current_history_motion=xrfg::osr_full_current_motion_usable(current_id,
         identity(f.warp.history(1-eye)),identity(f.warp.history(eye)),peer_id,same_id,2,true,false);
     check(in.use_current_history_motion,"production gate activates actual A/B/A native identities BEFORE GPU test");
+    if(adjacent)check(xrfg::osr_full_adjacent_motion_usable(current_id,peer_id,peer_id,1,true,true,false),"direct original interval uses independent exact peer gate");
     in.locked_depth=hard_near?.6F:2.F;
     for(unsigned i=0;i<4;++i) for(unsigned m:{0u,1u,2u,4u})in.current_history_data[m*16+i*5]=1;
     if(screen_locked)in.current_history_data[32+12]=24.F/float(width);
@@ -96,6 +97,18 @@ void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=fa
     // Reversed perspective: clip->view homogeneous W = depth (hard_near=1).
     in.current_history_data[50]=in.current_history_data[54]=1;
     in.current_history_data[56]=in.current_history_data[57]=1;
+    ComPtr<ID3D12Resource> original;
+    if(adjacent) {
+        original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+        std::vector<UINT> raw(width*height,0x7bff7bffu);
+        for(UINT y=3;y<height;++y)for(UINT x=7;x<width;++x)
+            raw[y*width+x]=zero?0u:(reverse?0xc000c200u:0x40004200u);
+        begin(f);f.upload(original.Get(),raw.data());submit(f);
+        in.adjacent_motion=original.Get();
+        in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;
+        in.current_history_data[60]=7;in.current_history_data[61]=3;
+        in.current_history_data[62]=1;in.current_history_data[63]=.5F;
+    }
     const std::vector<float> depths(width*height,current_z);
     const auto output=render_with_inputs(f,in,current,depths);
     if(invalid_native||zero||hard_near) {
@@ -220,6 +233,11 @@ int main() {
         current_vectors(eye,lower,.2F,false,false,false,true,true);
         current_vectors(eye,lower,.2F,false,true,false,false,true);
         current_vectors(eye,lower,.2F,false,false,false,false,false,1.125F);
+        current_vectors(eye,lower,.2F,false,false,false,false,false,1.F,true);
+        current_vectors(eye,lower,.25F,false,false,false,false,false,1.F,true);
+        current_vectors(eye,lower,.2F,false,false,false,true,false,1.F,true);
+        current_vectors(eye,lower,.25F,true,false,false,false,false,1.F,true);
+        current_vectors(eye,lower,.8F,false,false,true,false,false,1.F,true);
         transported_depth(eye,lower);
         trusted_edge(eye,lower,0);trusted_edge(eye,lower,1);trusted_edge(eye,lower,2);
     }
