@@ -749,6 +749,43 @@ float4 current_history_transform(float4 p, uint first) {
     return p.x * CurrentHistoryData[first] + p.y * CurrentHistoryData[first+1] +
            p.z * CurrentHistoryData[first+2] + p.w * CurrentHistoryData[first+3];
 }
+// Compare N1 motion in the SAME peer head pose before deciding whether a
+// surface follows the gameplay camera. Comparing native source pixels instead
+// mixes head rotation into object motion and can split one car at the ratio
+// boundary. Original N1 correspondence does not need an interpolated N2 depth
+// when both N1 surfaces agree in this camera-local reference.
+bool adjacent_local_history(float2 source_at,float source_z,bool strict_surface,
+    out float4 color,out float2 previous_at) {
+    color=0;previous_at=0;
+    bool found=false;
+    [unroll] do {
+    if(CurrentHistoryData[15].z!=1)break;
+    const int2 t=int2(floor(source_at-SourceDejitter));
+    uint aw=0,ah=0;AdjacentMotion.GetDimensions(aw,ah);
+    const int2 address=t+int2(CurrentHistoryData[15].xy);
+    if(any(address<0)||any(address>=int2(aw,ah)))break;
+    const float2 original=AdjacentMotion.Load(int3(address,0));
+    if(!all(isfinite(original))||any(abs(original)>=65504))break;
+    const float2 at=source_at+original*CurrentHistoryData[14].xy+HistoryDejitter-SourceDejitter;
+    if(any(abs(at-source_at)>4096)||any(at<0)||any(at>=float2(DepthSize)))break;
+    const float4 now=float4(source_at.x/DepthSize.x*2-1,1-source_at.y/DepthSize.y*2,source_z,1);
+    const float4 peer=mul(now,Forward);
+    const float4 history_camera=current_history_transform(now,0);
+    if(!all(isfinite(peer))||!all(isfinite(history_camera))||peer.w<=1e-8||history_camera.w<=1e-8)break;
+    const float2 peer_at=float2((peer.x/peer.w+1)*.5*DepthSize.x,(1-peer.y/peer.w)*.5*DepthSize.y);
+    const float2 camera_at=float2((history_camera.x/history_camera.w+1)*.5*DepthSize.x,
+                                  (1-history_camera.y/history_camera.w)*.5*DepthSize.y);
+    const float camera_length=length(camera_at-peer_at);
+    if(camera_length<=LockedCameraTexels||length(at-peer_at)>=LockedRatio*camera_length)break;
+    const float expected=peer.z/peer.w;
+    if(!isfinite(expected)||expected<=SkyDepth||expected>=LockedDepth)break;
+    if(!surface_agrees(HistoryDepth,at,expected,HistoryDejitter))break;
+    [branch] if(strict_surface&&!surface_quad_agrees(HistoryDepth,at,expected,HistoryDejitter))break;
+    color=sample_nearest(HistoryColor,at/float2(DepthSize));previous_at=at;
+    found=true;
+    } while(false);
+    return found;
+}
 bool current_history(float2 source_at, float source_z, float2 target_at, bool strict_surface,
     out float4 color, out float2 previous_at, out bool screen_locked) {
     color = 0; previous_at = 0; screen_locked = false;
@@ -759,6 +796,9 @@ bool current_history(float2 source_at, float source_z, float2 target_at, bool st
     [branch] if(strict_surface && !surface_quad_agrees(SourceDepth,source_at,source_z,SourceDejitter)) break;
     const int2 t = int2(floor(source_at - SourceDejitter));
     if (any(t < 0) || any(t >= int2(DepthSize))) break;
+    [branch] if(adjacent_local_history(source_at,source_z,strict_surface,color,previous_at)) {
+        screen_locked=true;found=true;break;
+    }
     const float2 total = HistoryMotion.Load(int3(t,0)) * CurrentHistoryData[14].xy;
     if (!all(isfinite(total)) || any(abs(total)>4096)) break;
     const float4 now = float4(source_at.x/DepthSize.x*2-1,1-source_at.y/DepthSize.y*2,source_z,1);

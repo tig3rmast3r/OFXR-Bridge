@@ -3,6 +3,8 @@
 #define main retained_scene_cut_main
 #include "osr_scene_cut_tests.cpp"
 #undef main
+#include <bit>
+#include <cmath>
 
 namespace {
 UINT grey(unsigned value) { return 0xff000000u | value | (value << 8) | (value << 16); }
@@ -219,6 +221,56 @@ void trusted_edge(unsigned eye,bool low,unsigned refusal) {
     std::printf("trusted edge eye=%u lower=%u refusal=%u changed=%u PASS\n",eye,low,refusal,differences);
 }
 
+// The object follows the gameplay camera while the head rolls in either
+// direction. Native N2 endpoint is unavailable; original N1 and this eye's N1
+// depth are valid. Distinct source colour prevents a pure-stereo shortcut.
+void adjacent_head_rotation(unsigned eye,bool low,bool reverse,unsigned refusal) {
+    Fixture f;std::vector<UINT> old(width*height),current(width*height),zero(width*height),raw(width*height);
+    for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
+        old[y*width+x]=grey(35+(x*7+y*11)%90);current[y*width+x]=old[y*width+x]^0x00100000u;
+    }
+    warm(f,old);auto composed=f.texture(DXGI_FORMAT_R16G16_FLOAT),original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    begin(f);f.upload(composed.Get(),zero.data());submit(f);
+    save(f,eye,old,.9F,composed.Get(),{101,11,3});
+    save(f,1-eye,old,refusal==1?.4F:.2F,composed.Get(),{102,22,4});
+    auto in=inputs(f,eye);in.lower_quality=low;in.source_motion=composed.Get();in.adjacent_motion=original.Get();
+    in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;in.locked_depth=.6F;
+    in.use_current_history_motion=xrfg::osr_full_adjacent_motion_usable({103,11,3},{102,22,4},{102,22,4},1,true,true,false);
+    const float angle=reverse?-.12F:.12F,c=std::cos(angle),s=std::sin(angle);
+    in.forward_stereo[0]=c;in.forward_stereo[1]=s;in.forward_stereo[4]=-s;in.forward_stereo[5]=c;
+    in.backward_source[0]=c;in.backward_source[1]=-s;in.backward_source[4]=s;in.backward_source[5]=c;
+    for(unsigned m:{0u,1u,2u,4u})for(unsigned i=0;i<4;++i)in.current_history_data[m*16+i*5]=1;
+    std::copy_n(in.forward_stereo,16,in.current_history_data);
+    in.current_history_data[13]=.4F; // full N1 camera motion AFTER factoring the head rotation
+    in.current_history_data[50]=in.current_history_data[54]=1;
+    in.current_history_data[56]=in.current_history_data[57]=1;in.current_history_data[62]=1;in.current_history_data[63]=.5F;
+    const auto half=[](float v)->UINT {
+        const auto b=std::bit_cast<UINT>(v);const int exp=int((b>>23)&255)-127+15;
+        if(exp<=0)return (b>>16)&0x8000;
+        return ((b>>16)&0x8000)|UINT(exp<<10)+(((b&0x7fffff)+0x1000)>>13);
+    };
+    for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
+        const float px=(x+.5F)/width*2-1,py=1-(y+.5F)/height*2;
+        const float tx=(px*c-py*s+1)*.5F*width,ty=(1-px*s-py*c)*.5F*height;
+        raw[y*width+x]=half(tx-(x+.5F)+2)|half(ty-(y+.5F)-1)<<16;
+    }
+    if(refusal==2)std::fill(raw.begin(),raw.end(),0x7bff7bffu);
+    begin(f);f.upload(original.Get(),raw.data());submit(f);
+    const std::vector<float> depths(width*height,refusal==3?.8F:.2F);
+    const auto output=render_with_inputs(f,in,current,depths);
+    in.use_current_history_motion=false;const auto legacy=render_with_inputs(f,in,current,depths);
+    if(refusal)check(output==legacy,"nearer N1 surface, invalid original flow and hard-near retain guarded fallback");
+    else {
+        unsigned changed=0;
+        for(UINT y=16;y<height-16;++y)for(UINT x=28;x<width-28;++x) {
+            check(output[y*width+x]==old[(y-1)*width+x+2],"head-compensated N1 reads exact own-eye colour");
+            changed+=output[y*width+x]!=legacy[y*width+x];
+        }
+        check(changed>0,"head rotation fixture must reject old N2-dependent selection");
+    }
+    std::printf("N1 head rotation eye=%u lower=%u reverse=%u refusal=%u PASS\n",eye,low,reverse,refusal);
+}
+
 }
 int main() {
     for(unsigned eye:{0u,1u})for(bool lower:{false,true}) {
@@ -240,6 +292,8 @@ int main() {
         current_vectors(eye,lower,.8F,false,false,true,false,false,1.F,true);
         transported_depth(eye,lower);
         trusted_edge(eye,lower,0);trusted_edge(eye,lower,1);trusted_edge(eye,lower,2);
+        adjacent_head_rotation(eye,lower,false,0);adjacent_head_rotation(eye,lower,true,0);
+        for(unsigned refusal:{1u,2u,3u})adjacent_head_rotation(eye,lower,false,refusal);
     }
     std::puts("OSR current native vectors: both eyes/qualities, own-eye colour, temporal depth and conservative fallbacks PASS");return 0;
 }
