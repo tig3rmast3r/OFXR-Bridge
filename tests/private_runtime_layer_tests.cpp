@@ -577,12 +577,13 @@ int main(int argc,char** argv) {
     const bool deep=route.starts_with("deep-");if(deep)route=route.substr(5);
     const bool toggling=route.starts_with("toggle-");if(toggling)route=route.substr(7);
     const bool blocked=route.starts_with("blocked-");if(blocked)route=route.substr(8);
+    const bool layout_alternation=route.starts_with("layout-");if(layout_alternation)route=route.substr(7);
     const bool sole_prefix=route.starts_with("solo-");if(sole_prefix)route=route.substr(5);
     const bool sole=sole_prefix || steady_memory;
     const bool canonical=route.starts_with("canonical-");if(canonical)route=route.substr(10);
     const bool pooled=route.starts_with("pooled-");if(pooled)route=route.substr(7);
     const bool unpooled=route.starts_with("unpooled-");if(unpooled)route=route.substr(9);
-    const bool split_eyes=pooled || unpooled || rife_msfs;
+    const bool split_eyes=pooled || unpooled || rife_msfs || layout_alternation;
     const bool separate_queue=route.starts_with("separate-");if(separate_queue)route=route.substr(9);
     int a{},b{};if(route.size()>3 && route[route.size()-3]=='-'){a=route[route.size()-2]-'0';b=route.back()-'0';route.resize(route.size()-3);}
     const bool switching=route=="switch";if(switching)route="new";
@@ -650,6 +651,7 @@ int main(int argc,char** argv) {
         auto desired=xrfg::autonomous::snapshot().desired;
         xrfg::autonomous::select_generation(desired,route=="fsr"?1:route=="dlssg"?2:route=="hybrid"?3:0,
             route=="ref"?1:route=="new"?2:route=="djules"?3:0);
+        if(layout_alternation && route=="hybrid")desired.hybrid_backend=2;
         desired.enabled=!steady_memory;desired.pacing_mode=adaptive_framework?0:1;
         desired.lower_vram=b;desired.separate_synthesis=a;
         desired.motion_vectors=route=="fsr" || route=="hybrid" || route=="dlssg";
@@ -948,7 +950,7 @@ int main(int argc,char** argv) {
         state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;
         state->nvidia_new_route=false;state->djules_route=false;
     }
-    if(route=="hybrid"){state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;state->hybrid_requested=true;state->nvidia_options.hybrid=true;state->nvidia_new_route=false;}
+    if(route=="hybrid"){state->optical_flow_backend=layout_alternation?xrfg::D3D12OpticalFlowBackend::nvidia:xrfg::D3D12OpticalFlowBackend::fidelity_fx;state->hybrid_requested=true;state->nvidia_options.hybrid=true;state->nvidia_new_route=layout_alternation;}
     if(publication_budget) {
         state->luke_afw_enabled=true;state->luke_outlaws_preframe=outlaws_budget;
         state->luke_shared_swapchains=shared_budget || (outlaws_budget && !unshared_budget);
@@ -1138,7 +1140,20 @@ int main(int argc,char** argv) {
         xr_ok(layer_create_swapchain_impl(state->handle,&info,&right),"separate right-eye application chain");
         f.create_state=std::move(saved);
         for(auto& image:right_images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
-        xr_ok(layer_enumerate_swapchain_images_impl(right,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(right_images.data())),"right-eye capture setup");
+        if(native12)xr_ok(layer_enumerate_swapchain_images_impl(right,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(right_images.data())),"right-eye capture setup");
+        else {std::array<XrSwapchainImageD3D11KHR,3> ri;for(auto& i:ri)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};
+            xr_ok(layer_enumerate_swapchain_images_impl(right,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(ri.data())),"right-eye D11 capture setup");}
+    }
+    XrSwapchain packed_layout{};
+    if(layout_alternation) {
+        auto packed_info=info;packed_info.width=image_width*2;packed_info.arraySize=1;
+        auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
+        xr_ok(layer_create_swapchain_impl(state->handle,&packed_info,&packed_layout),"packed projection source");
+        f.create_state=std::move(saved);
+        if(native12){std::array<XrSwapchainImageD3D12KHR,3> pi;for(auto& i:pi)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
+            xr_ok(layer_enumerate_swapchain_images_impl(packed_layout,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(pi.data())),"packed D12 capture setup");}
+        else {std::array<XrSwapchainImageD3D11KHR,3> pi;for(auto& i:pi)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};
+            xr_ok(layer_enumerate_swapchain_images_impl(packed_layout,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(pi.data())),"packed D11 capture setup");}
     }
     XrSwapchain panel_chain{},second_panel_chain{},budget_meter{};
     if(panel_test) {
@@ -1197,7 +1212,10 @@ int main(int argc,char** argv) {
         memory_native_baseline=memory_ledger->bytes(steamvr_vram_test::Kind::native);
     }
     ComPtr<ID3D12Resource> depth,motion;
-    if(vectors) {
+    // Native D11's fixture exposes D11 output identities, not D12 game guide
+    // publications. Exercise Hybrid's missing-guide fallback there; native
+    // D12 publishes real per-eye guides and switches to fallback when packed.
+    if(vectors && !(layout_alternation && !native12)) {
         D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;desc.Width=image_width;desc.Height=image_height;desc.DepthOrArraySize=2;desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;desc.Format=DXGI_FORMAT_R32_FLOAT;
         ok(f.device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&depth)),"owned depth guide");desc.Format=DXGI_FORMAT_R16G16_FLOAT;
@@ -1206,10 +1224,10 @@ int main(int argc,char** argv) {
         auto d=views->GetCPUDescriptorHandleForHeapStart(),m=d;m.ptr+=f.device12->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);f.device12->CreateRenderTargetView(depth.Get(),nullptr,d);f.device12->CreateRenderTargetView(motion.Get(),nullptr,m);
         f.commands([&](ID3D12GraphicsCommandList* list){const float z[]={.5F,.5F,.5F,1},v[]={0,0,0,0};list->ClearRenderTargetView(d,z,0,nullptr);list->ClearRenderTargetView(m,v,0,nullptr);D3D12_RESOURCE_BARRIER b[2]{};for(auto& x:b){x.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;x.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;x.Transition.StateBefore=D3D12_RESOURCE_STATE_RENDER_TARGET;x.Transition.StateAfter=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;}b[0].Transition.pResource=depth.Get();b[1].Transition.pResource=motion.Get();list->ResourceBarrier(2,b);});
     }
-    if(split_eyes && vectors)xrfg::configure_dlss_motion_vector_tracking(true);
+    if(split_eyes && vectors && native12)xrfg::configure_dlss_motion_vector_tracking(true);
     f.release_callback=[&](XrSwapchain handle,unsigned index){
         auto c=find_swapchain(handle);
-        if(split_eyes && vectors) {
+        if(split_eyes && vectors && native12 && handle!=packed_layout) {
             ComPtr<ID3D12GraphicsCommandList> recorded;
             f.commands([&](ID3D12GraphicsCommandList* list) {
                 recorded=list;xrfg::DlssMotionVectorPublication p{};
@@ -1241,7 +1259,7 @@ int main(int argc,char** argv) {
     // SDK limited to one generated frame it would instead test an unrelated
     // prefer_fps scheduling change while repeating the same 2X Fast policy.
     const unsigned benchmark_policy_phases=benchmark_dlssg_sequence && !benchmark_dlssg_transition && state->native_dlss_generated_frames<2?6:7;
-    const unsigned input_count=rife_latency?64:phase_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:rife_msfs?64:panel_lifecycle_test?16:8;
+    const unsigned input_count=layout_alternation?24:rife_latency?64:phase_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:rife_msfs?64:panel_lifecycle_test?16:8;
     if(benchmark_sequence) {
         std::fprintf(stderr,"BENCH policies=%u real_inputs=%u actual_3x_to_2x_transition=%u explicit_prefer_fps_transition_diagnostic=%u memory_sampling=%s\n",
             benchmark_policy_phases,input_count,unsigned(benchmark_policy_phases==7 &&
@@ -1381,7 +1399,17 @@ int main(int argc,char** argv) {
         }
         if(rife_latency)std::this_thread::sleep_for(16ms);
         std::fprintf(stderr,"frame %u write (physical=%u)\n",n,f.real_ends.load());
-        const auto color=((n-1)%8+1)*20;
+        const auto color=layout_alternation?(n%2?40u:176u):((n-1)%8+1)*20;
+        if(layout_alternation && n==12) {
+            std::scoped_lock lock(state->mutex);
+            for(auto& entry:state->projection_streams)
+                if(entry.snapshot.layers.front().views.front().subImage.swapchain==packed_layout)
+                    entry.observed=std::chrono::steady_clock::now()-kProjectionSourceRetention-1ms;
+        }
+        if(layout_alternation && n==15) {
+            clear_generation_continuity(state);
+            check(state->projection_streams.empty(),"structural reset retained cached stream metadata");
+        }
         if(rife_overlap && n==5) {
             // Exercise the real application Release/capture path as well as
             // EndFrame: native D12 Release waits for synthesis_busy itself.
@@ -1394,8 +1422,10 @@ int main(int argc,char** argv) {
             }
             released.get();
             check(captured,"RIFE next source Release/capture waited for old batch delivery admission after GPU completion");
-        } else if(!rife_msfs && !(rife_early_capture_done && n==6))f.write(chain,color);
-        if(split_eyes && !rife_msfs)f.write(right,color+7);
+        } else if(!rife_msfs && !(rife_early_capture_done && n==6) && !(layout_alternation && n%2==0))f.write(chain,color);
+        if(split_eyes && !rife_msfs && !(layout_alternation && n%2==0))f.write(right,color+7);
+        if(layout_alternation && n%2==0)f.write(packed_layout,color);
+        if(layout_alternation && n==11)f.write(chain,color); // one eye skips a released capture
         if(panel_test)f.write(panel_chain,30+n);
         if(panel_budget_test)f.write(second_panel_chain,70+n);
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
@@ -1424,6 +1454,7 @@ int main(int argc,char** argv) {
         }
         std::array<XrCompositionLayerProjectionView,2> views;
         for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={int(image_width),int(image_height)};}
+        if(layout_alternation && n%2==0)for(unsigned eye=0;eye<2;++eye){views[eye].subImage.swapchain=packed_layout;views[eye].subImage.imageArrayIndex=0;views[eye].subImage.imageRect.offset.x=int(eye*image_width);}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
         std::array<XrCompositionLayerQuad,2> panel_quads;
@@ -1519,6 +1550,8 @@ int main(int argc,char** argv) {
                     "closing one panel retired the other visible panel");
             }
         }
+        if(layout_alternation && n>=4)check(state->generation_resume_wall_time.time_since_epoch().count()==0,
+            "alternating valid projection layouts entered a one-second quarantine");
         if(rife_overlap && n==4) {
             std::unique_lock lock(state->presenter_mutex);
             rife_overlap_b_sequence=state->next_source_sequence-1;
@@ -1776,6 +1809,41 @@ int main(int argc,char** argv) {
         }
     }
     stop_continuous_presenter(state);
+    if(layout_alternation) {
+        xr_ok(f.transport->drain(),"alternating layout physical drain");
+        check(f.real_ends>input_count+8,"alternating layouts never generated sustained physical outputs");
+        std::array<unsigned,25> source_outputs{};
+        check(f.pixels.size()==f.right_pixels.size(),"alternating layouts lost an eye");
+        for(std::size_t i=0;i<f.pixels.size();++i) {
+            const auto source=unsigned(std::lround(f.positions[i]+.032F));
+            check(source>0 && source<=input_count,"alternating output lost its own pose/source identity");
+            ++source_outputs[source];
+            const int expected=source%2?40:176;
+            check(std::abs(int(f.pixels[i])-expected)<=2 &&
+                std::abs(int(f.right_pixels[i])-(expected+(source%2?7:0)))<=2,
+                "alternating output paired pixels from different source layouts or eyes");
+        }
+        unsigned split_pairs{},packed_pairs{};
+        for(unsigned source:{11u,12u,15u,16u})check(source_outputs[source]==1,
+            "capture gap, expired metadata or reset incorrectly reused a temporal pair");
+        for(unsigned source=5;source<=input_count;++source)if(source_outputs[source]>=2)
+            (source%2?split_pairs:packed_pairs)++;
+        check(split_pairs>=4 && packed_pairs>=4,"both recurring layouts must independently generate pairs");
+        check(state->projection_streams.size()<=4,"projection metadata cache is unbounded");
+        for(const auto& entry:state->projection_streams) {
+            check(!projection_stream_capture_advanced(entry.snapshot,entry.snapshot),"repeated capture can be paired");
+            auto altered=entry.snapshot;altered.layers.front().views.front().subImage.imageRect.offset.x++;
+            check(!disjoint_projection_streams(entry.snapshot,altered) &&
+                !projection_resource_layout_compatible(entry.snapshot,altered),"changed viewport bypassed the existing layout guard");
+        }
+        f.transport->stop();
+        for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
+        for(auto handle:{chain,right,packed_layout})xr_ok(layer_destroy_swapchain_impl(handle),"alternating source teardown");
+        check(f.chains.empty(),"alternating layouts leaked runtime sources or outputs");
+        {std::scoped_lock lock(g_state_mutex);g_sessions.erase(state->handle);}
+        std::printf("Alternating layouts: split_pairs=%u packed_pairs=%u physical=%u; no quarantine/cross-source pixels/leaks PASS\n",split_pairs,packed_pairs,f.real_ends.load());
+        return 0;
+    }
     if(argc>1 && std::string_view(argv[1])=="rife-msfs-memory") {
         const auto status=xrfg::autonomous::snapshot();const auto& m=status.runtime.video_memory;
         std::fprintf(stderr,"RIFE_MEMORY game=%llu private=%llu reserved=%llu active=%u valid=%u stamp=%llu\n",

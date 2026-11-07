@@ -774,6 +774,58 @@ int main(int argc,char** argv) {
             chains.clear();left.reset();right.reset();dynamic.reset();fixed.reset();session_state.reset();
             return 0;
         }
+        if(mode=="projection-layout-alternation") {
+            // Reduced-size Skyrim reproduction: separate eye sources alternate
+            // with one source carrying both eyes. Exercise shipping admission,
+            // resource identity and capture tickets, not a model of the policy.
+            std::array<ProjectionResourceMapping,2> split{};
+            split[0].application_swapchain=left->handle;
+            split[1].application_swapchain=right->handle;
+            require(ensure_projection_frame_generation(s,split),"initial split projection admission");
+            fill(left->enumerated_d3d12_images[0].Get(),1,80);release(left,false);
+            fill(right->enumerated_d3d12_images[0].Get(),1,160);release(right,false);
+            const auto left_generation=left->frame_generation;
+            const auto right_generation=right->frame_generation;
+            const auto left_history=left->d3d12_history;
+            const auto ticket=*left->last_released_capture;
+            auto packed=source(0x205,1,true);chains.push_back(packed);
+            ProjectionResourceMapping packed_mapping{};packed_mapping.application_swapchain=packed->handle;
+            const std::span<const ProjectionResourceMapping> packed_layout(&packed_mapping,1);
+            const auto packed_generation=packed->frame_generation;
+            const auto allocations=created.load();
+            for(unsigned frame=0;frame<120;++frame) {
+                const std::span<const ProjectionResourceMapping> layout=frame%2
+                    ? std::span<const ProjectionResourceMapping>(split) : packed_layout;
+                static_cast<void>(projection_frame_generation_pending(s,layout));
+                require(ensure_projection_frame_generation(s,layout),"alternating projection admission");
+                require(left->frame_generation==left_generation && right->frame_generation==right_generation &&
+                    packed->frame_generation==packed_generation,"alternating projection rebuilt a live source");
+                require(left->d3d12_history==left_history && left->last_released_capture &&
+                    left->last_released_capture->serial==ticket.serial,"alternating projection lost capture history");
+                require(created==allocations,"alternating projection allocated new runtime outputs");
+            }
+            require(!projection_frame_generation_pending(s,split),"warmed split layout requested rearming");
+            // Advance just the inactive source's age, without sleeping or
+            // changing the production clock. Stable frames must schedule
+            // drained retirement even when no new source needs allocation.
+            packed->last_projection_use=std::chrono::steady_clock::now()-kProjectionSourceRetention-std::chrono::milliseconds(1);
+            require(projection_frame_generation_pending(s,split),"idle source retirement never scheduled");
+            require(ensure_projection_frame_generation(s,split),"idle projection retirement");
+            require(!packed->frame_generation && !packed->projection_history_needed.load() &&
+                left->frame_generation==left_generation && right->frame_generation==right_generation,
+                "idle retirement kept old outputs or retired the active eyes");
+            require(!projection_frame_generation_pending(s,split),"idle retirement repeated on a stable layout");
+            require(projection_frame_generation_pending(s,packed_layout),"retired source cannot be readmitted");
+            require(ensure_projection_frame_generation(s,packed_layout) && packed->frame_generation,
+                "retired source readmission failed");
+            require(left->frame_generation==left_generation && right->frame_generation==right_generation,
+                "readmission evicted recently used eye sources");
+            for(auto& c:chains){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
+            require(created==destroyed,"alternating projection leaked runtime resources");
+            {std::scoped_lock lock(g_state_mutex);g_swapchains.clear();g_sessions.clear();}
+            chains.clear();left.reset();right.reset();dynamic.reset();fixed.reset();session_state.reset();
+            return 0;
+        }
         if(mode=="resource-cleanup") {
             restore_route.previous=xrfg::embedded::snapshot().desired;
             // Three full-size UI histories reproduce UEVR's enumerated targets.

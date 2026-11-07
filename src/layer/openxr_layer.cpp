@@ -634,6 +634,12 @@ struct ProjectionSnapshot {
     std::vector<ProjectionCaptureOrder> capture_order;
 };
 
+struct ProjectionStreamContinuity {
+    ProjectionSnapshot snapshot;
+    std::chrono::steady_clock::time_point observed;
+    std::uint64_t source_sequence{};
+};
+
 // Immutable metadata belongs to the two released AFW images, not the next
 // application's projection. No borrowed extension pointers are retained.
 struct HeldAfwResource {
@@ -921,6 +927,7 @@ struct SessionState {
     std::atomic<std::shared_ptr<xrfg::InterfaceCycle>> interface_active_cycle;
     std::uint64_t next_application_frame_serial{1}; // mutex
     std::optional<ProjectionSnapshot> previous_projection;
+    std::vector<ProjectionStreamContinuity> projection_streams; // mutex; bounded metadata, no GPU ownership
     std::atomic_bool generation_continuity_reset_pending{};
     XrTime generation_resume_display_time{};
     std::chrono::steady_clock::time_point generation_resume_wall_time{};
@@ -2507,6 +2514,8 @@ struct SwapchainState {
     bool private_depth{};
     bool pooled_publication{}; // generated outputs share only this projection source's native sink
     std::atomic_bool projection_history_needed{true}; // unknown until the first actual projection
+    // Protected by mutex; absence from one frame does not abandon an eye source.
+    std::chrono::steady_clock::time_point last_projection_use{};
     SwapchainState(
         std::shared_ptr<SessionState> owner,
         const XrSwapchainCreateInfo& input_create_info)
@@ -4412,9 +4421,19 @@ void log_rife_memory_refusal(const std::shared_ptr<SessionState>& session,HRESUL
     }
 }
 
-// Spends the generation budget on the swapchains this frame actually submits
-// as projection views. Returns false once the runtime has refused one, meaning
-// the caller must release the session's budget and stop generating.
+constexpr auto kProjectionSourceRetention = std::chrono::seconds(2);
+
+// Called with the source mutex held. Luke's alternating-eye admission and
+// generated panels keep their existing lifetime rules.
+[[nodiscard]] bool projection_source_retirable(const SwapchainState& chain,
+    const SessionState& session, std::chrono::steady_clock::time_point now) noexcept {
+    return (!session.luke_afw_enabled || (chain.diagnostic_layer_roles & 3) == 2) &&
+        !chain.panel_source && (chain.last_projection_use.time_since_epoch().count() == 0 ||
+            now - chain.last_projection_use >= kProjectionSourceRetention);
+}
+
+// Spends the generation budget on submitted projections and their recent
+// working set. False means the runtime refused allocation; release the budget.
 [[nodiscard]] bool ensure_projection_frame_generation(
     const std::shared_ptr<SessionState>& session,
     std::span<const ProjectionResourceMapping> mappings) noexcept {
@@ -4423,16 +4442,18 @@ void log_rife_memory_refusal(const std::shared_ptr<SessionState>& session,HRESUL
         return true;
     }
     // The arming caller has drained old submissions and released its retained
-    // repeat. Retire older projection output sets before admitting the new
-    // set (loading/menu -> level), even without a settings revision. AER eye
-    // identities can alternate, so only auxiliary-only AER sources are proven
-    // unused; their temporal eye resources remain admitted.
+    // repeat. Skyrim can alternate separate-eye and packed-eye sources on
+    // consecutive frames. Keep recently projected sources across that switch;
+    // retire genuinely idle sources and never-projected UI histories as before.
+    const auto now = std::chrono::steady_clock::now();
     if (projection_owned_outputs(*session) && !mappings.empty()) {
         for (const auto& chain:find_swapchains(session)) {
             const bool projected=std::any_of(mappings.begin(),mappings.end(),[&](const auto& mapping) {
                 return mapping.application_swapchain==chain->handle;
             });
             if (projected) {
+                std::scoped_lock lock(chain->mutex);
+                chain->last_projection_use = now;
                 chain->projection_history_needed.store(true,std::memory_order_release);
                 continue;
             }
@@ -4440,7 +4461,7 @@ void log_rife_memory_refusal(const std::shared_ptr<SessionState>& session,HRESUL
             bool unused{},had_generation{};
             { std::scoped_lock lock(chain->mutex);
               had_generation=bool(chain->frame_generation);
-              unused=(!session->luke_afw_enabled || (chain->diagnostic_layer_roles&3)==2) && !chain->panel_source; }
+              unused=projection_source_retirable(*chain,*session,now); }
             if (!unused || (!had_generation && !chain->projection_history_needed.load(std::memory_order_acquire)))continue;
             if(had_generation) {
                 drain_swapchain_gpu(chain);
@@ -4454,6 +4475,7 @@ void log_rife_memory_refusal(const std::shared_ptr<SessionState>& session,HRESUL
             chain->last_released_capture.reset();
             chain->last_released_motion_vectors.reset();
             chain->projection_history_needed.store(false,std::memory_order_release);
+            chain->last_projection_use = {};
             if(session->graphics_binding==SessionGraphicsBinding::d3d11 &&
                 !(session->luke_outlaws_preframe && session->luke_outlaws_frame_started))
                 chain->d3d12_history.reset();
@@ -4498,10 +4520,9 @@ void seal_outlaws_initialization(SessionState& state) noexcept {
         1000,handle_value(state.handle),state.luke_outlaws_eager_budget);
 }
 
-// Whether any swapchain this frame submits as a projection view still owes the
-// work ensure_projection_frame_generation would do. Cheap: two locks per
-// mapping and no allocation, and it answers true at most once per swapchain
-// until an explicit provider reconfiguration reopens a refused attempt.
+// Refresh use on every projection frame, including when no allocation is due.
+// Expiry requests the same drained/exclusive arming path as allocation: a
+// stable layout must eventually retire old sources without another switch.
 [[nodiscard]] bool projection_frame_generation_pending(
     const std::shared_ptr<SessionState>& session,
     std::span<const ProjectionResourceMapping> mappings) noexcept {
@@ -4510,15 +4531,30 @@ void seal_outlaws_initialization(SessionState& state) noexcept {
                             std::memory_order_acquire)) {
             return false;
         }
+        const auto now = std::chrono::steady_clock::now();
+        bool pending = false;
         for (const ProjectionResourceMapping& mapping : mappings) {
             const auto swapchain = find_swapchain(mapping.application_swapchain);
             if (!swapchain) {
                 continue;
             }
             std::scoped_lock call_lock(swapchain->call_mutex);
+            std::scoped_lock lock(swapchain->mutex);
+            swapchain->last_projection_use = now;
             if (swapchain->generation_eligible_pending &&
                 !swapchain->generation_declined) {
-                return true;
+                pending = true;
+            }
+        }
+        if (pending) return true;
+        if (projection_owned_outputs(*session) && !mappings.empty()) {
+            for (const auto& chain : find_swapchains(session)) {
+                std::scoped_lock call_lock(chain->call_mutex);
+                std::scoped_lock lock(chain->mutex);
+                if (chain->last_projection_use.time_since_epoch().count() != 0 &&
+                    projection_source_retirable(*chain,*session,now) &&
+                    (chain->frame_generation || chain->projection_history_needed.load(std::memory_order_acquire)))
+                    return true;
             }
         }
         return false;
@@ -6625,6 +6661,7 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         state->interface_waited_cycle.store(nullptr);
         state->interface_active_cycle.store(nullptr);
         state->previous_projection.reset();
+        state->projection_streams.clear();
         state->generation_resume_display_time = 0;
         state->generation_resume_wall_time = {};
         state->minimum_runtime_display_period = 0;
@@ -11991,6 +12028,80 @@ void record_projection_capture_order(
     return true;
 }
 
+[[nodiscard]] bool projection_stream_continuity_enabled(const SessionState& state) noexcept {
+    // Independent director delivery can drain one stream without losing the
+    // other stream's synthesizer anchor. Legacy/AFW/FSR/native FG stay unchanged.
+    return state.private_runtime && single_director_pacing(state) && !state.luke_afw_enabled &&
+        state.optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia && state.nvidia_new_route &&
+        state.nvidia_options.rife_model < 0 &&
+        state.frame_generation_mode != xrfg::D3D12FrameGenerationMode::fsr3 &&
+        state.frame_generation_mode != xrfg::D3D12FrameGenerationMode::native_dlss;
+}
+
+[[nodiscard]] bool disjoint_projection_streams(const ProjectionSnapshot& before,
+    const ProjectionSnapshot& after) noexcept {
+    if (before.layers.size()!=1 || after.layers.size()!=1 || !before.panels.empty() || !after.panels.empty() ||
+        before.layers.front().views.size()!=2 || after.layers.front().views.size()!=2) return false;
+    for (const auto& a:before.layers.front().views)
+        for (const auto& b:after.layers.front().views)
+            if (a.subImage.swapchain==b.subImage.swapchain) return false;
+    return true;
+}
+
+[[nodiscard]] bool projection_stream_capture_advanced(const ProjectionSnapshot& before,
+    const ProjectionSnapshot& after) noexcept {
+    if (before.capture_order.empty() || before.capture_order.size()!=after.capture_order.size()) return false;
+    for (std::size_t i=0;i<before.capture_order.size();++i) {
+        const auto& a=before.capture_order[i];const auto& b=after.capture_order[i];
+        const auto owner=a.history.lock();
+        if (!owner || owner!=b.history.lock() || a.swapchain!=b.swapchain || !a.serial ||
+            b.serial<=a.serial || !a.fence_value || b.fence_value<=a.fence_value) return false;
+    }
+    // Exact consecutive-ticket pairing is still checked by the synthesizer;
+    // a source capture gap primes both eyes instead of interpolating stale data.
+    return true;
+}
+
+// Caller holds state->mutex. Keep only metadata for the recently used working
+// set; the R1 source lifetime bound also applies to this temporal cache.
+void remember_projection_stream(SessionState& state,const ProjectionSnapshot& snapshot,
+    std::uint64_t sequence) {
+    if (!projection_stream_continuity_enabled(state) || snapshot.capture_order.empty()) return;
+    const auto now=std::chrono::steady_clock::now();
+    std::erase_if(state.projection_streams,[&](const auto& entry) {
+        return now-entry.observed>=kProjectionSourceRetention ||
+            !disjoint_projection_streams(entry.snapshot,snapshot);
+    });
+    if (state.projection_streams.size()>=4) state.projection_streams.erase(state.projection_streams.begin());
+    state.projection_streams.push_back({snapshot,now,sequence});
+}
+
+[[nodiscard]] XrResult select_projection_stream(const std::shared_ptr<SessionState>& state,
+    const ProjectionSnapshot& current,std::optional<ProjectionSnapshot>& previous) {
+    // Drain physical/worker descriptors before changing source identity. Keep
+    // each source's GPU history and original poses/times; never pair A with B.
+    auto result=wait_for_synthesis_handoff(state);
+    if (XR_SUCCEEDED(result)) result=wait_for_presenter_idle(state);
+    if (XR_FAILED(result)) return result;
+    std::uint64_t sequence{};
+    {
+        std::scoped_lock lock(state->mutex);
+        const auto now=std::chrono::steady_clock::now();
+        const auto found=std::find_if(state->projection_streams.begin(),state->projection_streams.end(),[&](const auto& entry) {
+            return now-entry.observed<kProjectionSourceRetention &&
+                projection_snapshots_compatible(entry.snapshot,current) &&
+                projection_stream_capture_advanced(entry.snapshot,current);
+        });
+        previous=found==state->projection_streams.end()?std::nullopt:std::optional{found->snapshot};
+        if(found!=state->projection_streams.end())sequence=found->source_sequence;
+        state->previous_projection=previous;
+    }
+    {std::scoped_lock lock(state->presenter_mutex);state->director_anchor_sequence=sequence;}
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+        766,previous?1:0,static_cast<std::uint64_t>(current.display_time),sequence);
+    return XR_SUCCESS;
+}
+
 struct ProjectionResourceDestination {
     XrSwapchain application_swapchain{XR_NULL_HANDLE};
     XrSwapchain destination_swapchain{XR_NULL_HANDLE};
@@ -15648,6 +15759,7 @@ void schedule_generation_quarantine(
             }
             state->generation_continuity_reset_pending.store(true, std::memory_order_release);
             state->previous_projection.reset();
+            state->projection_streams.clear();
         }
         state->generation_steady_state_established = false;
         {
@@ -15681,6 +15793,7 @@ void clear_generation_continuity(
         {
             std::scoped_lock lock(state->mutex);
             state->previous_projection.reset();
+            state->projection_streams.clear();
         }
         { std::scoped_lock lock(state->presenter_mutex); state->director_anchor_sequence = 0; }
         for (const auto& swapchain : find_swapchains(state)) {
@@ -16687,6 +16800,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     {
         std::scoped_lock lock(state->mutex);
         state->previous_projection.reset();
+        state->projection_streams.clear();
         state->generation_resume_display_time = 0;
         if (SUCCEEDED(result)) {
             state->optical_flow_backend = backend;
@@ -17866,12 +17980,17 @@ XrResult layer_end_frame_impl(
         state->luke_f11_down = f11_down;
     }
     const bool source_order_timeline = capture_order_timeline(*state);
-    if (source_order_timeline)
+    if (source_order_timeline || projection_stream_continuity_enabled(*state))
         record_projection_capture_order(current_snapshot, projection_mappings);
     std::optional<ProjectionSnapshot> previous_snapshot;
     {
         std::scoped_lock lock(state->mutex);
         previous_snapshot = state->previous_projection;
+    }
+    if (previous_snapshot && projection_stream_continuity_enabled(*state) &&
+        disjoint_projection_streams(*previous_snapshot,current_snapshot)) {
+        const auto selected=select_projection_stream(state,current_snapshot,previous_snapshot);
+        if (XR_FAILED(selected)) return selected;
     }
     const bool consecutive_captures = source_order_timeline && previous_snapshot &&
         consecutive_projection_captures(*previous_snapshot, current_snapshot);
@@ -18105,8 +18224,11 @@ XrResult layer_end_frame_impl(
             consume_application_frame(state, current_snapshot.display_time,
                                       consume_in_submission_order,
                                       match_latest_by_submission);
+            std::uint64_t source_sequence{};
+            {std::scoped_lock lock(state->presenter_mutex);source_sequence=state->director_anchor_sequence;}
             std::scoped_lock lock(state->mutex);
             state->previous_projection = current_snapshot;
+            remember_projection_stream(*state,current_snapshot,source_sequence);
             state->generation_failure_streak = 0;
         }
         if(XR_SUCCEEDED(handoff)) { frame_call_lock.unlock(); delay_djules_application_release(state); }
@@ -18680,9 +18802,11 @@ XrResult layer_end_frame_impl(
     if (prepared.anchor_is_current) {
         std::scoped_lock lock(state->mutex);
         state->previous_projection = current_snapshot;
+        remember_projection_stream(*state,current_snapshot,0);
     } else if (!prepared.preserve_previous) {
         std::scoped_lock lock(state->mutex);
         state->previous_projection.reset();
+        state->projection_streams.clear();
     }
 
     const bool promote_three_slot_after_inline = !use_continuous_presenter &&

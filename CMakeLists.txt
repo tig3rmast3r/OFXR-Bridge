@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.900.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.901.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1229,6 +1229,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(xrfg_steamvr_queue_choice_gpu PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_steamvr_budget_recovery_gpu COMMAND xrfg_three_slot_d3d12_tests steamvr-budget-recovery)
         add_test(NAME xrfg_all_routes_resource_cleanup_gpu COMMAND xrfg_three_slot_d3d12_tests resource-cleanup)
+        add_test(NAME xrfg_projection_layout_alternation_gpu COMMAND xrfg_three_slot_d3d12_tests projection-layout-alternation)
+        add_test(NAME xrfg_projection_continuity_d11_gpu COMMAND xrfg_private_runtime_layer_tests layout-solo-d11-new)
+        add_test(NAME xrfg_projection_continuity_d12_gpu COMMAND xrfg_private_runtime_layer_tests layout-solo-new)
+        add_test(NAME xrfg_projection_continuity_hybrid_d11_gpu COMMAND xrfg_private_runtime_layer_tests layout-solo-d11-hybrid)
+        add_test(NAME xrfg_projection_continuity_hybrid_d12_gpu COMMAND xrfg_private_runtime_layer_tests layout-solo-hybrid)
+        set_tests_properties(xrfg_projection_continuity_d11_gpu xrfg_projection_continuity_d12_gpu
+            xrfg_projection_continuity_hybrid_d11_gpu xrfg_projection_continuity_hybrid_d12_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        set_tests_properties(xrfg_projection_layout_alternation_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         set_tests_properties(xrfg_all_routes_resource_cleanup_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         set_tests_properties(xrfg_steamvr_budget_recovery_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         add_test(NAME xrfg_steamvr_djules_staged_gpu COMMAND xrfg_three_slot_d3d12_tests steamvr-djules-outputs)

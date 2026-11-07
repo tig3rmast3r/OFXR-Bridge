@@ -18,6 +18,7 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     s.separate_synthesis=desired.separate_synthesis;
     const int canonical_generation=desired.rife_model>=0 ?4:desired.hybrid && desired.frame_generation==0
         ?3:desired.frame_generation;
+    if(canonical_generation==3)s.hybrid_backend=desired.backend;
     s.motion_vectors=desired.motion_vectors; s.frame_generation=canonical_generation;
     s.native_scale=static_cast<int>(desired.native_scale);
     const auto pipeline=xrfg::embedded::djules_pipeline_snapshot();
