@@ -36,6 +36,20 @@ int main() {
     check(!xrfg::osr_full_current_motion_usable(103,102,101,101,2,true,true,true), "reset rejects current pull");
     check(!xrfg::osr_full_current_motion_usable(103,102,101,101,2,true,false,false), "epoch/stream mismatch rejects current pull");
     check(!xrfg::osr_full_current_motion_usable(103,102,101,101,2,false,false,true), "missing temporal camera rejects current pull");
+    {
+        using Id = xrfg::OsrFullFrameIdentity;
+        // Actual stream/publication keys from owner V904 F8. Epochs deliberately
+        // differ across the two eyes: epoch belongs to its OWN producer stream.
+        const Id current{8436,2293874049320ULL,13}, peer{8435,2293874039672ULL,7}, same{8434,current.stream,13};
+        check(xrfg::osr_full_current_motion_usable(current,peer,same,peer,same,2,true,false), "captured A/B/A streams activate current vectors");
+        check(xrfg::osr_full_current_motion_usable(peer,same,{8433,peer.stream,7},same,{8433,peer.stream,7},2,true,false), "opposite eye activates with its OWN epoch");
+        check(!xrfg::osr_full_current_motion_usable(current,peer,same,{8435,current.stream,7},same,2,true,false), "wrong peer producer rejected");
+        check(!xrfg::osr_full_current_motion_usable(current,peer,same,{8435,peer.stream,8},same,2,true,false), "reset peer epoch rejected");
+        check(!xrfg::osr_full_current_motion_usable(current,peer,same,peer,{8434,same.stream,14},2,true,false), "reset native source epoch rejected");
+        check(!xrfg::osr_full_current_motion_usable(current,peer,same,{8433,peer.stream,7},same,2,true,false), "wrong peer publication rejected");
+        check(!xrfg::osr_full_current_motion_usable(current,peer,{8434,peer.stream,7},peer,{8434,peer.stream,7},2,true,false), "same-eye resource cannot belong to peer producer");
+        check(xrfg::osr_full_current_motion_usable({103,10,4},{102,10,4},{101,10,4},{102,10,4},{101,10,4},2,true,false), "single producer remains supported");
+    }
     // Flags.
     check(xrfg::osr_full_flags(false, false) == 0, "no flags");
     check(xrfg::osr_full_flags(true, false) == xrfg::kOsrFullFlagDebug, "debug flag");

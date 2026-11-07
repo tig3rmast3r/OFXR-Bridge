@@ -41,14 +41,6 @@ void warm(Fixture& f,const std::vector<UINT>& color) {
     f.frame(0,color,.2F,false); f.frame(1,color,.2F);
     f.frame(0,color,.2F); f.frame(1,color,.2F);
 }
-void seed_history(Fixture& f,unsigned eye,const std::vector<UINT>& color,
-    const std::vector<float>& depth,const std::vector<UINT>& motion,
-    ID3D12Resource* field) {
-    begin(f); f.upload(f.color.Get(),color.data()); f.upload(f.depth.Get(),depth.data());
-    f.upload(field,motion.data()); auto in=inputs(f,1-eye); in.source_motion=field;
-    xrfg::OsrFullHistory kept{}; kept.publication=20;
-    f.warp.record_history_update(f.list.Get(),in,kept); submit(f); f.warp.commit();
-}
 std::vector<UINT> render_with_inputs(Fixture& f,const xrfg::OsrFullWarp::Inputs& in,
     const std::vector<UINT>& color,const std::vector<float>& depth) {
     begin(f); f.upload(f.color.Get(),color.data()); f.upload(f.depth.Get(),depth.data());
@@ -60,15 +52,11 @@ std::vector<UINT> render_with_inputs(Fixture& f,const xrfg::OsrFullWarp::Inputs&
         static_cast<char*>(ptr)+r.footprint.Offset+y*r.footprint.Footprint.RowPitch,width*4);
     r.buffer->Unmap(0,nullptr); return output;
 }
-std::vector<UINT> render(Fixture& f,unsigned eye,const std::vector<UINT>& color,
-    const std::vector<float>& depth) {
-    return render_with_inputs(f,inputs(f,eye),color,depth);
-}
-void save(Fixture& f,unsigned eye,const std::vector<UINT>& color,float z,ID3D12Resource* field) {
+void save(Fixture& f,unsigned eye,const std::vector<UINT>& color,float z,ID3D12Resource* field, xrfg::OsrFullFrameIdentity identity) {
     begin(f); f.upload(f.color.Get(),color.data());
     const std::vector<float> depths(width*height,z);f.upload(f.depth.Get(),depths.data());
     auto in=inputs(f,eye);in.source_motion=field;
-    xrfg::OsrFullHistory kept{};kept.publication=30;
+    xrfg::OsrFullHistory kept{};kept.publication=identity.publication;kept.stream=identity.stream;kept.epoch=identity.epoch;
     f.warp.record_history_update(f.list.Get(),in,kept);submit(f);f.warp.commit();
 }
 void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=false,bool zero=false,bool hard_near=false,bool reverse=false) {
@@ -80,8 +68,13 @@ void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=fa
     begin(f);f.upload(field.Get(),motion.data());submit(f);
     const float current_z=hard_near?.8F:.2F;
     const float middle_z=2.F/(1.F/current_z+1.F/native_z);
-    save(f,eye,previous,invalid_native?.9F:native_z,field.Get());
-    save(f,1-eye,previous,middle_z,field.Get());
+    using Id=xrfg::OsrFullFrameIdentity;
+    const std::uint64_t streams[2]{2293874049320ULL,2293874039672ULL}, epochs[2]{13,7};
+    const auto publication=eye==0?8436ULL:8435ULL;
+    const Id current_id{publication,streams[eye],epochs[eye]},
+        same_id{publication-2,streams[eye],epochs[eye]},peer_id{publication-1,streams[1-eye],epochs[1-eye]};
+    save(f,eye,previous,invalid_native?.9F:native_z,field.Get(),same_id);
+    save(f,1-eye,previous,middle_z,field.Get(),peer_id);
     const int dx=zero?0:(reverse?-2:2),dy=zero?0:(reverse?1:-1);
     for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
         const auto sx=std::clamp(int(x)+dx,0,int(width)-1),sy=std::clamp(int(y)+dy,0,int(height)-1);
@@ -91,7 +84,10 @@ void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=fa
     }
     begin(f);f.upload(field.Get(),motion.data());submit(f);
     auto in=inputs(f,eye);in.lower_quality=low;in.source_motion=field.Get();
-    in.use_current_history_motion=true;
+    const auto identity=[](const auto& h){return Id{h.publication,h.stream,h.epoch};};
+    in.use_current_history_motion=xrfg::osr_full_current_motion_usable(current_id,
+        identity(f.warp.history(1-eye)),identity(f.warp.history(eye)),peer_id,same_id,2,true,false);
+    check(in.use_current_history_motion,"production gate activates actual A/B/A native identities BEFORE GPU test");
     in.locked_depth=hard_near?.6F:2.F;
     for(unsigned i=0;i<4;++i) for(unsigned m=0;m<3;++m)in.current_history_data[m*16+i*5]=1;
     // Reversed perspective: clip->view homogeneous W = depth (hard_near=1).

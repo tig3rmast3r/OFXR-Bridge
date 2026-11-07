@@ -26,6 +26,26 @@ constexpr bool osr_full_current_motion_usable(std::uint64_t current,
         current > 2 && peer == current-1 && same == current-2 && native_same == same;
 }
 
+// Native A/B/A producers have per-eye streams and per-stream epochs. Match
+// each stored history to ITS immutable producer receipt, never peer to current.
+struct OsrFullFrameIdentity {
+    std::uint64_t publication{}, stream{}, epoch{};
+};
+constexpr bool osr_full_current_motion_usable(OsrFullFrameIdentity current,
+    OsrFullFrameIdentity peer, OsrFullFrameIdentity same,
+    OsrFullFrameIdentity expected_peer, OsrFullFrameIdentity expected_same,
+    unsigned native_span, bool temporal_valid, bool reset) noexcept {
+    const auto matches = [](OsrFullFrameIdentity stored, OsrFullFrameIdentity expected) {
+        return stored.stream != 0 && stored.epoch != 0 &&
+            stored.publication == expected.publication && stored.stream == expected.stream &&
+            stored.epoch == expected.epoch;
+    };
+    return osr_full_current_motion_usable(current.publication, peer.publication,
+        same.publication, expected_same.publication, native_span, temporal_valid, reset,
+        current.stream != 0 && current.epoch != 0 && same.stream == current.stream &&
+        same.epoch == current.epoch && matches(same, expected_same) && matches(peer, expected_peer));
+}
+
 // Reversed depth is proportional to 1 / distance, so a relative tolerance on
 // it is a relative tolerance on distance. A reprojected texel that finds a
 // source depth within this of the expected one belongs to that surface.

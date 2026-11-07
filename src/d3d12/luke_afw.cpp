@@ -2682,12 +2682,15 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 std::copy_n(forward_history.values, 16, in.forward_history);
                 std::copy_n(backward_history.values, 16, in.backward_history);
                 const auto& native_same = impl_->osr_full.history(source_eye);
-                in.use_current_history_motion = osr_full_current_motion_usable(
-                    guide.publication, history.publication, native_same.publication,
-                    guide.previous_same_native_camera ? guide.previous_same_native_camera->publication : 0,
-                    guide.raw_motion_native_span, temporal_camera_valid, guide.reset,
-                    native_same.stream == guide.stream && history.stream == guide.stream &&
-                    native_same.epoch == guide.epoch && history.epoch == guide.epoch);
+                if (guide.previous_opposite_guide && guide.previous_same_native_camera) {
+                    const auto identity = [](const auto& frame) noexcept {
+                        return OsrFullFrameIdentity{frame.publication, frame.stream, frame.epoch};
+                    };
+                    in.use_current_history_motion = osr_full_current_motion_usable(
+                        identity(guide), identity(history), identity(native_same),
+                        identity(*guide.previous_opposite_guide), identity(*guide.previous_same_native_camera),
+                        guide.raw_motion_native_span, temporal_camera_valid, guide.reset);
+                }
                 if (in.use_current_history_motion) {
                     const Matrix4x4 current_to_history = multiply(multiply(multiply(
                         provider_camera.source_clip_to_view, provider_camera.source_view_to_world),
@@ -2727,8 +2730,9 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             std::copy_n(provider_camera.source_clip_to_view.values, 16, kept.camera.clip_to_view.begin());
             // F8 only: retain the actual native endpoint depth BEFORE this
             // list overwrites it with the current source. No production readback.
-            if (in.use_current_history_motion && two_frame_capture_active()) {
+            if (history_usable && two_frame_capture_active()) {
                 for (unsigned eye : {source_eye, peer_eye}) {
+                    if (!impl_->osr_full.history(eye).publication) continue;
                     TwoFrameImageInfo snapshot{};
                     snapshot.stage = eye == source_eye ? "osr_native_previous_depth" : "osr_history_depth";
                     snapshot.stream = guide.stream;
