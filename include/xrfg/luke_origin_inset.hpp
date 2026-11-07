@@ -56,10 +56,11 @@ inline constexpr std::array<unsigned,2> luke_origin_inset_for_title(std::wstring
         origin_title_equal(name,L"u4.exe")||origin_title_equal(name,L"u4-l.exe"))return {256,32};
     return {0,0};
 }
-// DOOM's HDR-to-SDR pass crushes the old 1/16 stamp to an almost uniform
-// 0..3/255 band. Reuse full-white float samples; keep all geometry unchanged.
+// DOOM's HDR-to-SDR pass and GTA scripted camera grading crush the old
+// 1/16 stamp. Reuse full-white float samples; keep geometry/CRC unchanged.
 inline constexpr bool luke_origin_bright_primary_for_title(std::wstring_view name) {
-    return origin_title_equal(name,L"DOOMTheDarkAges.exe");
+    return origin_title_equal(name,L"DOOMTheDarkAges.exe") ||
+        origin_title_equal(name,L"GTA5_Enhanced.exe");
 }
 // Titles whose band sits at the bottom-left: Uncharted draws its night sky
 // and rain over the top of the image after DLSS, covering a top band entirely

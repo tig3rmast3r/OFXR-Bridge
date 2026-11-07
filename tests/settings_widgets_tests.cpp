@@ -515,20 +515,20 @@ void actual_widgets() {
     require(snapshot().desired.luke_osr==0,"headset selects the second legacy AFW entry");
     headset.choose("Reconstruction",1,"OSR","/Framewarp_");
     require(snapshot().desired.luke_osr==2,"headset selects the first OSR entry");
-    tray.draw();tray.draw(true);
-    require(tray.rendered_text.find("AFW shading rate")==std::string::npos &&
-        tray.rendered_text.find("Ignore motion")==std::string::npos &&
-        tray.rendered_text.find("Depth dilation")!=std::string::npos &&
-        tray.rendered_text.find("Use previous frame (debug only)")!=std::string::npos,
-        "Full OSR advanced parameters show only what it uses, Off included");
-    tray.choose("Depth dilation",1,"Horizontal","/Framewarp_");
-    require(snapshot().desired.afw_depth_dilate_mode==1 && snapshot().desired.luke_osr==2,
-        "OSR depth dilation can be selected from the desktop");
-    headset.choose("Depth dilation",2,"Square","/Framewarp_");
-    require(snapshot().desired.afw_depth_dilate_mode==2 && snapshot().desired.luke_osr==2,
-        "OSR depth dilation can be selected from the headset");
+    auto saved_dilate=snapshot().desired;saved_dilate.afw_depth_dilate_mode=2;
+    require(request(saved_dilate),"load old profile with OSR depth dilation");
+    tray.draw();tray.draw(true);headset.draw();headset.draw(true);
+    for(auto* view:{&tray,&headset})require(
+        view->rendered_text.find("AFW shading rate")==std::string::npos &&
+        view->rendered_text.find("Ignore motion")==std::string::npos &&
+        view->rendered_text.find("Depth dilation")==std::string::npos &&
+        view->rendered_text.find("Use previous frame (debug only)")!=std::string::npos,
+        "Full OSR hides dilation on desktop and headset");
+    tray.choose("Reconstruction",2,"AFW","/Framewarp_");tray.draw(true);
+    require(tray.rendered_text.find("Depth dilation")!=std::string::npos &&
+        snapshot().desired.afw_depth_dilate_mode==2,"AFW retains its independent saved dilation");
     tray.choose("Depth dilation",0,"Off","/Framewarp_");
-    require(snapshot().desired.afw_depth_dilate_mode==0,"OSR can restore undilated depth");
+    tray.choose("Reconstruction",1,"OSR","/Framewarp_");
     tray.activate("/Framewarp_","Use previous frame");tray.draw();tray.draw();
     require(snapshot().desired.afw_mode==1,"Full OSR without the previous frame is the alternate-eye mode");
     tray.activate("/Framewarp_","Use previous frame");tray.draw();tray.draw();

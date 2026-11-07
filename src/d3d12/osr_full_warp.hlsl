@@ -749,6 +749,44 @@ float4 current_history_transform(float4 p, uint first) {
     return p.x * CurrentHistoryData[first] + p.y * CurrentHistoryData[first+1] +
            p.z * CurrentHistoryData[first+2] + p.w * CurrentHistoryData[first+3];
 }
+// A static-world N1 correspondence can land on an old foreground occluder.
+// That foreground is not a temporal sample of the newly visible background.
+bool adjacent_history_disoccluded(float2 source_at,float source_z,float2 ndc) {
+    bool stale=false;
+    [unroll] do {
+    if((Flags&256u)==0)break;
+    if(CurrentHistoryData[15].z!=1||SceneState[uint2(4,0)]==0||source_z<=SkyDepth||source_z>=LockedDepth)break;
+    const int2 t=int2(floor(source_at-SourceDejitter));
+    uint aw=0,ah=0;AdjacentMotion.GetDimensions(aw,ah);
+    const int2 address=t+int2(CurrentHistoryData[15].xy);
+    if(any(address<0)||any(address>=int2(aw,ah)))break;
+    const float2 original=AdjacentMotion.Load(int3(address,0));
+    if(!all(isfinite(original))||any(abs(original)>=65504))break;
+    const float2 at=source_at+original*CurrentHistoryData[14].xy+HistoryDejitter-SourceDejitter;
+    if(any(at<0)||any(at>=float2(DepthSize)))break;
+    const float4 now=float4(source_at.x/DepthSize.x*2-1,1-source_at.y/DepthSize.y*2,source_z,1);
+    const float4 camera=current_history_transform(now,0);
+    if(!all(isfinite(camera))||camera.w<=1e-8)break;
+    const float2 camera_at=float2((camera.x/camera.w+1)*.5*DepthSize.x,(1-camera.y/camera.w)*.5*DepthSize.y);
+    if(length(at-camera_at)>LockedCameraTexels)break;
+    const float expected=camera.z/camera.w;
+    if(!isfinite(expected)||expected<=SkyDepth||expected>=LockedDepth)break;
+    const int2 base=int2(floor(at-HistoryDejitter-.5));
+    bool occupied=true;float nearest=1;
+    [unroll] for(int y=0;y<2;++y) [unroll] for(int x=0;x<2;++x) {
+        const float z=HistoryDepth.Load(int3(clamp(base+int2(x,y),int2(0,0),int2(DepthSize)-1),0));
+        occupied=occupied&&isfinite(z)&&z>expected*(1+DepthTolerance)+FarDepth;
+        nearest=min(nearest,z);
+    }
+    if(!occupied)break;
+    // Preserve genuine own-eye foreground hidden from the other eye.
+    if(source_sees_not_farther(ndc,nearest))break;
+    if(!surface_quad_agrees(SourceDepth,source_at,source_z,SourceDejitter))break;
+    stale=true;
+    } while(false);
+    return stale;
+}
+
 // Compare N1 motion in the SAME peer head pose before deciding whether a
 // surface follows the gameplay camera. Comparing native source pixels instead
 // mixes head rotation into object motion and can split one car at the ratio
@@ -906,7 +944,7 @@ void resolve_pixel(uint3 id) {
         // correlation 0.95, the warped other eye 0.70; AFW's output matches
         // its previous frame exactly in fine detail. (Rounds 7-11 applied
         // this only at silhouettes, bands and sky.)
-        if (history) {
+        if (history && !adjacent_history_disoccluded(stereo_at,stereo_depth,ndc)) {
             const float zs = asfloat(word & ~3u);
             const bool sky = zs <= SkyDepth;
             // A silhouette in the destination (depth contrast) or a band next

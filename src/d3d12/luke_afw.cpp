@@ -2286,9 +2286,9 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             native_motion.stereo = native_motion_detail::window_to_guide_transform(
                 as_array(stereo_transform), to_window);
         }
-        // Share the existing explicit depth-dilation choice with Full OSR.
-        // Off preserves its original depth; no automatic dilation is added.
-        const int depth_dilate_mode = settings.depth_dilate_mode;
+        // OSR uses undilated depth, including profiles saved before V912.
+        // Preserve the independent AFW preference when switching engines.
+        const int depth_dilate_mode = full_osr_requested ? 0 : settings.depth_dilate_mode;
         result = impl_->convert_depth(command_list, guide.depth.Get(),
             guide.depth_resource_state,
             guide.depth_x + depth_crop_x, guide.depth_y + depth_crop_y,

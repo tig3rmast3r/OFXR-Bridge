@@ -472,21 +472,22 @@ struct Gpu {
         return upload; // Caller retains until the submitted readback fence completes.
     }
 };
-void doom_hdr_gpu_test() {
+void bright_hdr_gpu_test(bool gta=false) {
     require(xrfg::luke_origin_bright_primary_for_title(L"DOOMTheDarkAges.exe")&&
         xrfg::luke_origin_bright_primary_for_title(L"doomthedarkages.EXE")&&
         !xrfg::luke_origin_bright_primary_for_title(L"TheGreatCircle.exe")&&
-        !xrfg::luke_origin_bright_primary_for_title(L"GTA5_Enhanced.exe")&&
-        !xrfg::luke_origin_bright_primary_for_title(L"Outlaws.exe"),"DOOM-only HDR contrast scope");
+        xrfg::luke_origin_bright_primary_for_title(L"GTA5_Enhanced.exe")&&
+        !xrfg::luke_origin_bright_primary_for_title(L"Outlaws.exe"),"DOOM/GTA-only HDR contrast scope");
     Gpu gpu;
     auto source=gpu.texture(1024,1024,DXGI_FORMAT_R16G16B16A16_FLOAT);
     auto eye=gpu.texture(1024,744,DXGI_FORMAT_R16G16B16A16_FLOAT);
+    const unsigned top=gta?406U:282U;
     xrfg::configure_luke_color_origin_extent(1024,744);
     constexpr std::uint32_t expected=0x12345;
     xrfg::LukeColorOriginRect written{};
     check(xrfg::mark_luke_color_origin(gpu.list.Get(),source.Get(),expected,D3D12_RESOURCE_STATE_COMMON,
         gpu.device.Get(),{},DXGI_FORMAT_UNKNOWN,&written),"DOOM HDR stamp");
-    require(written.x==2&&written.y==282&&written.width==256&&written.height==8,
+    require(written.x==2&&written.y==top&&written.width==256&&written.height==8,
         "DOOM HDR fix changed marker geometry/copy budget");
     D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;
     D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=16384;
@@ -497,7 +498,7 @@ void doom_hdr_gpu_test() {
     D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=source.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     dst.pResource=readback.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     dst.PlacedFootprint.Footprint={DXGI_FORMAT_R16G16B16A16_FLOAT,256,8,1,2048};
-    const D3D12_BOX box{2,282,0,258,290,1};gpu.list->CopyTextureRegion(&dst,0,0,0,&src,&box);
+    const D3D12_BOX box{2,top,0,258,top+8,1};gpu.list->CopyTextureRegion(&dst,0,0,0,&src,&box);
     gpu.transition(source.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
     gpu.crop(source.Get(),eye.Get(),0,140,1024,744);gpu.submit();
     std::uint32_t token{};check(xrfg::read_luke_color_origin(gpu.queue.Get(),eye.Get(),&token,
@@ -941,6 +942,7 @@ void gta_protected_gpu_test() {
     std::fill(chromatic.begin(),chromatic.end(),std::byte{64});
     xrfg::decode_luke_origin_images(std::span(&chromatic_image,1),std::span(&decoded,1));
     require(!decoded.token&&!decoded.ambiguous,"erased RGB invented an identity");
+    bright_hdr_gpu_test(true);
     Gpu gpu;auto source=gpu.texture(2128,1696);
     xrfg::configure_luke_color_origin_extent(1553,1696);
     xrfg::LukeColorOriginRect written{};constexpr std::uint32_t expected=223;
@@ -1012,7 +1014,7 @@ int captured_decode_benchmark(char** argv) {
  std::sort(serial_ms.begin(),serial_ms.end());std::sort(parallel_ms.begin(),parallel_ms.end());std::cout<<"CAPTURED_DECODE serial_ms="<<serial_ms[7]<<" parallel_ms="<<parallel_ms[7]<<" token0="<<expected[0].token<<" token1="<<expected[1].token<<" ambiguous="<<expected[0].ambiguous<<','<<expected[1].ambiguous<<'\n';return 0;
 }
 int main(int argc,char** argv) {
-    try { if(argc==2 && std::string_view(argv[1])=="doom-hdr") {doom_hdr_gpu_test();return 0;}
+    try { if(argc==2 && std::string_view(argv[1])=="doom-hdr") {bright_hdr_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="gta-protected") {gta_protected_gpu_test();return 0;}
         if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();windowed_decode_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }

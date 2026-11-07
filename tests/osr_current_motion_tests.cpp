@@ -271,6 +271,42 @@ void adjacent_head_rotation(unsigned eye,bool low,bool reverse,unsigned refusal)
     std::printf("N1 head rotation eye=%u lower=%u reverse=%u refusal=%u PASS\n",eye,low,reverse,refusal);
 }
 
+// A background point reappears where the previous eye still held the car.
+// N2 depth interpolation alone aliases that old foreground to valid background.
+void adjacent_disocclusion(unsigned eye,bool low,bool moving,bool hidden=false) {
+    Fixture f;const std::vector<UINT> old(width*height,grey(60)),current(width*height,grey(72));
+    const std::vector<UINT> zero(width*height,0),composed(width*height,0x4400u),raw(width*height,moving?0x4200u:0u);
+    warm(f,old);auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT),original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    begin(f);f.upload(field.Get(),zero.data());f.upload(original.Get(),raw.data());submit(f);
+    save(f,eye,old,.3F,field.Get(),{101,11,3});
+    save(f,1-eye,old,.15F,field.Get(),{102,22,4});
+    begin(f);f.upload(field.Get(),composed.data());submit(f);
+    auto in=inputs(f,eye);in.lower_quality=low;in.source_motion=field.Get();
+    in.adjacent_motion=original.Get();in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;
+    in.use_current_history_motion=xrfg::osr_full_adjacent_motion_usable({103,11,3},{102,22,4},{102,22,4},1,true,true,false);
+    for(unsigned m:{0u,1u,2u,4u})for(unsigned i=0;i<4;++i)in.current_history_data[m*16+i*5]=1;
+    in.current_history_data[50]=in.current_history_data[54]=1;
+    in.current_history_data[56]=in.current_history_data[57]=1;in.current_history_data[62]=1;in.current_history_data[63]=.5F;
+    in.locked_depth=.6F;
+    std::vector<float> depths(width*height,.1F);
+    if(hidden) {
+        in.forward_stereo[8]=2;in.backward_source[8]=-2;
+        // At destination x64, the old near surface projects to source x44.8;
+        // a current source occluder there hides genuine own-eye geometry.
+        for(UINT y=0;y<height;++y)for(UINT x=43;x<=46;++x)depths[y*width+x]=.3F;
+    }
+    const auto output=render_with_inputs(f,in,current,depths);
+    if(hidden) {
+        for(UINT y=16;y<height-16;++y)check(output[y*width+64]==grey(60),
+            "genuine own-eye foreground hidden behind source occluder stays protected");
+        return;
+    }
+    for(UINT y=16;y<height-16;++y)for(UINT x=28;x<width-28;++x)
+        check(output[y*width+x]==(moving?grey(60):grey(72)),
+            "newly visible static background rejects old foreground; moving own-eye history stays primary");
+    std::printf("N1 disocclusion eye=%u lower=%u moving=%u PASS\n",eye,low,moving);
+}
+
 }
 int main() {
     for(unsigned eye:{0u,1u})for(bool lower:{false,true}) {
@@ -290,6 +326,7 @@ int main() {
         current_vectors(eye,lower,.2F,false,false,false,true,false,1.F,true);
         current_vectors(eye,lower,.25F,true,false,false,false,false,1.F,true);
         current_vectors(eye,lower,.8F,false,false,true,false,false,1.F,true);
+        adjacent_disocclusion(eye,lower,false);adjacent_disocclusion(eye,lower,true);adjacent_disocclusion(eye,lower,false,true);
         transported_depth(eye,lower);
         trusted_edge(eye,lower,0);trusted_edge(eye,lower,1);trusted_edge(eye,lower,2);
         adjacent_head_rotation(eye,lower,false,0);adjacent_head_rotation(eye,lower,true,0);
