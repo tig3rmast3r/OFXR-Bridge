@@ -130,6 +130,10 @@ public:
         std::unique_lock lock(mutex_);done_.wait(lock,[&]{return pending_==0;});job_={};
     }
 };
+OriginDecodeWorkers& origin_decode_workers() {
+    static auto* workers=new OriginDecodeWorkers;
+    return *workers;
+}
 struct Cache {
     std::mutex mutex;
     std::vector<std::shared_ptr<Uploads>> uploads;
@@ -714,8 +718,7 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
             } catch(...) {for(std::size_t i=worker;i<rows.size();i+=step)rows[i].ambiguous=true;}
         };
         if(total>=64) {
-            static auto* workers=new OriginDecodeWorkers;
-            workers->run([&](unsigned worker) noexcept {decode(worker,4);});
+            origin_decode_workers().run([&](unsigned worker) noexcept {decode(worker,4);});
         } else decode(0,1);
         for(unsigned i=0;i<images.size();++i) {
             // The rows reported are one band: the longest run of decoded rows
@@ -742,17 +745,44 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
             const bool rgba=image.format==DXGI_FORMAT_R8G8B8A8_UNORM||image.format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB||image.format==DXGI_FORMAT_R8G8B8A8_TYPELESS;
             const bool bgra=image.format==DXGI_FORMAT_B8G8R8A8_UNORM||image.format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB||image.format==DXGI_FORMAT_B8G8R8A8_TYPELESS;
             if(!rgba&&!bgra)continue;
-            std::vector<float> row(image.width);
-            for(unsigned channel=0;channel<3;++channel)for(unsigned y=0;y<image.height;++y) {
-                const auto* pixels=image.pixels+y*image.row_pitch;
-                for(unsigned x=0;x<image.width;++x)row[x]=std::to_integer<unsigned char>(pixels[x*4+channel])/255.F;
-                const auto decoded=decode_luke_origin_row(row);
-                result.ambiguous|=decoded.ambiguous;
-                if(decoded.token) {
-                    if(result.token&&result.token!=decoded.token)result.ambiguous=true;
-                    result.token=decoded.token;
-                }
+            // RGB-only recovery must report its band just like luminance.
+            // Otherwise a valid token never learns a row window and every
+            // frame repeats the expensive full scan. Keep all three channels
+            // and all rows in that scan, including conflicting CRC identities.
+            std::vector<LukeColorOriginDecode> rgb_rows(image.height);
+            const auto rgb_decode=[&](unsigned worker,unsigned step) noexcept {
+                try {
+                    std::vector<float> row(image.width);
+                    for(unsigned y=worker;y<image.height;y+=step) {
+                        const auto* pixels=image.pixels+y*image.row_pitch;
+                        auto& found=rgb_rows[y];
+                        for(unsigned channel=0;channel<3;++channel) {
+                            for(unsigned x=0;x<image.width;++x)
+                                row[x]=std::to_integer<unsigned char>(pixels[x*4+channel])/255.F;
+                            const auto decoded=decode_luke_origin_row(row);
+                            found.ambiguous|=decoded.ambiguous;
+                            if(decoded.token) {
+                                if(found.token&&found.token!=decoded.token)found.ambiguous=true;
+                                found.token=decoded.token;
+                            }
+                        }
+                    }
+                } catch(...) {for(unsigned y=worker;y<image.height;y+=step)rgb_rows[y].ambiguous=true;}
+            };
+            if(image.height>=32)origin_decode_workers().run([&](unsigned worker) noexcept {rgb_decode(worker,4);});
+            else rgb_decode(0,1);
+            int run_first=-1,run_last=-1,best_first=-1,best_last=-1;
+            for(unsigned y=0;y<image.height;++y) {
+                const auto& decoded=rgb_rows[y];result.ambiguous|=decoded.ambiguous;
+                if(!decoded.token)continue;
+                if(result.token&&result.token!=decoded.token)result.ambiguous=true;
+                result.token=decoded.token;
+                const auto scan_row=static_cast<int>(y);
+                if(run_first<0||scan_row>run_last+2)run_first=scan_row;
+                run_last=scan_row;
+                if(best_first<0||run_last-run_first>=best_last-best_first) {best_first=run_first;best_last=run_last;}
             }
+            result.first_row=best_first;result.last_row=best_last;
         }
     } catch(...) {for(auto& result:results)result={0,true};}
 }

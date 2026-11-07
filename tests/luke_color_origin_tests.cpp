@@ -917,6 +917,60 @@ void outlaws_protected_gpu_test() {
     }
     std::cout<<"Outlaws protected GPU: "<<checks<<" checks PASS\n";
 }
+// GTA's chromatic pass can destroy luma while each channel retains the CRC.
+// A valid RGB-only result must learn and follow its rows without stale tokens.
+void rgb_windowed_decode_tests() {
+    constexpr unsigned w=800,h=76,pitch=w*4;
+    std::array<std::vector<std::byte>,2> bytes;
+    std::array<xrfg::LukeColorOriginImage,2> images;
+    for(unsigned i=0;i<2;++i) {bytes[i].assign(pitch*h,std::byte{102});
+        images[i]={bytes[i].data(),DXGI_FORMAT_R8G8B8A8_UNORM,w,h,pitch,true};}
+    const auto stamp=[&](unsigned i,unsigned top,std::uint32_t token,int only_channel=-1) {
+        for(unsigned y=top;y<top+8;++y)for(unsigned x=0;x<256;++x) {
+            const bool white=xrfg::luke_origin_white(token,x);
+            auto* pixel=bytes[i].data()+(y*w+100+x)*4;
+            if(only_channel==2)pixel[2]=std::byte(white?130:126);
+            else {
+                pixel[0]=std::byte(white?255:0);
+                // Opposed chromatic grades leave luminance below its edge
+                // contrast, but red retains the exact full CRC barcode.
+                pixel[1]=std::byte(white?90:166);pixel[2]=std::byte{128};
+            }
+        }
+    };
+    stamp(0,32,223);stamp(1,5,323);
+    std::array<xrfg::LukeColorOriginDecode,2> result{};
+    auto luma=images;luma[0].rgb_fallback=luma[1].rgb_fallback=false;
+    xrfg::decode_luke_origin_images(luma,result);
+    require(!result[0].token&&!result[1].token,"RGB fixture must require channel fallback");
+    std::array<std::uint64_t,2> geometry{31,41};std::array<xrfg::LukeOriginRowWindow,2> windows{};
+    const auto decode=[&]{return xrfg::decode_luke_origin_images_windowed(images,geometry,windows,result);};
+    require(decode()==0&&result[0].token==223&&result[1].token==323&&
+        windows[0].first==32&&windows[0].last==39&&windows[1].first==5&&windows[1].last==12,
+        "RGB-only bands must learn independent exact rows");
+    stamp(0,32,224);stamp(1,5,324);
+    require(decode()==3&&result[0].token==224&&result[1].token==324&&!result[0].ambiguous,
+        "RGB-only narrowed reads decode fresh CRC tokens, not cached identities");
+    std::fill(bytes[0].begin(),bytes[0].end(),std::byte{102});stamp(0,2,225);
+    require(decode()==2&&result[0].token==225&&windows[0].first==2,
+        "RGB band outside learned rows recovers in the same call");
+    stamp(0,2,226,2);
+    require((decode()&1)==0&&result[0].ambiguous&&!windows[0].geometry,
+        "different valid channel CRCs still reject and forget the window");
+    std::fill(bytes[0].begin(),bytes[0].end(),std::byte{102});
+    require(!result[1].ambiguous&&(decode()&1)==0&&!result[0].token&&result[1].token==324,
+        "erased RGB never borrows a token from its peer");
+    stamp(0,32,227);geometry[1]++;
+    require(decode()==0&&result[0].token==227&&result[1].token==324,
+        "new geometry forces RGB relearning");
+    std::array<std::thread,3> callers;
+    for(auto& t:callers)t=std::thread([&]{for(unsigned n=0;n<3;++n) {
+        std::array<xrfg::LukeColorOriginDecode,2> out;xrfg::decode_luke_origin_images(images,out);
+        require(out[0].token==227&&out[0].first_row==32&&out[1].token==324&&out[1].first_row==5,
+            "parallel RGB callers must preserve independent row ownership");
+    }});
+    for(auto& t:callers)t.join();
+}
 void gta_protected_gpu_test() {
     wchar_t executable[MAX_PATH]{};GetModuleFileNameW(nullptr,executable,MAX_PATH);
     const auto* name=wcsrchr(executable,L'\\');
@@ -1017,6 +1071,6 @@ int main(int argc,char** argv) {
     try { if(argc==2 && std::string_view(argv[1])=="doom-hdr") {bright_hdr_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="gta-protected") {gta_protected_gpu_test();return 0;}
-        if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();windowed_decode_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
+        if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();windowed_decode_tests();rgb_windowed_decode_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
     catch(const std::exception& e) {std::cerr<<"Compact origin FAIL: "<<e.what()<<"\n";return 1;}
 }
