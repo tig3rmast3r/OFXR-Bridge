@@ -8,6 +8,7 @@
 using namespace xrfg::autonomous;
 void require(bool ok,const char* text){if(!ok)throw std::runtime_error(text);}
 void report(RuntimeStatus& r){
+    if(snapshot().desired.frame_generation==4){r.rife_execution_active=true;r.rife_tensorrt=!r.rife_optimizing;r.generation_state=GenerationState::ready;}
     const auto s=snapshot();r.applied_revision=s.revision;r.pacing_mode=s.desired.pacing_mode;
     r.afw_shading_rate=s.desired.afw_shading_rate;r.osr_mode=s.desired.luke_osr;r.osr_lower_quality=s.desired.luke_osr_lower_quality;
     r.buffer_capacity=r.vdxr_legacy?0:r.steamvr_runtime && s.desired.enabled && s.desired.pacing_mode!=0 ? (s.desired.increase_buffer?4:3):s.desired.increase_buffer?3:2;
@@ -47,7 +48,7 @@ void controller(bool modern,bool full,bool luke,double base,double two,double th
             const auto previous=GetTickCount64();do{Sleep(1);}while(GetTickCount64()==previous);
             xrfg::InterfaceTelemetry m{};m.updated_ms=GetTickCount64();m.rates_valid=true;
             m.output_source=modern?xrfg::InterfaceSource::steamvr_delivery:xrfg::InterfaceSource::runtime_accepted_delivery;
-            m.output_fps=float(fps);m.generating=settings.enabled;m.cycle_estimated_valid=true;
+            m.output_fps=float(fps);m.generating=settings.enabled && (!rife || confirmed);m.cycle_estimated_valid=true;
             m.cycle_estimated_ms=rife?42:settings.enabled?40:25;m.display_hz=hz;
             r.telemetry=m;r.motion_source=full && settings.frame_generation>0 && settings.frame_generation<4?1:0;
             report(r);report_interface_telemetry(m);tick_benchmark(GetTickCount64()+sample_index++*300);
@@ -118,7 +119,7 @@ void setup_edge_cases(bool optimizing,bool failed=false){
     require(benchmark_active(snapshot().benchmark),"reach RIFE setup");
     r.pending=optimizing?0:1;r.rife_optimizing=optimizing;report(r);
     if(failed){r.rife_optimizing=false;r.rife_error=1;report(r);}
-    tick_benchmark(snapshot().benchmark.requested_ms+31000);
+    tick_benchmark(snapshot().benchmark.requested_ms+66000);
     if(failed){
         require(snapshot().benchmark.phase==BenchmarkPhase::error && snapshot().desired==saved,
             "compiler failure stops the test, restores settings and never measures Torch as optimized RIFE");
@@ -132,6 +133,22 @@ void setup_edge_cases(bool optimizing,bool failed=false){
         const auto path=std::filesystem::u8path(result.benchmark.csv_path);
         require(read(path.parent_path()/(path.stem().wstring()+L"-details.csv")).find("RIFE setup unavailable / skipped")!=std::string::npos,"RIFE timeout is explicit in CSV");
     }
+}
+void readiness_gate(){
+    auto saved=snapshot().desired;saved.benchmark_auto_pick=false;require(request(saved),"save readiness case");
+    RuntimeStatus r{};r.sessions=1;r.steamvr_runtime=true;r.vdxr_legacy=false;r.rife_max_multiplier=3;
+    report(r);require(start_benchmark(false),"start readiness case");
+    while(snapshot().desired.frame_generation!=4){report(r);const auto now=GetTickCount64()-4000;tick_benchmark(now);tick_benchmark(now+kBenchmarkDurationMs);}
+    report(r);r.rife_execution_active=false;r.rife_tensorrt=false;report_runtime(r);tick_benchmark();
+    require(snapshot().benchmark.phase==BenchmarkPhase::applying,"acknowledged settings without current inference must wait");
+    r.rife_execution_active=true;report_runtime(r);tick_benchmark();
+    require(snapshot().benchmark.phase==BenchmarkPhase::applying,"Torch fallback during engine startup is not a measured optimized result");
+    r.rife_tensorrt=true;r.generation_state=GenerationState::busy;report_runtime(r);tick_benchmark();
+    require(snapshot().benchmark.phase==BenchmarkPhase::applying,"worker receipt with pending generation must wait");
+    r.generation_state=GenerationState::ready;report_runtime(r);tick_benchmark();
+    require(snapshot().benchmark.phase==BenchmarkPhase::running,"current optimized ready output starts a new full interval");
+    stop_benchmark();tick_benchmark();
+    std::cout<<"RIFE readiness: old/no receipt, fallback backend and pending output rejected; current optimized output accepted PASS\n";
 }
 void cancellation(){
     RuntimeStatus r{};r.process_id=GetCurrentProcessId();r.sessions=1;r.steamvr_runtime=true;r.vdxr_legacy=false;r.rife_max_multiplier=4;
@@ -160,6 +177,6 @@ int main(){
         controller(false,false,false,95,105,120,120,3,true,false,false,false,120);
         controller(false,false,true,95,120,120,120,3,true,false,false,false,120);
         setup_edge_cases(false);setup_edge_cases(true);setup_edge_cases(true,true);
-        cancellation();std::cout<<"Adaptive RIFE live-controller, stable refresh, optimization, CSV, capability and cancellation PASS\n";return 0;
+        readiness_gate();cancellation();std::cout<<"Adaptive RIFE live-controller, stable refresh, optimization, CSV, capability and cancellation PASS\n";return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

@@ -98,7 +98,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     GenerationState generation=GenerationState::waiting, HRESULT initialization_result=S_OK,
     bool vulkan_detected=false, std::uint32_t provider_error=0,
     const SwapchainBudgetStatus* swapchains=nullptr,int pacing_mode=-1,bool steamvr=false,bool afw_only=false,
-    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false,unsigned buffer_capacity=0,unsigned rife_max_multiplier=2) {
+    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false,unsigned buffer_capacity=0,unsigned rife_max_multiplier=2,std::uint64_t rife_after_ms=0) {
     const auto control=embedded::snapshot();
     const auto afw=embedded::afw_snapshot();
     const auto nr=neural_rendering::status();
@@ -138,7 +138,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     const auto desired=snapshot().desired;
     if(desired.enabled && desired.frame_generation==4 && !afw_only) {
         const auto rife=xrfg::rife_execution_status();
-        out.rife_execution_active=rife.active;
+        out.rife_execution_active=rife.active && rife.updated_ms>=rife_after_ms;
         out.rife_optimizing=rife.active && rife.optimizing;
         out.rife_tensorrt=rife.active && rife.tensorrt;
         out.rife_error=rife.active?rife.error:0U;

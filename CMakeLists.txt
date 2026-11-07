@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.898.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.899.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1375,6 +1375,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_executable(xrfg_private_runtime_layer_tests tests/private_runtime_layer_tests.cpp src/common/embedded_control.cpp)
         add_test(NAME xrfg_ordinary_swapchain_inventory COMMAND xrfg_private_runtime_layer_tests ordinary-swapchain-inventory)
         add_test(NAME xrfg_overlay_image_identity COMMAND xrfg_private_runtime_layer_tests overlay-image-identity)
+        add_test(NAME xrfg_overlay_multiframe_identity COMMAND xrfg_private_runtime_layer_tests overlay-multiframe-identity)
+        add_test(NAME xrfg_rife_memory_recovery COMMAND xrfg_private_runtime_layer_tests rife-memory-recovery)
+        set_tests_properties(xrfg_overlay_multiframe_identity xrfg_rife_memory_recovery PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
         set_tests_properties(xrfg_overlay_image_identity PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         foreach(shape native-split native-array native-packed luke-split)
             foreach(format rgba8 rgba16f)

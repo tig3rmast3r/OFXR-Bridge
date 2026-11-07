@@ -1225,8 +1225,11 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 }
                 const bool optimizing=rife && s.runtime.rife_optimizing;
                 if(optimizing){b.requested_ms=now;return;} // wait until completion, Stop/disconnect remain available
-                if(s.runtime.applied_revision!=b.revision || s.runtime.pending || quality_pending || pacing_pending || buffer_pending) {
-                    if(now>=b.requested_ms+30000) {
+                const bool rife_pending=rife && (!s.runtime.rife_execution_active || !s.runtime.rife_tensorrt ||
+                    s.runtime.generation_state!=GenerationState::ready);
+                if(s.runtime.applied_revision!=b.revision || s.runtime.pending || quality_pending || pacing_pending || buffer_pending || rife_pending) {
+                    if(rife_pending)std::snprintf(b.message,sizeof(b.message),"Waiting for current RIFE configuration and optimized output.");
+                    if(now>=b.requested_ms+(rife?65000:30000)) {
                         if(!rife)suite_restore(shared,BenchmarkPhase::error,"Settings not applied within 30 seconds; stopped.",now);
                         else {
                             rec.revision=b.revision;rec.index=b.index;rec.started=now;rec.settings=s.desired;

@@ -254,10 +254,43 @@ static int panel_metadata_contract() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
-    if(route=="overlay-image-identity") {
+    if(route=="rife-memory-recovery") {
+        xrfg_fixture::ControlProfile profile;Fixture f(true);f.unblock();
+        auto dispatch=std::make_shared<Dispatch>();auto state=std::make_shared<SessionState>(dispatch);
+        state->d3d12_device=f.device12;state->d3d12_queue=f.queue;state->private_runtime=f.transport;
+        state->nvidia_options.rife_model=3;state->handle=reinterpret_cast<XrSession>(77);
+        XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        auto memory=std::make_shared<SwapchainState>(state,create),structural=std::make_shared<SwapchainState>(state,create),old=std::make_shared<SwapchainState>(state,create);
+        memory->handle=f.make_chain();structural->handle=f.make_chain();old->handle=f.make_chain();
+        memory->generation_declined=true;memory->generation_refusal=SwapchainEligibilityReason::synthesis_initialize_failed;memory->generation_refusal_detail=static_cast<std::uint64_t>(E_OUTOFMEMORY);
+        structural->generation_declined=true;structural->generation_refusal=SwapchainEligibilityReason::protected_content;
+        old->frame_generation=std::make_shared<FrameGenerationSwapchainState>();std::weak_ptr<FrameGenerationSwapchainState> retired=old->frame_generation;
+        {std::scoped_lock lock(g_state_mutex);g_swapchains[memory->handle]=memory;g_swapchains[structural->handle]=structural;g_swapchains[old->handle]=old;}
+        state->rife_memory_retry_pending=true;state->generation_initialization_result=E_OUTOFMEMORY;
+        ok(recover_rife_memory(state),"healthy allocation refusal may recover once");
+        check(retired.expired() && !old->frame_generation,"old working set retired before any replacement allocation");
+        check(!memory->generation_declined && memory->generation_eligible_pending,"exact memory refusal reopens source admission");
+        check(structural->generation_declined && structural->generation_refusal==SwapchainEligibilityReason::protected_content,"structural refusals stay quarantined");
+        check(state->control_reconfigure_required && state->generation_initialization_result==S_OK,"recovery requests real reconfiguration and clears old error");
+        state->rife_memory_retry_pending=true;
+        check(recover_rife_memory(state)==S_FALSE,"second failure in same configuration cannot spin on allocation retries");
+        auto desired=xrfg::embedded::snapshot().desired;desired.rife_model=3;desired.rife_resolution=21;desired.enabled=true;
+        check(xrfg::embedded::request(desired),"new explicit provider revision");
+        state->control_revision=xrfg::embedded::snapshot().revision;
+        state->rife_memory_retry_pending=true;
+        ok(apply_embedded_control(state),"recovery must bypass unchanged-revision early return and really apply");
+        check(!state->control_reconfigure_required && state->menu_enabled && state->rife_ready_after_ms,
+            "one-shot recovery finishes real control application and demands a fresh inference");
+        {std::scoped_lock lock(g_state_mutex);g_swapchains.clear();}
+        xr_ok(f.transport->destroy_swapchain(memory->handle),"memory source cleanup");xr_ok(f.transport->destroy_swapchain(structural->handle),"structural source cleanup");xr_ok(f.transport->destroy_swapchain(old->handle),"old source cleanup");
+        state->private_runtime.reset();std::puts("RIFE memory retry: old set retirement, exact refusal, original source ownership and hard one-attempt bound PASS");return 0;
+    }
+    if(route=="overlay-image-identity" || route=="overlay-multiframe-identity") {
+        const bool multi=route=="overlay-multiframe-identity";
         xrfg_fixture::ControlProfile profile;
-        for(bool d12:{true,false}) {
-            Fixture f(d12);f.throttled=false;f.native_image_count=1;f.unblock();
+        for(bool d12:{true,false})for(unsigned factor:(multi?std::vector<unsigned>{2,3,4}:std::vector<unsigned>{1})) {
+            Fixture f(d12);f.throttled=false;f.native_image_count=multi?3:1;f.unblock();
+            xr_ok(f.transport->set_buffer_capacity(3,true),"buffered UI test capacity");
             const auto projection_chain=f.make_chain(),menu_chain=f.make_chain(),meter_chain=f.make_chain();
             f.inspect_layers=[&](const XrFrameEndInfo* info) {
                 const auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
@@ -270,7 +303,7 @@ int main(int argc,char** argv) {
                         "equal-sized menu and meter pixels must follow source identity, not layer ordinal/native image index");
                 }
             };
-            for(unsigned frame=1;frame<=12;++frame) {
+            for(unsigned frame=1;frame<=(multi?36U:12U);++frame) {
                 if(frame%4==1)xr_ok(f.transport->set_director_enabled(((frame-1)/4)%2),"switch UI transport policy");
                 f.write(projection_chain,20+frame);f.write(menu_chain,50+frame);
                 if(frame==1 || frame%3==0)f.write(meter_chain,150+(frame/3)*3);
@@ -283,7 +316,7 @@ int main(int argc,char** argv) {
                 std::array<const XrCompositionLayerBaseHeader*,3> layers={reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),reinterpret_cast<const XrCompositionLayerBaseHeader*>(frame%2?&menu:&meter),reinterpret_cast<const XrCompositionLayerBaseHeader*>(frame%2?&meter:&menu)};
                 XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=epoch+ns()+period;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=3;end.layers=layers.data();
                 xr_ok(f.transport->end_frame(&end),"two independent UI sources accepted");
-                f.wait_count(frame);
+                if(!multi || frame%factor==0)f.wait_count(frame);
             }
             xr_ok(f.transport->drain(),"UI identity drain");
         }

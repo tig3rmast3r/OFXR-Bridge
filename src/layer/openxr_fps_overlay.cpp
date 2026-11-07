@@ -191,6 +191,7 @@ struct OpenXrFpsOverlay::Impl {
 
     struct UiProgress { std::uint64_t attempts{},publications{},published_at{};unsigned stage{};std::int64_t result{}; };
     std::array<UiProgress,3> ui_progress;
+    std::uint64_t meter_snapshot_revision{},meter_snapshot_index{},meter_snapshot_started{},meter_snapshot_now{};
     std::int64_t next_ui_diagnostic{},next_ui_submit_diagnostic{};
     void ui_stage(unsigned surface,unsigned stage,std::int64_t result=0) noexcept {
         if(!bridge_flight_logger().enabled())return;
@@ -206,6 +207,8 @@ struct OpenXrFpsOverlay::Impl {
             (std::uint64_t(ui_atlas_enabled)<<6)|(std::uint64_t(ui_atlas_failed)<<7)|(std::uint64_t(menu_focused)<<8)|
             (std::uint64_t(ui_atlas_held)<<9)|(std::uint64_t(ui_atlas_waited)<<10);
         logger.event(BridgeFlightOperation::menu_status,89800,flags,ui_projected_total,ui_published.size());
+        logger.event(BridgeFlightOperation::menu_status,89805,meter_snapshot_revision,meter_snapshot_index,meter_snapshot_started);
+        logger.event(BridgeFlightOperation::menu_status,89806,meter_snapshot_now,GetTickCount64(),0);
         const std::array<XrSwapchain,3> handles{swapchain,meter.swapchain,menu_swapchain};
         for(unsigned i=0;i<3;++i){const auto& v=ui_progress[i];
             logger.event(BridgeFlightOperation::menu_status,89801+i,xr_handle_bits(handles[i]),
@@ -1090,6 +1093,11 @@ void OpenXrFpsOverlay::application_frame(const XrFrameEndInfo* info) noexcept {
             unsigned rows{};
             auto pixels=rasterize_elliott_meter(paint->state,paint->now_ms,paint->bgra,paint->linear,&rows);
             std::scoped_lock lock(impl_->mutex);
+            if(bridge_flight_logger().enabled()) {
+                impl_->meter_snapshot_revision=paint->state.revision;
+                impl_->meter_snapshot_index=(std::uint64_t(paint->state.benchmark.index)<<32)|unsigned(paint->state.benchmark.phase);
+                impl_->meter_snapshot_started=paint->state.benchmark.started_ms;impl_->meter_snapshot_now=paint->now_ms;
+            }
             if(impl_->elliott_mode() && !impl_->disabled && !impl_->meter.failed && !pixels.empty())impl_->upload_meter(pixels,rows);
         }
         {std::scoped_lock lock(impl_->mutex);impl_->compose_ui_atlas(info);impl_->finish_ui_policy_refresh();impl_->log_ui_progress();}

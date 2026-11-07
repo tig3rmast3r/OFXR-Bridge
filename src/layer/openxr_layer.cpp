@@ -960,6 +960,9 @@ struct SessionState {
     std::atomic<xrfg::autonomous::GenerationState> generation_status{xrfg::autonomous::GenerationState::waiting};
     std::atomic_uint32_t interface_provider_error{};
     std::atomic<HRESULT> generation_initialization_result{S_OK};
+    std::atomic<std::uint64_t> rife_ready_after_ms{};
+    std::atomic_bool rife_memory_retry_pending{};
+    std::uint64_t rife_memory_retry_revision{};
     unsigned djules_phase_cooldown{}; // Presenter thread only; reset on policy epoch.
     std::atomic_bool djules_triple_requested{};
     std::atomic_uint64_t djules_configuration_epoch{};
@@ -4275,6 +4278,20 @@ void release_session_generation_budget(
     }
 }
 
+void log_rife_memory_refusal(const std::shared_ptr<SessionState>& session,HRESULT failure) noexcept {
+    auto& logger=xrfg::bridge_flight_logger();
+    if(failure!=E_OUTOFMEMORY || !logger.enabled())return;
+    MEMORYSTATUSEX system{};system.dwLength=sizeof(system);
+    PROCESS_MEMORY_COUNTERS_EX process{};process.cb=sizeof(process);
+    const bool system_ok=GlobalMemoryStatusEx(&system)!=FALSE;
+    const bool process_ok=K32GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&process),sizeof(process))!=FALSE;
+    logger.event(xrfg::BridgeFlightOperation::vram_usage,89920,system_ok?system.ullAvailPhys:0,
+        system_ok?system.ullAvailPageFile:0,process_ok?process.PrivateUsage:0);
+    logger.event(xrfg::BridgeFlightOperation::vram_usage,89921,system_ok?system.ullTotalPhys:0,
+        system_ok?system.ullTotalPageFile:0,process_ok?process.WorkingSetSize:0);
+    log_video_memory(*session,VideoMemoryStage::session,handle_value(session->handle));
+}
+
 // Creates the generation resources a swapchain deferred at enumeration time.
 // Returns false only when the runtime refused a private swapchain, which is
 // the caller's signal to hand the session's whole budget back.
@@ -4366,8 +4383,13 @@ void release_session_generation_budget(
             state->generation_declined = true;
             state->generation_refusal = reason;
             state->generation_refusal_detail = detail;
-            if (reason == SwapchainEligibilityReason::synthesis_initialize_failed)
+            if (reason == SwapchainEligibilityReason::synthesis_initialize_failed) {
                 state->session->generation_initialization_result = static_cast<HRESULT>(detail);
+                if(state->session->nvidia_options.rife_model>=0 && static_cast<HRESULT>(detail)==E_OUTOFMEMORY) {
+                    log_rife_memory_refusal(state->session,E_OUTOFMEMORY);
+                    state->session->rife_memory_retry_pending=true;
+                }
+            }
             log_swapchain_eligibility(state, reason, detail, auxiliary);
             return !budget_refusal(reason);
         }
@@ -16205,11 +16227,39 @@ HRESULT reconcile_multiplier_outputs(const std::shared_ptr<SessionState>& state)
     return result;
 }
 
+// One bounded retry after a healthy-device RIFE allocation refusal. The
+// caller already excludes new frame/capture submissions. Release old provider
+// working sets together before admitting any replacement; keep app images/history.
+HRESULT recover_rife_memory(const std::shared_ptr<SessionState>& state) {
+    if(!state->rife_memory_retry_pending.exchange(false))return S_FALSE;
+    const auto revision=xrfg::embedded::snapshot().revision;
+    if(state->rife_memory_retry_revision==revision || state->nvidia_options.rife_model<0)return S_FALSE;
+    state->rife_memory_retry_revision=revision;
+    if(!state->d3d12_device || FAILED(state->d3d12_device->GetDeviceRemovedReason()))return E_FAIL;
+    if(continuous_presenter_active(state) && XR_FAILED(wait_for_presenter_idle(state)))return E_FAIL;
+    if(state->private_runtime && XR_FAILED(state->private_runtime->drain()))return E_FAIL;
+    {std::scoped_lock lock(state->presenter_mutex);state->presenter_last_frame.reset();}
+    for(const auto& chain:find_swapchains(state)) {
+        std::scoped_lock call(chain->call_mutex);
+        bool had{};{std::scoped_lock lock(chain->mutex);had=bool(chain->frame_generation);}
+        if(had){drain_swapchain_gpu(chain);destroy_frame_generation_swapchains(chain);}
+        std::scoped_lock lock(chain->mutex);
+        const bool memory_refusal=chain->generation_refusal==SwapchainEligibilityReason::synthesis_initialize_failed &&
+            static_cast<HRESULT>(chain->generation_refusal_detail)==E_OUTOFMEMORY;
+        if(had || memory_refusal){chain->generation_eligible_pending=true;chain->generation_declined=false;
+            chain->generation_refusal=SwapchainEligibilityReason::ready;chain->generation_refusal_detail=0;}
+    }
+    state->generation_initialization_result=S_OK;state->control_reconfigure_required=true;
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::embedded_configuration,89910,revision,E_OUTOFMEMORY,1);
+    return S_OK;
+}
+
 // Called with frame ownership and presenter content excluded. No GUI thread
 // touches GPU objects; no new captures may enter during this transaction.
 HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
                                bool force_startup_rendezvous = false,
                                const XrFrameEndInfo* current = nullptr) {
+    const auto recovery=recover_rife_memory(state);if(FAILED(recovery))return recovery;
     auto control = xrfg::embedded::snapshot();
     control.desired=effective_session_settings(*state,control.desired);
     // A concurrent GUI enable cancels the Off-only startup request; ordinary
@@ -16227,7 +16277,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     const bool output_use_changed=state->generation_outputs_needed &&
         outputs_needed!=*state->generation_outputs_needed;
     if (!state->generation_outputs_needed) state->generation_outputs_needed=outputs_needed;
-    if (state->control_revision == control.revision && !force_startup_rendezvous && !output_use_changed && !afw_use_changed &&
+    if (recovery!=S_OK && state->control_revision == control.revision && !force_startup_rendezvous && !output_use_changed && !afw_use_changed &&
         hybrid_ready==state->nvidia_options.hybrid) return S_OK;
     struct ReconfigurationTrace {
         xrfg::BridgeFlightLogger& logger;xrfg::BridgeFlightToken token;std::uint64_t revision;
@@ -16259,6 +16309,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
                 state->single_director_requested=control.desired.pacing_mode==1;
             }
             state->applied_generation_settings=control.desired;
+            if(state->nvidia_options.rife_model>=0)state->rife_ready_after_ms=GetTickCount64();
             state->control_revision=control.revision;
             if(pacing_changed)++state->djules_configuration_epoch;
             if (state->fps_overlay) state->fps_overlay->reset_metrics();
@@ -16661,7 +16712,12 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     state->generation_outputs_needed=outputs_needed;
     state->luke_afw_resources_needed=afw_needed;
     state->control_reconfigure_required = FAILED(result);
-    if (FAILED(result)) state->generation_initialization_result = result;
+    if (FAILED(result)) {
+        state->generation_initialization_result = result;
+        if(options.rife_model>=0 && result==E_OUTOFMEMORY) {
+            log_rife_memory_refusal(state,result);state->rife_memory_retry_pending=true;
+        }
+    } else if(options.rife_model>=0) state->rife_ready_after_ms=GetTickCount64();
     ++state->djules_configuration_epoch;
     { std::scoped_lock lock(state->presenter_mutex);
       state->three_slots.configure(state->three_slot_director?native_frame_multiplier(*state):2);
@@ -17104,7 +17160,7 @@ XrResult layer_end_frame_impl(
             state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && state->luke_shared_swapchains,
         false, // no title forces the INI-only sharing policy
-        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state)); }
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state),state->rife_ready_after_ms.load()); }
     } runtime_report_scope{state,end_info};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =

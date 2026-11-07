@@ -423,8 +423,9 @@ struct BridgeFlightLogger::Impl {
         const bool rife_dependency=record.operation==BridgeFlightOperation::gpu_fence_snapshot &&
             record.result>=86700 && record.result<=86799;
         const bool ui_progress=record.operation==BridgeFlightOperation::menu_status && record.result>=89800 && record.result<=89813;
-        const bool control_transition=record.operation==BridgeFlightOperation::embedded_configuration && record.result==89830;
-        const bool benchmark = ui_progress || control_transition || rife_dependency || pacing_receipt || rife_timing || eye_changed || fsr_description ||
+        const bool control_transition=record.operation==BridgeFlightOperation::embedded_configuration && (record.result==89830 || record.result==89910 || record.result<0);
+        const bool allocation_failure=record.operation==BridgeFlightOperation::swapchain_eligibility && record.result==13;
+        const bool benchmark = record.operation==BridgeFlightOperation::vram_usage || allocation_failure || ui_progress || control_transition || rife_dependency || pacing_receipt || rife_timing || eye_changed || fsr_description ||
             record.operation==BridgeFlightOperation::fsr_recovery ||
             record.operation==BridgeFlightOperation::fsr_context_lifecycle ||
             record.operation == BridgeFlightOperation::benchmark_configuration ||

@@ -8,6 +8,7 @@ using namespace xrfg::autonomous;
 void require(bool ok,const char* text){if(!ok)throw std::runtime_error(text);}
 void report(RuntimeStatus& runtime){
     const auto state=snapshot();
+    runtime.rife_execution_active=runtime.rife_tensorrt=true;runtime.generation_state=GenerationState::ready;
     runtime.applied_revision=state.revision;runtime.pacing_mode=state.desired.pacing_mode;
     runtime.buffer_capacity=state.desired.enabled && state.desired.pacing_mode!=0?
         (state.desired.increase_buffer?4:3):state.desired.increase_buffer?3:2;
