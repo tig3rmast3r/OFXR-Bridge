@@ -892,6 +892,7 @@ struct SessionState {
     // SteamVR refused a three-slot auxiliary copy: generated panels handed
     // their outputs back and stay on their real images for this session.
     std::atomic<bool> panel_budget_refused{}; // reset by session lifetime
+    std::atomic<bool> fatal_worker_report_saved{};
     xrfg::autonomous::SwapchainBudgetStatus swapchain_budget; // frame_call_mutex
     std::uint64_t next_swapchain_inventory_ms{};
     std::uint64_t next_snapshot_retirement_ms{};
@@ -13411,7 +13412,10 @@ void save_synthesis_failure(const std::shared_ptr<SessionState>& state,
     const SynthesisFailureAudit& audit,const PreparedProjectionFrame* prepared,
     const char* message) noexcept {
     auto& logger=xrfg::bridge_flight_logger();
-    if(!logger.enabled() && !logger.ram_enabled())return;
+    // A fatal transaction poisons this session even with F9 off. Keep one
+    // bounded report so re-enabling logging cannot lose the original failure.
+    if(!logger.enabled() && !logger.ram_enabled() &&
+        state->fatal_worker_report_saved.exchange(true))return;
     try {
         std::ostringstream text;
         text << "OFXR synthesis worker failure\n"
@@ -13510,11 +13514,11 @@ bool panel_generation_pending(std::span<const PanelSource> panels) {
     }
     return false;
 }
-void arm_panel_generation(const std::shared_ptr<SessionState>& state,std::span<const PanelSource> panels) {
+bool arm_panel_generation(const std::shared_ptr<SessionState>& state,std::span<const PanelSource> panels) {
 #if !defined(_WIN64)
     static_cast<void>(state);
     static_cast<void>(panels);
-    return;
+    return true;
 #endif
     for(const auto& p:panels)if(const auto chain=find_swapchain(p.swapchain)) {
         // Only known non-projection sources enter here, after the triggering
@@ -13526,19 +13530,23 @@ void arm_panel_generation(const std::shared_ptr<SessionState>& state,std::span<c
             chain->generation_eligible_pending=true;
         }
         chain->projection_history_needed.store(true,std::memory_order_release);
-        static_cast<void>(ensure_frame_generation(chain));
+        const bool admitted=ensure_frame_generation(chain);
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
             761,chain->frame_generation?1:0,handle_value(p.swapchain));
+        if(!admitted)return false;
     }
+    return true;
 }
 // Generated panels keep independent native outputs per source. When SteamVR
 // then refuses an auxiliary copy (XR_ERROR_LIMIT_REACHED), hand those outputs
 // and their history back. The caller has drained the presenter, holds the
 // content lock and has latched panel_budget_refused. Returns whether any
 // panel source existed.
-bool retire_panel_generation(const std::shared_ptr<SessionState>& state) {
+bool retire_panel_generation(const std::shared_ptr<SessionState>& state,
+    std::span<const PanelSource> keep={},bool budget_refusal=true) {
     bool retired{};
     for(const auto& chain:find_swapchains(state)) {
+        if(std::any_of(keep.begin(),keep.end(),[&](const auto& p){return p.swapchain==chain->handle;}))continue;
         std::scoped_lock call_lock(chain->call_mutex);
         bool had_generation{};
         {std::scoped_lock lock(chain->mutex);
@@ -13548,9 +13556,10 @@ bool retire_panel_generation(const std::shared_ptr<SessionState>& state) {
             drain_swapchain_gpu(chain);
             destroy_frame_generation_swapchains(chain);
         }
-        chain->generation_eligible_pending=false;
-        chain->generation_declined=true;
-        chain->generation_refusal=SwapchainEligibilityReason::budget_exhausted;
+        chain->generation_eligible_pending=!budget_refusal;
+        chain->generation_declined=budget_refusal;
+        chain->generation_refusal=budget_refusal?SwapchainEligibilityReason::budget_exhausted:
+            SwapchainEligibilityReason::awaiting_projection_use;
         chain->generation_refusal_detail=0;
         std::scoped_lock lock(chain->mutex);
         if(!chain->d3d12_history || SUCCEEDED(chain->d3d12_history->release_snapshots())) {
@@ -13559,6 +13568,7 @@ bool retire_panel_generation(const std::shared_ptr<SessionState>& state) {
             chain->projection_history_needed.store(false,std::memory_order_release);
         }
         retired=true;
+        std::erase_if(state->panel_generated,[&](const auto& p){return p.first==chain->handle;});
     }
     return retired;
 }
@@ -17616,10 +17626,28 @@ XrResult layer_end_frame_impl(
                 xrfg::configure_luke_color_origin_extent(chain->create_info.width,chain->create_info.height);
         }
     }
+    const auto panels=panel_sources(*state,current_snapshot,projection_mappings);
+    bool inactive_panels{};
+    for(const auto& chain:find_swapchains(state)) {
+        std::scoped_lock lock(chain->mutex);
+        if(chain->panel_source && std::none_of(panels.begin(),panels.end(),
+            [&](const auto& p){return p.swapchain==chain->handle;})) {inactive_panels=true;break;}
+    }
+    if(inactive_panels) {
+        // A closed UI is not an everlasting generation reservation. Drain
+        // old readers before freeing only the absent panels' private outputs.
+        const bool was_exclusive=presenter_content_lock.owns_lock();
+        const auto idle=enter_presenter_exclusive();
+        if(XR_FAILED(idle))return idle;
+        {std::scoped_lock lock(state->presenter_mutex);state->presenter_last_frame.reset();}
+        retire_panel_generation(state,panels,false);
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+            765,panels.size(),handle_value(state->handle));
+        if(!was_exclusive && presenter_content_lock.owns_lock())presenter_content_lock.unlock();
+    }
     const bool generation_arming_pending =
         resource_mappings.ready() &&
         projection_frame_generation_pending(state, projection_mappings);
-    const auto panels=panel_sources(*state,current_snapshot,projection_mappings);
     const bool panel_arming_pending=!generation_arming_pending&&panel_generation_pending(panels);
     const bool stereo_projection = !current_snapshot.layers.empty() &&
         std::all_of(current_snapshot.layers.begin(), current_snapshot.layers.end(),
@@ -17704,7 +17732,15 @@ XrResult layer_end_frame_impl(
                 return exclusive_result;
             }
             release_session_generation_budget(state);
-        } else arm_panel_generation(state,panels);
+        } else if(!arm_panel_generation(state,panels)) {
+            // Optional panels are an all-or-nothing admission. Do not keep
+            // the first panel's native rings after the second is refused,
+            // or wait for a later auxiliary copy to discover the same limit.
+            state->panel_budget_refused.store(true,std::memory_order_release);
+            retire_panel_generation(state);
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                764,panels.size(),handle_value(state->handle));
+        }
         return passthrough_result;
     }
     const std::optional<PendingApplicationFrame> application_frame =

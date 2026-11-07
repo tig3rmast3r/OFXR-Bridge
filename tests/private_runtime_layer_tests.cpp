@@ -452,6 +452,10 @@ int main(int argc,char** argv) {
     const auto overlap_tag=route.find("-app-overlap");
     const bool rife_app_overlap=overlap_tag!=std::string::npos || rife_msfs;
     if(overlap_tag!=std::string::npos)route.erase(overlap_tag,std::string("-app-overlap").size());
+    const bool panel_lifecycle_test=route.starts_with("panel-close-");
+    if(panel_lifecycle_test)route="panel-budget-"+route.substr(12);
+    const bool panel_budget_test=route.starts_with("panel-budget-");
+    if(panel_budget_test)route="panels-"+route.substr(13);
     const bool panel_test=route.starts_with("panels-");if(panel_test)route=route.substr(7);
     const bool adaptive_framework=route.starts_with("adaptive-framework-");
     const bool adaptive_director=route.starts_with("adaptive-director-");
@@ -1100,7 +1104,7 @@ int main(int argc,char** argv) {
         for(auto& image:right_images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
         xr_ok(layer_enumerate_swapchain_images_impl(right,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(right_images.data())),"right-eye capture setup");
     }
-    XrSwapchain panel_chain{};
+    XrSwapchain panel_chain{},second_panel_chain{};
     if(panel_test) {
         const auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
         auto ci=info;ci.arraySize=1;
@@ -1109,6 +1113,15 @@ int main(int argc,char** argv) {
         std::array<XrSwapchainImageD3D12KHR,3> pi;for(auto& i:pi)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
         unsigned pc{};xr_ok(layer_enumerate_swapchain_images_impl(panel_chain,3,&pc,
             reinterpret_cast<XrSwapchainImageBaseHeader*>(pi.data())),"panel atlas capture setup");
+        if(panel_budget_test) {
+            const auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
+            xr_ok(layer_create_swapchain_impl(state->handle,&ci,&second_panel_chain),"independent second UEVR panel");
+            f.create_state=saved;
+            for(auto& i:pi)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
+            xr_ok(layer_enumerate_swapchain_images_impl(second_panel_chain,3,&pc,
+                reinterpret_cast<XrSwapchainImageBaseHeader*>(pi.data())),"second panel capture setup");
+            f.native_chain_limit=argc>2?std::stoul(argv[2]):panel_lifecycle_test?32:10;
+        }
     }
     ComPtr<IDXGIAdapter3> memory_adapter;
     std::unique_ptr<steamvr_vram_test::Ledger> memory_ledger;
@@ -1192,7 +1205,7 @@ int main(int argc,char** argv) {
     // SDK limited to one generated frame it would instead test an unrelated
     // prefer_fps scheduling change while repeating the same 2X Fast policy.
     const unsigned benchmark_policy_phases=benchmark_dlssg_sequence && !benchmark_dlssg_transition && state->native_dlss_generated_frames<2?6:7;
-    const unsigned input_count=rife_latency?64:phase_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:rife_msfs?64:8;
+    const unsigned input_count=rife_latency?64:phase_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:rife_msfs?64:panel_lifecycle_test?16:8;
     if(benchmark_sequence) {
         std::fprintf(stderr,"BENCH policies=%u real_inputs=%u actual_3x_to_2x_transition=%u explicit_prefer_fps_transition_diagnostic=%u memory_sampling=%s\n",
             benchmark_policy_phases,input_count,unsigned(benchmark_policy_phases==7 &&
@@ -1348,6 +1361,7 @@ int main(int argc,char** argv) {
         } else if(!rife_msfs && !(rife_early_capture_done && n==6))f.write(chain,color);
         if(split_eyes && !rife_msfs)f.write(right,color+7);
         if(panel_test)f.write(panel_chain,30+n);
+        if(panel_budget_test)f.write(second_panel_chain,70+n);
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=image_width;g->output_height=g->depth_height=g->motion_height=image_height;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
@@ -1381,9 +1395,10 @@ int main(int argc,char** argv) {
         if(panel_test) {
             for(unsigned i=0;i<2;++i){auto& q=panel_quads[i];q={XR_TYPE_COMPOSITION_LAYER_QUAD};
                 q.space=projection.space;q.pose.orientation.w=1;q.pose.position.x=i?5.f:.1f*n;
-                q.size={1,1};q.subImage.swapchain=panel_chain;q.subImage.imageRect={{int(i*image_width/2),0},{int(image_width/2),int(image_height)}};
+                q.size={1,1};q.subImage.swapchain=panel_budget_test&&i?second_panel_chain:panel_chain;q.subImage.imageRect={{int(i*image_width/2),0},{int(image_width/2),int(image_height)}};
                 panel_layers[i+1]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);}
             end.layerCount=3;end.layers=panel_layers.data();
+            if(panel_lifecycle_test && (n==5||n==6))end.layerCount=2;
         }
         if(rife_inherited && n==5) {
             auto desired=xrfg::autonomous::snapshot().desired;desired.rife_multiplier=3;
@@ -1459,6 +1474,12 @@ int main(int argc,char** argv) {
                 check(!ack.pending && !ack.errors && rife_frames(*state)==3,"RIFE3 must finish Applying settings and activate the requested multiplier");
             }
             xr_ok(submitted,"shipping OFXR End handoff");
+            if(panel_lifecycle_test && n==5) {
+                check(!find_swapchain(second_panel_chain)->frame_generation,
+                    "closed UEVR panel retained optional native generation rings");
+                check(find_swapchain(panel_chain)->frame_generation!=nullptr,
+                    "closing one panel retired the other visible panel");
+            }
         }
         if(rife_overlap && n==4) {
             std::unique_lock lock(state->presenter_mutex);
@@ -1886,7 +1907,15 @@ int main(int argc,char** argv) {
             "actual generation OFF kept physical/private/interop output allocations");
         for(const auto& app:find_swapchains(state))check(!app->frame_generation,"actual generation OFF retained its provider context");
     }
-    if(panel_test) {
+    if(panel_budget_test) {
+        if(f.native_chain_limit<=14)check(state->panel_budget_refused,
+            "native panel allocation refusal must disable optional panel generation");
+        if(panel_lifecycle_test)check(find_swapchain(second_panel_chain)->frame_generation!=nullptr,
+            "reopened UEVR panel failed to rearm its generation");
+        check(!state->generation_budget_exhausted,"optional panels must preserve world generation budget");
+        check(f.real_ends>input_count,"world real and generated frames still reach native runtime");
+        std::puts("Two independent UEVR panels: budget refusal preserves world delivery PASS");
+    } else if(panel_test) {
         xr_ok(wait_for_synthesis_handoff(state),"panel worker finished");
         if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"panel presenter finished");
         xr_ok(f.transport->drain(),"panel physical FIFO drained");
@@ -1907,6 +1936,7 @@ int main(int argc,char** argv) {
     for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
     xr_ok(layer_destroy_swapchain_impl(chain),"shipping destroy");
     if(panel_test)xr_ok(layer_destroy_swapchain_impl(panel_chain),"panel atlas cleanup");
+    if(panel_budget_test)xr_ok(layer_destroy_swapchain_impl(second_panel_chain),"second panel cleanup");
     if(split_eyes){xr_ok(layer_destroy_swapchain_impl(right),"shipping right destroy");check(f.chains.empty(),"shipping pool cleanup leaves no native handles");}
     if(steady_memory) {
         depth.Reset();motion.Reset();f.release_callback={};sample_memory("application-teardown",input_count);
