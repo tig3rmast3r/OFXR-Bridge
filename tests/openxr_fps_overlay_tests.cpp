@@ -45,7 +45,8 @@ std::vector<ComPtr<ID3D12Resource>> textures;
 std::vector<ComPtr<ID3D11Texture2D>> textures11;
 unsigned created{}, destroyed{}, space_created{}, space_destroyed{}, acquires{}, waits{}, releases{}, ends{};
 unsigned acquired_index{}, last_released{}, width{}, height{};
-bool timeout_next = true, fail_end{}, unsupported{}, d3d11{};
+bool timeout_next = true, fail_end{}, unsupported{}, d3d11{},limited_size{};
+XrRect2Di visible_rect{};
 unsigned clock_conversions{};
 bool clock_available=true;
 std::int64_t fixed_display_clock{};
@@ -70,7 +71,9 @@ XrResult XRAPI_CALL formats(XrSession, std::uint32_t capacity, std::uint32_t* co
     *count = 1; if (capacity) output[0] = DXGI_FORMAT_R8G8B8A8_UNORM; return XR_SUCCESS;
 }
 XrResult XRAPI_CALL properties(XrInstance, XrSystemId, XrSystemProperties* output) {
-    output->graphicsProperties = {4096, 4096, 2}; return XR_SUCCESS;
+    output->graphicsProperties.maxSwapchainImageWidth=4096;
+    output->graphicsProperties.maxSwapchainImageHeight=limited_size?1024u:4096u;
+    output->graphicsProperties.maxLayerCount=2;return XR_SUCCESS;
 }
 XrResult XRAPI_CALL create_chain(XrSession, const XrSwapchainCreateInfo* info, XrSwapchain* output) {
     check(info->arraySize == 1 && info->sampleCount == 1 && info->format == DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -131,10 +134,12 @@ XrResult XRAPI_CALL end(XrSession, const XrFrameEndInfo* info) {
         check(quad->type == XR_TYPE_COMPOSITION_LAYER_QUAD && quad->space == overlay_space &&
             quad->subImage.swapchain == overlay_chain && quad->eyeVisibility == XR_EYE_VISIBILITY_BOTH,
             "invalid overlay quad");
-        check(releases > 0 && quad->subImage.imageRect.extent.width == static_cast<int>(width), "unreleased overlay image");
+        visible_rect=quad->subImage.imageRect;
+        check(releases > 0 && visible_rect.extent.width<=static_cast<int>(width), "unreleased overlay image");
         check(quad->layerFlags == XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
               "overlay must blend premultiplied source alpha");
-        check(width == height * 2, "numeric overlay aspect ratio");
+        check(visible_rect.extent.width==visible_rect.extent.height*2 && visible_rect.offset.y==(limited_size?0:768),
+            "numeric overlay aspect and shared atlas region");
         last_pose = quad->pose;
     }
     if (fail_end) { fail_end = false; return XR_ERROR_RUNTIME_FAILURE; }
@@ -166,9 +171,9 @@ std::size_t pixel_count(std::uint32_t wanted) {
         D3D11_MAPPED_SUBRESOURCE mapped{};
         check(SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "map11");
         std::size_t result{};
-        for (unsigned y = 0; y < height; ++y) {
+        for (unsigned y=visible_rect.offset.y;y<unsigned(visible_rect.offset.y+visible_rect.extent.height);++y) {
             auto* row = reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(mapped.pData) + y * mapped.RowPitch);
-            for (unsigned x = 0; x < width; ++x) result += row[x] == wanted;
+            for (unsigned x=visible_rect.offset.x;x<unsigned(visible_rect.offset.x+visible_rect.extent.width);++x) result += row[x] == wanted;
         }
         context->Unmap(staging.Get(), 0); return result;
     }
@@ -208,9 +213,9 @@ std::size_t pixel_count(std::uint32_t wanted) {
     void* mapped{}; const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
     check(SUCCEEDED(readback->Map(0, &range, &mapped)), "map12");
     std::size_t result{};
-    for (unsigned y = 0; y < height; ++y) {
+    for (unsigned y=visible_rect.offset.y;y<unsigned(visible_rect.offset.y+visible_rect.extent.height);++y) {
         const auto* row = reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(mapped) + footprint.Offset + y * footprint.Footprint.RowPitch);
-        for (unsigned x = 0; x < width; ++x) result += row[x] == wanted;
+        for (unsigned x=visible_rect.offset.x;x<unsigned(visible_rect.offset.x+visible_rect.extent.width);++x) result += row[x] == wanted;
     }
     const D3D12_RANGE empty{}; readback->Unmap(0, &empty); return result;
 }
@@ -223,6 +228,7 @@ int main(int argc, char** argv) {
     try {
         std::filesystem::create_directories(profile);SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",profile.c_str());
         d3d11 = argc > 1 && std::string(argv[1]) == "d3d11";
+        for(int i=1;i<argc;++i)if(std::string_view(argv[i])=="limited")limited_size=true;
         if (d3d11) {
             check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
                 D3D11_SDK_VERSION, &device11, nullptr, nullptr)), "WARP D3D11");
@@ -255,7 +261,7 @@ int main(int argc, char** argv) {
             check(acquires == 1 && waits == 2 && releases == 1, "must retry same acquired image after timeout");
             check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 2, "fallback missing overlay");
             check(pixel_count(0xff5050ffu) > 100, "inactive bitmap missing red on GPU");
-            check(pixel_count(0) > static_cast<std::size_t>(width) * height / 2,
+            check(pixel_count(0) > static_cast<std::size_t>(visible_rect.extent.width) * visible_rect.extent.height / 2,
                   "numeric overlay background must be transparent on GPU");
             check(last_pose.position.x > 0 && last_pose.position.y > 0, "default quadrant");
             check(last_pose.position.x > 0.879f && last_pose.position.x < 0.881f &&

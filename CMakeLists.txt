@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.895.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.896.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -879,6 +879,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_link_libraries(xrfg_openxr_fps_overlay_tests PRIVATE xrfg_fps_overlay)
         add_test(NAME xrfg_openxr_fps_overlay_d3d12 COMMAND xrfg_openxr_fps_overlay_tests)
         add_test(NAME xrfg_openxr_fps_overlay_d3d11 COMMAND xrfg_openxr_fps_overlay_tests d3d11)
+        add_test(NAME xrfg_openxr_ui_small_limit_d3d12 COMMAND xrfg_openxr_fps_overlay_tests d3d12 limited)
+        add_test(NAME xrfg_openxr_ui_small_limit_d3d11 COMMAND xrfg_openxr_fps_overlay_tests d3d11 limited)
         add_executable(xrfg_overlay_resource_lifetime_tests tests/overlay_resource_lifetime_tests.cpp)
         target_link_libraries(xrfg_overlay_resource_lifetime_tests PRIVATE xrfg_fps_overlay xrfg_autonomous_ui)
         add_test(NAME xrfg_overlay_resource_lifetime_d3d12 COMMAND xrfg_overlay_resource_lifetime_tests)

@@ -23,6 +23,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 
 namespace xrfg {
 using Microsoft::WRL::ComPtr;
@@ -33,6 +34,11 @@ template <typename Handle>
 [[nodiscard]] std::uint64_t xr_handle_bits(Handle handle) noexcept {
     if constexpr (std::is_pointer_v<Handle>) return reinterpret_cast<std::uintptr_t>(handle);
     else return static_cast<std::uint64_t>(handle);
+}
+template <typename Handle>
+Handle xr_handle_from_pointer(void* pointer) noexcept {
+    if constexpr(std::is_pointer_v<Handle>)return reinterpret_cast<Handle>(pointer);
+    else return static_cast<Handle>(reinterpret_cast<std::uintptr_t>(pointer));
 }
 std::int64_t now_ns() noexcept {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -57,13 +63,13 @@ struct OpenXrFpsOverlay::Impl {
     std::atomic<std::shared_ptr<PrepareEndFrame>> private_delivery_prepare;
     PFN_xrCreateReferenceSpace create_space{};
     PFN_xrDestroySpace destroy_space{};
-    PFN_xrCreateSwapchain create_swapchain{};
-    PFN_xrDestroySwapchain destroy_swapchain{};
+    PFN_xrCreateSwapchain runtime_create_swapchain{};
+    PFN_xrDestroySwapchain runtime_destroy_swapchain{};
     PFN_xrEnumerateSwapchainFormats enumerate_formats{};
-    PFN_xrEnumerateSwapchainImages enumerate_images{};
-    PFN_xrAcquireSwapchainImage acquire{};
-    PFN_xrWaitSwapchainImage wait{};
-    PFN_xrReleaseSwapchainImage release{};
+    PFN_xrEnumerateSwapchainImages runtime_enumerate_images{};
+    PFN_xrAcquireSwapchainImage runtime_acquire{};
+    PFN_xrWaitSwapchainImage runtime_wait{};
+    PFN_xrReleaseSwapchainImage runtime_release{};
     PFN_xrGetSystemProperties system_properties{};
     std::filesystem::path ini;
     std::mutex mutex;
@@ -181,6 +187,8 @@ struct OpenXrFpsOverlay::Impl {
     MenuPresentationLayout menu_layout;
     MenuPresentationInteraction menu_interaction;
 
+#include "overlay_ui_atlas.inc"
+
     void close_menu(bool release_input = true) noexcept {
         const bool was_open = menu_open || menu_valid || pending_menu_input.open;
         if (was_open) menu_event(0, 0);
@@ -234,7 +242,7 @@ struct OpenXrFpsOverlay::Impl {
         info.format = format;
         info.sampleCount = info.faceCount = info.arraySize = info.mipCount = 1;
         info.width = menu_width; info.height = menu_height;
-        const auto created = create_swapchain(session, &info, &menu_swapchain);
+        const auto created = create_swapchain(session, &info, &menu_swapchain,true);
         menu_event(1, created);
         if(XR_SUCCEEDED(created) || created==XR_ERROR_LIMIT_REACHED)
             autonomous::report_overlay_limit(autonomous::OverlaySwapchain::menu,created==XR_ERROR_LIMIT_REACHED);
@@ -436,10 +444,10 @@ struct OpenXrFpsOverlay::Impl {
     ~Impl() {
         autonomous::set_interface_visible(autonomous::InterfaceSurface::meter,false);
         menu_renderer.shutdown();
-        if (meter.swapchain && destroy_swapchain) destroy_swapchain(meter.swapchain);
+        if (meter.swapchain && runtime_destroy_swapchain) destroy_swapchain(meter.swapchain);
         if (local && destroy_space) destroy_space(local);
-        if (menu_swapchain && destroy_swapchain) destroy_swapchain(menu_swapchain);
-        if (swapchain && destroy_swapchain) destroy_swapchain(swapchain);
+        if (menu_swapchain && runtime_destroy_swapchain) destroy_swapchain(menu_swapchain);
+        if (swapchain && runtime_destroy_swapchain) destroy_swapchain(swapchain);
         if (space && destroy_space) destroy_space(space);
         if (event) CloseHandle(event);
     }
@@ -450,17 +458,19 @@ struct OpenXrFpsOverlay::Impl {
         if ((!device11 && (!device12 || !queue12)) || !system) return false;
         if (!load(get, instance, "xrCreateReferenceSpace", create_space) ||
             !load(get, instance, "xrDestroySpace", destroy_space) ||
-            !load(get, instance, "xrCreateSwapchain", create_swapchain) ||
-            !load(get, instance, "xrDestroySwapchain", destroy_swapchain) ||
+            !load(get, instance, "xrCreateSwapchain", runtime_create_swapchain) ||
+            !load(get, instance, "xrDestroySwapchain", runtime_destroy_swapchain) ||
             !load(get, instance, "xrEnumerateSwapchainFormats", enumerate_formats) ||
-            !load(get, instance, "xrEnumerateSwapchainImages", enumerate_images) ||
-            !load(get, instance, "xrAcquireSwapchainImage", acquire) ||
-            !load(get, instance, "xrWaitSwapchainImage", wait) ||
-            !load(get, instance, "xrReleaseSwapchainImage", release) ||
+            !load(get, instance, "xrEnumerateSwapchainImages", runtime_enumerate_images) ||
+            !load(get, instance, "xrAcquireSwapchainImage", runtime_acquire) ||
+            !load(get, instance, "xrWaitSwapchainImage", runtime_wait) ||
+            !load(get, instance, "xrReleaseSwapchainImage", runtime_release) ||
             !load(get, instance, "xrGetSystemProperties", system_properties)) return false;
         XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
         if (XR_FAILED(system_properties(instance, system, &properties))) return false;
         max_layers = std::min(properties.graphicsProperties.maxLayerCount, 128u);
+        ui_atlas_supported=properties.graphicsProperties.maxSwapchainImageWidth>=ui_atlas_width &&
+            properties.graphicsProperties.maxSwapchainImageHeight>=ui_atlas_height;
         if (max_layers < 2) return false;
         std::uint32_t count{};
         if (XR_FAILED(enumerate_formats(session, 0, &count, nullptr)) || !count || count > 1024) return false;
@@ -1038,6 +1048,7 @@ void OpenXrFpsOverlay::application_frame(const XrFrameEndInfo* info) noexcept {
             std::scoped_lock lock(impl_->mutex);
             if(impl_->elliott_mode() && !impl_->disabled && !impl_->meter.failed && !pixels.empty())impl_->upload_meter(pixels,rows);
         }
+        {std::scoped_lock lock(impl_->mutex);impl_->compose_ui_atlas(info);}
     }
     catch (...) {
         // An optional UI failure must release capture as well as preserving
@@ -1112,7 +1123,8 @@ void OpenXrFpsOverlay::set_session_focused(bool focused) noexcept {
 std::optional<std::array<XrSwapchain,3>> OpenXrFpsOverlay::swapchain_handles() const noexcept {
     std::unique_lock lock(impl_->mutex,std::try_to_lock);
     if (!lock.owns_lock()) return std::nullopt;
-    return std::array<XrSwapchain,3>{impl_->swapchain,impl_->meter.swapchain,impl_->menu_swapchain};
+    return std::array<XrSwapchain,3>{impl_->public_ui_handle(impl_->swapchain),
+        impl_->public_ui_handle(impl_->meter.swapchain),impl_->public_ui_handle(impl_->menu_swapchain)};
 }
 
 FpsSnapshot OpenXrFpsOverlay::metrics() const noexcept {
@@ -1160,6 +1172,7 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
     }
     std::scoped_lock lock(impl_->mutex);
     std::array<const XrCompositionLayerBaseHeader*, 128> layers{};
+    std::array<XrCompositionLayerQuad,3> ui_quads{};
     XrFrameEndInfo composed{};
     const bool nonempty = info && info->type == XR_TYPE_FRAME_END_INFO && info->layers && info->layerCount;
     if (impl_->menu_open && (!nonempty || info->layerCount >= impl_->max_layers)) impl_->close_menu();
@@ -1168,17 +1181,20 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
         std::copy_n(info->layers, info->layerCount, layers.begin());
         composed = *info; // Preserve every app layer, next chain and display time.
         composed.layers = layers.data();
-        const bool menu = impl_->menu_open && impl_->menu_valid;
+        const bool menu = impl_->menu_open && impl_->menu_valid &&
+            impl_->public_ui_quad(impl_->menu_swapchain,impl_->menu_quad,ui_quads[2]);
         // Reserve the final spare slot for interactive controls on runtimes
         // that expose only one extra layer. Preserve every application layer.
         if (impl_->image_valid && !impl_->elliott_mode() && impl_->position != FpsOverlayPosition::off &&
-            composed.layerCount + (menu ? 1u : 0u) < impl_->max_layers)
-            layers[composed.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&impl_->quad);
+            composed.layerCount + (menu ? 1u : 0u) < impl_->max_layers &&
+            impl_->public_ui_quad(impl_->swapchain,impl_->quad,ui_quads[0]))
+            layers[composed.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&ui_quads[0]);
         if(impl_->elliott_mode() && impl_->place_meter(info->displayTime,now_ns()) &&
-            composed.layerCount+(menu?1u:0u)<impl_->max_layers)
-            layers[composed.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&impl_->meter.quad);
+            composed.layerCount+(menu?1u:0u)<impl_->max_layers &&
+            impl_->public_ui_quad(impl_->meter.swapchain,impl_->meter.quad,ui_quads[1]))
+            layers[composed.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&ui_quads[1]);
         if (menu && composed.layerCount < impl_->max_layers)
-            layers[composed.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&impl_->menu_quad);
+            layers[composed.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&ui_quads[2]);
         submitted = &composed;
     }
     std::int64_t display{};

@@ -149,7 +149,8 @@ XrResult XRAPI_CALL end(XrSession, const XrFrameEndInfo* info) {
         check(releases > 0, "unreleased overlay image");
         check(quad->layerFlags == XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
               "overlay must blend premultiplied source alpha");
-        check(width == height * 2, "numeric overlay aspect ratio");
+        check(width==1024 && height==1280 && quad->subImage.imageRect.offset.y==768,
+            "counter samples only its region of the shared native atlas");
         last_pose = quad->pose;last_quad_space=quad->space;
     }
     if (fail_end) { fail_end = false; return XR_ERROR_RUNTIME_FAILURE; }
@@ -187,7 +188,7 @@ std::size_t pixel_count(std::uint32_t wanted) {
         D3D11_MAPPED_SUBRESOURCE mapped{};
         check(SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "map11");
         std::size_t result{};
-        for (unsigned y = 0; y < height; ++y) {
+        for (unsigned y = 768; y < height; ++y) {
             auto* row = reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(mapped.pData) + y * mapped.RowPitch);
             for (unsigned x = 0; x < width; ++x) result += row[x] == wanted;
         }
@@ -229,7 +230,7 @@ std::size_t pixel_count(std::uint32_t wanted) {
     void* mapped{}; const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
     check(SUCCEEDED(readback->Map(0, &range, &mapped)), "map12");
     std::size_t result{};
-    for (unsigned y = 0; y < height; ++y) {
+    for (unsigned y = 768; y < height; ++y) {
         const auto* row = reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(mapped) + footprint.Offset + y * footprint.Footprint.RowPitch);
         for (unsigned x = 0; x < width; ++x) result += row[x] == wanted;
     }
@@ -288,7 +289,7 @@ int main(int argc, char** argv) {
             check(overlay.end_frame(&info,false)==XR_SUCCESS&&observed_count==1,"timed out meter stays hidden");
             std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
             check(overlay.end_frame(&info,false)==XR_SUCCESS&&observed_count==2,"bottom meter uploaded");
-            check(created==1 && width==1024&&height==512&&last_pose.position.y==-.30F&&last_pose.position.z==-1.F,"upstream bottom placement");
+            check(created==1 && width==1024&&height==1280&&last_pose.position.y==-.30F&&last_pose.position.z==-1.F,"upstream bottom placement on shared atlas");
             check(pixel_count(0)>1024*100,"meter cropped lower rows transparent on GPU");
             const auto generation_before_toggle=xrfg::embedded::snapshot().revision;
             const auto toggle_counter=[&](bool enabled) {

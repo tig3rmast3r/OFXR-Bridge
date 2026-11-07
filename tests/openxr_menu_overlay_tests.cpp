@@ -27,8 +27,8 @@ void check(bool pass,const char* message) { ++checks; if (!pass) throw std::runt
 template<class T> T handle(std::uintptr_t v) { return reinterpret_cast<T>(v); }
 ComPtr<ID3D12Device> device; ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D11Device> device11;
 struct Chain {
-    unsigned width{},height{},index{},acquires{},waits{},releases{};
-    bool timeout{true};
+    unsigned width{},height{},index{},published_index{},acquires{},waits{},releases{};
+    bool timeout{true},held{},owned{};
     std::vector<ComPtr<ID3D12Resource>> t12;
     std::vector<ComPtr<ID3D11Texture2D>> t11;
 };
@@ -49,7 +49,7 @@ XrResult XRAPI_CALL formats(XrSession,std::uint32_t capacity,std::uint32_t* coun
     *count=1;if(capacity)out[0]=DXGI_FORMAT_R8G8B8A8_UNORM;return XR_SUCCESS;
 }
 XrResult XRAPI_CALL create_chain(XrSession,const XrSwapchainCreateInfo* i,XrSwapchain* out) {
-    if(chains.size()>=chain_limit || (i->width==1024 && i->height==768 && refuse_menu_create)) {
+    if(chains.size()>=chain_limit || (i->width==1024 && (i->height==768||i->height==1280) && refuse_menu_create)) {
         refuse_menu_create=false;*out=XR_NULL_HANDLE;return XR_ERROR_LIMIT_REACHED;
     }
     *out=handle<XrSwapchain>(++made+10); auto& c=chains[*out]; c.width=i->width;c.height=i->height;
@@ -68,7 +68,7 @@ XrResult XRAPI_CALL create_chain(XrSession,const XrSwapchainCreateInfo* i,XrSwap
             D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&t))),"XR D12 image");
     }return XR_SUCCESS;
 }
-XrResult XRAPI_CALL destroy_chain(XrSwapchain s) {check(chains.erase(s)==1,"owned chain destruction");++destroyed;return XR_SUCCESS;}
+XrResult XRAPI_CALL destroy_chain(XrSwapchain s) {check(!chains.at(s).held,"destroy only after returning the shared XR image");check(chains.erase(s)==1,"owned chain destruction");++destroyed;return XR_SUCCESS;}
 XrResult XRAPI_CALL images(XrSwapchain s,std::uint32_t capacity,std::uint32_t* count,XrSwapchainImageBaseHeader* out) {
     auto& c=chains.at(s);*count=3;
     if(capacity)for(unsigned n=0;n<3;++n) {
@@ -78,13 +78,18 @@ XrResult XRAPI_CALL images(XrSwapchain s,std::uint32_t capacity,std::uint32_t* c
 }
 XrResult XRAPI_CALL acquire(XrSwapchain s,const XrSwapchainImageAcquireInfo*,std::uint32_t* out) {
     if(acquire_timeouts){--acquire_timeouts;return XR_TIMEOUT_EXPIRED;}
-    auto& c=chains.at(s);*out=c.index=c.acquires++%3;return XR_SUCCESS;
+    auto& c=chains.at(s);check(!c.held,"shared atlas cannot acquire the same XR chain twice");
+    c.held=true;c.owned=false;*out=c.index=c.acquires++%3;return XR_SUCCESS;
 }
 XrResult XRAPI_CALL wait(XrSwapchain s,const XrSwapchainImageWaitInfo* i) {
     check(i->timeout==0,"menu wait remains nonblocking");auto& c=chains.at(s);++c.waits;
-    if(c.timeout){c.timeout=false;return XR_TIMEOUT_EXPIRED;}return XR_SUCCESS;
+    check(c.held,"wait only after a successful shared acquire");
+    if(c.timeout){c.timeout=false;return XR_TIMEOUT_EXPIRED;}c.owned=true;return XR_SUCCESS;
 }
-XrResult XRAPI_CALL release(XrSwapchain s,const XrSwapchainImageReleaseInfo*) {++chains.at(s).releases;if(chains.at(s).height==768)++menu_releases;return XR_SUCCESS;}
+XrResult XRAPI_CALL release(XrSwapchain s,const XrSwapchainImageReleaseInfo*) {
+    auto& c=chains.at(s);check(c.held&&c.owned,"release only a successfully waited shared image");
+    c.held=c.owned=false;c.published_index=c.index;++c.releases;if(c.height>=768)++menu_releases;return XR_SUCCESS;
+}
 XrResult XRAPI_CALL end(XrSession,const XrFrameEndInfo* i) {
     check(i->next==next,"preserve endframe next chain");count_seen=i->layerCount;menu_seen=fps_seen=0;
     for(unsigned n=0;n<i->layerCount;++n) {
@@ -92,8 +97,9 @@ XrResult XRAPI_CALL end(XrSession,const XrFrameEndInfo* i) {
         auto* q=reinterpret_cast<const XrCompositionLayerQuad*>(i->layers[n]);auto& c=chains.at(q->subImage.swapchain);
         check(c.releases!=0,"only released XR images composed");
         check(q->eyeVisibility==XR_EYE_VISIBILITY_BOTH&&q->space==handle<XrSpace>(99),"both eyes in shared VIEW space");
-        if(c.width==1024 && c.height==768) {
-            ++menu_seen;check(c.height==768,"menu canvas 4:3");menu_pose=q->pose;menu_size=q->size;
+        check(q->subImage.imageRect.offset.y+q->subImage.imageRect.extent.height<=int(c.height),"UI region inside shared image");
+        if(q->subImage.imageRect.offset.y==0 && q->subImage.imageRect.extent.height==768) {
+            ++menu_seen;check(q->subImage.imageRect.extent.width==1024,"menu canvas 4:3");menu_pose=q->pose;menu_size=q->size;
             check(q->layerFlags==XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,"premultiplied menu alpha");
         }else ++fps_seen;
     }return XR_SUCCESS;
@@ -128,7 +134,7 @@ void bitmap(const Chain& chain, const std::filesystem::path& output, const unsig
 }
 void preview12(const Chain& chain,const std::filesystem::path& output) {
     // Test-only readback. Runtime UI never adds this list or fence wait.
-    const auto desc=chain.t12[chain.index]->GetDesc();
+    const auto desc=chain.t12[chain.published_index]->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};UINT64 bytes{};
     device->GetCopyableFootprints(&desc,0,1,0,&footprint,nullptr,nullptr,&bytes);
     D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=bytes;
@@ -139,9 +145,9 @@ void preview12(const Chain& chain,const std::filesystem::path& output) {
     check(SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator)))&&
         SUCCEEDED(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list))),"D12 readback commands");
     D3D12_RESOURCE_BARRIER barrier{};barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition={chain.t12[chain.index].Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE};
+    barrier.Transition={chain.t12[chain.published_index].Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE};
     list->ResourceBarrier(1,&barrier);
-    D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=chain.t12[chain.index].Get();from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=chain.t12[chain.published_index].Get();from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     to.pResource=readback.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint=footprint;
     list->CopyTextureRegion(&to,0,0,0,&from,nullptr);std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);list->ResourceBarrier(1,&barrier);
     check(SUCCEEDED(list->Close())&&SUCCEEDED(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence))),"D12 readback fence");
@@ -153,11 +159,11 @@ void preview12(const Chain& chain,const std::filesystem::path& output) {
     D3D12_RANGE empty{};readback->Unmap(0,&empty);
 }
 void preview11(const Chain& chain,const std::filesystem::path& output) {
-    D3D11_TEXTURE2D_DESC desc{};chain.t11[chain.index]->GetDesc(&desc);
+    D3D11_TEXTURE2D_DESC desc{};chain.t11[chain.published_index]->GetDesc(&desc);
     desc.BindFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> staging;ComPtr<ID3D11DeviceContext> context;
     check(SUCCEEDED(device11->CreateTexture2D(&desc,nullptr,&staging)),"menu preview staging");
-    device11->GetImmediateContext(&context);context->CopyResource(staging.Get(),chain.t11[chain.index].Get());
+    device11->GetImmediateContext(&context);context->CopyResource(staging.Get(),chain.t11[chain.published_index].Get());
     D3D11_MAPPED_SUBRESOURCE mapped{};check(SUCCEEDED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped)),"menu preview real GPU readback");
     bitmap(chain,output,static_cast<const unsigned char*>(mapped.pData),mapped.RowPitch);
     context->Unmap(staging.Get(),0);
@@ -202,7 +208,7 @@ int main(int argc,char** argv) {
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             check(menu_seen==1&&fps_seen==0&&count_seen==2,"menu works with FPS off");
             const auto menu=[&]() -> Chain& {
-                for(auto& [handle,chain]:chains)if(chain.height==768)return chain;
+                for(auto& [handle,chain]:chains)if(chain.height>=768)return chain;
                 throw std::runtime_error("live menu chain missing");
             };
             check(menu().acquires==1&&menu().waits==2&&menu().releases==1,"retry same acquired menu image after timeout");
@@ -232,9 +238,25 @@ int main(int argc,char** argv) {
             check(menu_seen==1&&std::abs(menu_pose.position.y-pose.position.y)<1e-6F,"storage inversion never moves menu");
             std::swap(v.fov.angleDown,v.fov.angleUp);
             position(ini,"upper_right");std::this_thread::sleep_for(std::chrono::milliseconds(260));
+            chain_limit=1; // opening any counter beside the menu must need no additional XR handle
             overlay.application_frame(&frame); // FPS first acquired image times out.
             std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&frame);overlay.end_frame(&frame,true);
             check(menu_seen==1&&fps_seen==1&&count_seen==3,"both quads on original/synthetic compositor path");
+            check(chains.size()==1,"menu and corner counter share exactly one native XR swapchain");
+            position(ini,"elliott_bottom");std::this_thread::sleep_for(std::chrono::milliseconds(260));
+            overlay.application_frame(&frame);overlay.end_frame(&frame,false);
+            for(unsigned n=0;n<40 && !(menu_seen&&fps_seen);++n) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));overlay.application_frame(&frame);overlay.end_frame(&frame,false);
+            }
+            check(menu_seen==1&&fps_seen==1&&chains.size()==1,"menu and Elliott meter remain independent quads on one native handle");
+            const auto handles=overlay.swapchain_handles();
+            check(handles && (*handles)[1] && (*handles)[1]==(*handles)[2],"inventory reports the shared native UI handle");
+            if(argc>=3) {
+                auto image=std::filesystem::path(argv[2]);image.replace_extension(".meter.bmp");
+                if(d11)preview11(menu(),image);else preview12(menu(),image);
+            }
+            position(ini,"upper_right");std::this_thread::sleep_for(std::chrono::milliseconds(260));
+            overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             overlay.set_session_focused(false);overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             check(menu_seen==0&&fps_seen==1,"focus loss removes menu even if input source still asks open");
             overlay.set_session_focused(true);overlay.application_frame(&frame);overlay.end_frame(&frame,false);
@@ -266,7 +288,7 @@ int main(int argc,char** argv) {
                     std::abs(menu_pose.position.x - expected.x) < 1e-5F &&
                     std::abs(menu_pose.position.y - expected.y) < 1e-5F,
                     "changed size and clamped position survive the production close/reopen path");
-                check(chains.size()<=2 && made-destroyed==chains.size(), "reopening releases unused panels and keeps one live menu");
+                check(chains.size()==1 && made-destroyed==chains.size(), "reopening retains one shared native atlas");
             }
             auto settings = xrfg::autonomous::snapshot().desired;
             settings.menu_scale = .5F; settings.menu_offset_x = settings.menu_offset_y = 0;
@@ -312,6 +334,12 @@ int main(int argc,char** argv) {
                 benchmark(false);benchmark(true);input.open=false;overlay.application_frame(&frame);
                 check(!xrfg::autonomous::interface_telemetry_requested(),"benchmark close clears visibility");
             }
+            input.open=false;position(ini,"off");std::this_thread::sleep_for(std::chrono::milliseconds(260));
+            for(unsigned n=0;n<40 && !chains.empty();++n) {
+                overlay.application_frame(&frame);overlay.end_frame(&frame,false);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            check(chains.empty(),"menu and counter off release the shared native reservation during the live session");
             XrFrameEndInfo empty=frame;empty.layerCount=0;empty.layers=nullptr;
             overlay.application_frame(&empty);overlay.end_frame(&empty,false);check(count_seen==0,"empty application frame remains empty");
             overlay.suspend();input.open=true;overlay.application_frame(&frame);overlay.end_frame(&frame,true);
