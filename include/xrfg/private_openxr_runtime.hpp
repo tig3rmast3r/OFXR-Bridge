@@ -190,6 +190,9 @@ public:
         // XR sink and every other output still retain independent allocations.
         ID3D12Device* d11_output_owner=nullptr);
     XrResult destroy_swapchain(XrSwapchain);
+    // Optional UI retirement: busy readers/consumers leave the chain intact
+    // and return XR_ERROR_CALL_ORDER_INVALID for a later frame-thread retry.
+    XrResult try_destroy_swapchain(XrSwapchain);
     XrResult enumerate_images(XrSwapchain,std::uint32_t,std::uint32_t*,XrSwapchainImageBaseHeader*);
     XrResult acquire_image(XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t*);
     // Same ownership checks, with no wait or mutation when every eligible
@@ -207,6 +210,7 @@ public:
     // CPU-only inventory; busy transport returns no partial snapshot.
     [[nodiscard]] std::optional<std::vector<SwapchainMapping>> native_swapchain_mapping() const;
 private:
+    XrResult destroy_swapchain_impl(XrSwapchain,bool blocking);
     XrResult acquire_image_impl(XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t*,bool blocking);
     struct Impl;
     std::shared_ptr<Impl> impl_;

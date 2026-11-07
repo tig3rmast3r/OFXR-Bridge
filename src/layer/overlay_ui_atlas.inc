@@ -9,6 +9,10 @@ struct UiSource {
 };
 std::unordered_map<XrSwapchain,std::unique_ptr<UiSource>> ui_sources;
 bool ui_atlas_supported{},ui_atlas_held{},ui_atlas_waited{},ui_atlas_failed{};
+bool ui_atlas_enabled{},ui_policy_warming{};
+NativeSwapchainCount ui_native_count;
+std::optional<bool> ui_pair_choice;
+unsigned ui_pair_mask{},ui_projected_total{};
 XrSwapchain ui_atlas{};unsigned ui_atlas_index{};
 std::vector<Image> ui_atlas_images;
 std::vector<std::pair<XrSwapchain,std::uint64_t>> ui_published;
@@ -48,7 +52,7 @@ XrResult ensure_ui_atlas(const XrSwapchainCreateInfo& source) {
     return XR_SUCCESS;
 }
 XrResult create_swapchain(XrSession owner,const XrSwapchainCreateInfo* info,XrSwapchain* out,bool menu_source=false) {
-    if(!ui_atlas_supported)return runtime_create_swapchain(owner,info,out);
+    if(!ui_atlas_supported || !ui_atlas_enabled)return runtime_create_swapchain(owner,info,out);
     if(!out || !info)return XR_ERROR_VALIDATION_FAILURE;
     *out=XR_NULL_HANDLE;
     if(info->width>ui_atlas_width || info->height>(menu_source?ui_status_y:ui_atlas_height-ui_status_y))
@@ -220,4 +224,64 @@ void compose_ui_atlas(const XrFrameEndInfo* info) {
     XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     if(runtime_release(ui_atlas,&release_info)!=XR_SUCCESS){ui_atlas_failed=true;return;}
     ui_atlas_held=ui_atlas_waited=false;ui_published.assign(desired.begin(),desired.end());
+}
+
+void observe_ui_membership() {
+    const unsigned mask=(menu_open?1u:0u)|(position!=FpsOverlayPosition::off?2u:0u);
+    if(mask!=ui_pair_mask){ui_pair_mask=mask;ui_pair_choice.reset();}
+}
+bool retire_ui_for_policy() {
+    image_valid=menu_valid=meter.image_valid=false;meter_paint.reset();
+    if(swapchain) {
+        if(!release_unused(swapchain,images,acquired,waited) || destroy_swapchain(swapchain)!=XR_SUCCESS)return false;
+        swapchain={};images.clear();quad.subImage.swapchain={};fps_attempted=fps_initialized=false;
+    }
+    if(meter.swapchain) {
+        if(!release_unused(meter.swapchain,meter.images,meter.acquired,meter.waited) || destroy_swapchain(meter.swapchain)!=XR_SUCCESS)return false;
+        meter=MeterSurface{};
+    }
+    if(menu_swapchain) {
+        if(!release_unused(menu_swapchain,menu_images,menu_acquired,menu_waited) || FAILED(menu_renderer.shutdown()) ||
+            destroy_swapchain(menu_swapchain)!=XR_SUCCESS)return false;
+        menu_swapchain={};menu_images.clear();menu_quad.subImage.swapchain={};
+        menu_attempted=menu_initialized=false;
+    }
+    return true;
+}
+bool update_ui_policy(bool& refresh,std::int64_t now) {
+    observe_ui_membership();
+    if(ui_pair_mask==3 && !ui_pair_choice) {
+        if(ui_native_count && ui_atlas_supported) {
+            const auto total=ui_native_count();if(!total)return false;
+            std::array<XrSwapchain,3> own{};unsigned owned{};
+            for(const auto source:{swapchain,meter.swapchain,menu_swapchain}) {
+                const auto native=public_ui_handle(source);
+                if(native && std::find(own.begin(),own.begin()+owned,native)==own.begin()+owned)own[owned++]=native;
+            }
+            ui_projected_total=*total-std::min(*total,owned)+2;
+            ui_pair_choice=ui_projected_total>=14;
+        } else {ui_pair_choice=false;ui_projected_total=0;}
+    }
+    const bool desired=ui_pair_mask==3 && ui_pair_choice.value_or(false);
+    if(desired==ui_atlas_enabled)return true;
+    // Finish a mouse gesture before rebuilding its ImGui owner. Keep polling
+    // and buffering input; no game image or producer/presenter schedule waits.
+    if(std::any_of(pending_menu_input.mouse_down.begin(),pending_menu_input.mouse_down.end(),[](bool down){return down;}))return false;
+    if(!retire_ui_for_policy())return false;
+    // All old handles are returned first, so conversion never needs a spare
+    // third UI allocation at the very native limit it is meant to relieve.
+    ui_atlas_enabled=desired;ui_policy_warming=true;refresh=true;next_refresh=now+250'000'000;
+    bridge_flight_logger().event(BridgeFlightOperation::menu_status,desired?1:0,12,ui_projected_total,0);
+    return true;
+}
+void finish_ui_policy_refresh() {
+    if(!ui_policy_warming)return;
+    const auto published=[&](XrSwapchain source) {
+        return !ui_sources.contains(source) || std::any_of(ui_published.begin(),ui_published.end(),[&](const auto& p){return p.first==source;});
+    };
+    const bool menu_ready=!menu_open || (menu_valid&&published(menu_swapchain));
+    const bool counter_ready=position==FpsOverlayPosition::off ||
+        (elliott_mode()?(!meter.initialized || meter.failed || (meter.image_valid&&published(meter.swapchain))):
+            (!fps_initialized || (image_valid&&published(swapchain))));
+    if(disabled || (menu_ready&&counter_ready))ui_policy_warming=false;
 }

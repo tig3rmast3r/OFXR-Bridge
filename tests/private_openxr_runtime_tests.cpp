@@ -1570,7 +1570,8 @@ void queue_priority_policy() {
     std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
 }
-int main(int argc,char** argv){
+#include "private_overlay_destroy_fixture.inc"
+int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
 if(argc>1 && std::string_view(argv[1])=="stalled-renewal"){
     for(bool d12:{true,false})for(bool directed:{true,false})stalled_native_renewal(d12,directed,0);

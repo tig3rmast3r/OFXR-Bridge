@@ -6368,6 +6368,15 @@ XrResult layer_create_session_impl(
             }, dispatch.get());
         bind_private_delivery_metrics(state);
         state->fps_overlay->set_delivery_source(state->steamvr_delivery.get());
+        if(state->dispatch->steamvr_runtime && state->private_runtime) {
+            state->fps_overlay->set_native_swapchain_count_source([weak=std::weak_ptr<SessionState>(state)]()->std::optional<unsigned> {
+                const auto owner=weak.lock();if(!owner || !owner->private_runtime)return std::nullopt;
+                const auto mapping=owner->private_runtime->native_swapchain_mapping();if(!mapping)return std::nullopt;
+                std::vector<XrSwapchain> native;native.reserve(mapping->size());
+                for(const auto& entry:*mapping)if(entry.native && std::find(native.begin(),native.end(),entry.native)==native.end())native.push_back(entry.native);
+                return static_cast<unsigned>(native.size());
+            });
+        }
         if(state->dispatch->virtual_desktop_runtime ||
             state->dispatch->runtime_name.find("Pimax OpenXR")!=std::string::npos) {
             const auto rate=state->runtime_acceptance;

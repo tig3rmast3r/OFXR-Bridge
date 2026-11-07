@@ -1663,10 +1663,20 @@ XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* inf
     return XR_SUCCESS;
 }
 XrResult PrivateOpenXrRuntime::destroy_swapchain(XrSwapchain handle) {
-    auto& s=*impl_;std::unique_lock lock(s.mutex);auto it=s.chains.find(handle);if(it==s.chains.end())return XR_ERROR_HANDLE_INVALID;
+    return destroy_swapchain_impl(handle,true);
+}
+XrResult PrivateOpenXrRuntime::try_destroy_swapchain(XrSwapchain handle) {
+    return destroy_swapchain_impl(handle,false);
+}
+XrResult PrivateOpenXrRuntime::destroy_swapchain_impl(XrSwapchain handle,bool blocking) {
+    auto& s=*impl_;std::unique_lock lock(s.mutex,std::defer_lock);
+    if(blocking)lock.lock();else if(!lock.try_lock())return XR_ERROR_CALL_ORDER_INVALID;
+    auto it=s.chains.find(handle);if(it==s.chains.end())return XR_ERROR_HANDLE_INVALID;
+    const auto idle=[&]{return !it->second->consumers && std::none_of(it->second->images.begin(),it->second->images.end(),[](auto& i){return i.readers!=0;});};
+    if(!blocking && (s.stopping || !idle()))return XR_ERROR_CALL_ORDER_INVALID;
     auto chain=it->second;chain->destroying=true;
     if(s.stopping){lock.unlock();stop();lock.lock();}
-    s.changed.wait(lock,[&]{return !chain->consumers && std::none_of(chain->images.begin(),chain->images.end(),[](auto& i){return i.readers!=0;});});
+    if(blocking)s.changed.wait(lock,[&]{return !chain->consumers && std::none_of(chain->images.begin(),chain->images.end(),[](auto& i){return i.readers!=0;});});
     s.chains.erase(handle);
     auto publication=chain->publication;
     if(publication && --publication->publication_owners)return XR_SUCCESS;

@@ -22,6 +22,7 @@ unsigned checks{}, made{}, destroyed{}, max_layers{3}, count_seen{}, menu_seen{}
 bool d11{};
 bool refuse_menu_create{};
 unsigned chain_limit=~0u,menu_releases{};
+unsigned max_image_height=4096;bool policy_fixture{};
 unsigned acquire_timeouts{};
 void check(bool pass,const char* message) { ++checks; if (!pass) throw std::runtime_error(message); }
 template<class T> T handle(std::uintptr_t v) { return reinterpret_cast<T>(v); }
@@ -43,7 +44,9 @@ XrResult XRAPI_CALL space(XrSession,const XrReferenceSpaceCreateInfo* i,XrSpace*
 }
 XrResult XRAPI_CALL destroy_space(XrSpace s) { check(s==handle<XrSpace>(99),"private space lifetime");return XR_SUCCESS; }
 XrResult XRAPI_CALL properties(XrInstance,XrSystemId,XrSystemProperties* out) {
-    out->graphicsProperties={4096,4096,max_layers};return XR_SUCCESS;
+    out->graphicsProperties.maxSwapchainImageWidth=4096;
+    out->graphicsProperties.maxSwapchainImageHeight=max_image_height;
+    out->graphicsProperties.maxLayerCount=max_layers;return XR_SUCCESS;
 }
 XrResult XRAPI_CALL formats(XrSession,std::uint32_t capacity,std::uint32_t* count,std::int64_t* out) {
     *count=1;if(capacity)out[0]=DXGI_FORMAT_R8G8B8A8_UNORM;return XR_SUCCESS;
@@ -53,6 +56,7 @@ XrResult XRAPI_CALL create_chain(XrSession,const XrSwapchainCreateInfo* i,XrSwap
         refuse_menu_create=false;*out=XR_NULL_HANDLE;return XR_ERROR_LIMIT_REACHED;
     }
     *out=handle<XrSwapchain>(++made+10); auto& c=chains[*out]; c.width=i->width;c.height=i->height;
+    c.timeout=!policy_fixture;
     check(i->arraySize==1&&i->sampleCount==1,"single image/single sample");
     if(d11) {
         c.t11.resize(3);D3D11_TEXTURE2D_DESC d{};d.Width=c.width;d.Height=c.height;
@@ -169,6 +173,7 @@ void preview11(const Chain& chain,const std::filesystem::path& output) {
     context->Unmap(staging.Get(),0);
 }
 }
+#include "overlay_atlas_policy_fixture.inc"
 int main(int argc,char** argv) {
     auto fixture=std::filesystem::temp_directory_path()/(L"ofxr-menu-xr-"+std::to_wstring(GetCurrentProcessId()));
     try {
@@ -189,9 +194,13 @@ int main(int argc,char** argv) {
         app=reinterpret_cast<XrCompositionLayerBaseHeader*>(&p);std::array<const XrCompositionLayerBaseHeader*,2> layers{app,app};
         XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.layerCount=1;frame.layers=layers.data();
         XrBaseInStructure extension{XR_TYPE_UNKNOWN};next=frame.next=&extension;
+        if(argc>2 && std::string_view(argv[2])=="policy") {
+            atlas_policy_fixture(ini,frame);std::filesystem::remove_all(fixture);return 0;
+        }
         {
             xrfg::OpenXrFpsOverlay overlay(handle<XrInstance>(1),handle<XrSession>(2),1,get,end,
                 device.Get(),queue.Get(),device11.Get(),ini,true,poll);
+            overlay.set_native_swapchain_count_source([]()->std::optional<unsigned>{return 12u+static_cast<unsigned>(chains.size());});
             overlay.application_frame(&frame);check(made==0,"closed menu + FPS off creates no texture");
             input.open=input.focused=input.mouse_valid=true;input.mouse_x=300;input.mouse_y=240;
             refuse_menu_create=true;
@@ -241,6 +250,7 @@ int main(int argc,char** argv) {
             chain_limit=1; // opening any counter beside the menu must need no additional XR handle
             overlay.application_frame(&frame); // FPS first acquired image times out.
             std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&frame);overlay.end_frame(&frame,true);
+            for(unsigned n=0;n<40 && !(menu_seen&&fps_seen);++n){std::this_thread::sleep_for(std::chrono::milliseconds(2));overlay.application_frame(&frame);overlay.end_frame(&frame,true);}
             check(menu_seen==1&&fps_seen==1&&count_seen==3,"both quads on original/synthetic compositor path");
             check(chains.size()==1,"menu and corner counter share exactly one native XR swapchain");
             position(ini,"elliott_bottom");std::this_thread::sleep_for(std::chrono::milliseconds(260));
@@ -258,6 +268,7 @@ int main(int argc,char** argv) {
             position(ini,"upper_right");std::this_thread::sleep_for(std::chrono::milliseconds(260));
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             overlay.set_session_focused(false);overlay.application_frame(&frame);overlay.end_frame(&frame,false);
+            for(unsigned n=0;n<40 && !fps_seen;++n){std::this_thread::sleep_for(std::chrono::milliseconds(2));overlay.application_frame(&frame);overlay.end_frame(&frame,false);}
             check(menu_seen==0&&fps_seen==1,"focus loss removes menu even if input source still asks open");
             overlay.set_session_focused(true);overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             for(unsigned n=0;n<40 && !menu_seen;++n){overlay.application_frame(&frame);overlay.end_frame(&frame,false);std::this_thread::sleep_for(std::chrono::milliseconds(1));}
@@ -351,6 +362,7 @@ int main(int argc,char** argv) {
         {
             xrfg::OpenXrFpsOverlay overlay(handle<XrInstance>(1),handle<XrSession>(2),1,get,end,
                 device.Get(),queue.Get(),device11.Get(),ini,true,poll);
+            overlay.set_native_swapchain_count_source([]()->std::optional<unsigned>{return 12u+static_cast<unsigned>(chains.size());});
             overlay.application_frame(&frame);std::this_thread::sleep_for(std::chrono::milliseconds(260));
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             check(menu_seen==1&&fps_seen==0&&count_seen==2,"one spare slot gives interactive menu priority");

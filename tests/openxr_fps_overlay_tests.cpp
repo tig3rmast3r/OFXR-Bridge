@@ -138,8 +138,8 @@ XrResult XRAPI_CALL end(XrSession, const XrFrameEndInfo* info) {
         check(releases > 0 && visible_rect.extent.width<=static_cast<int>(width), "unreleased overlay image");
         check(quad->layerFlags == XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
               "overlay must blend premultiplied source alpha");
-        check(visible_rect.extent.width==visible_rect.extent.height*2 && visible_rect.offset.y==(limited_size?0:768),
-            "numeric overlay aspect and shared atlas region");
+        check(visible_rect.extent.width==visible_rect.extent.height*2 && visible_rect.offset.y==0,
+            "ordinary runtime retains direct numeric overlay aspect");
         last_pose = quad->pose;
     }
     if (fail_end) { fail_end = false; return XR_ERROR_RUNTIME_FAILURE; }

@@ -195,6 +195,7 @@ struct OpenXrFpsOverlay::Impl {
         if (was_open) autonomous::set_interface_visible(autonomous::InterfaceSurface::headset, false);
         if (release_input && menu_input) menu_input->close();
         menu_open = menu_valid = false;
+        if(was_open){ui_pair_choice.reset();ui_pair_mask&=~1u;}
         pending_menu_input = {};
         if (was_open) {
             autonomous::finish_settings_widget_edits(menu_widgets);
@@ -900,7 +901,7 @@ struct OpenXrFpsOverlay::Impl {
     void application_frame(const XrFrameEndInfo* info) {
         const auto now = now_ns();
         if (!info || info->type != XR_TYPE_FRAME_END_INFO) return;
-        const bool refresh_fps = now >= next_refresh;
+        bool refresh_fps = now >= next_refresh || ui_policy_warming;
         if (refresh_fps) {
             next_refresh = now + 250'000'000;
             std::array<wchar_t, 32> setting{};
@@ -933,6 +934,7 @@ struct OpenXrFpsOverlay::Impl {
         if (menu_open) autonomous::set_interface_visible(autonomous::InterfaceSurface::headset, true);
         if(!elliott_mode())autonomous::set_interface_visible(autonomous::InterfaceSurface::meter,false);
         refresh_telemetry();
+        observe_ui_membership();
         release_unused_surfaces();
         if ((!refresh_fps || position == FpsOverlayPosition::off) && !menu_open && !elliott_mode()) return;
         float left = -1, right = 1, down = -1, up = 1;
@@ -968,6 +970,10 @@ struct OpenXrFpsOverlay::Impl {
         placement_valid = true;
         if (!initialize()) { close_menu(); return; }
         if (info->layerCount >= max_layers) close_menu();
+        if(!update_ui_policy(refresh_fps,now))return;
+        // Do not transiently allocate a third direct UI chain when switching
+        // between corner counter and meter while the old GPU image retires.
+        if(!ui_atlas_enabled && ((elliott_mode() && swapchain) || (!elliott_mode() && meter.swapchain)))return;
         if (menu_open) {
             if (!initialize_menu()) { close_menu(); }
             else {
@@ -1048,7 +1054,7 @@ void OpenXrFpsOverlay::application_frame(const XrFrameEndInfo* info) noexcept {
             std::scoped_lock lock(impl_->mutex);
             if(impl_->elliott_mode() && !impl_->disabled && !impl_->meter.failed && !pixels.empty())impl_->upload_meter(pixels,rows);
         }
-        {std::scoped_lock lock(impl_->mutex);impl_->compose_ui_atlas(info);}
+        {std::scoped_lock lock(impl_->mutex);impl_->compose_ui_atlas(info);impl_->finish_ui_policy_refresh();}
     }
     catch (...) {
         // An optional UI failure must release capture as well as preserving
@@ -1063,6 +1069,9 @@ void OpenXrFpsOverlay::set_afw_active(bool active) noexcept {
 void OpenXrFpsOverlay::set_delivery_source(SteamVrDelivery* delivery) noexcept {
     std::scoped_lock lock(impl_->mutex);
     impl_->delivery = delivery;
+}
+void OpenXrFpsOverlay::set_native_swapchain_count_source(NativeSwapchainCount source) {
+    std::scoped_lock lock(impl_->mutex);impl_->ui_native_count=std::move(source);impl_->ui_pair_choice.reset();
 }
 void OpenXrFpsOverlay::set_runtime_acceptance_source(std::function<std::optional<float>(std::int64_t)> source,bool direct) noexcept {
     std::scoped_lock lock(impl_->mutex);impl_->runtime_acceptance=std::move(source);impl_->direct_acceptance=direct;
