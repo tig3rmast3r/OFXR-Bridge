@@ -13,6 +13,13 @@ inline constexpr std::uint64_t kBenchmarkSettleMs=2500;
 inline constexpr std::uint64_t kBenchmarkMeasureMs=5000;
 inline constexpr std::uint64_t kBenchmarkDurationMs=kBenchmarkSettleMs+kBenchmarkMeasureMs;
 inline constexpr std::uint64_t kBenchmarkMemoryRequestMs=kBenchmarkDurationMs-500;
+// A missing frame heartbeat is not proof that the game process exited.
+// RIFE cold startup has a 60s worker handshake; other route rebuilds get 30s.
+inline bool benchmark_reconfiguration_grace(const RuntimeStatus& runtime,
+    std::uint64_t now, bool rife) noexcept {
+    return runtime.process_id && runtime.sessions && runtime.heartbeat_ms &&
+        now >= runtime.heartbeat_ms && now-runtime.heartbeat_ms < (rife ? 65000ULL : 30000ULL);
+}
 struct BenchmarkStep {
     int generation{}, backend{}, a{}, b{};
     bool triple{}, prefer{}, disabled{};

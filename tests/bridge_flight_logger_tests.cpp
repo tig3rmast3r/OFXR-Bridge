@@ -76,6 +76,9 @@ void concurrent_records(const fs::path& directory, bool wrap, bool flush) {
         logger.event(xrfg::BridgeFlightOperation::presenter_transition, 5751, 1, 0, 0);
         const auto infer = logger.begin(xrfg::BridgeFlightOperation::rife_infer, 42);
         logger.end(infer, xrfg::BridgeFlightOperation::rife_infer, 0, 42, 2, 3);
+        logger.event(xrfg::BridgeFlightOperation::menu_status,89802,17,9,8310);
+        const auto configure=logger.begin(xrfg::BridgeFlightOperation::embedded_configuration,106);
+        logger.end(configure,xrfg::BridgeFlightOperation::embedded_configuration,89830,106,0,0);
         logger.event(xrfg::BridgeFlightOperation::presenter_transition, 752, 0, 70, 1);
         logger.event(xrfg::BridgeFlightOperation::presenter_transition, 752, 0, 70, 1);
         logger.event(xrfg::BridgeFlightOperation::presenter_transition, 752, 0, 71, 1);
@@ -167,6 +170,9 @@ void concurrent_records(const fs::path& directory, bool wrap, bool flush) {
             benchmark.find("phase=B op=rife_infer") == std::string::npos,
             "compact log lost RIFE inference or native-cycle evidence during verbose rotation");
         const std::string identity="op=presenter_transition result=752 dur_us=0 a=0 b=70 c=1";
+        require(benchmark.find("op=menu_status result=89802 dur_us=0 a=17 b=9 c=8310")!=std::string::npos &&
+            benchmark.find("op=embedded_configuration result=89830")!=std::string::npos,
+            "UI publication progress and timed reconfiguration must survive verbose rotation");
         const auto first=benchmark.find(identity);
         require(first!=std::string::npos && benchmark.find(identity,first+identity.size())==std::string::npos &&
             benchmark.find("op=presenter_transition result=752 dur_us=0 a=0 b=71 c=1")!=std::string::npos,

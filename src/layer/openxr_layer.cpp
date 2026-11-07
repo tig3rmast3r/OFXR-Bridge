@@ -16229,6 +16229,13 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     if (!state->generation_outputs_needed) state->generation_outputs_needed=outputs_needed;
     if (state->control_revision == control.revision && !force_startup_rendezvous && !output_use_changed && !afw_use_changed &&
         hybrid_ready==state->nvidia_options.hybrid) return S_OK;
+    struct ReconfigurationTrace {
+        xrfg::BridgeFlightLogger& logger;xrfg::BridgeFlightToken token;std::uint64_t revision;
+        ~ReconfigurationTrace(){logger.end(token,xrfg::BridgeFlightOperation::embedded_configuration,89830,revision,0,0);}
+    };
+    auto& reconfiguration_logger=xrfg::bridge_flight_logger();
+    ReconfigurationTrace transition_trace{reconfiguration_logger,
+        reconfiguration_logger.begin(xrfg::BridgeFlightOperation::embedded_configuration,control.revision,0,0),control.revision};
     const bool explicit_revision = state->control_revision != control.revision;
     if (!force_startup_rendezvous && !state->control_reconfigure_required && !output_use_changed && !afw_use_changed &&
         hybrid_ready == state->nvidia_options.hybrid && state->applied_generation_settings) {

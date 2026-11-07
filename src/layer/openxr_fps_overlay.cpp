@@ -189,6 +189,32 @@ struct OpenXrFpsOverlay::Impl {
 
 #include "overlay_ui_atlas.inc"
 
+    struct UiProgress { std::uint64_t attempts{},publications{},published_at{};unsigned stage{};std::int64_t result{}; };
+    std::array<UiProgress,3> ui_progress;
+    std::int64_t next_ui_diagnostic{},next_ui_submit_diagnostic{};
+    void ui_stage(unsigned surface,unsigned stage,std::int64_t result=0) noexcept {
+        if(!bridge_flight_logger().enabled())return;
+        auto& progress=ui_progress[surface];progress.stage=stage;progress.result=result;
+        if(stage==1)++progress.attempts;
+        if(stage==7){++progress.publications;progress.published_at=now_ns()/1'000'000;}
+    }
+    void log_ui_progress() noexcept {
+        auto& logger=bridge_flight_logger();if(!logger.enabled())return;
+        const auto now=now_ns();if(now<next_ui_diagnostic)return;next_ui_diagnostic=now+1'000'000'000;
+        const auto flags=std::uint64_t(disabled)|(std::uint64_t(meter.failed)<<1)|(std::uint64_t(menu_open)<<2)|
+            (std::uint64_t(menu_valid)<<3)|(std::uint64_t(meter.image_valid)<<4)|(std::uint64_t(image_valid)<<5)|
+            (std::uint64_t(ui_atlas_enabled)<<6)|(std::uint64_t(ui_atlas_failed)<<7)|(std::uint64_t(menu_focused)<<8)|
+            (std::uint64_t(ui_atlas_held)<<9)|(std::uint64_t(ui_atlas_waited)<<10);
+        logger.event(BridgeFlightOperation::menu_status,89800,flags,ui_projected_total,ui_published.size());
+        const std::array<XrSwapchain,3> handles{swapchain,meter.swapchain,menu_swapchain};
+        for(unsigned i=0;i<3;++i){const auto& v=ui_progress[i];
+            logger.event(BridgeFlightOperation::menu_status,89801+i,xr_handle_bits(handles[i]),
+                (v.attempts<<32)|(v.publications&0xffffffffULL),v.published_at?now/1'000'000-v.published_at:UINT64_MAX);
+            logger.event(BridgeFlightOperation::menu_status,89811+i,v.stage,static_cast<std::uint64_t>(v.result),
+                fence12?fence12->GetCompletedValue():fence11?fence11->GetCompletedValue():0);
+        }
+    }
+
     void close_menu(bool release_input = true) noexcept {
         const bool was_open = menu_open || menu_valid || pending_menu_input.open;
         if (was_open) menu_event(0, 0);
@@ -291,10 +317,12 @@ struct OpenXrFpsOverlay::Impl {
     }
 
     bool render_menu() {
+        ui_stage(2,1);
         if (menu_unfenced_submission) { close_menu(); return false; }
         if (!menu_acquired) {
             XrSwapchainImageAcquireInfo info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
             const auto result = acquire(menu_swapchain, &info, &menu_index);
+            ui_stage(2,2,result);
             if (result == XR_TIMEOUT_EXPIRED) return false;
             if (result != XR_SUCCESS) return menu_failure(2, result);
             menu_acquired = true; menu_waited = false;
@@ -303,6 +331,7 @@ struct OpenXrFpsOverlay::Impl {
         if (!menu_waited) {
             XrSwapchainImageWaitInfo info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO}; info.timeout = 0;
             const auto result = wait(menu_swapchain, &info);
+            ui_stage(2,3,result);
             if (result == XR_TIMEOUT_EXPIRED) return false;
             if (result != XR_SUCCESS) return menu_failure(3, result);
             menu_waited = true;
@@ -310,6 +339,7 @@ struct OpenXrFpsOverlay::Impl {
         auto& image = menu_images[menu_index];
         const auto completed = fence12 ? fence12->GetCompletedValue() : fence11->GetCompletedValue();
         if (completed == UINT64_MAX) return menu_failure(4, DXGI_ERROR_DEVICE_REMOVED);
+        ui_stage(2,4,completed<image.fence_value?XR_TIMEOUT_EXPIRED:XR_SUCCESS);
         if (completed < image.fence_value) return false;
         const auto value = next_fence++;
         HRESULT result{};
@@ -360,7 +390,7 @@ struct OpenXrFpsOverlay::Impl {
         const auto released = release(menu_swapchain, &info);
         if (XR_FAILED(released)) return menu_failure(7, released);
         menu_acquired = menu_waited = false;
-        menu_valid = true;
+        menu_valid = true;ui_stage(2,7);
         return true;
     }
 
@@ -568,9 +598,11 @@ struct OpenXrFpsOverlay::Impl {
     }
 
     bool upload(const FpsSnapshot& snapshot) {
+        ui_stage(0,1);
         if (!acquired) {
             XrSwapchainImageAcquireInfo info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
             const auto result=acquire(swapchain, &info, &index);
+            ui_stage(0,2,result);
             if(result==XR_TIMEOUT_EXPIRED)return false;
             if(result!=XR_SUCCESS){disabled=true;return false;}
             acquired = true;
@@ -581,6 +613,7 @@ struct OpenXrFpsOverlay::Impl {
             XrSwapchainImageWaitInfo info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
             info.timeout = 0;
             const auto result = wait(swapchain, &info);
+            ui_stage(0,3,result);
             // XR_TIMEOUT_EXPIRED is positive, but does NOT grant ownership.
             if (result == XR_TIMEOUT_EXPIRED) return false;
             if (result != XR_SUCCESS) { disabled = true; return false; }
@@ -589,6 +622,7 @@ struct OpenXrFpsOverlay::Impl {
         auto& image = images[index];
         const auto completed = fence12 ? fence12->GetCompletedValue() : fence11->GetCompletedValue();
         if (completed == UINT64_MAX) { disabled = true; return false; }
+        ui_stage(0,4,completed<image.fence_value?XR_TIMEOUT_EXPIRED:XR_SUCCESS);
         if (completed < image.fence_value) return false;
         const bool bgra = format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
         const auto pixels = rasterize_fps_overlay(width, height, snapshot, bgra);
@@ -644,7 +678,7 @@ struct OpenXrFpsOverlay::Impl {
         XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         if (XR_FAILED(release(swapchain, &info))) { disabled = true; return false; }
         acquired = waited = false;
-        image_valid = true;
+        image_valid = true;ui_stage(0,7);
         return true;
     }
 
@@ -714,9 +748,11 @@ struct OpenXrFpsOverlay::Impl {
         return true;
     }
     bool upload_meter(const std::vector<std::uint32_t>& pixels, unsigned rows) {
+        ui_stage(1,1);
         if (!meter.acquired) {
             XrSwapchainImageAcquireInfo info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
             const auto result=acquire(meter.swapchain, &info, &meter.index);
+            ui_stage(1,2,result);
             if(result==XR_TIMEOUT_EXPIRED)return false;
             if(result!=XR_SUCCESS){meter.failed=true;return false;}
             meter.acquired = true;
@@ -727,6 +763,7 @@ struct OpenXrFpsOverlay::Impl {
             XrSwapchainImageWaitInfo info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
             info.timeout = 0;
             const auto result = wait(meter.swapchain, &info);
+            ui_stage(1,3,result);
             // XR_TIMEOUT_EXPIRED is positive, but does NOT grant ownership.
             if (result == XR_TIMEOUT_EXPIRED) return false;
             if (result != XR_SUCCESS) { meter.failed = true; return false; }
@@ -735,6 +772,7 @@ struct OpenXrFpsOverlay::Impl {
         auto& image = meter.images[meter.index];
         const auto completed = fence12 ? fence12->GetCompletedValue() : fence11->GetCompletedValue();
         if (completed == UINT64_MAX) { meter.failed = true; return false; }
+        ui_stage(1,4,completed<image.fence_value?XR_TIMEOUT_EXPIRED:XR_SUCCESS);
         if (completed < image.fence_value) return false;
         if (pixels.empty()) return false;
         HRESULT result = S_OK;
@@ -789,7 +827,7 @@ struct OpenXrFpsOverlay::Impl {
         if (XR_FAILED(release(meter.swapchain, &info))) { meter.failed = true; return false; }
         meter.acquired = meter.waited = false;
         meter.rows=rows;
-        meter.image_valid = true;
+        meter.image_valid = true;ui_stage(1,7);
         return true;
     }
 
@@ -1054,7 +1092,7 @@ void OpenXrFpsOverlay::application_frame(const XrFrameEndInfo* info) noexcept {
             std::scoped_lock lock(impl_->mutex);
             if(impl_->elliott_mode() && !impl_->disabled && !impl_->meter.failed && !pixels.empty())impl_->upload_meter(pixels,rows);
         }
-        {std::scoped_lock lock(impl_->mutex);impl_->compose_ui_atlas(info);impl_->finish_ui_policy_refresh();}
+        {std::scoped_lock lock(impl_->mutex);impl_->compose_ui_atlas(info);impl_->finish_ui_policy_refresh();impl_->log_ui_progress();}
     }
     catch (...) {
         // An optional UI failure must release capture as well as preserving
@@ -1205,6 +1243,15 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
         if (menu && composed.layerCount < impl_->max_layers)
             layers[composed.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&ui_quads[2]);
         submitted = &composed;
+    }
+    if(bridge_flight_logger().enabled()) {
+        const auto now=now_ns();
+        if(now>=impl_->next_ui_submit_diagnostic) {
+            impl_->next_ui_submit_diagnostic=now+1'000'000'000;
+            bridge_flight_logger().event(BridgeFlightOperation::menu_status,89804,
+                xr_handle_bits(ui_quads[0].subImage.swapchain),xr_handle_bits(ui_quads[1].subImage.swapchain),
+                xr_handle_bits(ui_quads[2].subImage.swapchain));
+        }
     }
     std::int64_t display{};
     if (measure && !synthetic && nonempty && impl_->converter)

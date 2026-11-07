@@ -892,6 +892,7 @@ struct SuiteRecorder {
     std::vector<BenchmarkStep> plan;
     bool afw_success{};
     bool rife_success{};
+    bool awaiting_runtime{};
     bool vector_success{};
     std::uint32_t eye_long_side{};
     std::uint32_t bridge_buffer_capacity{};
@@ -916,6 +917,14 @@ std::filesystem::path benchmark_game_path(unsigned pid) {
     wchar_t path[32768]{};DWORD size=32768;
     const bool found=QueryFullProcessImageNameW(handle,0,path,&size)!=FALSE;
     CloseHandle(handle);return found ? std::filesystem::path(path) : std::filesystem::path{};
+}
+bool suite_process_alive(unsigned pid) noexcept {
+    const auto process=OpenProcess(SYNCHRONIZE,FALSE,pid);
+    // Access denied does not prove exit. The heartbeat grace is still bounded.
+    if(!process)return GetLastError()==ERROR_ACCESS_DENIED;
+    const auto result=WaitForSingleObject(process,0);
+    CloseHandle(process);
+    return result==WAIT_TIMEOUT;
 }
 bool suite_runtime_fresh(const RuntimeStatus& r) {
     const auto now=GetTickCount64();
@@ -1173,9 +1182,28 @@ void tick_benchmark(std::uint64_t now) noexcept {
         std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(GetTickCount64()+2000,std::memory_order_release);
         try {
             if(rec.run!=b.run_id)csv_open(rec,b,s.runtime.dlssg_preset_request,s.runtime);
-            if(!suite_runtime_fresh(s.runtime) || s.runtime.process_id!=b.game_pid) {
-                csv_finish(rec,b,now,"game disconnected / partial");
-                suite_restore(shared,BenchmarkPhase::error,"Game disconnected. Original settings restored.",now);rec.stream.close();return;
+            if(s.runtime.process_id!=b.game_pid || !s.runtime.sessions || !suite_runtime_fresh(s.runtime)) {
+                const auto wall_now=GetTickCount64();
+                const bool alive=s.runtime.process_id==b.game_pid && s.runtime.sessions && suite_process_alive(b.game_pid);
+                if(alive && benchmark_reconfiguration_grace(s.runtime,wall_now,s.desired.frame_generation==4)) {
+                    // Initialization can block frame/status publication. Do not
+                    // turn a live worker startup into a game-disconnect error,
+                    // and never retain any measurements across that gap.
+                    rec.awaiting_runtime=true;
+                    b.phase=BenchmarkPhase::applying;b.started_ms=0;
+                    std::atomic_ref<std::uint64_t>(shared.benchmark_memory_request).store(0,std::memory_order_release);
+                    shared.benchmark_memory={};rec.revision=0;rec.samples={};rec.memory={};
+                    std::snprintf(b.message,sizeof(b.message),"Waiting for game frame updates; the current test will restart.");
+                    return;
+                }
+                csv_finish(rec,b,now,alive?"frame updates timed out / partial":"game disconnected / partial");
+                suite_restore(shared,BenchmarkPhase::error,alive?
+                    "Game process is alive but frame updates timed out. Original settings restored.":
+                    "Game disconnected. Original settings restored.",now);rec.stream.close();return;
+            }
+            if(rec.awaiting_runtime) {
+                rec.awaiting_runtime=false;b.requested_ms=now;
+                std::snprintf(b.message,sizeof(b.message),"Frame updates resumed; restarting the current test.");
             }
             if(s.revision!=b.revision) {
                 b.phase=BenchmarkPhase::stopped;
