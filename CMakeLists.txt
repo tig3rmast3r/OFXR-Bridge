@@ -2575,3 +2575,8 @@ if(WIN32 AND XRFG_BUILD_TESTS)
     add_test(NAME xrfg_rife_dependency_timing COMMAND xrfg_rife_dependency_timing_tests)
     set_tests_properties(xrfg_rife_dependency_timing PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE)
 endif()
+
+if(TARGET xrfg_three_slot_director_tests)
+    add_test(NAME xrfg_luke_private_startup COMMAND xrfg_three_slot_director_tests luke-private-startup)
+    set_tests_properties(xrfg_luke_private_startup PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()

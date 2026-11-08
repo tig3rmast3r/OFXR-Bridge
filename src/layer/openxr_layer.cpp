@@ -2775,14 +2775,11 @@ XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& s
     const XrFrameEndInfo* info,const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery={},
     const std::shared_ptr<xrfg::PrivateOpenXrRuntime::EndFrameReservation>& reservation={});
 
-XrResult observed_content_end_frame(const std::shared_ptr<SessionState>& state,const XrFrameEndInfo* info,
-    const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery,
-    const std::shared_ptr<xrfg::PrivateOpenXrRuntime::EndFrameReservation>& reservation={}) {
-    if(!state || !state->dispatch->end_frame)return XR_ERROR_HANDLE_INVALID;
+XrResult begin_luke_output_cycle(const std::shared_ptr<SessionState>& state) {
+    if(!state)return XR_ERROR_HANDLE_INVALID;
     const auto session=state->handle;
     if(!state->luke_fresh_only || continuous_presenter_active(state))
-        return end_frame_with_private_auxiliary(state,info,delivery,reservation);
-    if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
+        return XR_SUCCESS;
     if(!state->luke_output_begun) {
         XrFrameState slot{XR_TYPE_FRAME_STATE};
         if(state->runtime_frame_waited_unbegun && state->last_inline_frame_state_valid)
@@ -2805,6 +2802,18 @@ XrResult observed_content_end_frame(const std::shared_ptr<SessionState>& state,c
         state->last_inline_frame_state=slot;
         state->last_inline_frame_state_valid=true;
     }
+    return XR_SUCCESS;
+}
+
+XrResult observed_content_end_frame(const std::shared_ptr<SessionState>& state,const XrFrameEndInfo* info,
+    const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery,
+    const std::shared_ptr<xrfg::PrivateOpenXrRuntime::EndFrameReservation>& reservation={}) {
+    if(!state || !state->dispatch->end_frame)return XR_ERROR_HANDLE_INVALID;
+    if(!state->luke_fresh_only || continuous_presenter_active(state))
+        return end_frame_with_private_auxiliary(state,info,delivery,reservation);
+    if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
+    const auto begun=begin_luke_output_cycle(state);
+    if(XR_FAILED(begun))return begun;
     auto submitted=*info;
     // Pose/FOV/space/rect are the original immutable image metadata. Only the
     // actual physical presentation slot is assigned here.
@@ -2831,6 +2840,11 @@ void bind_private_delivery_metrics(const std::shared_ptr<SessionState>& state) {
     if(state->private_runtime)prepare=[weak]() -> xrfg::OpenXrFpsOverlay::PreparedEndFrame {
         const auto owner=weak.lock();
         if(!owner || !owner->private_runtime)return {XR_ERROR_HANDLE_INVALID,{}};
+        // HFW application Wait/Begin tickets are predictions only. Open the
+        // corresponding output cycle before reserving EndFrame admission;
+        // doing it inside the submit callback is too late for this reservation.
+        const auto begun=begin_luke_output_cycle(owner);
+        if(XR_FAILED(begun))return {begun,{}};
         const auto endpoint=owner->private_runtime;
         std::shared_ptr<xrfg::PrivateOpenXrRuntime::EndFrameReservation> reservation;
         const auto result=endpoint->reserve_end_frame(reservation);
