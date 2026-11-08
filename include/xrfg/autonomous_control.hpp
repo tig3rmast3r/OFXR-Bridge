@@ -47,7 +47,7 @@ struct Settings {
     int backend{2}; // 0 FidelityFX, 1 NVIDIA reference, 2 NVIDIA new, 3 NVIDIA djules
     int motion_vectors{}; // 0 optical flow, 1 native game guides
     int rife_multiplier{2}; // experimental RIFE 2X/3X/4X
-    int rife_resolution{18}; // Medium; inference presets10/15/18/21/25/30, native output unchanged
+    int rife_resolution{18}; // Medium; inference presets10/15/18/21/25/30/36, native output unchanged
     int rife_model{3}; // 2 4.6, 3 4.4, 4 4.3; retired Lite IDs0/1 map to2
     int frame_generation{}; // 0 OFXR, 1 FSR 3, 2 native DLSS Frame Generation, 3 Hybrid, 4 RIFE
     int hybrid_backend{}; // Hybrid's own OFXR engine: 0 FidelityFX, 1 0.2.1, 2 0.3.0 (never 0.2.13)

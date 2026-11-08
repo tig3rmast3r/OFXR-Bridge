@@ -394,7 +394,7 @@ Settings sanitize(Settings value) noexcept {
     value.benchmark_csv=true;
     if(!value.advanced_mode) {
         const Settings defaults;
-        value.preset=defaults.preset;value.scale=defaults.scale;value.backward=defaults.backward;
+        value.backward=defaults.backward;
         value.rife_model=defaults.rife_model;value.r19_camera=defaults.r19_camera;
         // Off is a visible primary choice. Reset only the hidden sub-modes.
         if(value.afw_mode>0)value.afw_mode=defaults.afw_mode;
@@ -470,7 +470,7 @@ Settings sanitize(Settings value) noexcept {
     if (!value.profiles_initialized) {
         value.generation_profiles = {};
         value.generation_profiles[7].scale=5; // RIFE defaults to exact1/6 motion inference.
-        value.generation_profiles[6].scale=3; // Hybrid's flow defaults to a quarter per axis.
+        value.generation_profiles[6].scale=value.advanced_mode?3:2; // retain the existing Basic50% default
     }
     value.profiles_initialized = true;
     value.generation_profiles[selected_profile(value)] = active_preferences(value);
@@ -487,7 +487,12 @@ Settings sanitize(Settings value) noexcept {
         p.frame_multiplier = i <= 2 || i == 5 || i == 6 ? std::clamp(p.frame_multiplier, 2, 4) : 2;
         if(!value.advanced_mode) {
             const GenerationPreferences defaults;
-            p.preset=defaults.preset;p.scale=i==7?default_generation_profiles()[7].scale:defaults.scale;
+            // Flow size and Slow/Medium are visible again. Hidden Fast and
+            // backward settings must never survive in inactive game profiles.
+            const bool flow=i<4 || i==6;
+            const bool nvidia=(i>0 && i<4) || (i==6 && value.hybrid_backend!=0);
+            if(!flow)p.scale=i==7?default_generation_profiles()[7].scale:defaults.scale;
+            if(!nvidia || p.preset==2)p.preset=defaults.preset;
             p.backward=defaults.backward;
             if(i<4)p.motion_vectors=defaults.motion_vectors;
         }
@@ -573,8 +578,8 @@ Settings parse_settings(std::string_view text) {
     if(value.frame_generation==4 && !flat_scale_seen)value.scale=value.generation_profiles[7].scale;
     if(!hybrid_flow_revision_seen) {
         // The resolution Hybrid ran at, not the unused one its route held.
-        value.generation_profiles[6].scale=3;
-        if(value.frame_generation==3)value.scale=3;
+        value.generation_profiles[6].scale=value.advanced_mode?3:2;
+        if(value.frame_generation==3)value.scale=value.generation_profiles[6].scale;
     }
     if(!pacing_seen && legacy_single_director>=0)value.pacing_mode=legacy_single_director?1:2;
     if(!flat_separation_seen) value.separate_synthesis=value.lower_vram;
@@ -925,6 +930,7 @@ struct SuiteRecorder {
     std::uint64_t run{}, revision{}, started{}, next_sample{};
     unsigned index{};
     unsigned dlssg_preset{};
+    int rife_quality{18}; // immutable user quality captured when the suite starts
     std::ofstream stream;
     BenchmarkSamples samples;
     Settings settings;
@@ -1011,7 +1017,7 @@ bool same_trial(const Settings& a,const Settings& b) {
 }
 void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
     if(rec.layout_path.empty())return;
-    const auto steps=benchmark_export_plan(b.full,b.luke,rec.steamvr,b.advanced);
+    const auto steps=benchmark_export_plan(b.full,b.luke,rec.steamvr,b.advanced,rec.rife_quality);
     std::ofstream output(rec.layout_path,std::ios::trunc);output.imbue(std::locale::classic());
     if(!output)throw std::runtime_error("Cannot write layout CSV");
     output<<"Game,Build,Metric";
@@ -1085,13 +1091,14 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
     csv_layout(rec,b);
     rec.revision=0;rec.samples={};
 }
-void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const RuntimeStatus& runtime) {
+void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const RuntimeStatus& runtime,int rife_quality) {
     {auto* owner=rec.controller;rec=SuiteRecorder{};rec.controller=owner;}rec.run=b.run_id;
     rec.steamvr=pacing_comparison_runtime(runtime);
     rec.legacy_vdxr=runtime.vdxr_legacy;
     rec.runtime=runtime.vdxr_runtime?"VDXR":runtime.steamvr_runtime?"SteamVR":"Other";
     rec.dlssg_preset=preset;
-    rec.plan=benchmark_execution_plan(b.full,b.luke,rec.steamvr,b.advanced,runtime.eye_long_side,runtime.rife_max_multiplier);
+    rec.rife_quality=rife_quality;
+    rec.plan=benchmark_execution_plan(b.full,b.luke,rec.steamvr,b.advanced,runtime.eye_long_side,runtime.rife_max_multiplier,rife_quality);
     rec.game=utf8_path(benchmark_game_path(b.game_pid).filename());
     if(!b.csv)return;
     const auto folder=common_folder()/L"Benchmarks";
@@ -1199,7 +1206,7 @@ bool start_benchmark(bool full,bool luke) noexcept {
         const auto run=std::max(b.run_id+1,(now<<16)^GetCurrentProcessId());
         b={};b.full=full;b.luke=luke;b.advanced=s.desired.advanced_mode;b.auto_pick=s.desired.benchmark_auto_pick;b.csv=s.desired.benchmark_csv;b.game_pid=s.runtime.process_id;
         b.run_id=run;
-        const auto plan=benchmark_execution_plan(full,luke,pacing_comparison_runtime(s.runtime),b.advanced,s.runtime.eye_long_side,s.runtime.rife_max_multiplier);b.count=static_cast<unsigned>(plan.size());
+        const auto plan=benchmark_execution_plan(full,luke,pacing_comparison_runtime(s.runtime),b.advanced,s.runtime.eye_long_side,s.runtime.rife_max_multiplier,shared.benchmark_saved.rife_resolution);b.count=static_cast<unsigned>(plan.size());
         b.phase=BenchmarkPhase::applying;
         std::snprintf(b.label,sizeof(b.label),"%s",plan[0].label.c_str());
         if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,plan[0]),now)) {
@@ -1239,7 +1246,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
         b.controller_pid=own_pid;rec.controller=&c;
         std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(GetTickCount64()+2000,std::memory_order_release);
         try {
-            if(rec.run!=b.run_id)csv_open(rec,b,s.runtime.dlssg_preset_request,s.runtime);
+            if(rec.run!=b.run_id)csv_open(rec,b,s.runtime.dlssg_preset_request,s.runtime,shared.benchmark_saved.rife_resolution);
             if(s.runtime.process_id!=b.game_pid || !s.runtime.sessions || !suite_runtime_fresh(s.runtime)) {
                 const auto wall_now=GetTickCount64();
                 const bool alive=s.runtime.process_id==b.game_pid && s.runtime.sessions && suite_process_alive(b.game_pid);

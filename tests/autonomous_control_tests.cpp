@@ -222,8 +222,8 @@ void basic_defaults_policy() {
     require(advanced.preset==0&&advanced.scale==3&&advanced.backward&&advanced.afw_debug&&advanced.afw_mode==2,
         "Advanced retains editable optical and reconstruction settings");
     dirty.advanced_mode=false;const auto basic=sanitize(dirty);const Settings defaults;
-    require(basic.preset==1&&basic.scale==2&&!basic.backward&&!basic.motion_vectors,
-        "Basic forces Medium50 optical flow and optical motion source");
+    require(basic.preset==0&&basic.scale==3&&!basic.backward&&!basic.motion_vectors,
+        "Basic retains visible Slow/size and resets hidden backward/native controls");
     require(basic.afw_mode==3&&!basic.afw_debug&&!basic.afw_clear_before_warping&&
         basic.afw_ignore_motion_threshold==defaults.afw_ignore_motion_threshold&&
         basic.afw_depth_dilate_mode==0&&basic.afw_shading_rate==0&&!basic.luke_advanced,
@@ -236,16 +236,19 @@ void basic_defaults_policy() {
         "Basic retains controls still visible in normal mode");
     for(unsigned i=0;i<basic.generation_profiles.size();++i) {
         const auto& route=basic.generation_profiles[i];
-        require(route.preset==1&&route.scale==(i==7?5:2)&&!route.backward,
+        require(route.preset==(i==2?0:1)&&route.scale==(i==7?5:(i<4||i==6)?3:2)&&!route.backward,
             "inactive engine profiles cannot restore hidden nondefault flow settings");
         require(route.motion_vectors==(i>=4&&i<=6?1:0),"required native guides remain enabled only on their routes");
     }
     require(parse_settings(serialize_settings(dirty))==basic,"saved Basic profile uses the enforced defaults");
+    const auto old=parse_settings("[ofxr]\npreset=2\nscale=3\nbackward=1\n");
+    require(old.preset==1&&old.scale==3&&!old.backward,
+        "saved hidden Fast/backward normalize to Medium/Off while visible size survives");
     dirty.afw_mode=0;dirty.pacing_mode=0;auto off=sanitize(dirty);
     require(off.afw_mode==0&&off.pacing_mode==0,"Basic preserves visible reconstruction Off and Framework choices");
     for(int mode:{0,1,2,3,4}) {
         auto selected=dirty;select_generation(selected,mode,2);
-        require(selected.preset==1&&!selected.backward&&selected.scale==(mode==4?5:2),
+        require(selected.preset==(mode==0?0:1)&&!selected.backward&&selected.scale==(mode==4?5:(mode==0||mode==3)?3:2),
             "changing engine in Basic cannot resurrect inactive tuning");
         require(selected.motion_vectors==(mode>0&&mode<4?1:0),"FSR/DLSS-G/Hybrid retain required native vectors");
     }
@@ -266,8 +269,8 @@ void route_profiles() {
     Settings fresh;select_generation(fresh,3,0);
     require(fresh.scale==2,"Basic Hybrid flow resolution defaults to50 percent");
     auto older=parse_settings("[ofxr]\nframe_generation=3\nscale=2\n[route.hybrid]\nscale=2\n[route.ofxr_new]\nscale=1\n");
-    require(older.scale==2 && older.generation_profiles[6].scale==2 && older.generation_profiles[2].scale==2,
-        "Basic normalizes both old Hybrid and inactive optical flow profiles to50 percent");
+    require(older.scale==2 && older.generation_profiles[6].scale==2 && older.generation_profiles[2].scale==1,
+        "Basic retains visible Hybrid and inactive optical flow size choices");
     older.scale=2;older=parse_settings(serialize_settings(older));
     require(older.scale==2,"Hybrid's chosen flow resolution survives a save");
     Settings multiplied;select_generation(multiplied,0,2);multiplied.frame_multiplier=4;multiplied=sanitize(multiplied);
@@ -346,14 +349,14 @@ void route_profiles() {
     auto basic=explicit_rife;basic.advanced_mode=false;
     require(sanitize(basic).rife_model==3,"leaving Advanced mode selects 4.4");
     require(minimal_rife.rife_resolution==18,"RIFE resolution defaults to Medium");
-    for(int percent:{10,15,18,21,25,30}) {
+    for(int percent:{10,15,18,21,25,30,36}) {
         auto slider=minimal_rife;slider.rife_resolution=percent;
         require(parse_settings(serialize_settings(slider)).rife_resolution==percent,"RIFE preset percentage roundtrip");
     }
     auto bounded=minimal_rife;bounded.rife_resolution=1;require(sanitize(bounded).rife_resolution==10,"RIFE slider minimum");
-    bounded.rife_resolution=99;require(sanitize(bounded).rife_resolution==30,"RIFE Ultra maximum");
+    bounded.rife_resolution=99;require(sanitize(bounded).rife_resolution==36,"RIFE Godlike maximum");
     require(parse_settings("[ofxr]\nrife_resolution=23\n").rife_resolution==21,"legacy intermediate maps to nearest preset; equal distance prefers lower");
-    require(parse_settings("[ofxr]\nrife_resolution=40\n").rife_resolution==30,"old upper bound migrates to Ultra");
+    require(parse_settings("[ofxr]\nrife_resolution=40\n").rife_resolution==36,"old upper bound migrates to Godlike");
     auto rife=parse_settings("[ofxr]\nAdvancedMode=1\nframe_generation=4\nrife_model=2\nmotion_vectors=1\ntriple_frame_gen=1\n");
     require(rife.frame_generation==4 && rife.rife_model==2 && rife.motion_vectors==0 && !rife.triple_frame_gen,"RIFE uses no engine guides and is 2X only");
     auto rife_roundtrip=parse_settings(serialize_settings(rife,true));

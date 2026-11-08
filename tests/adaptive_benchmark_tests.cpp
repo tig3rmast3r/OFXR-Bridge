@@ -18,7 +18,7 @@ std::string read(const std::filesystem::path& path){std::ifstream f(path);return
 void controller(bool modern,bool full,bool luke,double base,double two,double three,double four,
     unsigned cap=4,bool confirmed=true,bool optimize=false,bool unstable=false,bool only=false,double hz=90){
     auto saved=snapshot().desired;saved.advanced_mode=false;saved.benchmark_auto_pick=true;
-    saved.benchmark_csv=true;saved.afw_only=false;saved.nr_enabled=true;saved.afw_mode=3;
+    saved.rife_resolution=36;saved.benchmark_csv=true;saved.afw_only=false;saved.nr_enabled=true;saved.afw_mode=3;
     require(request(saved),"save isolated settings");saved=snapshot().desired;
     RuntimeStatus r{};r.process_id=GetCurrentProcessId();r.sessions=1;r.luke_detected=luke;
     r.vdxr_runtime=!modern;r.vdxr_legacy=!modern;r.steamvr_runtime=modern;r.eye_long_side=3300;
@@ -29,9 +29,9 @@ void controller(bool modern,bool full,bool luke,double base,double two,double th
         auto state=snapshot();const auto settings=state.desired;const bool rife=settings.frame_generation==4;
         if(rife){
             ++multipliers[settings.rife_multiplier];require(settings.rife_model==3 && !settings.motion_vectors,"RIFE4.4 never asks for vectors");
-            require(settings.rife_resolution==18 || settings.rife_resolution==21 || settings.rife_resolution==25,"RIFE Medium/High/VeryHigh only");
-            if(settings.rife_multiplier==3)require(multipliers[2]==(modern?24:6),"all2X candidates must finish before3X");
-            if(settings.rife_multiplier==4)require(multipliers[3]==24,"all3X candidates must finish before4X");
+            require(settings.rife_resolution==36,"RIFE preserves the user-selected Godlike quality");
+            if(settings.rife_multiplier==3)require(multipliers[2]==(modern?8:2),"all2X candidates must finish before3X");
+            if(settings.rife_multiplier==4)require(multipliers[3]==8,"all3X candidates must finish before4X");
         }
         if(settings.triple_frame_gen)++triples;
         auto clock=GetTickCount64()-4000;r.telemetry={};r.afw_running=luke || only;
@@ -68,7 +68,7 @@ void controller(bool modern,bool full,bool luke,double base,double two,double th
         require(done<200,"adaptive suite must terminate");
     }
     const auto result=snapshot();require(result.benchmark.phase==BenchmarkPhase::complete,"suite completes");
-    require(multipliers[2]==(modern?24:6),"both RIFE2X qualities and policies are always measured");
+    require(multipliers[2]==(modern?8:2),"one RIFE2X quality with all pacing policies is measured");
     const bool reached2=!unstable && (base>=hz || (confirmed && two>=hz));
     const bool higher=cap>=3;
     require((multipliers[3]>0)==(higher && !reached2),"3X gate follows stable preceding results and session capability");
@@ -79,7 +79,7 @@ void controller(bool modern,bool full,bool luke,double base,double two,double th
     else if(base<hz && (two>=hz || (higher && three>=hz)))
         require(result.desired.frame_generation==4,"stable RIFE refresh wins over sub-refresh alternatives");
     const auto layout_path=std::filesystem::u8path(result.benchmark.csv_path);const auto layout=read(layout_path);
-    require(layout.find("RIFE Medium 2X")!=std::string::npos && layout.find("RIFE High 2X")!=std::string::npos,"CSV distinguishes quality");
+    require(layout.find("RIFE Godlike 2X")!=std::string::npos && layout.find("RIFE Medium 2X")==std::string::npos,"CSV records exactly the user-selected quality");
     require(layout.find("4x4")==std::string::npos,"AFW4x4 is retired");
     if(luke)require(layout.find("AFW 1x1")==std::string::npos && layout.find("AFW 2x2")==std::string::npos &&
         layout.find("OSR / only")!=std::string::npos && layout.find("OSR cheap")!=std::string::npos,"CSV distinguishes OSR normal/cheap without AFW");
@@ -91,7 +91,7 @@ void controller(bool modern,bool full,bool luke,double base,double two,double th
     const auto first_value=fps_line+std::string_view("Output FPS median,").size();
     const auto first_cell=layout.substr(first_value,layout.find(',',first_value)-first_value);
     require(first_cell!="n.a." && first_cell!="N/A","RIFE quality changes must not erase completed reference trial statistics");
-    const auto prior_columns=modern?26U:8U;
+    const auto prior_columns=modern?(luke?26U:19U):(luke?8U:7U);
     auto at=first_value;
     for(unsigned column=0;column<prior_columns;++column){
         const auto end=layout.find_first_of(",\n",at);
@@ -100,7 +100,7 @@ void controller(bool modern,bool full,bool luke,double base,double two,double th
         require(cell!="n.a." && cell!="N/A","all completed pre-RIFE optical trials survive the final quality");
         at=end+1;
     }
-    if(!multipliers[3])require(layout.find("RIFE Very High 3X")!=std::string::npos && layout.find("n.a.")!=std::string::npos,"pruned3X tiers retain empty export cells");
+    if(!multipliers[3])require(layout.find("RIFE Godlike 3X")!=std::string::npos && layout.find("n.a.")!=std::string::npos,"pruned3X tiers retain empty export cells");
     require(layout.find("4X")==std::string::npos,"no4X columns in temporary suite");
     const auto details=read(layout_path.parent_path()/(layout_path.stem().wstring()+L"-details.csv"));
     require(details.find("OutputFPSMean,FPSMeanSource,MeanFrameIntervals,MeanObservedSeconds,CadenceValid,CadenceSource,")!=std::string::npos,

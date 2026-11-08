@@ -12,7 +12,7 @@ sys.dont_write_bytecode = True
 PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE / "tools"))
 sys.path.insert(0, str(PACKAGE / "python/rife"))
-QUALITIES = (10, 15, 18, 21, 25, 30)
+QUALITIES = (10, 15, 18, 21, 25, 30, 36)
 
 
 def read_games(folder):

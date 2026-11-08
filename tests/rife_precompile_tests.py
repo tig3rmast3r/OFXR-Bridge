@@ -134,19 +134,19 @@ class PlanTests(unittest.TestCase):
             self.assertIn("No recorded game resolutions", result["message"])
             self.assertNotIn(b"ModuleNotFoundError", done.stderr)
 
-    def test_exact_native_dimensions_all_six_qualities_and_no_extra_eye_batch(self):
+    def test_exact_native_dimensions_all_seven_qualities_and_no_extra_eye_batch(self):
         plan = tool.build_plan([self.game()], {123: 0})
-        self.assertEqual(len(plan), 6)
+        self.assertEqual(len(plan), 7)
         self.assertEqual(plan[0][0], (0, 440, 403, 1))
         self.assertEqual({row[0][3] for row in plan}, {1})
         self.assertTrue(any(row[0][1:3] == (793, 726) for row in plan))  # float32 native ceil(.18)
 
     def test_shared_eye_quad_and_games_deduplicate_only_identical_shapes(self):
         a = self.game(); b = {**a, "game": "Other.exe"}
-        self.assertEqual(len(tool.build_plan([a, b], {123: 0})), 6)
-        self.assertEqual(len(tool.build_plan([a, self.game(eyes=2)], {123: 0})), 12)
+        self.assertEqual(len(tool.build_plan([a, b], {123: 0})), 7)
+        self.assertEqual(len(tool.build_plan([a, self.game(eyes=2)], {123: 0})), 14)
         quad = {**a, "shapes": a["shapes"] + [dict(width=2000, height=1800, eyes=1)]}
-        self.assertEqual(len(tool.build_plan([quad], {123: 0})), 12)
+        self.assertEqual(len(tool.build_plan([quad], {123: 0})), 14)
 
     def test_latest_file_only_and_malformed_input_is_not_silently_accepted(self):
         with tempfile.TemporaryDirectory(prefix="OFXR games spaces ") as temporary:
@@ -216,17 +216,17 @@ class PlanTests(unittest.TestCase):
                 result=root.parent / "result.json", progress=root.parent / "progress.json",
                 cancel=root.parent / "cancel", log=root.parent / "run.log")
             backend = Mock();backend._initialize.return_value = True
-            results = [RuntimeError("compile failed")] + [("key", True)] * 5
+            results = [RuntimeError("compile failed")] + [("key", True)] * 6
             with patch("update_rife_overlay.sync_locked", return_value=False), patch.object(tool, "cuda_adapters", return_value={123: 0}), patch.object(trt_backend, "Backend", return_value=backend) as factory, patch.object(tool, "prepare_one", side_effect=results) as prepare, patch("torch.cuda.set_device"), patch("torch.cuda.empty_cache"):
                 self.assertEqual(tool.run(args), 1)
             for call in factory.call_args_list:
                 self.assertEqual(call.args[1], root / "app", "cache identity must use installed worker bytes, not release checkout bytes")
             result = json.loads(args.result.read_text())
-            self.assertEqual((result["completed"], result["total"], result["status"]), (6, 6, "error"))
-            self.assertEqual(prepare.call_count, 6)
-            self.assertEqual(json.loads(args.progress.read_text())["completed"], 6)
+            self.assertEqual((result["completed"], result["total"], result["status"]), (7, 7, "error"))
+            self.assertEqual(prepare.call_count, 7)
+            self.assertEqual(json.loads(args.progress.read_text())["completed"], 7)
 
-    def test_global_source_problem_is_one_preflight_error_not_six_failed_engines(self):
+    def test_global_source_problem_is_one_preflight_error_not_seven_failed_engines(self):
         from update_rife_overlay import OverlayRepairRequired
         with tempfile.TemporaryDirectory() as temporary:
             folder=Path(temporary);games=folder/"games";games.mkdir()
@@ -253,12 +253,12 @@ class PlanTests(unittest.TestCase):
                 def publish(path, value):
                     if path == args.progress: raise PermissionError("progress locked")
                     return original(path, value)
-                outcomes = ([RuntimeError("actual compile failure")] if fail_engine else [("key", True)]) + [("key", True)] * 5
+                outcomes = ([RuntimeError("actual compile failure")] if fail_engine else [("key", True)]) + [("key", True)] * 6
                 with patch("update_rife_overlay.sync_locked", return_value=False), patch.object(tool, "cuda_adapters", return_value={123: 0}), patch.object(trt_backend, "Backend", return_value=backend), patch.object(tool, "prepare_one", side_effect=outcomes) as prepare, patch.object(tool, "publish_json", side_effect=publish), patch("torch.cuda.set_device"), patch("torch.cuda.empty_cache"):
                     self.assertEqual(tool.run(args), 1 if fail_engine else 0)
                 result = json.loads(args.result.read_text())
-                self.assertEqual((result["completed"], result["total"], result["status"]), (6, 6, "error" if fail_engine else "ready"))
-                self.assertEqual(prepare.call_count, 6)
+                self.assertEqual((result["completed"], result["total"], result["status"]), (7, 7, "error" if fail_engine else "ready"))
+                self.assertEqual(prepare.call_count, 7)
                 self.assertEqual(args.log.read_text().count("Progress update unavailable"), 1)
                 if fail_engine: self.assertIn("actual compile failure", args.log.read_text())
 

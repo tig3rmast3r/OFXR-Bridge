@@ -712,7 +712,7 @@ bool generation(Panel& p) {
             hover_help(p,kHelpRifeModel);
         } else if(draft.rife_model!=3) {draft.rife_model=3;changed=true;}
         int resolution=xrfg::rife_resolution_index(draft.rife_resolution);
-        if(segmented(p,"Quality","Quality",resolution,{{"Potato"},{"Low"},{"Medium"},{"High"},{"Very high"},{"Ultra"}},kHelpRifeQuality)) {
+        if(segmented(p,"Quality","Quality",resolution,{{"Potato"},{"Low"},{"Medium"},{"High"},{"Very high"},{"Ultra"},{"Godlike"}},kHelpRifeQuality)) {
             draft.rife_resolution=xrfg::kRifeResolutions[resolution];changed=true;
         }
     } else if(draft.frame_generation==3) {
@@ -757,16 +757,19 @@ bool generation(Panel& p) {
     }
 
     // Disclosures come last, so opening one pushes no primary control away.
-    if(show_flow && draft.advanced_mode) {
+    if(show_flow) {
         constexpr const char* qualities[]{"Slow","Medium","Fast"};
         constexpr const char* resolutions[]{"100%","75%","50%","25%"};
         char summary[64];
         std::snprintf(summary,sizeof(summary),"%s%s%s%s",nvidia_flow ? qualities[std::clamp(draft.preset,0,2)] : "",nvidia_flow ? ", " : "",
             resolutions[std::clamp(draft.scale,0,3)],nvidia_flow&&draft.backward ? ", bidirectional" : "");
         if(disclosure(p,"Flow tuning",summary,kHelpResolution,nullptr,false,Icon::flow)) {
-            if(nvidia_flow)changed|=segmented(p,"Flow quality","Flow quality",draft.preset,{{"Slow"},{"Medium"},{"Fast"}},kHelpQuality);
+            if(nvidia_flow) {
+                if(draft.advanced_mode)changed|=segmented(p,"Flow quality","Flow quality",draft.preset,{{"Slow"},{"Medium"},{"Fast"}},kHelpQuality);
+                else changed|=segmented(p,"Flow quality","Flow quality",draft.preset,{{"Slow"},{"Medium"}},kHelpQuality);
+            }
             changed|=segmented(p,"Flow resolution","Flow resolution",draft.scale,{{"100%"},{"75%"},{"50%"},{"25%"}},kHelpResolution);
-            if(nvidia_flow)changed|=toggle_row(p,"Bidirectional flow","Bidirectional flow",draft.backward,kHelpBidirectional);
+            if(nvidia_flow && draft.advanced_mode)changed|=toggle_row(p,"Bidirectional flow","Bidirectional flow",draft.backward,kHelpBidirectional);
             disclosure_end();
         }
     }
@@ -1137,10 +1140,10 @@ bool tests(Panel& p) {
     changed|=toggle_row(p,"Auto pick best one","Auto pick best one",draft.benchmark_auto_pick,kHelpAuto,active);
     if(disclosure(p,"How tests work","")) {
         reason(p,"7.5 seconds per configuration: 2.5 seconds settling, then 5 seconds measured. CSV: min / median / max Output FPS and Cycle minimum. Works with diagnostic logging off. Neural and AFW choices are kept.");
-        reason(p,modern ? "Framework and Director: Normal/Fast, each with Buffer off/on."
-            : "Legacy VDXR: Normal/Fast, including RIFE Medium, High and Very High.");
-        reason(p,"Luke Ross: OSR normal/cheap only, including RIFE Medium, High and Very High.");
-        reason(p,"RIFE 4.4: Medium, High and Very High at 2X, then 3X only if no preceding result holds full headset refresh. No Djules 3X or automatic 4X in this temporary suite. TensorRT optimization completes before settling and measurement.");
+        reason(p,modern ? "Framework and Director: Normal, Fast and Buffer. RIFE and vector routes also test Fast + Buffer."
+            : "Legacy VDXR: Normal/Fast, using your selected RIFE Quality.");
+        reason(p,"Luke Ross: OSR normal/cheap only, using your selected RIFE Quality.");
+        reason(p,"RIFE uses one Quality selected before the suite: 2X, then 3X only if no preceding result holds full headset refresh. No Djules 3X or automatic 4X. TensorRT optimization completes before settling and measurement.");
         reason(p,"Suite length adjusts to measured results and session capabilities. Skipped configurations remain n.a. in CSV.");
         reason(p,"Close the menu and keep the same test scene. Stop restores original settings. Completion restores them unless Auto pick best one selects a valid result. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
         disclosure_end();

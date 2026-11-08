@@ -9,7 +9,7 @@ motion vectors or depth. Luke Ross **OSR/AFW** and **Neural Rendering** retain
 their own capture and model requirements when used alongside RIFE.
 
 The tray also offers **RIFE → Reinstall RIFE...** for a clean runtime/cache reset
-and **RIFE → Pre-compile TensorRT for found games...** to prepare the six Quality
+and **RIFE → Pre-compile TensorRT for found games...** to prepare the seven Quality
 presets using each game's last recorded resolution and eye layout. Open games
 once with V863 or newer to populate the list; diagnostics need not be enabled.
 See [offline preparation and progress](V863_RIFE_PRECOMPILE.md).
@@ -76,8 +76,8 @@ weights are present. The list refreshes when opening the menu. Unknown or retire
 Lite networks are not offered. Turning Advanced mode off immediately returns
 to **4.4**, including for profiles which previously saved another model.
 
-**Quality** offers **Potato**, **Low**, **Medium**, **High**, **Very high** and
-**Ultra**, with **Medium** as the default. It controls the resolution used to
+**Quality** offers **Potato**, **Low**, **Medium**, **High**, **Very high**,
+**Ultra** and **Godlike**, with **Medium** as the default. It controls the resolution used to
 estimate motion. Higher settings cost more GPU time and can improve fine-edge
 and occlusion precision. Compare them in the same scene. Older intermediate
 settings map to the closest available preset.

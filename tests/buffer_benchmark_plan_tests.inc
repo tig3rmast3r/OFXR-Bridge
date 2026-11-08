@@ -21,11 +21,12 @@ void buffer_plan_contract() {
             check(applied.increase_buffer==(step.buffer==1),"benchmark applies the explicit buffer to the same normal setting");
             check(applied.nr_enabled && applied.afw_ignore_motion_threshold==2.5F && applied.afw_depth_dilate_mode==0,
                 "Basic suite preserves Neural settings and normalizes hidden AFW parameters");
-            check(applied.scale==(step.generation==4?5:2) && applied.preset==1 && applied.native_scale==50,"Basic suite keeps visible generated resolution and forces hidden flow defaults");
+            check(applied.scale==(step.generation==4?5:step.generation==1||step.generation==2?2:3) && applied.preset==1 && applied.native_scale==50,"Basic suite keeps visible generated resolution and forces hidden flow defaults");
             if(luke)check(!step.a && !step.b && !step.triple && (step.generation==0 || step.generation==4) && (step.shading==0 || step.shading==4),"Luke has qualities and buffers, no Fast/vector/3X trial");
-            else check(step.a==step.b,"normal Fast consistently selects both operations");
+            else {check(step.a==step.b,"normal Fast consistently selects both operations");
+                check(step.generation!=0 || !(step.a&&step.buffer==1),"optical-only Fast+Buffer is excluded from the suite");}
         }
-        check(references==(luke?2u:1u) && two_credit==three_credit,"one reference per quality and equal two/three coverage");
+        check(references==(luke?2u:1u) && two_credit-three_credit==(luke?0u:6u),"references retained; six ordinary optical Fast+Buffer cases omitted");
         const auto exported=benchmark_export_plan(full,luke,true,false);
         check(exported.size()==plan.size(),"export retains every potential RIFE multiplier column");
         if(luke)for(const auto& step:exported)check(step.shading==0 || step.shading==4,"Luke export retains both AFW qualities");

@@ -604,27 +604,27 @@ void automatic_buttons() {
     for(const auto label:{"Without vectors","Complete","Luke Ross"})
         require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Tests");
     require(tray.rendered_text.find("Open benchmark folder")==std::string::npos,"shared settings no longer opens shell folders");
-    require(tray.rendered_text.find("Up to 73 tests")!=std::string::npos &&
-        tray.rendered_text.find("Up to 97 tests")!=std::string::npos &&
-        tray.rendered_text.find("Up to 74 tests")!=std::string::npos,
+    require(tray.rendered_text.find("Up to 35 tests")!=std::string::npos &&
+        tray.rendered_text.find("Up to 59 tests")!=std::string::npos &&
+        tray.rendered_text.find("Up to 42 tests")!=std::string::npos,
         "SteamVR Display describes its actual pacing and AFW matrix");
     tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==73,
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==35,
         "Display button starts the actual SteamVR optical matrix");
     tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==prior,"Display Stop restores original settings");
     runtime.steamvr_runtime=false;runtime.vdxr_runtime=true;runtime.vdxr_legacy=true;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("Up to 19 tests")!=std::string::npos && tray.rendered_text.find("Up to 25 tests")!=std::string::npos,
+    require(tray.rendered_text.find("Up to 11 tests")!=std::string::npos && tray.rendered_text.find("Up to 17 tests")!=std::string::npos,
         "VDXR Display describes the Legacy spreadsheet suite");
     tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==19,
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==11,
         "Legacy Display starts Normal/Fast for every optical route");
     tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     runtime.vdxr_legacy=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("Up to 73 tests")!=std::string::npos,
+    require(tray.rendered_text.find("Up to 35 tests")!=std::string::npos,
         "opt-in VDXR exposes the full comparison in the actual Display surface");
     tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==73,
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==35,
         "VDXR Display button starts all three pacing variants");
     tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     auto simple=snapshot().desired;simple.advanced_mode=false;require(request(simple),"return to basic UI policy");
@@ -638,19 +638,31 @@ void automatic_buttons() {
     simple_flow.preset=0;simple_flow.scale=3;simple_flow.backward=true;require(request(simple_flow),"old hidden flow values requested in Basic");
     Context basic_headset({1024,768},true);basic_headset.draw();basic_headset.draw();
     tray.select_tab("Frame generation");basic_headset.select_tab("Frame generation");tray.draw(true);basic_headset.draw(true);
-    require(tray.rendered_text.find("Flow tuning")==std::string::npos&&basic_headset.rendered_text.find("Flow tuning")==std::string::npos&&
-        snapshot().desired.preset==1&&snapshot().desired.scale==2&&!snapshot().desired.backward,
-        "Basic desktop and headset hide flow tuning and enforce Medium50");
+    require(tray.rendered_text.find("Flow tuning")!=std::string::npos&&basic_headset.rendered_text.find("Flow tuning")!=std::string::npos&&
+        snapshot().desired.preset==0&&snapshot().desired.scale==3&&!snapshot().desired.backward,
+        "Basic desktop and headset expose flow size and retain Slow while resetting backward");
+    tray.activate("/Generation_","Flow tuning");tray.draw();tray.draw(true);
+    basic_headset.activate("/Generation_","Flow tuning");basic_headset.draw();basic_headset.draw(true);
+    require(tray.rendered_text.find("Flow resolution")!=std::string::npos &&
+        basic_headset.rendered_text.find("Flow resolution")!=std::string::npos &&
+        tray.rendered_text.find("Bidirectional flow")==std::string::npos &&
+        basic_headset.rendered_text.find("Bidirectional flow")==std::string::npos,
+        "Basic flow size is editable in both surfaces while backward stays hidden");
+    tray.choose("Flow quality",2,"Fast");
+    require(snapshot().desired.preset==0,"hidden flow Fast cannot be activated in Basic");
+    tray.choose("Flow quality",1,"Medium");tray.choose("Flow resolution",1,"75%");
+    require(snapshot().desired.preset==1&&snapshot().desired.scale==1,
+        "visible Basic flow quality and size publish their selected values");
 
     tray.select_tab("Tests");
     runtime.applied_revision=snapshot().revision;runtime.pacing_mode=1;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("Up to 73 tests")!=std::string::npos && tray.rendered_text.find("Up to 74 tests")!=std::string::npos,"basic Display shows current two/three-buffer counts");
+    require(tray.rendered_text.find("Up to 35 tests")!=std::string::npos && tray.rendered_text.find("Up to 42 tests")!=std::string::npos,"basic Display shows current two/three-buffer counts");
     tray.activate("/Tests_","How tests work");tray.draw();tray.draw(true);
     require(tray.rendered_text.find("7.5 seconds per configuration")!=std::string::npos &&
         tray.rendered_text.find("2.5 seconds settling, then 5 seconds measured")!=std::string::npos,
         "Display describes the actual shorter benchmark timing");
     tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
-    require(snapshot().benchmark.count==73 && !snapshot().benchmark.advanced,"basic Display starts current buffer matrix");
+    require(snapshot().benchmark.count==35 && !snapshot().benchmark.advanced,"basic Display starts current buffer matrix");
     tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     require(tray.rendered_text.find("Auto pick best one")!=std::string::npos,"auto-pick checkbox is in Display");
     require(tray.rendered_text.find("On completion: within")==std::string::npos &&
@@ -691,9 +703,9 @@ void gpu_telemetry_and_quality() {
     require(desktop.rendered_text.find("Quality")!=std::string::npos && desktop.rendered_text.find("Medium")!=std::string::npos,
         "RIFE exposes Quality with Medium default");
     require(desktop.rendered_text.find("Motion inference resolution")==std::string::npos,"old resolution slider label removed");
-    constexpr const char* names[]{"Potato","Low","Medium","High","Very high","Ultra"};
-    constexpr int values[]{10,15,18,21,25,30};
-    for(int i=0;i<6;++i) {
+    constexpr const char* names[]{"Potato","Low","Medium","High","Very high","Ultra","Godlike"};
+    constexpr int values[]{10,15,18,21,25,30,36};
+    for(int i=0;i<7;++i) {
         desktop.choose("Quality",i,names[i]);
         require(snapshot().desired.rife_resolution==values[i],"each named Quality selection publishes the exact preset");
     }

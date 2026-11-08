@@ -1,5 +1,6 @@
 #pragma once
 #include "xrfg/autonomous_control.hpp"
+#include "xrfg/rife_resolution.hpp"
 #include <algorithm>
 #include <vector>
 #include <string>
@@ -34,11 +35,11 @@ inline const char* benchmark_pacing_label(int mode) {
     return mode==0 ? "Framework" : mode==1 ? "Director" : "Framework+director";
 }
 inline const char* benchmark_rife_quality_label(int quality) {
-    return quality==18?"Medium":quality==21?"High":"Very High";
+    return quality==25?"Very High":xrfg::kRifeQualityNames[xrfg::rife_resolution_index(quality)];
 }
 // Temporary owner-sheet matrix: 2 legacy variants or 8 private-runtime variants.
 // Luke uses normal/cheap reconstruction in the Normal/Fast positions, never Fast.
-inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool modern=true,bool advanced=false) {
+inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool modern=true,bool advanced=false,int rife_quality=18) {
     (void)advanced; // the provisional matrix always includes both buffer budgets
     std::vector<BenchmarkStep> steps;
     const auto label=[&](bool cheap,const std::string& route){
@@ -56,6 +57,7 @@ inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool 
           for(int buffer=0;buffer<(modern?2:1);++buffer)
             for(int variant=0;variant<2;++variant){
                 const int fast=luke?0:variant;
+                if(generation==0 && fast && buffer)continue; // keep the manual menu option
                 const auto suffix=modern?std::string(benchmark_pacing_label(pacing))+(luke?"":variant?" Fast":" Normal")+(buffer?" Buffer":"")
                     : std::string(luke?"":variant?"Fast":"Normal");
                 BenchmarkStep step{generation,backend,fast,fast,false,false,false,
@@ -67,7 +69,8 @@ inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool 
             }
     };
     add("0.2.1",0,1);add("Djules 2X",0,3);add("0.3.0",0,2);
-    for(int multiplier:{2,3})for(int quality:{18,21,25})
+    const int quality=xrfg::rife_resolution_preset(rife_quality);
+    for(int multiplier:{2,3})
         add("RIFE "+std::string(benchmark_rife_quality_label(quality))+" "+std::to_string(multiplier)+"X",4,2,multiplier,quality);
     if(full&&!luke){add("Hybrid",3,0);add("FSR",1,0);add("DLSS-G",2,0);}
     return steps;
@@ -77,16 +80,16 @@ inline bool benchmark_afw_quality_allowed(int shading,std::uint32_t eye_long_sid
     return shading==0 || shading==4; // both supported AFW options at every resolution;4x4 retired
 }
 inline std::vector<BenchmarkStep> benchmark_execution_plan(bool full,bool luke,bool steamvr,bool advanced,
-    std::uint32_t eye_long_side,unsigned rife_max_multiplier=4) {
-    auto steps=benchmark_plan(full,luke,steamvr,advanced);
+    std::uint32_t eye_long_side,unsigned rife_max_multiplier=4,int rife_quality=18) {
+    auto steps=benchmark_plan(full,luke,steamvr,advanced,rife_quality);
     std::erase_if(steps,[&](const auto& step){return step.generation==4 && unsigned(step.rife_multiplier)>rife_max_multiplier;});
     if(luke)std::erase_if(steps,[&](const auto& step) {
         return !benchmark_afw_quality_allowed(step.shading,eye_long_side);
     });
     return steps;
 }
-inline std::vector<BenchmarkStep> benchmark_export_plan(bool full,bool luke,bool steamvr,bool advanced=false) {
-    auto steps=benchmark_plan(full,luke,steamvr,advanced);
+inline std::vector<BenchmarkStep> benchmark_export_plan(bool full,bool luke,bool steamvr,bool advanced=false,int rife_quality=18) {
+    auto steps=benchmark_plan(full,luke,steamvr,advanced,rife_quality);
     return steps;
 }
 inline Settings benchmark_settings(Settings saved,const BenchmarkStep& step) {

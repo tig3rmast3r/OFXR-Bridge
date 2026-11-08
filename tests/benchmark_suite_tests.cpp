@@ -79,9 +79,19 @@ int main() {
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",root.c_str());
     try {
         buffer_plan_contract();automatic_choice_rules();quality_choice_rules();cadence_choice_rules();
+        for(int quality:xrfg::kRifeResolutions)for(bool modern:{false,true})for(bool luke:{false,true}) {
+            const auto plan=benchmark_execution_plan(true,luke,modern,false,3500,3,quality);
+            unsigned rife=0;
+            for(const auto& step:plan)if(step.generation==4) {
+                ++rife;check(step.rife_quality==quality,"one chosen RIFE quality is retained throughout both multiplier tiers");
+                Settings saved;saved.rife_resolution=quality;
+                check(benchmark_settings(saved,step).rife_resolution==quality,"RIFE quality reaches applied settings in Basic");
+            }
+            check(rife==unsigned(modern?16:4),"RIFE has one quality, all pacing combinations and conditional3X");
+        }
         for(bool modern:{false,true})for(bool advanced:{false,true})for(bool luke:{false,true})for(bool full:{false,true}) {
             const auto plan=benchmark_plan(full,luke,modern,advanced);
-            const auto expected=modern?(luke?74:full?97:73):(luke?20:full?25:19);
+            const auto expected=modern?(luke?42:full?59:35):(luke?12:full?17:11);
             check(plan.size()==std::size_t(expected),"complete matrix count");
             std::set<std::tuple<int,int,int,int,int,int,int,int,bool,bool,int,int>> unique;
             for(const auto& step:plan) {

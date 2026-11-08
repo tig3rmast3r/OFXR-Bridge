@@ -67,7 +67,7 @@ int child(const std::filesystem::path& game,const std::wstring& mode,const std::
     check(WaitForSingleObject(go,5000)==WAIT_OBJECT_0,"continue child");
     if(mode==L"reset")check(a::snapshot().desired==factory,"desktop reset reached game without resetting global UI preference");
     if(mode==L"advanced-flip") {const auto current=a::snapshot();check(!current.desired.advanced_mode&&
-        current.desired.pacing_mode==1&&current.desired.preset==1&&current.desired.scale==2&&
+        current.desired.pacing_mode==1&&current.desired.preset!=2&&current.desired.scale==3&&
         !current.desired.backward&&!current.desired.afw_debug&&!current.desired.r19_camera,
         "already bound child process observes normalized settings after global Advanced Off");}
     if(mode==L"independent")check(a::snapshot().desired.nr_intensity==.625F && a::snapshot().desired.nr_second_pass,
@@ -140,7 +140,7 @@ int wmain(int argc,wchar_t** argv) {
             check(!a::snapshot().desired.advanced_mode,"active profile immediately reflects the global preference");
             const auto normalized=a::snapshot();
             check(normalized.desired.pacing_mode==1 && normalized.revision>live_revision &&
-                normalized.desired.preset==1&&normalized.desired.scale==2&&!normalized.desired.backward&&
+                normalized.desired.preset==0&&normalized.desired.scale==3&&!normalized.desired.backward&&
                 !normalized.desired.r19_camera&&!normalized.desired.afw_debug,
                 "global Advanced Off publishes default hidden settings as an applicable game revision");
             check(a::snapshot().revision==normalized.revision,"observing an already normalized profile does not churn revisions");
@@ -159,7 +159,7 @@ int wmain(int argc,wchar_t** argv) {
             check(a::snapshot().benchmark.phase==a::BenchmarkPhase::stopped,"global policy stops active suite");
             a::tick_benchmark();const auto restored=a::snapshot();
             check(!restored.desired.advanced_mode&&restored.desired.pacing_mode==1&&
-                restored.desired.preset==1&&restored.desired.scale==2&&!restored.desired.r19_camera,
+                restored.desired.preset==1&&restored.desired.scale==3&&!restored.desired.r19_camera,
                 "suite restore cannot resurrect the saved Advanced policy or hidden custom values");
             live.finish();
         }
