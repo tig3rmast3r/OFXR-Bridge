@@ -60,8 +60,8 @@ inline void apply_runtime_settings() {
     e.native_scale=static_cast<unsigned>(s.native_scale);
     if (!embedded::request(e)) return;
     embedded::AfwSettings a{};
-    // The switch lives in Advanced: without AdvancedMode=1 nothing could turn a
-    // saved tint off, so it stays in the profile but does not apply.
+    // Basic-mode sanitation resets hidden AFW controls; keep this final debug
+    // guard for compatibility with older control mappings.
     a.mode=s.afw_mode; a.debug=s.afw_debug&&s.advanced_mode;
     a.clear_before_warping=s.afw_clear_before_warping;
     a.ignore_motion_threshold=s.afw_ignore_motion_threshold;

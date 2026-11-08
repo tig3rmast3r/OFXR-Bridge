@@ -132,6 +132,7 @@ struct Context {
 };
 
 void rebase_and_publish() {
+    auto editable=snapshot().desired;editable.advanced_mode=true;require(request(editable),"enable editable submodes for delta merge fixture");
     SettingsWidgetState tray, headset;
     const auto initial = snapshot();
     synchronize_settings_widgets(tray, initial);
@@ -631,6 +632,16 @@ void automatic_buttons() {
     tray.select_tab("Reconstruction");tray.draw();tray.draw(true);
     require(tray.rendered_text.find("Debug framewarp")==std::string::npos &&
         tray.rendered_text.find("Use previous frame")==std::string::npos,"Advanced needs AdvancedMode=1");
+    require(snapshot().desired.afw_mode==3&&!snapshot().desired.afw_debug&&
+        snapshot().desired.afw_depth_dilate_mode==0,"hidden reconstruction values reset when Advanced is disabled");
+    auto simple_flow=snapshot().desired;select_generation(simple_flow,0,2);
+    simple_flow.preset=0;simple_flow.scale=3;simple_flow.backward=true;require(request(simple_flow),"old hidden flow values requested in Basic");
+    Context basic_headset({1024,768},true);basic_headset.draw();basic_headset.draw();
+    tray.select_tab("Frame generation");basic_headset.select_tab("Frame generation");tray.draw(true);basic_headset.draw(true);
+    require(tray.rendered_text.find("Flow tuning")==std::string::npos&&basic_headset.rendered_text.find("Flow tuning")==std::string::npos&&
+        snapshot().desired.preset==1&&snapshot().desired.scale==2&&!snapshot().desired.backward,
+        "Basic desktop and headset hide flow tuning and enforce Medium50");
+
     tray.select_tab("Tests");
     runtime.applied_revision=snapshot().revision;runtime.pacing_mode=1;report_runtime(runtime);tray.draw(true);
     require(tray.rendered_text.find("Up to 73 tests")!=std::string::npos && tray.rendered_text.find("Up to 74 tests")!=std::string::npos,"basic Display shows current two/three-buffer counts");

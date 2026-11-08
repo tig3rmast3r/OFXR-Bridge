@@ -757,7 +757,7 @@ bool generation(Panel& p) {
     }
 
     // Disclosures come last, so opening one pushes no primary control away.
-    if(show_flow) {
+    if(show_flow && draft.advanced_mode) {
         constexpr const char* qualities[]{"Slow","Medium","Fast"};
         constexpr const char* resolutions[]{"100%","75%","50%","25%"};
         char summary[64];

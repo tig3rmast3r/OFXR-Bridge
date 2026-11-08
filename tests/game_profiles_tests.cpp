@@ -66,7 +66,10 @@ int child(const std::filesystem::path& game,const std::wstring& mode,const std::
     check(ready && go,"open child rendezvous");SetEvent(ready);
     check(WaitForSingleObject(go,5000)==WAIT_OBJECT_0,"continue child");
     if(mode==L"reset")check(a::snapshot().desired==factory,"desktop reset reached game without resetting global UI preference");
-    if(mode==L"advanced-flip")check(!a::snapshot().desired.advanced_mode,"global preference update reaches an already bound game process");
+    if(mode==L"advanced-flip") {const auto current=a::snapshot();check(!current.desired.advanced_mode&&
+        current.desired.pacing_mode==1&&current.desired.preset==1&&current.desired.scale==2&&
+        !current.desired.backward&&!current.desired.afw_debug&&!current.desired.r19_camera,
+        "already bound child process observes normalized settings after global Advanced Off");}
     if(mode==L"independent")check(a::snapshot().desired.nr_intensity==.625F && a::snapshot().desired.nr_second_pass,
         "other game's reset did not overwrite this game's NR settings or second-pass choice");
     a::report_runtime({});CloseHandle(ready);CloseHandle(go);return 0;
@@ -128,15 +131,36 @@ int wmain(int argc,wchar_t** argv) {
         check(read(a::global_configuration_path())==original,"failed profile initialization never alters main");
         {
             Child live(executable,L"Live.exe",L"advanced-flip",suffix+L"-advanced");
-            auto live_settings=a::snapshot().desired;live_settings.pacing_mode=2;
+            auto live_settings=a::snapshot().desired;live_settings.pacing_mode=2;live_settings.preset=0;live_settings.scale=3;live_settings.backward=true;live_settings.r19_camera=true;live_settings.afw_debug=true;
             check(a::request(live_settings),"select an existing advanced game route");
             const auto live_revision=a::snapshot().revision;
             const auto global=a::global_configuration_path();
             {a::ScopedConfigurationSelection selected(global);auto settings=a::snapshot().desired;
              settings.advanced_mode=false;check(a::request(settings),"change only the global UI policy");}
             check(!a::snapshot().desired.advanced_mode,"active profile immediately reflects the global preference");
-            check(a::snapshot().desired.pacing_mode==2 && a::snapshot().revision==live_revision,
-                "observing the global UI toggle does not change the running route or game revision");
+            const auto normalized=a::snapshot();
+            check(normalized.desired.pacing_mode==1 && normalized.revision>live_revision &&
+                normalized.desired.preset==1&&normalized.desired.scale==2&&!normalized.desired.backward&&
+                !normalized.desired.r19_camera&&!normalized.desired.afw_debug,
+                "global Advanced Off publishes default hidden settings as an applicable game revision");
+            check(a::snapshot().revision==normalized.revision,"observing an already normalized profile does not churn revisions");
+            live.finish();
+        }
+        {
+            const auto global=a::global_configuration_path();
+            {a::ScopedConfigurationSelection selected(global);auto settings=a::snapshot().desired;
+             settings.advanced_mode=true;settings.scale=3;check(a::request(settings),"enable Advanced for live suite restore fixture");}
+            Child live(executable,L"LiveBench.exe",L"advanced-flip",suffix+L"-advanced-suite");
+            auto saved=a::snapshot().desired;saved.pacing_mode=2;saved.scale=3;saved.r19_camera=true;
+            check(a::request(saved)&&a::start_benchmark(false),"start a suite with saved Advanced choices");
+            a::tick_benchmark();
+            {a::ScopedConfigurationSelection selected(global);auto settings=a::snapshot().desired;
+             settings.advanced_mode=false;check(a::request(settings),"turn Advanced off during a suite");}
+            check(a::snapshot().benchmark.phase==a::BenchmarkPhase::stopped,"global policy stops active suite");
+            a::tick_benchmark();const auto restored=a::snapshot();
+            check(!restored.desired.advanced_mode&&restored.desired.pacing_mode==1&&
+                restored.desired.preset==1&&restored.desired.scale==2&&!restored.desired.r19_camera,
+                "suite restore cannot resurrect the saved Advanced policy or hidden custom values");
             live.finish();
         }
         const auto global_after=read(a::global_configuration_path());

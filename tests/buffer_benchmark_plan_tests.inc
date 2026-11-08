@@ -19,9 +19,9 @@ void buffer_plan_contract() {
             saved.scale=3;saved.preset=2;saved.native_scale=50;
             auto applied=benchmark_settings(saved,step);
             check(applied.increase_buffer==(step.buffer==1),"benchmark applies the explicit buffer to the same normal setting");
-            check(applied.nr_enabled && applied.afw_ignore_motion_threshold==7.5F && applied.afw_depth_dilate_mode==2,
-                "suite preserves unrelated Neural and AFW parameters");
-            check(applied.scale==3 && applied.preset==2 && applied.native_scale==50,"suite keeps route-specific generation resolution and preset");
+            check(applied.nr_enabled && applied.afw_ignore_motion_threshold==2.5F && applied.afw_depth_dilate_mode==0,
+                "Basic suite preserves Neural settings and normalizes hidden AFW parameters");
+            check(applied.scale==(step.generation==4?5:2) && applied.preset==1 && applied.native_scale==50,"Basic suite keeps visible generated resolution and forces hidden flow defaults");
             if(luke)check(!step.a && !step.b && !step.triple && (step.generation==0 || step.generation==4) && (step.shading==0 || step.shading==4),"Luke has qualities and buffers, no Fast/vector/3X trial");
             else check(step.a==step.b,"normal Fast consistently selects both operations");
         }

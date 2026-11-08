@@ -392,6 +392,22 @@ int runtime_multiplier(const Settings& s) noexcept {
 Settings sanitize(Settings value) noexcept {
     value.pacing_mode=std::clamp(value.pacing_mode,0,value.advanced_mode?2:1);
     value.benchmark_csv=true;
+    if(!value.advanced_mode) {
+        const Settings defaults;
+        value.preset=defaults.preset;value.scale=defaults.scale;value.backward=defaults.backward;
+        value.rife_model=defaults.rife_model;value.r19_camera=defaults.r19_camera;
+        // Off is a visible primary choice. Reset only the hidden sub-modes.
+        if(value.afw_mode>0)value.afw_mode=defaults.afw_mode;
+        value.afw_debug=defaults.afw_debug;
+        value.afw_clear_before_warping=defaults.afw_clear_before_warping;
+        value.afw_ignore_motion_threshold=defaults.afw_ignore_motion_threshold;
+        value.afw_depth_dilate_mode=defaults.afw_depth_dilate_mode;
+        value.afw_shading_rate=defaults.afw_shading_rate;
+        value.luke_advanced=defaults.luke_advanced;
+        value.luke_osr_cover=defaults.luke_osr_cover;
+        value.luke_osr_trim=defaults.luke_osr_trim;
+        value.luke_osr_fill=defaults.luke_osr_fill;
+    }
     if(!value.advanced_mode && value.frame_generation==0)value.motion_vectors=0;
     value.backend = std::clamp(value.backend, 0, 3);
     // Hybrid keeps an engine of its own, beside the OFXR one. 0.2.13 is a
@@ -469,6 +485,12 @@ Settings sanitize(Settings value) noexcept {
         // OFXR FidelityFX, 0.2.1 and 0.3.0, Hybrid, and DLSS-G's 4X. 0.2.13
         // keeps its own 3X.
         p.frame_multiplier = i <= 2 || i == 5 || i == 6 ? std::clamp(p.frame_multiplier, 2, 4) : 2;
+        if(!value.advanced_mode) {
+            const GenerationPreferences defaults;
+            p.preset=defaults.preset;p.scale=i==7?default_generation_profiles()[7].scale:defaults.scale;
+            p.backward=defaults.backward;
+            if(i<4)p.motion_vectors=defaults.motion_vectors;
+        }
     }
     restore_preferences(value);
     return value;
@@ -774,13 +796,33 @@ Snapshot snapshot() noexcept {
         // Retain the last coherent settings while another peer holds the lock.
         thread_local Snapshot last_good{};
         thread_local Channel* last_channel{};
-        if(last_channel!=&connection) {last_good={load(connection.data ? std::filesystem::path(connection.data->configuration_file) : global_configuration_path()),1,{},false};last_channel=&connection;}
+        thread_local std::uint64_t checked_revision{};
+        if(last_channel!=&connection) {last_good={load(connection.data ? std::filesystem::path(connection.data->configuration_file) : global_configuration_path()),1,{},false};last_channel=&connection;checked_revision=0;}
         Lock lock(connection);
-        if (lock.acquired) last_good = connection.data->snapshot;
+        if (lock.acquired) {
+            auto& shared=connection.data->snapshot;
+            const bool policy=advanced.value_or(shared.desired.advanced_mode);
+            if(policy!=shared.desired.advanced_mode || (!policy && checked_revision!=shared.revision)) {
+                auto desired=shared.desired;desired.advanced_mode=policy;desired=sanitize(desired);
+                if(desired!=shared.desired) {
+                    if(benchmark_active(shared.benchmark)) {
+                        // A policy change must not leave the last trial's
+                        // visible generator/pacing choices selected either.
+                        desired=connection.data->benchmark_saved;
+                        desired.advanced_mode=policy;desired=sanitize(desired);
+                        shared.benchmark.phase=BenchmarkPhase::stopped;
+                        shared.benchmark.requested_ms=GetTickCount64();
+                        std::snprintf(shared.benchmark.message,sizeof(shared.benchmark.message),"Stopped because Advanced mode changed; original visible settings restored.");
+                    }
+                    shared.desired=desired;++shared.revision;
+                }
+            }
+            checked_revision=shared.revision;last_good=shared;
+        }
+        // A busy mapping keeps its last coherent policy/settings together.
+        // The next successful read publishes the policy reset as a revision,
+        // so the existing runtime apply/drain path cannot miss the change.
         Snapshot result = last_good;
-        // Visibility preference only: observing another UI must not silently
-        // reconfigure a running game's rendering settings or revisions.
-        if(advanced)result.desired.advanced_mode=*advanced;
 #ifdef _WIN32
         const auto now = GetTickCount64();
         result.connected = result.runtime.sessions != 0 && result.runtime.process_id != 0 &&
@@ -931,6 +973,8 @@ bool suite_runtime_fresh(const RuntimeStatus& r) {
     return r.process_id && r.sessions && now>=r.heartbeat_ms && now-r.heartbeat_ms<5000;
 }
 bool suite_publish(Shared& shared,Settings desired,std::uint64_t now) {
+    // Restoring a suite must not restore a stale global Advanced policy.
+    desired.advanced_mode=shared.snapshot.desired.advanced_mode;
     desired=sanitize(desired);
     if(!save(shared,desired)) return false;
     auto& s=shared.snapshot;

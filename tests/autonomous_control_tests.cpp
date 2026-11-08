@@ -50,9 +50,9 @@ void codec() {
     auto concurrent_nr=desired;concurrent_nr.enabled=false;concurrent_nr.afw_mode=1;
     concurrent_nr.nr_working_scale=.5F;concurrent_nr.nr_preset=2;
     const auto merged_nr=xrfg::autonomous::merge_changes(concurrent_nr,desired,second_pass);
-    require(merged_nr.nr_second_pass && !merged_nr.enabled && merged_nr.afw_mode==1 &&
+    require(merged_nr.nr_second_pass && !merged_nr.enabled && merged_nr.afw_mode==3 &&
         merged_nr.nr_working_scale==.5F && merged_nr.nr_preset==2,
-        "second-pass delta preserves concurrent OFXR, AFW and shared NR parameter edits");
+        "second-pass delta preserves visible concurrent settings and resets hidden Basic reconstruction mode");
     require(desired.luke_osr==2 && xrfg::autonomous::parse_settings("").luke_osr==2,
         "factory and missing profile reconstruction default to OSR");
     for(int saved:{0,1,2}) {
@@ -132,7 +132,9 @@ void codec() {
     require(desired.lower_vram == 0, "Lower VRAM defaults off");
     require(!desired.r19_camera, "R19 camera defaults off for legacy profiles");
     desired.r19_camera=true;
-    require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(desired)).r19_camera,"R19 flag persisted");
+    require(!xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(desired)).r19_camera,"Basic mode forces the hidden R19 flag off");
+    auto advanced_r19=desired;advanced_r19.advanced_mode=true;
+    require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(advanced_r19,true)).r19_camera,"Advanced mode retains the experimental R19 choice");
     auto r19_base=desired, r19_edit=desired, concurrent=desired;
     r19_edit.r19_camera=false; concurrent.enabled=false;
     const auto merged=xrfg::autonomous::merge_changes(concurrent,r19_base,r19_edit);
@@ -156,13 +158,13 @@ void codec() {
         migrated_profiles.generation_profiles[2].separate_synthesis == 1,
         "Old partial controls migrate to combined Lower VRAM");
     for (int rate : {0,4,8,99,-1}) {
-        auto settings = desired; settings.afw_shading_rate = rate;
-        const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(settings));
+        auto settings = desired; settings.advanced_mode=true; settings.afw_shading_rate = rate;
+        const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(settings,true));
         require(restored.afw_shading_rate == (std::clamp(rate,0,8)==8 ? 4 : std::clamp(rate,0,8)), "AFW shading rate persistence and bounds");
     }
     for(int scale=0;scale<4;++scale) {
-        auto quarter=desired;quarter.scale=scale;
-        const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(quarter));
+        auto quarter=desired;quarter.advanced_mode=true;quarter.scale=scale;
+        const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(quarter,true));
         require(restored.scale==scale,"all four flow resolutions survive restart");
     }
     desired.backend = 3;
@@ -205,24 +207,67 @@ void codec() {
     require(xrfg::autonomous::sanitize(desired).nr_local_tone == 1.F,
         "infinite requested runtime value sanitized");
 }
+void basic_defaults_policy() {
+    using namespace xrfg::autonomous;
+    Settings dirty;dirty.advanced_mode=true;dirty.profiles_initialized=true;
+    dirty.pacing_mode=2;dirty.motion_vectors=1;dirty.preset=0;dirty.scale=3;dirty.backward=true;
+    dirty.rife_model=2;dirty.r19_camera=true;dirty.afw_mode=2;dirty.afw_debug=true;
+    dirty.afw_clear_before_warping=true;dirty.afw_ignore_motion_threshold=9;
+    dirty.afw_depth_dilate_mode=2;dirty.afw_shading_rate=4;
+    dirty.luke_advanced=true;dirty.luke_osr_cover=8;dirty.luke_osr_trim=2;dirty.luke_osr_fill=8;
+    dirty.rife_resolution=25;dirty.rife_multiplier=3;dirty.increase_buffer=true;
+    dirty.lower_vram=1;dirty.nr_enabled=true;dirty.nr_colour_strength=.3F;dirty.nr_debug_view=2;
+    for(auto& route:dirty.generation_profiles){route.preset=2;route.scale=3;route.backward=true;route.motion_vectors=1;}
+    const auto advanced=sanitize(dirty);
+    require(advanced.preset==0&&advanced.scale==3&&advanced.backward&&advanced.afw_debug&&advanced.afw_mode==2,
+        "Advanced retains editable optical and reconstruction settings");
+    dirty.advanced_mode=false;const auto basic=sanitize(dirty);const Settings defaults;
+    require(basic.preset==1&&basic.scale==2&&!basic.backward&&!basic.motion_vectors,
+        "Basic forces Medium50 optical flow and optical motion source");
+    require(basic.afw_mode==3&&!basic.afw_debug&&!basic.afw_clear_before_warping&&
+        basic.afw_ignore_motion_threshold==defaults.afw_ignore_motion_threshold&&
+        basic.afw_depth_dilate_mode==0&&basic.afw_shading_rate==0&&!basic.luke_advanced,
+        "Basic resets every hidden reconstruction sub-control");
+    require(!basic.r19_camera&&basic.pacing_mode==1&&basic.rife_model==3&&
+        basic.luke_osr_cover==0&&basic.luke_osr_trim==0&&basic.luke_osr_fill==2,
+        "Basic resets hidden experimental, model, pacing and retired band choices");
+    require(basic.rife_resolution==25&&basic.rife_multiplier==3&&basic.increase_buffer&&
+        basic.lower_vram==1&&basic.nr_enabled&&basic.nr_colour_strength==.3F&&basic.nr_debug_view==2,
+        "Basic retains controls still visible in normal mode");
+    for(unsigned i=0;i<basic.generation_profiles.size();++i) {
+        const auto& route=basic.generation_profiles[i];
+        require(route.preset==1&&route.scale==(i==7?5:2)&&!route.backward,
+            "inactive engine profiles cannot restore hidden nondefault flow settings");
+        require(route.motion_vectors==(i>=4&&i<=6?1:0),"required native guides remain enabled only on their routes");
+    }
+    require(parse_settings(serialize_settings(dirty))==basic,"saved Basic profile uses the enforced defaults");
+    dirty.afw_mode=0;dirty.pacing_mode=0;auto off=sanitize(dirty);
+    require(off.afw_mode==0&&off.pacing_mode==0,"Basic preserves visible reconstruction Off and Framework choices");
+    for(int mode:{0,1,2,3,4}) {
+        auto selected=dirty;select_generation(selected,mode,2);
+        require(selected.preset==1&&!selected.backward&&selected.scale==(mode==4?5:2),
+            "changing engine in Basic cannot resurrect inactive tuning");
+        require(selected.motion_vectors==(mode>0&&mode<4?1:0),"FSR/DLSS-G/Hybrid retain required native vectors");
+    }
+}
 void route_profiles() {
     using namespace xrfg::autonomous;
     require(generation_ui_index(0)==0 && generation_ui_index(3)==1 && generation_ui_index(1)==2 && generation_ui_index(2)==3 && generation_ui_index(4)==4,
         "Hybrid UI order preserves existing persisted generator IDs");
     require(generation_from_ui(1)==3 && generation_from_ui(2)==1 && generation_from_ui(3)==2 && generation_from_ui(4)==4,"UI selection maps to stable route IDs");
-    Settings hybrid;select_generation(hybrid,0,2);hybrid.scale=0;hybrid.motion_vectors=0;hybrid=sanitize(hybrid);
+    Settings hybrid;hybrid.advanced_mode=true;select_generation(hybrid,0,2);hybrid.scale=0;hybrid.motion_vectors=0;hybrid=sanitize(hybrid);
     select_generation(hybrid,3,2);hybrid.scale=1;hybrid.lower_vram=1;hybrid.hybrid_backend=1;hybrid=sanitize(hybrid);
     select_generation(hybrid,1,2);hybrid.native_scale=42;hybrid=sanitize(hybrid);
-    hybrid=parse_settings(serialize_settings(hybrid));select_generation(hybrid,3,2);
+    hybrid=parse_settings(serialize_settings(hybrid,true));select_generation(hybrid,3,2);
     require(hybrid.scale==1 && hybrid.lower_vram==1 && hybrid.hybrid_backend==1,"Hybrid retains own engine and preferences");
     require(hybrid.backend==2,"Hybrid engine is separate from the OFXR engine");
     hybrid.hybrid_backend=3;hybrid=sanitize(hybrid);
     require(hybrid.hybrid_backend==2,"Hybrid never takes the 0.2.13 pacing route");
     Settings fresh;select_generation(fresh,3,0);
-    require(fresh.scale==3,"Hybrid's flow resolution defaults to a quarter");
+    require(fresh.scale==2,"Basic Hybrid flow resolution defaults to50 percent");
     auto older=parse_settings("[ofxr]\nframe_generation=3\nscale=2\n[route.hybrid]\nscale=2\n[route.ofxr_new]\nscale=1\n");
-    require(older.scale==3 && older.generation_profiles[6].scale==3 && older.generation_profiles[2].scale==1,
-        "profiles from before Hybrid's flow resolution keep the quarter they ran at, and only Hybrid's");
+    require(older.scale==2 && older.generation_profiles[6].scale==2 && older.generation_profiles[2].scale==2,
+        "Basic normalizes both old Hybrid and inactive optical flow profiles to50 percent");
     older.scale=2;older=parse_settings(serialize_settings(older));
     require(older.scale==2,"Hybrid's chosen flow resolution survives a save");
     Settings multiplied;select_generation(multiplied,0,2);multiplied.frame_multiplier=4;multiplied=sanitize(multiplied);
@@ -313,9 +358,9 @@ void route_profiles() {
     require(rife.frame_generation==4 && rife.rife_model==2 && rife.motion_vectors==0 && !rife.triple_frame_gen,"RIFE uses no engine guides and is 2X only");
     auto rife_roundtrip=parse_settings(serialize_settings(rife,true));
     require(rife_roundtrip.rife_model==2 && rife_roundtrip.frame_generation==4,"advanced RIFE model survives configuration roundtrip");
-    auto fifth=parse_settings("[ofxr]\nframe_generation=4\nrife_model=3\nscale=4\n");
+    auto fifth=parse_settings("[ofxr]\nAdvancedMode=1\nframe_generation=4\nrife_model=3\nscale=4\n");
     require(fifth.rife_model==3 && fifth.scale==4,"RIFE 4.4 and 20 percent survive normalization");
-    auto fifth_roundtrip=parse_settings(serialize_settings(fifth));
+    auto fifth_roundtrip=parse_settings(serialize_settings(fifth,true));
     require(fifth_roundtrip.scale==4 && fifth_roundtrip.rife_model==3,"RIFE 20 percent is persisted in its own profile");
     select_generation(fifth,0,2);
     require(fifth.scale<=3,"ordinary OFXR never inherits unsupported fifth grid");
@@ -387,6 +432,7 @@ int wmain(int count, wchar_t** arguments) {
             return 0;
         }
         codec();
+        basic_defaults_policy();
         route_profiles();
         const auto fixture = std::filesystem::temp_directory_path() /
             (L"ofxr-autonomous-control-fixture-" + std::to_wstring(GetCurrentProcessId()) +
@@ -406,8 +452,8 @@ int wmain(int count, wchar_t** arguments) {
         const auto original = xrfg::autonomous::snapshot();
         auto desired = original.desired;
         for (int rate : {0,4,8,99,-1}) {
-        auto settings = desired; settings.afw_shading_rate = rate;
-        const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(settings));
+        auto settings = desired; settings.advanced_mode=true; settings.afw_shading_rate = rate;
+        const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(settings,true));
         require(restored.afw_shading_rate == (std::clamp(rate,0,8)==8 ? 4 : std::clamp(rate,0,8)), "AFW shading rate persistence and bounds");
     }
     desired.backend = 3;
@@ -476,8 +522,8 @@ int wmain(int count, wchar_t** arguments) {
         require(xrfg::autonomous::request_changes(updated.desired, tray), "tray delta publication");
         require(xrfg::autonomous::request_changes(updated.desired, headset), "stale headset delta publication");
         auto merged = xrfg::autonomous::snapshot();
-        require(merged.desired.afw_mode == 1 && merged.desired.nr_intensity == .375F,
-            "independent settings from both clients survive");
+        require(merged.desired.afw_mode == 3 && merged.desired.nr_intensity == .375F,
+            "independent visible edits survive while hidden Basic submode stays at default");
         require(merged.desired.menu_scale == .75F,
             "headset size survives an independent stale engine edit");
         require(merged.desired.backend == 3 && merged.desired.nr_enabled, "delta retains untouched runtime settings");
