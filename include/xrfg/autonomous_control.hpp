@@ -73,6 +73,10 @@ struct Settings {
     int luke_osr_cover{};  // OSR: band cover in depth texels beyond the hole, 0..8
     int luke_osr_trim{};   // OSR: object-edge texels replaced too, 0..2
     int luke_osr_fill{2};  // OSR: band fill gain, 1..8
+    bool ofr_enabled{}; // Explicit AER temporal reconstruction, exclusive with OSR/AFW.
+    int ofr_backend{}; // 0 FidelityFX, 1 OFXR optical flow (NVIDIA).
+    int ofr_scale{2}; // 0 100%, 1 75%, 2 50%, 3 25%; per-axis flow size.
+    bool ofr_swap{}; // Reverse temporal phase, never the logical eye mapping.
     bool luke_advanced{};  // Luke Ross tab: show the provider and OSR parameters
     bool nr_enabled{};
     bool nr_before_sr{true};
@@ -185,6 +189,8 @@ struct RuntimeStatus {
     bool rife_execution_active{}; // a fresh, live worker receipt exists (false is not proof of Torch)
     unsigned rife_error{}; // fresh receipt: 1 timeout, 2 unavailable, 3 optimization failure
     int osr_mode{-1},osr_lower_quality{-1}; // last successfully submitted reconstruction
+    bool ofr_running{};
+    unsigned ofr_delivery{}; // 0 learning, 1 alternating, 2 paired.
     bool uevr_osr{}; // UEVR Alternating/AFR attached as OSR's eye source, as Luke Ross is
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {

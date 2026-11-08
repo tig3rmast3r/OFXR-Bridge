@@ -59,6 +59,10 @@ struct Control {
         settings.frame_generation = _wcsicmp(generation, L"fsr3") == 0 ? 1 : _wcsicmp(generation, L"dlss") == 0 ? 2 : 0;
         settings.rife_resolution=xrfg::rife_resolution_preset(static_cast<int>(GetPrivateProfileIntW(L"ofxr",L"rife_resolution",18,ini().c_str())));
         settings.rife_multiplier=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr",L"rife_multiplier",2,ini().c_str())),2,4);
+        settings.ofr=GetPrivateProfileIntW(L"experimental",L"ofr_enabled",0,ini().c_str())!=0;
+        settings.ofr_backend=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"experimental",L"ofr_backend",0,ini().c_str())),0,1);
+        settings.ofr_scale=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"experimental",L"ofr_scale",2,ini().c_str())),0,3);
+        settings.ofr_swap=GetPrivateProfileIntW(L"experimental",L"ofr_swap",0,ini().c_str())!=0;
         settings.rife_model=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr",L"rife_model",-1,ini().c_str())),-1,4);
         settings.hybrid = GetPrivateProfileIntW(L"ofxr",L"dlss_flow_hybrid",0,ini().c_str())!=0;
         settings.native_scale = std::clamp(GetPrivateProfileIntW(L"ofxr", L"dlssg_resolution", 100, ini().c_str()), 25u, 100u);
@@ -102,6 +106,10 @@ struct AfwControl {
                 0, ini().c_str())), 0, 2);
         settings.osr = normalize_osr_reconstruction(static_cast<int>(GetPrivateProfileIntW(
             L"experimental", L"luke_osr", 2, ini().c_str())));
+        settings.ofr=GetPrivateProfileIntW(L"experimental",L"ofr_enabled",0,ini().c_str())!=0;
+        settings.ofr_backend=std::clamp(int(GetPrivateProfileIntW(L"experimental",L"ofr_backend",0,ini().c_str())),0,1);
+        settings.ofr_scale=std::clamp(int(GetPrivateProfileIntW(L"experimental",L"ofr_scale",2,ini().c_str())),0,3);
+        settings.ofr_swap=GetPrivateProfileIntW(L"experimental",L"ofr_swap",0,ini().c_str())!=0;
         settings.osr_lower_quality=GetPrivateProfileIntW(L"experimental",L"luke_osr_lower_quality",0,ini().c_str())!=0;
         settings.osr_cover = std::clamp(static_cast<int>(GetPrivateProfileIntW(
             L"experimental", L"luke_osr_cover", 0, ini().c_str())), 0, 8);
@@ -130,6 +138,7 @@ Snapshot snapshot() {
     return s;
 }
 bool request(Settings s) {
+    if(s.ofr_backend<0 || s.ofr_backend>1 || s.ofr_scale<0 || s.ofr_scale>3) return false;
     if (s.pacing_mode < 0 || s.pacing_mode > 2 || s.backend < 0 || s.backend > 3 || s.preset < 0 || s.preset > 2 ||
         s.scale < 0 || s.scale > (s.rife_model>=0?6:3) || s.motion_vectors < 0 || s.motion_vectors > 1 ||
         s.frame_generation < 0 || s.frame_generation > 2 || s.rife_model < -1 || s.rife_model > 4 || s.rife_resolution!=xrfg::rife_resolution_preset(s.rife_resolution) || s.rife_multiplier<2 || s.rife_multiplier>4 ||
@@ -145,6 +154,10 @@ bool request(Settings s) {
     }
     if (old.enabled != s.enabled) ok &= write(L"ofxr", L"enabled", s.enabled ? L"1" : L"0");
     if(old.increase_buffer!=s.increase_buffer)ok &=write(L"ofxr",L"increase_buffer",s.increase_buffer?L"1":L"0");
+    if(old.ofr!=s.ofr) ok &= write(L"experimental",L"ofr_enabled",s.ofr?L"1":L"0");
+    if(old.ofr_swap!=s.ofr_swap) ok &= write(L"experimental",L"ofr_swap",s.ofr_swap?L"1":L"0");
+    if(old.ofr_backend!=s.ofr_backend) {wchar_t value[16]{};swprintf_s(value,L"%d",s.ofr_backend);ok &= write(L"experimental",L"ofr_backend",value);}
+    if(old.ofr_scale!=s.ofr_scale) {wchar_t value[16]{};swprintf_s(value,L"%d",s.ofr_scale);ok &= write(L"experimental",L"ofr_scale",value);}
     if (old.backend != s.backend) ok &= write(L"ofxr", L"backend", s.backend ? L"nvidia" : L"fidelityfx");
     if (old.backend != s.backend) ok &= write(L"ofxr", L"nvidia_route", s.backend == 3 ? L"djules" : s.backend == 2 ? L"new" : L"legacy");
     const wchar_t* presets[]{L"slow", L"medium", L"fast"};
@@ -180,6 +193,7 @@ AfwSnapshot afw_snapshot() {
 }
 
 bool request_afw(AfwSettings settings) {
+    if (settings.ofr_backend<0 || settings.ofr_backend>1 || settings.ofr_scale<0 || settings.ofr_scale>3) return false;
     if (settings.mode < 0 || settings.mode > 3 ||
         settings.osr < 0 || settings.osr > 2 ||
         settings.osr_cover < 0 || settings.osr_cover > 8 ||
@@ -196,6 +210,13 @@ bool request_afw(AfwSettings settings) {
     std::scoped_lock lock(c.mutex);
     const auto old = c.snapshot.desired;
     bool ok = true;
+    if(old.ofr!=settings.ofr)ok &= write(L"experimental",L"ofr_enabled",settings.ofr?L"1":L"0");
+    if(old.ofr_swap!=settings.ofr_swap)ok &= write(L"experimental",L"ofr_swap",settings.ofr_swap?L"1":L"0");
+    if(old.ofr_backend!=settings.ofr_backend || old.ofr_scale!=settings.ofr_scale) {
+        wchar_t value[16]{};swprintf_s(value,L"%d",settings.ofr_backend);
+        ok &= write(L"experimental",L"ofr_backend",value);
+        swprintf_s(value,L"%d",settings.ofr_scale);ok &= write(L"experimental",L"ofr_scale",value);
+    }
     if (old.mode != settings.mode) {
         const wchar_t* modes[]{L"0", L"1", L"2", L"3"};
         ok &= write(L"experimental", L"luke_afw_mode", modes[settings.mode]);

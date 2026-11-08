@@ -44,6 +44,7 @@ inline void apply_runtime_settings() {
     if (applied==incoming.revision) return;
     const auto& s=incoming.desired;
     embedded::Settings e{};
+    e.ofr=s.ofr_enabled;e.ofr_backend=s.ofr_backend;e.ofr_scale=s.ofr_scale;e.ofr_swap=s.ofr_swap;
     e.pacing_mode=s.pacing_mode;
     e.increase_buffer=s.increase_buffer;
     e.enabled=s.enabled; e.backend=s.backend; e.preset=s.preset; e.scale=s.scale;
@@ -67,6 +68,7 @@ inline void apply_runtime_settings() {
     a.ignore_motion_threshold=s.afw_ignore_motion_threshold;
     a.depth_dilate_mode=s.afw_depth_dilate_mode; a.shading_rate=s.afw_shading_rate;
     a.osr_lower_quality=s.luke_osr_lower_quality;
+    a.ofr=s.ofr_enabled;a.ofr_backend=s.ofr_backend;a.ofr_scale=s.ofr_scale;a.ofr_swap=s.ofr_swap;
     a.osr=s.luke_osr; a.osr_cover=s.luke_osr_cover; a.osr_trim=s.luke_osr_trim; a.osr_fill=s.luke_osr_fill;
     if (!embedded::request_afw(a)) return;
     if (!embedded::set_djules_triple_frame_gen(s.triple_frame_gen)) return;
@@ -120,7 +122,10 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.afw_projection_frames=afw.projection_frames; out.afw_ready_frames=afw.ready_frames;
     const auto now=GetTickCount64();
     out.afw_flat_scene=afw.flat_scene;
-    out.afw_running=!afw.flat_scene && afw.desired.mode!=0 && afw.last_success_ms &&
+    const auto ofr_last=embedded::ofr_last_success_ms.load(std::memory_order_relaxed);
+    out.ofr_running=afw.desired.ofr && ofr_last && now>=ofr_last && now-ofr_last<2000;
+    out.ofr_delivery=embedded::ofr_delivery.load(std::memory_order_relaxed);
+    out.afw_running=!afw.desired.ofr && !afw.flat_scene && afw.desired.mode!=0 && afw.last_success_ms &&
         now>=afw.last_success_ms && now-afw.last_success_ms<2000;
     out.nr_running=nr.running;
     out.nr_model_missing=nr.enabled && nr.model_missing;

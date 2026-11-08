@@ -9,6 +9,10 @@ bool layer_active() noexcept;
 // CPU-only interface: no NGX/FFX structures cross the host/backend ABI boundary.
 struct Settings {
     bool enabled{true};
+    bool ofr{};
+    int ofr_backend{};
+    int ofr_scale{2};
+    bool ofr_swap{};
     bool increase_buffer{};
     int pacing_mode{2}; // 0 framework, 1 sole director, 2 framework + director
     int backend{}; // 0 FidelityFX, 1 NVIDIA legacy, 2 NVIDIA new, 3 NVIDIA djules
@@ -47,6 +51,10 @@ struct AfwSettings {
     bool osr_lower_quality{};
     int osr_cover{};  // OSR: band cover in depth texels beyond the hole on the background side, 0..8
     int osr_trim{};   // OSR: depth texels of the object's smeared edge replaced too, 0..2
+    bool ofr{};
+    int ofr_backend{};
+    int ofr_scale{2};
+    bool ofr_swap{};
     int osr_fill{2};  // OSR: band fill gain on (1 - t), 1..8; 1 = history model only
     bool operator==(const AfwSettings&) const = default;
 };
@@ -91,6 +99,8 @@ Snapshot snapshot();
 bool request(Settings settings); // persists only owned keys; false means INI write failed
 AfwSnapshot afw_snapshot();
 bool request_afw(AfwSettings settings);
+inline std::atomic_uint64_t ofr_last_success_ms{};
+inline std::atomic_uint ofr_delivery{};
 inline std::atomic_int active_osr_mode{-1},active_osr_lower_quality{-1};
 inline void report_osr_configuration(int mode,bool lower) noexcept {
     active_osr_mode.store(mode,std::memory_order_relaxed);

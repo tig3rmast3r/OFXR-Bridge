@@ -282,7 +282,7 @@ bool uevr_afr_osr_wanted(const SessionState& session) noexcept {
         session.graphics_binding != SessionGraphicsBinding::d3d12 ||
         session.d3d11_bridge || session.vulkan_bridge || !session.d3d12_device || !session.d3d12_queue) return false;
     const auto afw = xrfg::embedded::afw_snapshot().desired;
-    return afw.mode != 0 && afw.osr == static_cast<int>(xrfg::OsrReconstruction::full);
+    return !xrfg::embedded::snapshot().desired.ofr && afw.mode != 0 && afw.osr == static_cast<int>(xrfg::OsrReconstruction::full);
 }
 
 // UEVR's xrEndFrame as it must reach the layer: owned copies of what changed.

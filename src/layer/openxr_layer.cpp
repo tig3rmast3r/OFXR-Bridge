@@ -75,6 +75,7 @@
 #include <openxr/openxr_platform.h>
 
 #include <algorithm>
+#include "xrfg/ofr_reconstruction.hpp"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -949,6 +950,8 @@ struct SessionState {
     xrfg::D3D12OpticalFlowBackend optical_flow_backend{
         xrfg::D3D12OpticalFlowBackend::fidelity_fx};
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
+    std::atomic_uint ofr_delivery{}; // 0 learning,1 alternate,2 paired
+    unsigned ofr_fresh_mask{3},ofr_last_mask{};
     // D35: bounded opt-in allocation/adapter records; never a pacing input.
     std::mutex video_memory_mutex;
     Microsoft::WRL::ComPtr<IDXGIAdapter3> video_memory_adapter;
@@ -1669,6 +1672,15 @@ private:
 // transport choice, not another generation backend or a Neural Rendering switch.
 [[nodiscard]] xrfg::embedded::Settings effective_session_settings(
     const SessionState& state, xrfg::embedded::Settings requested) noexcept {
+    if(requested.ofr) {
+        // A local reconstruction trial owns the temporal engine while selected.
+        // Normal FG preferences remain stored and are restored on deselection.
+        requested.enabled=true;requested.backend=requested.ofr_backend?2:0;
+        requested.scale=requested.ofr_scale;requested.preset=1;
+        requested.backward=false;requested.motion_vectors=0;requested.frame_generation=0;
+        requested.hybrid=false;requested.rife_model=-1;requested.rife_multiplier=2;
+        requested.native_scale=100;
+    }
 #if !defined(_WIN64)
     // 0.2 V576: the 32-bit layer has NVIDIA optical flow alone - FidelityFX,
     // NGX (DLSS-G), FSR's provider and RIFE are x64 only - and 32-bit games
@@ -3003,6 +3015,7 @@ XrResult wait_presenter_runtime_frame(const std::shared_ptr<SessionState>& state
 
 [[nodiscard]] XrDuration doubled_display_period(XrDuration period) noexcept;
 [[nodiscard]] XrDuration djules_application_period(const SessionState& state,XrDuration period) noexcept {
+    if(state.nvidia_options.ofr && state.ofr_delivery.load(std::memory_order_relaxed)==1) return period;
     if(!djules_triple_active(state)) return doubled_display_period(period);
     const auto factor=native_frame_multiplier(state);
     if(period>std::numeric_limits<XrDuration>::max()/factor) return std::numeric_limits<XrDuration>::max();
@@ -3773,6 +3786,7 @@ create_d3d12_frame_generation_swapchains(
             state->panel_source ? xrfg::D3D12OpticalFlowBackend::fidelity_fx : state->session->optical_flow_backend;
         auto options=state->session->nvidia_options;
         if(state->panel_source) {
+            options.ofr=false;
             options.input_scale=xrfg::D3D12NvidiaInputScale::full;
             options.hybrid=false;
             options.rife_model=-1;
@@ -6051,7 +6065,7 @@ XrResult layer_create_session_impl(
     state->vdxr_legacy = true;
 #endif
     const auto game_preferences=xrfg::autonomous::snapshot().desired;
-    state->afw_only=state->luke_afw_enabled && game_preferences.afw_only;
+    state->afw_only=state->luke_afw_enabled && game_preferences.afw_only && !xrfg::embedded::snapshot().desired.ofr;
     state->luke_shared_swapchains=game_preferences.luke_shared_swapchains;
     auto initial_control = xrfg::embedded::snapshot();
     initial_control.desired=effective_session_settings(*state,initial_control.desired);
@@ -6068,6 +6082,8 @@ XrResult layer_create_session_impl(
         static_cast<xrfg::D3D12NvidiaInputScale>(initial_control.desired.scale),
         initial_control.desired.backward,
         state->nvidia_new_route, xrfg::flow_encoding_for_route(state->nvidia_new_route), state->nvidia_new_route, initial_control.desired.native_scale};
+    state->nvidia_options.ofr=initial_control.desired.ofr;
+    state->nvidia_options.ofr_swap=initial_control.desired.ofr_swap;
     state->nvidia_options.rife_model=initial_control.desired.rife_model;
     state->nvidia_options.rife_resolution_percent=initial_control.desired.rife_resolution;
     state->nvidia_options.rife_multiplier=initial_control.desired.rife_multiplier;
@@ -6088,7 +6104,7 @@ XrResult layer_create_session_impl(
     state->luke_fresh_only=state->luke_afw_enabled && xrfg::luke_hfw_producer_supported();
     state->luke_afw_odd_serial_is_left = xrfg::luke_host_odd_serial_is_left(
         xrfg::luke_host_game_directory(), experimental_ini);
-    if (state->luke_afw_enabled) state->dlss_motion_vectors = true;
+    if (state->luke_afw_enabled && !state->nvidia_options.ofr) state->dlss_motion_vectors = true;
     state->djules_history_wait_enabled.store(ordinary_djules_route(*state), std::memory_order_relaxed);
     state->control_revision = initial_control.revision;
     state->generation_outputs_needed=state->menu_enabled ||
@@ -10894,7 +10910,7 @@ void stop_continuous_presenter(
 
 [[nodiscard]] bool three_slot_generation_session(
     const std::shared_ptr<SessionState>& state) noexcept {
-    return !presenter_forbidden(*state) && !djules_inline_runtime(*state) && state->menu_enabled && state->frame_generation_mode !=
+    return !state->nvidia_options.ofr && !presenter_forbidden(*state) && !djules_inline_runtime(*state) && state->menu_enabled && state->frame_generation_mode !=
                xrfg::D3D12FrameGenerationMode::fsr3 &&
            ((state->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
              (state->nvidia_new_route || fresh_luke_director_worker(*state))) ||
@@ -11895,6 +11911,7 @@ build_reprojection_views(
             snapshot.layers[reference.projection_index]
                 .views[reference.view_index];
         xrfg::D3D12ReprojectionView& destination = output[view_index];
+        destination.logical_eye=static_cast<std::uint32_t>(reference.view_index);
         destination.display_time = snapshot.display_time;
         destination.pose.orientation = {
             source.pose.orientation.x,
@@ -11982,6 +11999,25 @@ void record_projection_capture_order(
                 chain->d3d12_history, capture.serial, capture.fence_value});
         }
     } catch (...) { snapshot.capture_order.clear(); }
+}
+
+[[nodiscard]] std::array<xrfg::ofr::Source,2> ofr_sources(
+    const ProjectionSnapshot& snapshot, std::span<const ProjectionResourceMapping> mappings) noexcept {
+    std::array<xrfg::ofr::Source,2> result{};
+    if(snapshot.layers.size()!=1 || snapshot.layers[0].views.size()!=2) return {};
+    for(const auto& mapping:mappings) {
+        const auto capture=std::find_if(snapshot.capture_order.begin(),snapshot.capture_order.end(),
+            [&](const auto& c){return c.swapchain==mapping.application_swapchain;});
+        if(capture==snapshot.capture_order.end()) return {};
+        for(const auto& reference:mapping.views) {
+            if(reference.projection_index!=0 || reference.view_index>1) return {};
+            auto& source=result[reference.view_index];
+            if(source.serial) return {};
+            source={static_cast<std::uintptr_t>(handle_value(mapping.application_swapchain)),
+                reinterpret_cast<std::uintptr_t>(capture->history.lock().get()),capture->serial};
+        }
+    }
+    return result;
 }
 
 [[nodiscard]] bool consecutive_projection_captures(
@@ -13060,7 +13096,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             // The legacy queue can hand S to the runtime while the producer
             // advances. Submit B now as well, so its queue dependency precedes
             // that next application frame rather than being inserted after S.
-            const bool defer_current_copy = !generation->staged_outputs && !worker_submission &&
+            const bool defer_current_copy = !state->session->nvidia_options.ofr && !generation->staged_outputs && !worker_submission &&
                 generation->d3d11_interop == nullptr &&
                 !state->session->queued_nvidia_presenter;
             if (!generation->d3d11_interop || SUCCEEDED(submit_result)) {
@@ -13088,7 +13124,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                                                   static_cast<std::uint32_t>((synthetic_runtime_slot+1)%generation->synthetic_runtime_rings) * generation->synthetic_images_per_slot + extra_image.acquired_index,
                                                   extra_fraction, extra_views,request_third?static_cast<UINT>((synthetic_runtime_slot+2)%generation->synthetic_runtime_rings)*generation->synthetic_images_per_slot+third_image.acquired_index:UINT32_MAX,
                                                   third_fraction,third_views}} : std::nullopt,
-                                          !synthetic_views.empty());
+                                          !synthetic_views.empty(), state->session->ofr_fresh_mask);
                 } else {
                     submit_result = synthesizer->submit_prime(
                                           *capture,
@@ -16405,7 +16441,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     const bool hybrid_ready=control.desired.hybrid &&
         !(state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode != 0) &&
         xrfg::dlss_motion_vector_publications()!=0;
-    const bool afw_needed=state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode!=0;
+    const bool afw_needed=!control.desired.ofr && state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode!=0;
     const bool outputs_needed=control.desired.enabled || afw_needed;
     const bool afw_use_changed=state->luke_afw_resources_needed &&
         afw_needed!=*state->luke_afw_resources_needed;
@@ -16528,6 +16564,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(control.desired.preset),
         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
         nvidia_new_route, xrfg::flow_encoding_for_route(nvidia_new_route), nvidia_new_route, control.desired.native_scale};
+    options.ofr=control.desired.ofr;options.ofr_swap=control.desired.ofr_swap;
     options.rife_model=control.desired.rife_model;
     options.rife_resolution_percent=control.desired.rife_resolution;
     options.rife_multiplier=control.desired.rife_multiplier;
@@ -16548,7 +16585,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     }
     const int effective_separation = effective_memory_control(*state,control.desired.separate_synthesis);
     const int effective_reduction = effective_memory_control(*state,control.desired.lower_vram);
-    const bool changed = options.rife_resolution_percent!=state->nvidia_options.rife_resolution_percent || options.rife_multiplier!=state->nvidia_options.rife_multiplier || options.rife_async!=state->nvidia_options.rife_async || options.rife_model!=state->nvidia_options.rife_model || options.hybrid!=state->nvidia_options.hybrid ||
+    const bool changed = options.ofr!=state->nvidia_options.ofr || options.ofr_swap!=state->nvidia_options.ofr_swap || options.rife_resolution_percent!=state->nvidia_options.rife_resolution_percent || options.rife_multiplier!=state->nvidia_options.rife_multiplier || options.rife_async!=state->nvidia_options.rife_async || options.rife_model!=state->nvidia_options.rife_model || options.hybrid!=state->nvidia_options.hybrid ||
         control.desired.hybrid!=state->hybrid_requested || force_startup_rendezvous || state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||
         options.input_scale != state->nvidia_options.input_scale ||
@@ -16569,6 +16606,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     // also see this tuple. A partial failure remains bypass, never mixed flow.
     state->optical_flow_backend = backend;
     state->nvidia_options = options;
+    state->ofr_delivery=0;state->ofr_last_mask=0;
+    xrfg::embedded::ofr_last_success_ms=0;xrfg::embedded::ofr_delivery=0;
     state->frame_generation_mode = generation_mode;
     state->hybrid_requested=control.desired.hybrid;
     state->nvidia_new_route = nvidia_new_route;
@@ -16579,7 +16618,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     state->lower_vram = effective_reduction;
     state->dlss_motion_vectors = control.desired.motion_vectors == 1 ||
         generation_mode != xrfg::D3D12FrameGenerationMode::ofxr ||
-        state->luke_afw_enabled;
+        (state->luke_afw_enabled && !control.desired.ofr);
     if (changed) state->generation_initialization_result = S_OK;
     std::vector<XrSwapchain> projected_sources, auxiliary_sources;
     bool submitted_sources_known = current && current->type == XR_TYPE_FRAME_END_INFO &&
@@ -17412,7 +17451,7 @@ XrResult layer_end_frame_impl(
 
     const auto afw_control = xrfg::embedded::afw_snapshot();
     bool afw_selected = state->luke_afw_enabled &&
-        afw_control.desired.mode != 0;
+        afw_control.desired.mode != 0 && !xrfg::embedded::snapshot().desired.ofr;
     const bool ofxr_was_enabled = state->menu_enabled;
     const auto desired_control = xrfg::embedded::snapshot();
     auto startup_request = state->luke_afw_startup.pending();
@@ -18019,7 +18058,7 @@ XrResult layer_end_frame_impl(
         state->luke_f11_down = f11_down;
     }
     const bool source_order_timeline = capture_order_timeline(*state);
-    if (source_order_timeline || projection_stream_continuity_enabled(*state))
+    if (source_order_timeline || state->nvidia_options.ofr || projection_stream_continuity_enabled(*state))
         record_projection_capture_order(current_snapshot, projection_mappings);
     std::optional<ProjectionSnapshot> previous_snapshot;
     {
@@ -18047,6 +18086,43 @@ XrResult layer_end_frame_impl(
     }
     bool metadata_pairable =
         latest_application_frame && previous_snapshot && snapshots_compatible;
+    if(state->nvidia_options.ofr) {
+        if(!stereo_projection || current_snapshot.layers.size()!=1)
+            return bypass_generation(GenerationPrepareReason::missing_capture);
+        const auto sources=ofr_sources(current_snapshot,projection_mappings);
+        const auto prior=previous_snapshot ? ofr_sources(*previous_snapshot,projection_mappings) : std::array<xrfg::ofr::Source,2>{};
+        const auto decision=xrfg::ofr::classify(prior,sources);
+        if(!sources[0].serial || !sources[1].serial)
+            return bypass_generation(GenerationPrepareReason::missing_capture);
+        state->ofr_fresh_mask=decision.fresh;
+        if(!decision.fresh) {
+            if(use_continuous_presenter) {
+                consume_application_frame(state,current_snapshot.display_time,
+                    consume_in_submission_order,match_latest_by_submission);
+                return XR_SUCCESS;
+            }
+            return bypass_generation(GenerationPrepareReason::missing_capture);
+        }
+        const unsigned delivery=decision.paired()?2:1;
+        const bool lost=!decision.continuity ||
+            (state->ofr_delivery.load()!=0 && state->ofr_delivery.load()!=delivery) ||
+            (delivery==1 && state->ofr_last_mask==decision.fresh);
+        if(lost && previous_snapshot) {
+            clear_generation_continuity(state);metadata_pairable=false;previous_snapshot.reset();
+        }
+        state->ofr_delivery=delivery;
+        xrfg::embedded::ofr_delivery=delivery;
+        // A repeated eye's pixels retain their render camera, even if the mod
+        // has refreshed both submitted poses for the next presentation.
+        if(previous_snapshot && delivery==1) {
+            for(unsigned eye=0;eye<2;++eye) if(!(decision.fresh&(1u<<eye))) {
+                current_snapshot.layers[0].views[eye].pose=previous_snapshot->layers[0].views[eye].pose;
+                current_snapshot.layers[0].views[eye].fov=previous_snapshot->layers[0].views[eye].fov;
+            }
+        }
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+            9230,decision.fresh,delivery,lost?1:0);
+    }
     const bool use_three_slot = use_continuous_presenter && three_slot_generation_session(state);
     if (previous_snapshot && !snapshots_compatible) {
         if (!projection_resource_layout_compatible(
@@ -18286,14 +18362,14 @@ XrResult layer_end_frame_impl(
     // application's frame interval it changes every frame rather than being a
     // constant offset nobody would see. Alternating early and late is what
     // reads as judder.
-    const float interpolation_fraction = synthetic_interpolation_fraction(
+    const float interpolation_fraction = state->nvidia_options.ofr ? .5F : synthetic_interpolation_fraction(
         state, previous_snapshot, current_snapshot);
     const auto mapping_span = std::span<const ProjectionResourceMapping>(
         resource_mappings.mappings.data(),
         resource_mappings.mappings.size());
     const auto extra_fraction=synthetic_interpolation_fraction(state,previous_snapshot,current_snapshot,1);
     const auto third_fraction=synthetic_interpolation_fraction(state,previous_snapshot,current_snapshot,2);
-    const bool r19_camera=xrfg::autonomous::r19_camera_enabled.load(std::memory_order_acquire);
+    const bool r19_camera=state->nvidia_options.ofr || xrfg::autonomous::r19_camera_enabled.load(std::memory_order_acquire);
     const auto synthetic_camera=previous_snapshot && r19_camera ? synthetic_camera_snapshot(*previous_snapshot,current_snapshot,interpolation_fraction) : std::nullopt;
     const auto extra_camera=previous_snapshot && r19_camera ? synthetic_camera_snapshot(*previous_snapshot,current_snapshot,extra_fraction) : std::nullopt;
     const xrfg::D3D12PresentationTransform final_color_transform{};
@@ -18308,7 +18384,7 @@ XrResult layer_end_frame_impl(
         : prepare_projection_frame(
               current_snapshot, mapping_span, metadata_pairable, interpolation_fraction, false, nullptr, {},
               extra_fraction, synthetic_camera ? &*synthetic_camera : nullptr, extra_camera ? &*extra_camera : nullptr);
-    if(prepared.kind!=PreparedGenerationKind::none) {
+    if(prepared.kind!=PreparedGenerationKind::none && !state->nvidia_options.ofr) {
         const auto panel_inputs=freeze_panel_inputs(*state,current_snapshot,mapping_span);
         prepare_panel_generation(*state,current_snapshot,panel_inputs,prepared,interpolation_fraction,extra_fraction,false,third_fraction);
     }
@@ -18476,7 +18552,7 @@ XrResult layer_end_frame_impl(
         if (synthetic_built && current_built) {
             // The synthetic frame owns the deferred copies: they must reach
             // the queue after it has been handed to the runtime.
-            if (!state->queued_nvidia_presenter)
+            if (!state->queued_nvidia_presenter && !state->nvidia_options.ofr)
             for (const PreparedProjectionResource& resource :
                  prepared.resources) {
                 if (resource.generation.synthesizer && !resource.generation.staging_generation) {
@@ -18498,6 +18574,17 @@ XrResult layer_end_frame_impl(
         clear_generation_continuity(state);
     }
 
+    const bool ofr_single=state->nvidia_options.ofr && pair_ready && state->ofr_fresh_mask!=3;
+    if(state->nvidia_options.ofr && pair_ready && previous_snapshot) {
+        if(!ofr_single) {
+            const auto eye=xrfg::ofr::newer_eye(state->nvidia_options.ofr_swap);
+            auto& first=first_generated.projections[0].views[eye];
+            auto& second=current_generated.projections[0].views[eye];
+            second.pose=first.pose;second.fov=first.fov;
+            first.pose=previous_snapshot->layers[0].views[eye].pose;
+            first.fov=previous_snapshot->layers[0].views[eye].fov;
+        }
+    }
     bool extra_ready=pair_ready && djules_triple_active(*state);
     if(extra_ready) {
         auto extra_destinations = synthetic_destinations;
@@ -18513,6 +18600,7 @@ XrResult layer_end_frame_impl(
     }
     if(prepared.kind==PreparedGenerationKind::prime) attach_djules_outputs(prepared,first_generated);
     else if(pair_ready) attach_djules_outputs(prepared,current_generated,&first_generated,extra_ready?&extra_generated:nullptr);
+    if(ofr_single) pair_ready=false;
     if (completed_afw) {
         first_generated.composition_images = completed_afw->submission->composition_images;
         current_generated.composition_images = completed_afw->submission->composition_images;
@@ -18561,11 +18649,11 @@ XrResult layer_end_frame_impl(
     first_generated.app_release_value = generated_release_value;
     current_generated.app_release_value = generated_release_value;
     extra_generated.app_release_value = generated_release_value;
-    first_generated.synthetic = pair_ready;
+    first_generated.synthetic = pair_ready || ofr_single;
     first_generated.djules_leader=extra_ready;
     std::shared_ptr<GeneratedFrameEndInfo> presenter_current_frame,presenter_extra_frame;
     if (use_continuous_presenter &&
-        (prepared.kind == PreparedGenerationKind::prime || pair_ready)) {
+        (prepared.kind == PreparedGenerationKind::prime || pair_ready || ofr_single)) {
         presenter_first_frame =
             make_presenter_owned_frame(std::move(first_generated));
         if (pair_ready) {
@@ -18765,7 +18853,9 @@ XrResult layer_end_frame_impl(
     // not arm or interrupt the fresh-publication sequence.
     startup_observation.physical_success = !pair_ready &&
         prepared.kind == PreparedGenerationKind::prime;
-    if (pair_ready) {
+    if ((pair_ready || ofr_single) && XR_SUCCEEDED(result) && state->nvidia_options.ofr)
+        xrfg::embedded::ofr_last_success_ms=GetTickCount64();
+    if (pair_ready || ofr_single) {
         state->generation_steady_state_established = true;
     } else if(!use_continuous_presenter && end_info && XR_SUCCEEDED(result) && blackbar_gate(*state)) {
         XrDuration period{};
@@ -18841,6 +18931,7 @@ XrResult layer_end_frame_impl(
     if (prepared.anchor_is_current) {
         std::scoped_lock lock(state->mutex);
         state->previous_projection = current_snapshot;
+        if(state->nvidia_options.ofr) state->ofr_last_mask=state->ofr_fresh_mask;
         remember_projection_stream(*state,current_snapshot,0);
     } else if (!prepared.preserve_previous) {
         std::scoped_lock lock(state->mutex);
@@ -18857,7 +18948,7 @@ XrResult layer_end_frame_impl(
         if (pair_ready) {
             seed_frame = make_presenter_owned_frame(
                 std::move(current_generated));
-        } else if (prepared.kind == PreparedGenerationKind::prime) {
+        } else if (prepared.kind == PreparedGenerationKind::prime || ofr_single) {
             seed_frame = make_presenter_owned_frame(
                 std::move(first_generated));
         }

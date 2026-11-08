@@ -715,6 +715,10 @@ std::string build_runtime_ini(
         "\r\nluke_afw_ignore_motion_threshold=" + std::to_string(desired.afw_ignore_motion_threshold) +
         "\r\nluke_afw_depth_dilate_mode=" + std::to_string(desired.afw_depth_dilate_mode) + "\r\n" +
         "luke_afw_shading_rate=" + std::to_string(desired.afw_shading_rate) + "\r\n" +
+        "ofr_enabled=" + std::to_string(desired.ofr_enabled) + "\r\n" +
+        "ofr_backend=" + std::to_string(desired.ofr_backend) + "\r\n" +
+        "ofr_scale=" + std::to_string(desired.ofr_scale) + "\r\n" +
+        "ofr_swap=" + std::to_string(desired.ofr_swap) + "\r\n" +
         "luke_osr=" + std::to_string(normalize_osr_reconstruction(desired.luke_osr)) + "\r\n" +
         "luke_osr_lower_quality=" + std::to_string(desired.luke_osr_lower_quality) + "\r\n" +
         "luke_osr_cover=" + std::to_string(desired.luke_osr_cover) + "\r\n" +

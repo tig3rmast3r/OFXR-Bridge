@@ -1235,6 +1235,7 @@ struct D3D12FrameSynthesizer::Impl {
     std::uint32_t next_work_slot{};
     std::uint32_t next_timing_slot{};
     D3D12OpticalFlowBackend backend{D3D12OpticalFlowBackend::fidelity_fx};
+    bool ofr_paired{true};
     D3D12NvidiaOpticalFlowOptions nvidia_options{};
     D3D12FrameGenerationMode generation_mode{D3D12FrameGenerationMode::ofxr};
     std::unique_ptr<D3D12NativeDlssG> native_dlss;
@@ -5325,6 +5326,43 @@ struct D3D12FrameSynthesizer::Impl {
             &dispatch));
     }
 
+    // Raw A=(L0,R1), B=(L2,R3), midpoint S=(L1,R2).
+    // Preserve logical eyes: first=(L1,R1), second=(L2,R2).
+    // Save S's newer eye into B BEFORE replacing S with raw A's endpoint.
+    // Alternating delivery already yields a coherent S; B is not published.
+    void record_ofr_endpoints(ID3D12GraphicsCommandList* list,
+        ID3D12Resource* raw_previous, ID3D12Resource* synthetic,
+        ID3D12Resource* current, std::span<const D3D12ReprojectionView> views) noexcept {
+        if(!nvidia_options.ofr || !ofr_paired) return;
+        const unsigned newer=nvidia_options.ofr_swap?0:1;
+        for(const auto& view:views) {
+            if(view.logical_eye!=newer) continue;
+            const auto desc=raw_previous->GetDesc();
+            const UINT slice=view.array_slice==UINT32_MAX?0:view.array_slice;
+            const auto rect=view.image_rect;
+            const UINT x=rect.width?rect.offset_x:0, y=rect.height?rect.offset_y:0;
+            const UINT w=rect.width?rect.width:static_cast<UINT>(desc.Width);
+            const UINT h=rect.height?rect.height:desc.Height;
+            D3D12_TEXTURE_COPY_LOCATION a{},s{},b{};
+            a.pResource=raw_previous;s.pResource=synthetic;b.pResource=current;
+            a.Type=s.Type=b.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            a.SubresourceIndex=s.SubresourceIndex=b.SubresourceIndex=slice*desc.MipLevels;
+            const D3D12_BOX box{x,y,0,x+w,y+h,1};
+            auto barrier=transition_barrier(synthetic,release_state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+            list->ResourceBarrier(1,&barrier);
+            list->CopyTextureRegion(&b,x,y,0,&s,&box);
+            const std::array<D3D12_RESOURCE_BARRIER,2> middle{
+                transition_barrier(synthetic,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COPY_DEST),
+                transition_barrier(raw_previous,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE)};
+            list->ResourceBarrier(static_cast<UINT>(middle.size()),middle.data());
+            list->CopyTextureRegion(&s,x,y,0,&a,&box);
+            const std::array<D3D12_RESOURCE_BARRIER,2> finish{
+                transition_barrier(synthetic,D3D12_RESOURCE_STATE_COPY_DEST,release_state),
+                transition_barrier(raw_previous,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON)};
+            list->ResourceBarrier(static_cast<UINT>(finish.size()),finish.data());
+        }
+    }
+
     [[nodiscard]] HRESULT record_nvidia_pair(
         WorkSlot& slot,
         const RollingSource& previous_source,
@@ -5760,6 +5798,9 @@ struct D3D12FrameSynthesizer::Impl {
         slot.current_copy_command_list->CopyResource(
             current_destination,
             current_resource);
+        record_ofr_endpoints(slot.current_copy_command_list.Get(), previous_resource,
+            synthetic_destinations[synthetic_destination_index].resource.Get(), current_destination,
+            {current_source.views.data(),current_source.view_count});
         // DIAGNOSTIC. The real frame is otherwise indistinguishable from one
         // that never arrived: the purple marker rides only on the synthetic,
         // so a steady purple square means either "only synthetics are shown"
@@ -6332,6 +6373,9 @@ struct D3D12FrameSynthesizer::Impl {
         slot.current_copy_command_list->CopyResource(
             current_destination,
             current_resource);
+        record_ofr_endpoints(slot.current_copy_command_list.Get(), previous_resource,
+            synthetic_destinations[synthetic_destination_index].resource.Get(), current_destination,
+            {current_source.views.data(),current_source.view_count});
         // DIAGNOSTIC. The real frame is otherwise indistinguishable from one
         // that never arrived: the purple marker rides only on the synthetic,
         // so a steady purple square means either "only synthetics are shown"
@@ -7301,7 +7345,9 @@ struct D3D12FrameSynthesizer::Impl {
         float interpolation_fraction,
         D3D12PresentationTransform presentation_transform,
         const std::optional<D3D12ExtraSynthetic>& extra_synthetic,
-        bool allow_synthetic_camera) noexcept {
+        bool allow_synthetic_camera, unsigned ofr_fresh_mask) noexcept {
+        ofr_paired = ofr_fresh_mask == 3;
+        if(nvidia_options.ofr) {defer_current_copy=false;interpolation_fraction=.5F;}
         rife_pair={}; // no abandoned pre-submission transaction survives a retry
         synthetic_fraction = usable_synthesis_fraction(interpolation_fraction, false);
         synthetic_camera_turned = {};
@@ -7736,6 +7782,7 @@ struct D3D12FrameSynthesizer::Impl {
         if (generation_mode == D3D12FrameGenerationMode::fsr3) {
             last_fsr_context_fence_values[active_fsr_domain] = fence_value;
         }
+        if(nvidia_options.ofr) last_synthetic_fence_value=fence_value;
         if (native_dlss) native_dlss->submitted(fence.Get(), fence_value, last_synthetic_fence_value);
         if (!rife && (used_game_motion || hybrid_guides_used) && (!native_dlss || native_pair_generated)) report_dlss_motion_vector_use();
 
@@ -8114,7 +8161,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
     float interpolation_fraction,
     D3D12PresentationTransform presentation_transform,
     std::optional<D3D12ExtraSynthetic> extra_synthetic,
-    bool allow_synthetic_camera) noexcept {
+    bool allow_synthetic_camera, unsigned ofr_fresh_mask) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -8138,7 +8185,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             std::move(motion_vectors),
             defer_current_copy,
             interpolation_fraction,
-            std::move(presentation_transform), extra_synthetic, allow_synthetic_camera);
+            std::move(presentation_transform), extra_synthetic, allow_synthetic_camera, ofr_fresh_mask);
     } catch (...) {
         if (ticket != nullptr) {
             *ticket = {};

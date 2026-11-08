@@ -53,6 +53,7 @@ struct D3D12ReprojectionView {
     std::uint32_t array_slice{
         std::numeric_limits<std::uint32_t>::max()};
     std::int64_t display_time{};
+    std::uint32_t logical_eye{std::numeric_limits<std::uint32_t>::max()};
 };
 
 struct D3D12PresentationTransform {
@@ -184,6 +185,8 @@ struct D3D12NvidiaOpticalFlowOptions {
     int rife_model{-1}; // experimental Python/CUDA generator, no OFA/engine guides
     int rife_multiplier{2};
     int rife_resolution_percent{}; //0 legacy exact fraction; otherwise10..40
+    bool ofr{}; // AER reconstruction, using the ordinary optical-flow outputs
+    bool ofr_swap{}; // newer logical eye: right by default, left when swapped
     bool rife_async{}; // dedicated producer/consumer queues only; owned FIFO work
 };
 
@@ -315,7 +318,8 @@ public:
         float interpolation_fraction = 0.5F,
         D3D12PresentationTransform presentation_transform = {},
         std::optional<D3D12ExtraSynthetic> extra_synthetic = std::nullopt,
-        bool allow_synthetic_camera = false) noexcept;
+        bool allow_synthetic_camera = false,
+        unsigned ofr_fresh_mask = 3) noexcept;
 
     // Executes the current output's copy, which submit_pair records but
     // deliberately leaves unsubmitted. The synthetic frame is handed to the

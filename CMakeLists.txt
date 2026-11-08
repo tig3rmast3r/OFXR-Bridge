@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.922.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.923.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2590,4 +2590,15 @@ endif()
 if(TARGET xrfg_three_slot_director_tests)
     add_test(NAME xrfg_luke_private_clock COMMAND xrfg_three_slot_director_tests luke-private-clock)
     set_tests_properties(xrfg_luke_private_clock PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
+if(XRFG_BUILD_TESTS)
+    add_executable(xrfg_ofr_reconstruction_tests tests/ofr_reconstruction_tests.cpp)
+    target_include_directories(xrfg_ofr_reconstruction_tests PRIVATE include)
+    target_compile_features(xrfg_ofr_reconstruction_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_ofr_reconstruction COMMAND xrfg_ofr_reconstruction_tests)
+endif()
+if(TARGET xrfg_d3d12_history_tests)
+    add_test(NAME xrfg_ofr_endpoints_gpu COMMAND xrfg_d3d12_history_tests ofr)
+    set_tests_properties(xrfg_ofr_endpoints_gpu PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
 endif()

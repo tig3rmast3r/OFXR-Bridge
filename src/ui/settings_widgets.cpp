@@ -451,6 +451,8 @@ constexpr Help kHelpPreset{"DLSS-G preset","C uses Lite blending; A uses Full qu
 constexpr Help kHelpGenerated{"Generated resolution","Resolution of DLSS-G generated frames. Requires compatible NVIDIA DLSS-G hardware and runtime."};
 constexpr Help kHelpMethod{"Reconstruction","Rebuilds the eye the game skipped this frame. Applies live. Off stops it for every game, Luke Ross and UEVR alike; frame generation and Neural Rendering stay independent."};
 constexpr Help kHelpOsr{"OSR","OFXR Stereo Reconstruction. OFXR renders the missing eye itself from the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame. Used with Luke Ross and UEVR."};
+constexpr Help kHelpOfr{"OFR","OFXR Framegen Reconstruction. Select only for AER games: temporally aligns the eyes using same-eye optical flow. Requires history and adds lookahead."};
+constexpr Help kHelpOfrSwap{"Swap phase","Reverses which eye is assumed older. Does not exchange left and right images. Re-primes both histories."};
 constexpr Help kHelpAfw{"AFW","Legacy. Reconstructs the missing eye with the AFW provider. Luke Ross only."};
 constexpr Help kHelpOnly{"Frame Reconstruction only","Removes frame generation from the pipeline. Each application frame goes straight to the headset, and only the missing eye is reconstructed. The best choice for latency."};
 constexpr Help kHelpOsrQuality{"OSR quality","Faster reduces reconstruction work and may soften object edges. Colour stays full resolution. Live."};
@@ -827,13 +829,14 @@ bool framewarp(Panel& p) {
     const auto& r=state.runtime;
     const auto now=GetTickCount64();
     const bool fresh=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
+    const bool ofr=draft.ofr_enabled;
     const bool osr=draft.luke_osr==2;
-    const char* source=!state.connected ? "No active game" : r.luke_detected ? "Luke Ross detected" :
+    const char* source=!state.connected ? "No active game" : ofr ? "AER (selected by user)" : r.luke_detected ? "Luke Ross detected" :
         r.uevr_osr ? "UEVR Alternating detected" : "None detected";
-    const bool active=state.connected && draft.afw_mode!=0 && fresh && r.afw_running && !r.afw_flat_scene;
-    const char* activity=draft.afw_mode==0 ? "Off" : active ? "Active" :
+    const bool active=state.connected && fresh && (ofr ? r.ofr_running : draft.afw_mode!=0 && r.afw_running && !r.afw_flat_scene);
+    const char* activity=!ofr && draft.afw_mode==0 ? "Off" : active ? "Active" :
         state.connected && fresh && r.afw_flat_scene ? "2D scene (no stereo source)" :
-        reconstruction_source(r) ? "Waiting" : "N/A";
+        ofr || reconstruction_source(r) ? "Waiting" : "N/A";
     const float right=right_edge();
     title(p,"Reconstruction");
     state_pill(p,active ? Tone::ok : Tone::idle,activity,right);
@@ -842,14 +845,25 @@ bool framewarp(Panel& p) {
     ImGui::TextDisabled("%s",source);
 
     bool changed=false;
-    int reconstruction=draft.afw_mode==0 ? 0 : osr ? 1 : 2;
-    if(segmented(p,"Method","Reconstruction",reconstruction,{{"Off",false,kHelpMethod},{"OSR",false,kHelpOsr},{"AFW",false,kHelpAfw}},kHelpMethod)) {
+    int reconstruction=ofr ? 3 : draft.afw_mode==0 ? 0 : osr ? 1 : 2;
+    if(segmented(p,"Method","Reconstruction",reconstruction,{{"Off",false,kHelpMethod},{"OSR",false,kHelpOsr},{"AFW",false,kHelpAfw},{"OFR",false,kHelpOfr}},kHelpMethod)) {
+        draft.ofr_enabled=reconstruction==3;
         if(reconstruction==0)draft.afw_mode=0;
         else {
             draft.luke_osr=reconstruction==1 ? 2 : 0;
             if(draft.afw_mode==0)draft.afw_mode=3;
         }
         changed=true;
+    }
+    if(draft.ofr_enabled) {
+        if(segmented(p,"OFR engine","Engine",draft.ofr_backend,{{"FidelityFX"},{"OFXR"}},kHelpOfr))changed=true;
+        if(segmented(p,"OFR size","Size",draft.ofr_scale,{{"100%"},{"75%"},{"50%"},{"25%"}},kHelpResolution))changed=true;
+        changed|=toggle_row(p,"OFR swap","Swap phase",draft.ofr_swap,kHelpOfrSwap);
+        notice(p,Tone::idle,"Experimental AER reconstruction. Uses its own flow engine while selected; normal framegen settings are retained.");
+        if(state.connected && r.afw_only) notice(p,Tone::warn,"Restart the game to leave Reconstruction-only transport and activate OFR.");
+        const char* delivery=r.ofr_delivery==1?"Alternating eye releases":r.ofr_delivery==2?"Paired releases (phase assumed)":"Learning release cadence";
+        notice(p,Tone::idle,delivery);
+        return changed;
     }
     if(draft.afw_mode!=0 && draft.luke_osr!=2 && r.uevr_osr)
         notice(p,Tone::warn,"UEVR is reconstructed by OSR only: select OSR to reconstruct its missing eye.");
@@ -1328,7 +1342,7 @@ std::string section_summary(const Panel& p,int index,bool& live,bool& alert) {
     case 1: {
         live=state.connected && draft.afw_mode!=0 && state.runtime.afw_running && !state.runtime.afw_flat_scene;
         if(draft.afw_mode==0)return "Off";
-        std::string text=draft.luke_osr==2 ? "OSR" : "AFW";
+        std::string text=draft.ofr_enabled ? "OFR" : draft.luke_osr==2 ? "OSR" : "AFW";
         if(draft.afw_only)text+=" only";
         return text;
     }

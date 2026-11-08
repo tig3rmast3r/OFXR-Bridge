@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 92101;
+constexpr std::uint32_t kAbi = 92301;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -433,6 +433,8 @@ Settings sanitize(Settings value) noexcept {
     value.afw_depth_dilate_mode = std::clamp(value.afw_depth_dilate_mode, 0, 2);
     value.afw_shading_rate = std::clamp(value.afw_shading_rate, 0, 8);
     if(value.afw_shading_rate==8)value.afw_shading_rate=4; // retired4x4 profiles migrate to2x2
+    value.ofr_backend = std::clamp(value.ofr_backend, 0, 1);
+    value.ofr_scale = std::clamp(value.ofr_scale, 0, 3);
     value.luke_osr = normalize_osr_reconstruction(value.luke_osr);
     value.luke_osr_cover = std::clamp(value.luke_osr_cover, 0, 8);
     value.luke_osr_trim = std::clamp(value.luke_osr_trim, 0, 2);
@@ -562,6 +564,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(frame_multiplier) READ_FIELD(hybrid_depth_search) READ_FIELD(hybrid_hud_fix) READ_FIELD(r19_camera)
         READ_FIELD(afw_mode) READ_FIELD(afw_debug) READ_FIELD(afw_clear_before_warping)
         READ_FIELD(afw_ignore_motion_threshold) READ_FIELD(afw_depth_dilate_mode) READ_FIELD(afw_shading_rate)
+        READ_FIELD(ofr_enabled) READ_FIELD(ofr_backend) READ_FIELD(ofr_scale) READ_FIELD(ofr_swap)
         READ_FIELD(luke_osr) READ_FIELD(luke_osr_lower_quality) READ_FIELD(luke_osr_cover) READ_FIELD(luke_osr_trim) READ_FIELD(luke_osr_fill) READ_FIELD(luke_advanced)
         READ_FIELD(nr_enabled) READ_FIELD(nr_second_pass) READ_FIELD(nr_before_sr) READ_FIELD(nr_intensity)
         READ_FIELD(nr_preset) READ_FIELD(nr_style) READ_FIELD(nr_local_structure)
@@ -607,7 +610,8 @@ std::string serialize_settings(const Settings& settings,bool include_global_ui) 
     WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(frame_multiplier) WRITE_FIELD(hybrid_depth_search) WRITE_FIELD(hybrid_hud_fix) WRITE_FIELD(r19_camera)
     WRITE_FIELD(afw_mode) WRITE_FIELD(afw_debug) WRITE_FIELD(afw_clear_before_warping)
     WRITE_FIELD(afw_ignore_motion_threshold) WRITE_FIELD(afw_depth_dilate_mode) WRITE_FIELD(afw_shading_rate)
-    WRITE_FIELD(luke_osr) WRITE_FIELD(luke_osr_lower_quality) WRITE_FIELD(luke_osr_cover) WRITE_FIELD(luke_osr_trim) WRITE_FIELD(luke_osr_fill) WRITE_FIELD(luke_advanced)
+    WRITE_FIELD(ofr_enabled) WRITE_FIELD(ofr_backend) WRITE_FIELD(ofr_scale) WRITE_FIELD(ofr_swap)
+        WRITE_FIELD(luke_osr) WRITE_FIELD(luke_osr_lower_quality) WRITE_FIELD(luke_osr_cover) WRITE_FIELD(luke_osr_trim) WRITE_FIELD(luke_osr_fill) WRITE_FIELD(luke_advanced)
     WRITE_FIELD(nr_enabled) WRITE_FIELD(nr_second_pass) WRITE_FIELD(nr_before_sr) WRITE_FIELD(nr_intensity)
     WRITE_FIELD(nr_preset) WRITE_FIELD(nr_style) WRITE_FIELD(nr_local_structure)
     WRITE_FIELD(nr_local_tone) WRITE_FIELD(nr_skin_structure) WRITE_FIELD(nr_auto_mask)
@@ -875,7 +879,8 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
     MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(rife_resolution) MERGE_FIELD(rife_multiplier) MERGE_FIELD(rife_model) MERGE_FIELD(hybrid_backend) MERGE_FIELD(hybrid_depth_search) MERGE_FIELD(hybrid_hud_fix) MERGE_FIELD(r19_camera)
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
     MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
-    MERGE_FIELD(luke_osr) MERGE_FIELD(luke_osr_lower_quality) MERGE_FIELD(luke_osr_cover) MERGE_FIELD(luke_osr_trim) MERGE_FIELD(luke_osr_fill) MERGE_FIELD(luke_advanced)
+    MERGE_FIELD(ofr_enabled) MERGE_FIELD(ofr_backend) MERGE_FIELD(ofr_scale) MERGE_FIELD(ofr_swap)
+        MERGE_FIELD(luke_osr) MERGE_FIELD(luke_osr_lower_quality) MERGE_FIELD(luke_osr_cover) MERGE_FIELD(luke_osr_trim) MERGE_FIELD(luke_osr_fill) MERGE_FIELD(luke_advanced)
     MERGE_FIELD(nr_enabled) MERGE_FIELD(nr_second_pass) MERGE_FIELD(nr_before_sr) MERGE_FIELD(nr_intensity)
     MERGE_FIELD(nr_preset) MERGE_FIELD(nr_style) MERGE_FIELD(nr_local_structure)
     MERGE_FIELD(nr_local_tone) MERGE_FIELD(nr_skin_structure) MERGE_FIELD(nr_auto_mask)
@@ -1555,6 +1560,7 @@ std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) no
 }
 std::string_view interface_reconstruction_text(const Snapshot& s,std::uint64_t now_ms) noexcept {
     const auto& r=s.runtime;
+    if(s.desired.ofr_enabled) return s.connected && r.ofr_running ? "OFR: AER" : "OFR: Waiting";
     if(!s.connected || s.desired.afw_mode==0)return "OSR: Off";
     const bool osr=normalize_osr_reconstruction(s.desired.luke_osr)==2;
     const bool active=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000 &&

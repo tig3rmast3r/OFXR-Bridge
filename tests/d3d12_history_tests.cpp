@@ -3509,7 +3509,8 @@ void test_stereo_motion_synthesis_beats_same_pixel_blend(
     xrfg::D3D12OpticalFlowBackend backend =
         xrfg::D3D12OpticalFlowBackend::fidelity_fx,
     bool validate_repeated_capture = false,
-    xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options = {}) {
+    xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options = {},
+    StereoPattern* midpoint_reference=nullptr, unsigned ofr_mask=3) {
     constexpr UINT kMotionWidth = 1024;
     constexpr UINT kMotionHeight = 512;
     constexpr UINT kEvaluationMargin = 32;
@@ -3580,7 +3581,8 @@ void test_stereo_motion_synthesis_beats_same_pixel_blend(
             nvidia_options,
             backend == xrfg::D3D12OpticalFlowBackend::nvidia)),
         "motion frame synthesizer initialization failed");
-    const ReprojectionViews static_views = make_reprojection_views();
+    auto static_views = make_reprojection_views();
+    for(UINT eye=0;eye<kEyeCount;++eye)static_views[eye].logical_eye=eye;
 
     xrfg::D3D12HistoryCaptureTicket capture_a{};
     require(
@@ -3617,7 +3619,7 @@ void test_stereo_motion_synthesis_beats_same_pixel_blend(
             static_views,
             0,
             1,
-            &pair)),
+            &pair, std::nullopt, {}, nvidia_options.ofr, .5F, {}, std::nullopt, false, ofr_mask)),
         "motion A/B pair submission failed");
     require(
         pair.previous_serial == capture_a.serial &&
@@ -3631,6 +3633,23 @@ void test_stereo_motion_synthesis_beats_same_pixel_blend(
         fixture,
         synthetic_destinations[0].Get(),
         D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if(nvidia_options.ofr) {
+        require(midpoint_reference!=nullptr,"OFR needs an independent midpoint reference");
+        require(pair.synthetic_fence_value==pair.fence_value,"OFR exposes an early, incomplete synthetic receipt");
+        const unsigned newer=nvidia_options.ofr_swap?0:1,older=newer^1;
+        if(ofr_mask==3) {
+            require(actual_synthetic[newer]==previous[newer],"OFR first endpoint is not raw A's same eye");
+            require(actual_current[older]==current[older],"OFR second endpoint changed B's other eye");
+            require(actual_current[newer]==(*midpoint_reference)[newer],"OFR second eye is not the original same-eye midpoint");
+            require(actual_synthetic[older]==(*midpoint_reference)[older],"OFR first eye is not the original same-eye midpoint");
+        } else {
+            require(actual_synthetic==*midpoint_reference,"Alternating delivery changed the coherent midpoint");
+            require(actual_current==current,"Alternating delivery must not rewrite the unused endpoint");
+        }
+        require(operation_succeeded(synthesizer.wait_for_idle()),"OFR drain failed");
+        fixture.require_no_debug_errors();return;
+    }
+    if(midpoint_reference)*midpoint_reference=actual_synthetic;
     require(actual_current == current, "motion current output is not a bit-exact copy of B");
     require(
         actual_synthetic != previous && actual_synthetic != current,
@@ -6098,6 +6117,23 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 #include "synthesis_memory_lifecycle_tests.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1&&std::string_view(argv[1])=="ofr") {
+        try {
+            D3D12WarpFixture fixture(true);
+            for(auto backend:{xrfg::D3D12OpticalFlowBackend::fidelity_fx,xrfg::D3D12OpticalFlowBackend::nvidia}) {
+                StereoPattern reference{};
+                xrfg::D3D12NvidiaOpticalFlowOptions options{};
+                test_stereo_motion_synthesis_beats_same_pixel_blend(fixture,backend,false,options,&reference);
+                options.ofr=true;
+                for(bool swap:{false,true}) {
+                    options.ofr_swap=swap;
+                    for(unsigned mask:{3u,1u,2u})test_stereo_motion_synthesis_beats_same_pixel_blend(fixture,backend,false,options,&reference,mask);
+                }
+            }
+            fixture.require_no_debug_errors();return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+
     if(argc>1&&std::string_view(argv[1])=="panel") {
         try {
             D3D12WarpFixture fixture(true);
