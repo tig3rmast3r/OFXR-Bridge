@@ -14861,7 +14861,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     job->snapshot = post_afw_frame ? post_afw_frame->snapshot : snapshot;
     std::optional<ProjectionSnapshot> previous;
     { std::scoped_lock lock(state->mutex); previous=state->previous_projection; }
-    job->aer_previous=previous;
+    if(state->nvidia_options.ofr)job->aer_previous=previous;
     job->fraction=state->nvidia_options.ofr?.5F:synthetic_interpolation_fraction(state,previous,job->snapshot);
     job->extra_fraction=synthetic_interpolation_fraction(state,previous,job->snapshot,1);
     job->third_fraction=synthetic_interpolation_fraction(state,previous,job->snapshot,2);
