@@ -242,7 +242,7 @@ bool segmented(Panel& p,const char* label,const char* id,int& value,std::initial
         ImGui::BeginDisabled(locked);
         {
             FaceScope scope(selected?face_semibold:face_sans,p.m.body);
-            if(ImGui::Button(option.text,ImVec2(widths[index],p.m.control)) && !selected) {value=index;changed=true;}
+            if(ImGui::Button(option.text,ImVec2(widths[index],p.m.control)) && !selected && !locked) {value=index;changed=true;}
         }
         ImGui::EndDisabled();
         ImGui::PopStyleColor(5);

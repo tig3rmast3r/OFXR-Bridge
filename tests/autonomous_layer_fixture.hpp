@@ -13,6 +13,7 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     s.pacing_mode=desired.pacing_mode;
     s.increase_buffer=desired.increase_buffer;
     s.rife_resolution=desired.rife_resolution;s.rife_model=desired.rife_model; s.rife_multiplier=desired.rife_multiplier;
+    s.ofr_enabled=desired.ofr;s.ofr_backend=desired.ofr_backend;s.ofr_scale=desired.ofr_scale;s.ofr_swap=desired.ofr_swap;
     s.enabled=desired.enabled; s.backend=desired.backend; s.preset=desired.preset;
     s.scale=desired.scale; s.backward=desired.backward; s.lower_vram=desired.lower_vram;
     s.separate_synthesis=desired.separate_synthesis;
@@ -26,6 +27,7 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     if (!xrfg::autonomous::request(s)) return false;
     xrfg::autonomous::apply_runtime_settings();
     auto effective=desired;
+    if(effective.ofr)effective.rife_multiplier=2;
     effective.hybrid=canonical_generation==3;
     effective.frame_generation=canonical_generation>=3?0:canonical_generation;
     if (effective.frame_generation == 2) effective.backend = 0;
@@ -53,6 +55,7 @@ public:
         auto initial=xrfg::embedded::snapshot().desired;initial.pacing_mode=2;initial.enabled=true;
         // The fixture owns a fresh profile, not a RIFE choice left beside the test EXE.
         initial.rife_model=-1;initial.rife_multiplier=2;initial.scale=std::clamp(initial.scale,0,3);
+        initial.ofr=false;initial.ofr_swap=false; // do not inherit an earlier fixture's temporal modifier
         initial.increase_buffer=false; // independent fixture baseline, not the prior test's saved flag
         if (!request_control(initial))
             throw std::runtime_error("autonomous fixture publication failed");
