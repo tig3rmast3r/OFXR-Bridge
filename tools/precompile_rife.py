@@ -118,18 +118,44 @@ def prepare_one(backend, shape, cancelled, sleep=time.sleep):
     return key, cached
 
 
+def publish_json(path, value):
+    """Bounded sharing-conflict retry, only for the offline precompiler's IPC."""
+    from trt_cache import atomic_json
+    delays = (.01, .025, .05, .1, .2)
+    for attempt in range(len(delays) + 1):
+        try:
+            atomic_json(path, value)
+            return
+        except OSError as error:
+            # Access denied is also returned for an open destination without
+            # FILE_SHARE_DELETE. Genuine failures remain visible after retries.
+            if getattr(error, "winerror", None) not in (5, 32, 33) or attempt == len(delays):
+                raise
+            time.sleep(delays[attempt])
+
+
 def run(args):
-    from trt_cache import atomic_json, cache_directory
+    from trt_cache import cache_directory
     from runtime_lease import RuntimeBusy, RuntimeLease
     from update_rife_overlay import sync_locked, OverlayRepairRequired
     result = dict(schema=1, status="error", message="", root=str(args.root), backend="NVIDIA / TensorRT",
                   installed_bytes=0, required_free_bytes=0, log_path=str(args.log), completed=0, total=0)
     args.log.parent.mkdir(parents=True, exist_ok=True)
+    progress_warning = False
     def report(message, status="running"):
+        nonlocal progress_warning
         current = min(result["completed"] + 1, result["total"]) if status == "running" else result["completed"]
-        atomic_json(args.progress, dict(status=status, completed=result["completed"], current=current, total=result["total"], message=message))
+        # Progress is advisory; it must never turn a checked engine into a
+        # failed combination, abort the batch or hide its actual result.
         with args.log.open("a", encoding="utf-8") as stream:
             stream.write(datetime.now(timezone.utc).isoformat() + " " + message + "\n")
+        try:
+            publish_json(args.progress, dict(status=status, completed=result["completed"], current=current, total=result["total"], message=message))
+        except OSError as error:
+            if not progress_warning:
+                with args.log.open("a", encoding="utf-8") as stream:
+                    stream.write(datetime.now(timezone.utc).isoformat() + " Progress update unavailable; compilation continues: " + str(error) + "\n")
+                progress_warning = True
     try:
         games, errors = read_games(args.games or args.root.parent / "games")
         if not games:
@@ -182,7 +208,9 @@ def run(args):
         result.update(status="repair", message=str(error));report(result["message"], "error")
     except Exception as error:
         result.update(status="error", message=str(error));report(result["message"], "cancelled" if isinstance(error, InterruptedError) else "error")
-    atomic_json(args.result, result)
+    # The final result is mandatory, unlike progress. Never report success to
+    # the tray if it could not be published, and never silently ignore errors.
+    publish_json(args.result, result)
     return {"ready": 0, "busy": 13, "repair": 11}.get(result["status"], 1)
 
 

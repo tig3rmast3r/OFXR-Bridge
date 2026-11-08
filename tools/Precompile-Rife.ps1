@@ -39,6 +39,17 @@ function Quote-Argument([string]$Value){
  if($Value.Contains('"')){throw 'Invalid quote in pre-compile argument.'}
  return '"'+[regex]::Replace($Value,'(\\+)$','$1$1')+'"'
 }
+function Read-PrecompileJson([string]$Path){
+ # The writer publishes by atomic rename. Reading must also allow deletion,
+ # otherwise our own progress refresh can deny that rename on Windows.
+ $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+ try {
+  $reader=[IO.StreamReader]::new($stream,[Text.Encoding]::UTF8,$true)
+  try {$text=$reader.ReadToEnd()}finally{$reader.Dispose()}
+ }finally{$stream.Dispose()}
+ # Close the handle before parsing or updating any controls.
+ return ($text|ConvertFrom-Json)
+}
 $process=$null;$exitCode=1
 try {
  $python=Join-Path $Root 'python/python.exe'
@@ -61,7 +72,7 @@ try {
   [Windows.Forms.Application]::DoEvents()
   if((Test-Path -LiteralPath $progressPath) -and -not $state.cancelled){
    try {
-    $p=Get-Content -LiteralPath $progressPath -Raw -Encoding UTF8|ConvertFrom-Json
+    $p=Read-PrecompileJson $progressPath
     $bar.Maximum=[Math]::Max(1,[int]$p.total);$bar.Value=[Math]::Min($bar.Maximum,[int]$p.completed)
     $label.Text=('{0}/{1}   {2}' -f $p.current,$p.total,$p.message)
    }catch{} # atomic replacement may race one UI refresh
@@ -72,7 +83,7 @@ try {
  $diagnostics=$stderr.Result+$stdout.Result
  if($diagnostics){[IO.File]::AppendAllText($logPath,$diagnostics)}
  if(-not (Test-Path -LiteralPath $ResultJson)){throw 'The pre-compiler exited without a result. See the retained log.'}
- $result=Get-Content -LiteralPath $ResultJson -Raw -Encoding UTF8|ConvertFrom-Json
+ $result=Read-PrecompileJson $ResultJson
  $label.Text=$result.message
  if($exitCode -eq 0){$bar.Value=$bar.Maximum}
 }catch{

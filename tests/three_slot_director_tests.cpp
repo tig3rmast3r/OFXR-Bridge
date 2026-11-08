@@ -2440,7 +2440,12 @@ void test_rife_layer_multiframe_contract() {
 }
 
 #include "quarantine_history_recovery_test.inc"
+#include "luke_private_startup_test.inc"
 int main(int argc, char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="luke-private-startup") {
+        try {xrfg_fixture::ControlProfile profile;luke_private_startup_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="quarantine-history-recovery") {
         try {quarantine_history_recovery_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

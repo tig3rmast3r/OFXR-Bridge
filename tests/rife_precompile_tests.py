@@ -2,11 +2,13 @@
 import contextlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -17,6 +19,102 @@ sys.path.insert(0, str(SOURCE / "tools"))
 sys.path.insert(0, str(SOURCE / "python/rife"))
 import precompile_rife as tool
 from trt_cache import cache_key
+
+
+class PublicationTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell reader")
+    def test_actual_powershell_reader_allows_concurrent_atomic_replacement(self):
+        from trt_cache import atomic_json
+        with tempfile.TemporaryDirectory(prefix="OFXR concurrent progress spaces ") as temporary:
+            folder = Path(temporary); path = folder / "progress.json"
+            atomic_json(path, {"completed": 0})
+            script = folder / "reader.ps1"
+            script.write_text('''param($Source,$Progress,$Ready,$Stop)
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'Production PowerShell script has parse errors'}
+$fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Read-PrecompileJson'},$true)
+Invoke-Expression $fn.Extent.Text
+$null=Read-PrecompileJson $Progress
+[IO.File]::WriteAllText($Ready,'ready')
+$count=0
+while(-not [IO.File]::Exists($Stop)) {
+ $p=Read-PrecompileJson $Progress
+ if($null -eq $p.completed){throw 'Partial JSON read'}
+ $count++
+}
+Write-Output $count
+''')
+            ready = folder / "ready"; stop = folder / "stop"
+            process = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                str(SOURCE / "tools/Precompile-Rife.ps1"), str(path), str(ready), str(stop)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 12
+                while not ready.exists() and process.poll() is None and time.monotonic() < deadline: time.sleep(.01)
+                self.assertTrue(ready.exists(), "isolated reader started")
+                for index in range(500):
+                    # Exercise both production ends: Windows can still briefly
+                    # deny replacement during handle/rename transitions.
+                    tool.publish_json(path, {"completed": index + 1})
+                    time.sleep(.001)
+                stop.touch()
+                stdout, stderr = process.communicate(timeout=8)
+                self.assertEqual(process.returncode, 0, stderr.decode(errors="replace"))
+                self.assertGreater(int(stdout.strip()), 0)
+                self.assertEqual(json.loads(path.read_text())["completed"], 500)
+            finally:
+                stop.touch()
+                if process.poll() is None:
+                    process.terminate(); process.wait(timeout=5)  # test-owned reader only
+                process.communicate(timeout=5)
+
+    @unittest.skipUnless(os.name == "nt", "Windows delete-sharing contract")
+    def test_real_locked_destination_retries_then_publishes_without_partial_json(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        with tempfile.TemporaryDirectory(prefix="OFXR locked progress spaces ") as temporary:
+            path = Path(temporary) / "progress.json"
+            path.write_text('{"completed":15}')
+            handle = kernel.CreateFileW(str(path), 0x80000000, 3, None, 3, 0x80, None)
+            self.assertNotEqual(handle, wintypes.HANDLE(-1).value)
+            held = True
+            def release(delay):
+                nonlocal held
+                self.assertEqual(json.loads(path.read_text()), {"completed": 15})
+                self.assertTrue(kernel.CloseHandle(handle)); held = False
+            try:
+                with patch.object(tool.time, "sleep", side_effect=release) as sleep:
+                    tool.publish_json(path, {"completed": 16})
+                sleep.assert_called_once_with(.01)
+                self.assertEqual(json.loads(path.read_text()), {"completed": 16})
+                self.assertEqual(list(Path(temporary).glob("*.tmp")), [])
+            finally:
+                if held: kernel.CloseHandle(handle)
+
+    def test_persistent_sharing_denial_is_bounded_and_preserves_old_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "result.json"
+            path.write_text('{"old":true}')
+            error = PermissionError("locked"); error.winerror = 5
+            with patch("trt_cache.os.replace", side_effect=error) as replace, patch.object(tool.time, "sleep") as sleep:
+                with self.assertRaises(PermissionError): tool.publish_json(path, {"new": True})
+            self.assertEqual(replace.call_count, 6)
+            self.assertEqual(sleep.call_count, 5)
+            self.assertEqual(json.loads(path.read_text()), {"old": True})
+            self.assertEqual(list(Path(temporary).glob("*.tmp")), [])
+
+    def test_non_sharing_io_failure_is_not_retried_or_hidden(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch("trt_cache.os.replace", side_effect=OSError("disk full")) as replace, patch.object(tool.time, "sleep") as sleep:
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    tool.publish_json(Path(temporary) / "result.json", {})
+            replace.assert_called_once(); sleep.assert_not_called()
 
 
 class PlanTests(unittest.TestCase):
@@ -141,6 +239,43 @@ class PlanTests(unittest.TestCase):
             result=json.loads(args.result.read_text())
             self.assertEqual((result["completed"],result["total"],result["status"]),(0,0,"repair"))
             self.assertIn("dependency versions differ",result["message"])
+
+    def test_unwritable_progress_does_not_abort_batch_or_hide_compile_failure(self):
+        import trt_backend
+        for fail_engine in (False, True):
+            with self.subTest(fail_engine=fail_engine), tempfile.TemporaryDirectory() as temporary:
+                folder = Path(temporary); games = folder / "games"; games.mkdir()
+                (games / "game.json").write_text(json.dumps({**self.game(), "schema": 1}))
+                args = types.SimpleNamespace(root=folder / "runtime", games=games, cache=folder / "cache",
+                    result=folder / "result.json", progress=folder / "progress.json", cancel=folder / "cancel", log=folder / "log")
+                backend = Mock(); backend._initialize.return_value = True
+                original = tool.publish_json
+                def publish(path, value):
+                    if path == args.progress: raise PermissionError("progress locked")
+                    return original(path, value)
+                outcomes = ([RuntimeError("actual compile failure")] if fail_engine else [("key", True)]) + [("key", True)] * 5
+                with patch("update_rife_overlay.sync_locked", return_value=False), patch.object(tool, "cuda_adapters", return_value={123: 0}), patch.object(trt_backend, "Backend", return_value=backend), patch.object(tool, "prepare_one", side_effect=outcomes) as prepare, patch.object(tool, "publish_json", side_effect=publish), patch("torch.cuda.set_device"), patch("torch.cuda.empty_cache"):
+                    self.assertEqual(tool.run(args), 1 if fail_engine else 0)
+                result = json.loads(args.result.read_text())
+                self.assertEqual((result["completed"], result["total"], result["status"]), (6, 6, "error" if fail_engine else "ready"))
+                self.assertEqual(prepare.call_count, 6)
+                self.assertEqual(args.log.read_text().count("Progress update unavailable"), 1)
+                if fail_engine: self.assertIn("actual compile failure", args.log.read_text())
+
+    def test_unwritable_progress_preserves_cancellation_result(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary); games = folder / "games"; games.mkdir()
+            (games / "game.json").write_text(json.dumps({**self.game(), "schema": 1}))
+            args = types.SimpleNamespace(root=folder / "runtime", games=games, cache=folder / "cache",
+                result=folder / "result.json", progress=folder / "progress.json", cancel=folder / "cancel", log=folder / "log")
+            args.cancel.touch()
+            original = tool.publish_json
+            def publish(path, value):
+                if path == args.progress: raise PermissionError("progress locked")
+                return original(path, value)
+            with patch("update_rife_overlay.sync_locked", return_value=False), patch.object(tool, "cuda_adapters", return_value={123: 0}), patch.object(tool, "publish_json", side_effect=publish):
+                self.assertEqual(tool.run(args), 1)
+            self.assertIn("cancelled", json.loads(args.result.read_text())["message"])
 
 
 if __name__ == "__main__":
