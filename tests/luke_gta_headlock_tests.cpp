@@ -69,6 +69,23 @@ int main() {try {
         check(!xrfg::luke_gta_headlock_binding(module,latest),"changed GTA vtable witness must refuse November layout");
     }
     m=Memory{};
+    {
+        Memory latest;
+        const auto put_header=[&](unsigned at,std::uint32_t value){std::memcpy(latest.blocks[module].data()+at,&value,4);};
+        put_header(0x108,1794066503);put_header(0x100+24+56,110219264);
+        latest.blocks[module+0x1ffdef]=latest.blocks[module+0x1fedff];
+        latest.blocks[module+0x1feee6]=latest.blocks[module+0x1fdef6];
+        latest.blocks[module+0x1fcc89]={0x48,0x8b,0x3d,0x98,0x98,0x5b,0x00};
+        latest.blocks[module+0xb2e0b]={0x48,0x8d,0x05,0x96,0x8f,0x4f,0x00,0x48,0x89,0x06};
+        latest.put(module+xrfg::kLukeGtaNovember7Layout.runtime_pointer,std::uint64_t{object});
+        latest.put(object,std::uint64_t{module+xrfg::kLukeGtaNovember7Layout.runtime_vtable});
+        const auto binding=xrfg::luke_gta_headlock_binding(module,latest);
+        check(binding&&binding->runtime_pointer==0x7b6528&&binding->runtime_vtable==0x5abda8,"November7 exact binding");
+        auto current=xrfg::read_luke_gta_headlock(module,latest,false,*binding);
+        check(current&&current->active()&&current->render==79,"November7 effective locked camera");
+        latest.blocks[module+0x1fcc89][3]^=1;
+        check(!xrfg::luke_gta_headlock_binding(module,latest),"November7 altered owner accepted");
+    }
     auto& tracking=m.blocks[object+0x840ab8];tracking.resize(180);
     constexpr unsigned offsets[]{0,48,96,152};
     for(unsigned i=0;i<4;++i) {

@@ -12,6 +12,31 @@ namespace xrfg {
 // picture by the measured bar plus a margin, never further in than a tenth of
 // the eye; a larger bar leaves it at that limit.
 struct LukeOriginBars { unsigned left{}, top{}, bottom{}; };
+// GTA final-colour transforms can change without changing the eye dimensions.
+// Use only complete CRC observations to measure proximity to the left edge;
+// consecutive nonblack misses move the next written marker, never invent an ID.
+struct LukeOriginCropGuard {
+    unsigned width{},height{},inset{64},misses{};
+    unsigned configure(unsigned w,unsigned h) noexcept {
+        if(width!=w||height!=h) {width=w;height=h;inset=64;misses=0;}
+        return inset;
+    }
+    bool observe(bool valid,bool nonblack,bool ambiguous,int first_column) noexcept {
+        if(ambiguous) {misses=0;return false;}
+        if(valid) {
+            misses=0;
+            if(first_column<0||first_column>=16)return false;
+        } else {
+            if(!nonblack) {misses=0;return false;}
+            if(++misses<8)return false;
+            misses=0;
+        }
+        const auto maximum=std::min(512U,width>260?(width-260)/2:0U);
+        const auto next=std::min(maximum,inset+32);
+        if(next<=inset)return false;
+        inset=next;return true;
+    }
+};
 inline constexpr unsigned kLukeOriginBarMargin = 8;
 inline constexpr unsigned kLukeOriginBarLimitDivisor = 10;
 inline constexpr std::array<unsigned,2> luke_origin_inset_with_bars(std::array<unsigned,2> title,
@@ -45,9 +70,11 @@ inline constexpr std::array<unsigned,2> luke_origin_inset_for_title(std::wstring
     if(origin_title_equal(name,L"Outlaws.exe"))return {256,32};
     // GTA's realtime scripted scenes cover the top eighth of the final eye.
     // Keep the same eight-row token below that mask, with a resolution-relative
-    // margin. Both writer and reader use the observed full-size eye height;
-    // AFW quality scaling happens later and must not move this location.
-    if(origin_title_equal(name,L"GTA5_Enhanced.exe"))return {0,color_height/6>32?color_height/6:32};
+    // margin. PID7020 on Luke2611.7.2 retained a CRC-valid payload but lost
+    // the sync prefix past the left eye edge. Keep 64 pixels of horizontal
+    // inset for that final-color translation. Writer and reader share the
+    // full-size eye geometry, before AFW quality scaling.
+    if(origin_title_equal(name,L"GTA5_Enhanced.exe"))return {64,color_height/6>32?color_height/6:32};
     if(origin_title_equal(name,L"tlou-i.exe"))return {32,32};
     // Uncharted: Legacy of Thieves Collection: its eye shows the output
     // magnified about 1.05 and shifted left, by up to 43 pixels at 3600 wide

@@ -2640,12 +2640,15 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             in.source_motion_state = D3D12_RESOURCE_STATE_COMMON;
             in.source_eye = source_eye;
             in.use_history = history_usable;
+            // The validated binding/mode is available during normal play.
+            // tracking_valid is diagnostic-only and must not gate rendering.
+            in.conservative_cabin_history=guide.gta_headlock && guide.gta_headlock->mode==0;
             in.lower_quality=settings.osr_lower_quality;
             in.reset_history = guide.reset;
             // The history frame's own motion needs that eye's frame before it
             // for the camera's share: the two publications back it points to.
             in.use_history_motion = history_usable && history.has_motion &&
-                history.previous_publication != 0 && history.previous_publication + 2 == history.publication;
+                history.previous_publication != 0 && history.previous_publication + (history.native_motion?1:2) == history.publication;
             in.history_motion_scale[0] = history.motion_scale[0];
             in.history_motion_scale[1] = history.motion_scale[1];
             // Depth texel (i, j) holds the scene at (i, j) + 0.5 + (rounded -
@@ -2740,6 +2743,13 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                         provider_camera.destination_world_to_view), provider_camera.destination_view_to_clip);
                     std::copy_n(native_attached_to_peer.values,16,in.current_history_data+64);
                 }
+                if(history.native_motion) {
+                    in.native_history_motion=true;
+                    in.use_history_motion=in.use_history_motion && in.conservative_cabin_history &&
+                        in.use_current_history_motion && in.adjacent_motion;
+                    std::copy_n(history.native_stereo,16,in.native_history_stereo);
+                    std::copy_n(history.previous_dejitter,2,in.native_history_previous_dejitter);
+                }
                 if (in.use_history_motion) {
                     const Matrix4x4 forward_history_previous = multiply(multiply(multiply(
                         as_matrix(history.camera.clip_to_view), as_matrix(history.camera.view_to_world)),
@@ -2785,6 +2795,11 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
                 (static_cast<std::int64_t>(effective_mode) << 8) | (history_usable ? 1 : 0) | (in.use_history_motion ? 2 : 0) | (in.use_current_history_motion ? 4 : 0) | (in.adjacent_motion ? 8 : 0),
                 1310, guide.publication, history.publication);
+            // 1321: stored original N1 (bit0), eligible this frame (bit1).
+            // b=current publication, c=the history field's native previous endpoint.
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                (history.native_motion?1:0)|((in.native_history_motion&&in.use_history_motion)?2:0),
+                1321,guide.publication,history.previous_publication);
             // 1312: the de-jitter applied to the source depth this frame:
             // result = float bits of (window fraction x, y) packed high/low,
             // b = publication, c = float bits of (jitter x, y) packed high/low.

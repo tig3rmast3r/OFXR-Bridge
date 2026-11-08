@@ -234,7 +234,36 @@ float2 history_texel_now(int2 t, float z, out bool locked) {
     float2 pos = float2(t) + 0.5 + HistoryDejitter;
     float2 now = pos; // single exit: fxc rejects early returns here
     locked = z >= LockedDepth;
-    if (!locked && SceneState[uint2(4, 0)] != 0 && (MotionScale.x != 0.0 || MotionScale.y != 0.0)) {
+    if((Flags&2048u)!=0 && z>SkyDepth && SceneState[uint2(4,0)]!=0) {
+        const float2 total=HistoryMotion.Load(int3(t,0))*MotionScale;
+        const float2 at=pos+total+SourceDejitter-HistoryDejitter;
+        const float4 scene_point=float4(pos.x/DepthSize.x*2-1,1-pos.y/DepthSize.y*2,z,1);
+        const float4 world=mul(scene_point,BackwardHistory),peer=mul(scene_point,BackwardSource);
+        if(all(isfinite(total))&&all(abs(total)<4096)&&all(isfinite(world))&&all(isfinite(peer))&&world.w>1e-8&&peer.w>1e-8&&all(at>=0)&&all(at<float2(DepthSize))) {
+            const float2 world_at=float2((world.x/world.w+1)*.5*DepthSize.x,(1-world.y/world.w)*.5*DepthSize.y);
+            const float2 peer_at=float2((peer.x/peer.w+1)*.5*DepthSize.x,(1-peer.y/peer.w)*.5*DepthSize.y);
+            const float expected=peer.z/peer.w;
+            const int2 base=int2(floor(at-SourceDejitter-.5));bool agrees=false;
+            [unroll] for(int yy=0;yy<2;++yy) [unroll] for(int xx=0;xx<2;++xx) {
+                const float old_z=NativePreviousDepth.Load(int3(clamp(base+int2(xx,yy),int2(0,0),int2(DepthSize)-1),0));
+                agrees=agrees || (isfinite(old_z)&&old_z>=0&&abs(old_z-expected)<=DepthTolerance*max(old_z,expected)+FarDepth);
+            }
+            const float camera_length=length(world_at-peer_at);
+            if(agrees && camera_length>LockedCameraTexels && length(at-peer_at)<LockedRatio*camera_length) {
+                locked=true;
+                // Original N1 spans one publication. Remove its stereo share,
+                // then advance the measured screen motion by one publication.
+                now=pos-(at-peer_at);
+            }
+        }
+    }
+    // Confirmed original N1: sky has camera rotation but no depth-defined
+    // object displacement. The older composed field can otherwise drag the
+    // windshield tint into detached shapes across the sky (GTA PID56568).
+    // GTA's unlocked cabin cannot infer attachment/object motion from the old
+    // composed field: it leaves mirror and pillar fragments on the background.
+    // Keep hard-near protection and current original-N1 correspondence intact.
+    if (!locked && (Flags&1024u)==0 && ((Flags&512u)==0 || z>SkyDepth) && SceneState[uint2(4, 0)] != 0 && (MotionScale.x != 0.0 || MotionScale.y != 0.0)) {
         float2 total = HistoryMotion.Load(int3(t, 0)) * MotionScale;
         float2 ndc = float2(pos.x / DepthSize.x * 2.0 - 1.0, 1.0 - pos.y / DepthSize.y * 2.0);
         float4 q = mul(float4(ndc, z, 1.0), BackwardHistory);
@@ -638,7 +667,7 @@ bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, o
 // Outside the source image counts as unseen.
 bool source_sees_not_farther(float2 ndc, float z) {
     float4 q = mul(float4(ndc, z, 1.0), BackwardSource);
-    bool not_farther = true;
+    bool not_farther = (Flags&1024u)==0;
     if (all(isfinite(q)) && q.w > 1e-8) {
         float2 p = float2((q.x / q.w + 1.0) * 0.5 * DepthSize.x, (1.0 - q.y / q.w) * 0.5 * DepthSize.y);
         float expected = max(q.z / q.w, 0.0); // at or beyond a finite far plane is far
@@ -816,7 +845,10 @@ bool adjacent_local_history(float2 source_at,float source_z,bool strict_surface,
     const float camera_length=length(camera_at-peer_at);
     if(camera_length<=LockedCameraTexels||length(at-peer_at)>=LockedRatio*camera_length)break;
     const float expected=peer.z/peer.w;
-    if(!isfinite(expected)||expected<=SkyDepth||expected>=LockedDepth)break;
+    // A confirmed original N1 correspondence also identifies near cabin
+    // surfaces. The common-peer attachment test above and the exact old
+    // surface below still apply; no composed N2 near-motion inference.
+    if(!isfinite(expected)||expected<=SkyDepth||expected>1)break;
     if(!surface_agrees(HistoryDepth,at,expected,HistoryDejitter))break;
     [branch] if(strict_surface&&!surface_quad_agrees(HistoryDepth,at,expected,HistoryDejitter))break;
     color=sample_nearest(HistoryColor,at/float2(DepthSize));previous_at=at;
@@ -830,13 +862,16 @@ bool current_history(float2 source_at, float source_z, float2 target_at, bool st
     bool found=false;
     [unroll] do {
     if ((Flags & 256u) == 0 || SceneState[uint2(4,0)] == 0 ||
-        source_z <= SkyDepth || source_z >= LockedDepth) break;
+        source_z <= SkyDepth) break;
     [branch] if(strict_surface && !surface_quad_agrees(SourceDepth,source_at,source_z,SourceDejitter)) break;
     const int2 t = int2(floor(source_at - SourceDejitter));
     if (any(t < 0) || any(t >= int2(DepthSize))) break;
     [branch] if(adjacent_local_history(source_at,source_z,strict_surface,color,previous_at)) {
         screen_locked=true;found=true;break;
     }
+    // Hard-near protection remains for inferred/composed motion. Only the
+    // independently validated original N1 attachment above may precede it.
+    if(source_z>=LockedDepth)break;
     const float2 total = HistoryMotion.Load(int3(t,0)) * CurrentHistoryData[14].xy;
     if (!all(isfinite(total)) || any(abs(total)>4096)) break;
     const float4 now = float4(source_at.x/DepthSize.x*2-1,1-source_at.y/DepthSize.y*2,source_z,1);
@@ -901,6 +936,52 @@ bool current_history(float2 source_at, float source_z, float2 target_at, bool st
     screen_locked=attached;
     found=true;
     } while(false);
+    return found;
+}
+
+// A near history splat can hide the real background available in that eye.
+// Search the gap boundary for a background depth, then intersect that ray
+// with the actual old depth. Never accept the mirror/roof as background.
+// The regular correspondence tolerance, full depth footprint and stale-halo
+// rejection apply before colour is copied. All work is bounded and GPU-only.
+bool cabin_background_history(int2 c,float2 ndc,out float4 color,out uint word,out float2 at) {
+    color=0;word=0;at=0;
+    float far_z=1;bool available=false;bool found=false;
+    [loop] for(int d=0;d<8;++d) {
+        [loop] for(int k=1;k<=128;k*=2) {
+            const int2 t=c+FillDirections[d]*k;
+            if(any(t<0)||any(t>=int2(DepthSize)))break;
+            const uint v=StereoDepth.Load(int3(t,0));
+            if(v!=0){far_z=min(far_z,asfloat(v&~3u));available=true;break;}
+        }
+    }
+    if(available && far_z<LockedDepth) {
+        float z=far_z;
+        [loop] for(int iteration=0;iteration<5;++iteration) {
+            const float4 old=mul(float4(ndc,z,1),BackwardHistory);
+            if(!all(isfinite(old))||old.w<=1e-8)break;
+            const float2 p=float2((old.x/old.w+1)*.5*DepthSize.x,(1-old.y/old.w)*.5*DepthSize.y);
+            if(any(p<0)||any(p>=float2(DepthSize)))break;
+            const float oz=HistoryDepth.Load(int3(clamp(int2(floor(p-HistoryDejitter)),int2(0,0),int2(DepthSize)-1),0));
+            if(!isfinite(oz)||oz<0||oz>=LockedDepth)break;
+            if(fetch(HistoryDepth,HistoryColor,BackwardHistory,ndc,z,HistoryDejitter,true,color) &&
+               surface_quad_agrees(HistoryDepth,g_fetch_position,g_fetch_depth,HistoryDejitter)) {
+                float near=0;
+                const float2 toward=halo_direction(HistoryDepth,int2(floor(g_fetch_position-HistoryDejitter)),g_fetch_depth,near);
+                if(near>g_fetch_depth*EdgeRatio+FarDepth &&
+                   (halo_parallax(BackwardHistory,ndc,g_fetch_depth,near,toward)>HaloParallax || !nearer_surface_present(c,g_fetch_depth)))break;
+                word=(asuint(z)&~3u)|TagHistory;at=g_fetch_position;found=true;break;
+            }
+            // Solve old.z/old.w = sampled old depth for the destination z.
+            const float a=BackwardHistory[2][2], b=ndc.x*BackwardHistory[0][2]+ndc.y*BackwardHistory[1][2]+BackwardHistory[3][2];
+            const float cc=BackwardHistory[2][3], dd=ndc.x*BackwardHistory[0][3]+ndc.y*BackwardHistory[1][3]+BackwardHistory[3][3];
+            const float denominator=max(oz,FarDepth)*cc-a;
+            if(abs(denominator)<1e-8)break;
+            z=(b-max(oz,FarDepth)*dd)/denominator;
+            if(!isfinite(z)||z<0||z>=LockedDepth)break;
+            z=max(z,FarDepth);
+        }
+    }
     return found;
 }
 
@@ -1083,6 +1164,13 @@ void resolve_pixel(uint3 id) {
         WarpedOut[id.xy] = color;
         ResolvedOut[id.xy] = (word & ~3u) | TagStereo;
         return;
+    }
+    if(history && (Flags&1024u)!=0) {
+        float2 background_at=0;
+        if(cabin_background_history(c,ndc,color,word,background_at)) {
+            g_pick=2;g_pick_at=background_at;g_pick_word=word;g_pick_tag=TagHistory;
+            WarpedOut[id.xy]=color;ResolvedOut[id.xy]=word;return;
+        }
     }
     if (history && resolve_history(c, depth_pixel, ndc, true, color, word)) {
         // A camera-attached surface (the first-person weapon) keeps its screen

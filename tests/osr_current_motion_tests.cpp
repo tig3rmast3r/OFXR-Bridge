@@ -224,7 +224,7 @@ void trusted_edge(unsigned eye,bool low,unsigned refusal) {
 // The object follows the gameplay camera while the head rolls in either
 // direction. Native N2 endpoint is unavailable; original N1 and this eye's N1
 // depth are valid. Distinct source colour prevents a pure-stereo shortcut.
-void adjacent_head_rotation(unsigned eye,bool low,bool reverse,unsigned refusal) {
+void adjacent_head_rotation(unsigned eye,bool low,bool reverse,unsigned refusal,bool near_rig=false) {
     Fixture f;std::vector<UINT> old(width*height),current(width*height),zero(width*height),raw(width*height);
     for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
         old[y*width+x]=grey(35+(x*7+y*11)%90);current[y*width+x]=old[y*width+x]^0x00100000u;
@@ -232,7 +232,8 @@ void adjacent_head_rotation(unsigned eye,bool low,bool reverse,unsigned refusal)
     warm(f,old);auto composed=f.texture(DXGI_FORMAT_R16G16_FLOAT),original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
     begin(f);f.upload(composed.Get(),zero.data());submit(f);
     save(f,eye,old,.9F,composed.Get(),{101,11,3});
-    save(f,1-eye,old,refusal==1?.4F:.2F,composed.Get(),{102,22,4});
+    const float surface_z=near_rig?.8F:.2F;
+    save(f,1-eye,old,refusal==1?.4F:surface_z,composed.Get(),{102,22,4});
     auto in=inputs(f,eye);in.lower_quality=low;in.source_motion=composed.Get();in.adjacent_motion=original.Get();
     in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;in.locked_depth=.6F;
     in.use_current_history_motion=xrfg::osr_full_adjacent_motion_usable({103,11,3},{102,22,4},{102,22,4},1,true,true,false);
@@ -256,7 +257,7 @@ void adjacent_head_rotation(unsigned eye,bool low,bool reverse,unsigned refusal)
     }
     if(refusal==2)std::fill(raw.begin(),raw.end(),0x7bff7bffu);
     begin(f);f.upload(original.Get(),raw.data());submit(f);
-    const std::vector<float> depths(width*height,refusal==3?.8F:.2F);
+    const std::vector<float> depths(width*height,refusal==3?.8F:surface_z);
     const auto output=render_with_inputs(f,in,current,depths);
     in.use_current_history_motion=false;const auto legacy=render_with_inputs(f,in,current,depths);
     if(refusal)check(output==legacy,"nearer N1 surface, invalid original flow and hard-near retain guarded fallback");
@@ -268,7 +269,142 @@ void adjacent_head_rotation(unsigned eye,bool low,bool reverse,unsigned refusal)
         }
         check(changed>0,"head rotation fixture must reject old N2-dependent selection");
     }
-    std::printf("N1 head rotation eye=%u lower=%u reverse=%u refusal=%u PASS\n",eye,low,reverse,refusal);
+    std::printf("N1 head rotation eye=%u lower=%u reverse=%u refusal=%u near-rig=%u PASS\n",eye,low,reverse,refusal,near_rig);
+}
+
+// The old composed field can carry foreground motion into zero-depth sky.
+// Confirmed original N1 keeps camera-reprojected own-eye sky instead of moving
+// a windshield tint across it; non-N1 retains its established path.
+void adjacent_sky(unsigned eye,bool low) {
+    Fixture f;std::vector<UINT> old(width*height),current(width*height);
+    for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
+        old[y*width+x]=grey(35+(x*7+y*11)%90);
+        current[y*width+x]=old[y*width+x]^0x00100000u;
+    }
+    warm(f,old);auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT),original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    const std::vector<UINT> residue(width*height,0x4400u),zero(width*height,0);
+    begin(f);f.upload(field.Get(),residue.data());f.upload(original.Get(),zero.data());submit(f);
+    save(f,eye,old,0,field.Get(),{101,11,3});
+    save(f,1-eye,old,0,field.Get(),{102,22,4});
+    auto in=inputs(f,eye);in.lower_quality=low;in.source_motion=field.Get();
+    in.adjacent_motion=original.Get();in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;
+    in.use_current_history_motion=xrfg::osr_full_adjacent_motion_usable({103,11,3},{102,22,4},{102,22,4},1,true,true,false);
+    in.forward_history_previous[12]=.5F;
+    in.current_history_data[62]=1;
+    const std::vector<float> depths(width*height,0);
+    const auto output=render_with_inputs(f,in,current,depths);
+    in.adjacent_motion=nullptr;in.use_current_history_motion=false;
+    const auto legacy=render_with_inputs(f,in,current,depths);
+    unsigned changed=0;
+    for(UINT y=16;y<height-16;++y)for(UINT x=28;x<width-28;++x) {
+        check(output[y*width+x]==old[y*width+x],"N1 sky must not inherit old composed foreground motion");
+        changed+=output[y*width+x]!=legacy[y*width+x];
+    }
+    check(changed>0,"sky fixture must expose the previous composed-motion error");
+    std::printf("N1 sky eye=%u lower=%u PASS\n",eye,low);
+}
+
+// The history splat holds an old hard-near mirror at x47..65, but the old
+// eye's actual camera reveals background at x-16. Current stereo has a gap
+// there. Recover that real background instead of copying the old mirror.
+void cabin_background(unsigned eye,bool low) {
+    Fixture f;std::vector<UINT> old(width*height),current(width*height),zero(width*height,0);
+    std::vector<float> old_depth(width*height,.1F),depth(width*height,.1F);
+    for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
+        old[y*width+x]=grey(50+x%70);current[y*width+x]=grey(150);
+        if(x>=47&&x<=65){old_depth[y*width+x]=.8F;old[y*width+x]=grey(10);}
+        if(x>=40&&x<=60){depth[y*width+x]=.8F;current[y*width+x]=grey(10);}
+    }
+    warm(f,old);auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT),original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    begin(f);f.upload(field.Get(),zero.data());f.upload(original.Get(),zero.data());f.upload(f.color.Get(),old.data());f.upload(f.depth.Get(),old_depth.data());
+    auto keep=inputs(f,1-eye);keep.source_motion=field.Get();xrfg::OsrFullHistory h{};h.publication=102;
+    f.warp.record_history_update(f.list.Get(),keep,h);submit(f);f.warp.commit();
+    auto in=inputs(f,eye);in.lower_quality=low;in.source_motion=field.Get();in.adjacent_motion=original.Get();
+    in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;in.use_current_history_motion=true;
+    in.conservative_cabin_history=true;in.locked_depth=.6F;
+    in.forward_stereo[8]=1;in.backward_source[8]=-1;
+    in.forward_history[12]=.25F;in.backward_history[12]=-.25F;
+    const auto output=render_with_inputs(f,in,current,depth);
+    in.conservative_cabin_history=false;const auto legacy=render_with_inputs(f,in,current,depth);
+    unsigned changed=0;
+    for(UINT y=16;y<height-16;++y)for(UINT x=51;x<=59;++x) {
+        check(output[y*width+x]==old[y*width+x-16],"cabin gap uses depth-validated real background, not old mirror");
+        changed+=output[y*width+x]!=legacy[y*width+x];
+    }
+    check(changed>0,"cabin fixture must expose the old displaced mirror");
+    in.conservative_cabin_history=true;in.adjacent_motion=nullptr;
+    const auto unavailable=render_with_inputs(f,in,current,depth);
+    in.conservative_cabin_history=false;
+    check(unavailable==render_with_inputs(f,in,current,depth),"cabin policy requires confirmed original N1");
+    std::printf("cabin background eye=%u lower=%u PASS\n",eye,low);
+}
+
+// Original N1 distinguishes a camera-following cabin from a static world
+// surface. The composed field and the two-publication camera are unsuitable.
+void cabin_native_history(unsigned eye,bool low,unsigned kind) {
+    Fixture f;std::vector<UINT> previous(width*height),current(width*height),zero(width*height,0);
+    for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
+        previous[y*width+x]=grey(45+(x*7+y*11)%80);current[y*width+x]=previous[y*width+x]^0x00100000u;
+    }
+    warm(f,previous);auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT),original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    const std::vector<UINT> native(width*height,(kind==1||kind==3)?0x5100u:kind==4?0x4900u:0x4800u); // 40 world; 8 stereo; 10 = stereo + 2 temporal
+    begin(f);f.upload(field.Get(),zero.data());f.upload(original.Get(),native.data());submit(f);
+    save(f,eye,previous,kind==2?.8F:.2F,field.Get(),{101,11,3});
+    if(kind==3) {
+        begin(f);f.upload(f.color.Get(),previous.data());const std::vector<float> depths(width*height,.2F);f.upload(f.depth.Get(),depths.data());
+        auto store=inputs(f,1-eye);store.source_motion=field.Get();store.adjacent_motion=original.Get();
+        store.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;store.conservative_cabin_history=true;
+        store.use_current_history_motion=true;store.current_history_data[62]=1;store.forward_stereo[12]=.125F;
+        xrfg::OsrFullHistory kept{};kept.publication=102;kept.motion_scale[0]=kept.motion_scale[1]=1;
+        f.warp.record_history_update(f.list.Get(),store,kept);submit(f);f.warp.commit();
+        const auto& saved=f.warp.history(1-eye);
+        check(saved.native_motion&&saved.previous_publication==101&&saved.native_stereo[12]==.125F,
+            "native snapshot retains one-publication camera, stereo reference and original motion");
+    } else save(f,1-eye,previous,.2F,original.Get(),{102,22,4});
+    auto in=inputs(f,eye);in.lower_quality=low;in.source_motion=field.Get();in.adjacent_motion=original.Get();
+    in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;in.use_current_history_motion=true;
+    in.conservative_cabin_history=true;in.native_history_motion=true;in.current_history_data[62]=1;
+    in.locked_depth=.6F;in.forward_history[12]=.25F;in.backward_history[12]=-.25F;
+    in.forward_history_previous[12]=.625F;
+    for(unsigned i=0;i<4;++i)in.native_history_stereo[i*5]=1;
+    in.native_history_stereo[12]=.125F;
+    const std::vector<float> depths(width*height,.2F);
+    const auto output=render_with_inputs(f,in,current,depths);
+    for(UINT y=16;y<height-16;++y)for(UINT x=48;x<80;++x) {
+        const UINT sample_x=kind==4?x+2:kind==0?x:x-16;
+        check(output[y*width+x]==previous[y*width+sample_x],
+            "original N1 holds attached cabin only; static world and mismatched native depth keep camera projection");
+    }
+    if(kind==0) {
+        in.adjacent_motion=nullptr;
+        const auto unavailable=render_with_inputs(f,in,current,depths);
+        for(UINT y=16;y<height-16;++y)for(UINT x=48;x<80;++x)
+            check(unavailable[y*width+x]==previous[y*width+x-16],
+                "unavailable current N1 must not reinterpret stored native N1 as composed N2");
+    }
+    std::printf("native cabin eye=%u lower=%u kind=%u PASS\n",eye,low,kind);
+}
+
+// An old foreground projects outside the source FOV, while current stereo
+// already sees road. Unavailable source evidence cannot certify that old car.
+void cabin_outside_history(unsigned eye,bool low) {
+    Fixture f;const std::vector<UINT> old(width*height,grey(60)),current(width*height,grey(72)),zero(width*height,0);
+    warm(f,old);auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT),original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    begin(f);f.upload(field.Get(),zero.data());f.upload(original.Get(),zero.data());submit(f);
+    save(f,eye,old,.3F,field.Get(),{101,11,3});save(f,1-eye,old,.3F,field.Get(),{102,22,4});
+    auto in=inputs(f,eye);in.lower_quality=low;in.source_motion=field.Get();in.adjacent_motion=original.Get();
+    in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;in.use_current_history_motion=true;
+    in.conservative_cabin_history=true;in.current_history_data[62]=1;in.locked_depth=.6F;
+    in.forward_stereo[8]=4;in.backward_source[8]=-4;
+    const std::vector<float> depths(width*height,.1F);
+    const auto output=render_with_inputs(f,in,current,depths);
+    in.conservative_cabin_history=false;const auto legacy=render_with_inputs(f,in,current,depths);
+    unsigned changed=0;
+    for(UINT y=16;y<height-16;++y)for(UINT x=40;x<=60;++x) {
+        check(output[y*width+x]==grey(72),"out-of-FOV old foreground cannot cover visible current road");
+        changed+=output[y*width+x]!=legacy[y*width+x];
+    }
+    check(changed>0,"outside-history negative must expose the old background patch");
 }
 
 // A background point reappears where the previous eye still held the car.
@@ -310,6 +446,10 @@ void adjacent_disocclusion(unsigned eye,bool low,bool moving,bool hidden=false) 
 }
 int main() {
     for(unsigned eye:{0u,1u})for(bool lower:{false,true}) {
+        cabin_background(eye,lower);
+        cabin_outside_history(eye,lower);
+        for(unsigned kind:{0u,1u,2u,3u,4u})cabin_native_history(eye,lower,kind);
+        adjacent_sky(eye,lower);
         current_vectors(eye,lower,.2F);
         current_vectors(eye,lower,.25F);
         current_vectors(eye,lower,.2F,false,false,false,true);
@@ -331,6 +471,12 @@ int main() {
         trusted_edge(eye,lower,0);trusted_edge(eye,lower,1);trusted_edge(eye,lower,2);
         adjacent_head_rotation(eye,lower,false,0);adjacent_head_rotation(eye,lower,true,0);
         for(unsigned refusal:{1u,2u,3u})adjacent_head_rotation(eye,lower,false,refusal);
+        // A near dashboard/hand has confirmed original N1 flow and matching
+        // peer depth, despite the unreliable N2 endpoint. Preserve its exact
+        // own-eye sample through head roll; mismatched depth/invalid flow refuse.
+        adjacent_head_rotation(eye,lower,false,0,true);
+        adjacent_head_rotation(eye,lower,true,0,true);
+        for(unsigned refusal:{1u,2u})adjacent_head_rotation(eye,lower,false,refusal,true);
     }
     std::puts("OSR current native vectors: both eyes/qualities, own-eye colour, temporal depth and conservative fallbacks PASS");return 0;
 }

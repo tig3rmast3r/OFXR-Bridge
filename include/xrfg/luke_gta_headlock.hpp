@@ -25,6 +25,7 @@ struct LukeGtaRuntimeLayout {
 };
 inline constexpr LukeGtaRuntimeLayout kLukeGtaOctoberLayout{kLukeGtaRuntimePointer,kLukeGtaRuntimeVtable};
 inline constexpr LukeGtaRuntimeLayout kLukeGtaNovemberLayout{0x7b6500,0x5abda8};
+inline constexpr LukeGtaRuntimeLayout kLukeGtaNovember7Layout{0x7b6528,0x5abda8};
 
 // Read-only interoperability for the explicitly observed GTA runtime layout.
 // Unknown builds/objects/racing state do not enable the special camera path.
@@ -38,23 +39,27 @@ std::optional<LukeGtaRuntimeLayout> luke_gta_headlock_binding(std::uintptr_t mod
     if(nt>header.size()-128||u32(nt)!=0x4550)return {};
     const bool october=u32(nt+8)==1792152767 && u32(nt+24+56)==11485184;
     const bool november=u32(nt+8)==1793909090 && u32(nt+24+56)==110219264;
-    if(!october&&!november)return {};
+    const bool november7=u32(nt+8)==1794066503 && u32(nt+24+56)==110219264;
+    if(!october&&!november&&!november7)return {};
     constexpr std::array<unsigned char,12> state{
         0x8b,0x87,0x2c,0x11,0x84,0x00,0x89,0x87,0x58,0x6c,0x85,0x00};
     constexpr std::array<unsigned char,8> yaw{0xf3,0x0f,0x5c,0xb3,0x18,0x11,0x84,0x00};
     std::array<unsigned char,12> live_state{};std::array<unsigned char,8> live_yaw{};
-    if(!read(module+(november?0x1ffd0f:0x1fedff),live_state.data(),live_state.size())||live_state!=state||
-        !read(module+(november?0x1fee06:0x1fdef6),live_yaw.data(),live_yaw.size())||live_yaw!=yaw)return {};
-    if(november) {
+    if(!read(module+(november7?0x1ffdef:november?0x1ffd0f:0x1fedff),live_state.data(),live_state.size())||live_state!=state||
+        !read(module+(november7?0x1feee6:november?0x1fee06:0x1fdef6),live_yaw.data(),live_yaw.size())||live_yaw!=yaw)return {};
+    if(november||november7) {
         // Witness the exact runtime pointer and GTA vtable on2611.5.2.5692.
         // No signature scanning or guessed object addresses in a running game.
         constexpr std::array<unsigned char,7> owner{0x48,0x8b,0x3d,0x50,0x99,0x5b,0x00};
         constexpr std::array<unsigned char,10> constructor{0x48,0x8d,0x05,0x76,0x90,0x4f,0x00,0x48,0x89,0x06};
+        // Luke2611.7.2.5696, verified offline against its exact PE image.
+        constexpr std::array<unsigned char,7> owner7{0x48,0x8b,0x3d,0x98,0x98,0x5b,0x00};
+        constexpr std::array<unsigned char,10> constructor7{0x48,0x8d,0x05,0x96,0x8f,0x4f,0x00,0x48,0x89,0x06};
         std::array<unsigned char,7> live_owner{};std::array<unsigned char,10> live_constructor{};
-        if(!read(module+0x1fcba9,live_owner.data(),live_owner.size())||live_owner!=owner||
-            !read(module+0xb2d2b,live_constructor.data(),live_constructor.size())||live_constructor!=constructor)return {};
+        if(!read(module+(november7?0x1fcc89:0x1fcba9),live_owner.data(),live_owner.size())||live_owner!=(november7?owner7:owner)||
+            !read(module+(november7?0xb2e0b:0xb2d2b),live_constructor.data(),live_constructor.size())||live_constructor!=(november7?constructor7:constructor))return {};
     }
-    return november?kLukeGtaNovemberLayout:kLukeGtaOctoberLayout;
+    return november7?kLukeGtaNovember7Layout:november?kLukeGtaNovemberLayout:kLukeGtaOctoberLayout;
 }
 template<class Read>
 bool luke_gta_headlock_layout(std::uintptr_t module,Read&& read) noexcept {

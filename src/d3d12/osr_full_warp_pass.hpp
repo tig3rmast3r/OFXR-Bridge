@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 
 #include "osr_full_clear_shader.hpp"
 #include "osr_full_splat_shader.hpp"
@@ -50,6 +51,9 @@ struct OsrFullHistory {
     float motion_scale[2]{}; // composed motion value -> depth texels at that frame
     float dejitter[2]{};     // window fraction - DLSS jitter of that frame, in texels
     bool has_motion{};
+    bool native_motion{}; // original one-publication field; never interpret it as composed N2
+    float native_stereo[16]{};
+    float previous_dejitter[2]{};
 };
 
 // OSR (OFXR Stereo Reconstruction), full reconstruction, GPU side. Private
@@ -256,6 +260,10 @@ public:
         bool reset_history{};
         bool use_history_motion{};
         bool use_current_history_motion{}; // exact native endpoints; N1 has a separate original field
+        bool native_history_motion{}; // stored original N1; camera_previous is the previous opposite eye
+        float native_history_stereo[16]{};
+        float native_history_previous_dejitter[2]{};
+        bool conservative_cabin_history{}; // GTA unlocked camera; requires confirmed original N1
         ID3D12Resource* adjacent_motion{}; // immutable original N1 field, not composed same-eye motion
         D3D12_RESOURCE_STATES adjacent_motion_state{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
         DXGI_FORMAT adjacent_motion_format{kMotionFormat};
@@ -355,6 +363,12 @@ public:
         constants.history_dejitter[0] = in.history_dejitter[0]; constants.history_dejitter[1] = in.history_dejitter[1];
         constants.locked_depth = in.locked_depth;
         const bool current_motion = in.use_history && in.use_current_history_motion && in.source_motion;
+        // Original N1 identifies this eye's own previous image. Its sky keeps
+        // camera reprojection; the older composed N2 field can carry a nearby
+        // windshield/frame's motion through zero-depth sky pixels.
+        if(current_motion && in.adjacent_motion)constants.flags|=512u;
+        if(current_motion && in.adjacent_motion && in.conservative_cabin_history)constants.flags|=1024u;
+        if((constants.flags&1024u)!=0 && in.native_history_motion && in.use_history_motion)constants.flags|=2048u;
         if (current_motion) {
             std::memcpy(current_history_mapped_, in.current_history_data, sizeof(in.current_history_data));
         }
@@ -405,12 +419,20 @@ public:
                 std::memcpy(history_constants.backward_source, in.forward_history_locked, sizeof(history_constants.backward_source));
                 history_constants.flags |= kOsrFullFlagLockedFollows;
             }
-            if (in.use_history_motion) {
+            if (in.use_history_motion && (!in.native_history_motion || (constants.flags&2048u)!=0)) {
                 history_constants.motion_scale[0] = in.history_motion_scale[0];
                 history_constants.motion_scale[1] = in.history_motion_scale[1];
             }
+            if((constants.flags&1024u)!=0 && in.native_history_motion && in.use_history_motion) {
+                history_constants.flags|=2048u;
+                std::memcpy(history_constants.backward_source,in.native_history_stereo,sizeof(history_constants.backward_source));
+                history_constants.source_dejitter[0]=in.native_history_previous_dejitter[0];
+                history_constants.source_dejitter[1]=in.native_history_previous_dejitter[1];
+                barriers.track(history_depth_[source_eye],D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);barriers.flush(list);
+            }
             const std::array<ID3D12Resource*, kSrvCount> srvs{history_depth.resource.Get(), nullptr, nullptr, nullptr,
-                nullptr, nullptr, nullptr, nullptr, history_motion.resource.Get(), nullptr};
+                nullptr, nullptr, nullptr, nullptr, history_motion.resource.Get(), nullptr,nullptr,nullptr,
+                (history_constants.flags&2048u)!=0?history_depth_[source_eye].resource.Get():nullptr};
             dispatch(list, splat_history_.Get(), bind(device, block_splat_history, srvs, {history_splat_.resource.Get()}),
                 history_constants, depth_width_, depth_height_);
             barriers.uav(history_splat_.resource.Get());
@@ -490,36 +512,52 @@ public:
         Tracked& color = history_color_[source_eye];
         Tracked& depth = history_depth_[source_eye];
         Tracked& motion = history_motion_[source_eye];
-        const bool copy_motion = in.source_motion != nullptr;
+        const auto& opposite=history_[1-source_eye];
+        const auto adjacent_desc=in.adjacent_motion?in.adjacent_motion->GetDesc():D3D12_RESOURCE_DESC{};
+        const float crop_x=in.current_history_data[60],crop_y=in.current_history_data[61];
+        const bool native_motion=in.conservative_cabin_history && in.use_current_history_motion && in.adjacent_motion &&
+            in.current_history_data[62]==1 && in.adjacent_motion_format==kMotionFormat && adjacent_desc.Format==kMotionFormat &&
+            opposite.publication!=0 && opposite.publication+1==history.publication &&
+            std::isfinite(crop_x)&&std::isfinite(crop_y)&&crop_x>=0&&crop_y>=0 &&
+            crop_x==std::floor(crop_x)&&crop_y==std::floor(crop_y) &&
+            double(crop_x)+depth_width_<=double(adjacent_desc.Width) && double(crop_y)+depth_height_<=double(adjacent_desc.Height);
+        ID3D12Resource* motion_source=native_motion?in.adjacent_motion:in.source_motion;
+        const auto motion_state=native_motion?in.adjacent_motion_state:in.source_motion_state;
+        const bool copy_motion=motion_source!=nullptr;
         Barriers barriers;
         barriers.track(color, D3D12_RESOURCE_STATE_COPY_DEST);
         barriers.track(depth, D3D12_RESOURCE_STATE_COPY_DEST);
         if (copy_motion) barriers.track(motion, D3D12_RESOURCE_STATE_COPY_DEST);
         barriers.transition(in.source_color, in.source_color_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
         barriers.transition(in.source_depth, in.source_depth_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        if (copy_motion) barriers.transition(in.source_motion, in.source_motion_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        if (copy_motion) barriers.transition(motion_source,motion_state,D3D12_RESOURCE_STATE_COPY_SOURCE);
         barriers.flush(list);
-        const auto copy = [&](ID3D12Resource* destination, ID3D12Resource* source, UINT width, UINT height) {
+        const auto copy = [&](ID3D12Resource* destination, ID3D12Resource* source, UINT width, UINT height, UINT x=0, UINT y=0) {
             D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
             dst.pResource = destination; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
             src.pResource = source; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            const D3D12_BOX box{0, 0, 0, width, height, 1};
+            const D3D12_BOX box{x,y,0,x+width,y+height,1};
             list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
         };
         copy(color.resource.Get(), in.source_color, color_width_, color_height_);
         copy(depth.resource.Get(), in.source_depth, depth_width_, depth_height_);
-        if (copy_motion) copy(motion.resource.Get(), in.source_motion, depth_width_, depth_height_);
+        if (copy_motion) copy(motion.resource.Get(),motion_source,depth_width_,depth_height_,native_motion?static_cast<UINT>(crop_x):0,native_motion?static_cast<UINT>(crop_y):0);
         barriers.track(color, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(depth, D3D12_RESOURCE_STATE_COMMON);
         if (copy_motion) barriers.track(motion, D3D12_RESOURCE_STATE_COMMON);
         barriers.transition(in.source_color, D3D12_RESOURCE_STATE_COPY_SOURCE, in.source_color_state);
         barriers.transition(in.source_depth, D3D12_RESOURCE_STATE_COPY_SOURCE, in.source_depth_state);
-        if (copy_motion) barriers.transition(in.source_motion, D3D12_RESOURCE_STATE_COPY_SOURCE, in.source_motion_state);
+        if (copy_motion) barriers.transition(motion_source,D3D12_RESOURCE_STATE_COPY_SOURCE,motion_state);
         barriers.flush(list);
         pending_ = history;
         pending_.has_motion = copy_motion;
-        pending_.previous_publication = history_[source_eye].publication;
-        pending_.camera_previous = history_[source_eye].camera;
+        pending_.native_motion=native_motion;
+        pending_.previous_publication=native_motion?opposite.publication:history_[source_eye].publication;
+        pending_.camera_previous=native_motion?opposite.camera:history_[source_eye].camera;
+        if(native_motion) {
+            std::memcpy(pending_.native_stereo,in.forward_stereo,sizeof(pending_.native_stereo));
+            pending_.previous_dejitter[0]=opposite.dejitter[0];pending_.previous_dejitter[1]=opposite.dejitter[1];
+        }
         pending_eye_ = source_eye;
     }
 

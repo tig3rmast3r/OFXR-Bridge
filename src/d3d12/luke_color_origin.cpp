@@ -18,6 +18,9 @@
 namespace xrfg {
 namespace {
 bool origin_from_bottom() noexcept;
+bool gta_color_origin() noexcept;
+std::mutex g_crop_mutex;
+LukeOriginCropGuard g_crop_guard;
 // Black bars measured on the eye images by the reader (left|top|bottom, 16
 // bits each) and the eye extent they were measured on. Writer and reader
 // place the mark from the same values.
@@ -40,7 +43,12 @@ std::array<unsigned,2> origin_inset(unsigned color_width, unsigned color_height)
         const auto* name=wcsrchr(path,L'\\');
         return std::wstring(name?name+1:path);
     }();
-    return luke_origin_inset_with_bars(luke_origin_inset_for_title(title,color_height),
+    auto inset=luke_origin_inset_for_title(title,color_height);
+    if(gta_color_origin()) {
+        std::scoped_lock lock(g_crop_mutex);
+        inset[0]=g_crop_guard.configure(color_width,color_height);
+    }
+    return luke_origin_inset_with_bars(inset,
         stored_bars(color_width,color_height),color_width,color_height,origin_from_bottom());
 }
 bool bright_primary_origin() noexcept {
@@ -574,6 +582,12 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
                 report_origin_layout(false,2,output_extent,extent_bits(static_cast<UINT>(original.Width),original.Height));
                 results[i]=E_PENDING; continue;
             }
+            if(gta_color_origin()) {
+                // Include earlier marker positions during feedback changes.
+                // A moving scan origin could otherwise hide the previous frame.
+                plan.layout.scan.width+=plan.layout.scan.x;
+                plan.layout.scan.x=0;
+            }
             std::uint64_t key=1469598103934665603ULL;
             for(const std::uint64_t value:{original.Width,std::uint64_t(original.Height),std::uint64_t(original.Format)})
                 {key^=value;key*=1099511628211ULL;}
@@ -768,9 +782,11 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             geometry[i]=key|1;
         }
         for(unsigned i=0;i<count;++i)image_rows[i].rgb_fallback=gta_color_origin();
+        std::array<bool,2> local_nonblack{};
+        auto* observed_nonblack=nonblack?nonblack:local_nonblack.data();
         const auto narrowed=decode_luke_origin_images_windowed(std::span(image_rows.data(),count),
             std::span(geometry.data(),count),std::span(reader->windows.data(),count),
-            std::span(decoded.data(),count),nonblack?std::span<bool>(nonblack,count):std::span<bool>{});
+            std::span(decoded.data(),count),(nonblack||gta_color_origin())?std::span<bool>(observed_nonblack,count):std::span<bool>{});
         phase(127,static_cast<HRESULT>(narrowed)); // Bit per color decoded from its learned rows.
         HRESULT decode_status=S_OK;
         for(unsigned i=0;i<count;++i)if(plans[i].valid) {
@@ -780,6 +796,28 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             const auto& p=plans[i];
             reader->positions[i].observed(decoded[i],p.layout.scan.x,p.layout.scan.y,
                 static_cast<unsigned>(p.original.Width),p.original.Height,GetTickCount64());
+        }
+        if(gta_color_origin()) {
+            bool valid=false,color=false,ambiguous=false;int left=-1;
+            for(unsigned i=0;i<count;++i)if(plans[i].valid) {
+                color|=observed_nonblack[i];ambiguous|=decoded[i].ambiguous;
+                if(decoded[i].token&&!decoded[i].ambiguous) {
+                    valid=true;
+                    const auto x=decoded[i].first_column;
+                    if(x>=0)left=left<0?x:std::min(left,x);
+                }
+            }
+            // A single readable eye must not mask a consistently clipped peer.
+            bool any_missing=false;
+            for(unsigned i=0;i<count;++i)if(plans[i].valid&&!decoded[i].token&&observed_nonblack[i])any_missing=true;
+            unsigned inset{};bool changed=false;
+            {
+                std::scoped_lock crop_lock(g_crop_mutex);
+                changed=g_crop_guard.observe(valid&&!any_missing,color,ambiguous,left);
+                inset=g_crop_guard.inset;
+            }
+            if(changed)bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                valid?1:0,1320,inset,left<0?0:static_cast<unsigned>(left));
         }
         const D3D12_RANGE no_write{0,0}; reader->readback->Unmap(0,&no_write);
         phase(125,decode_status);

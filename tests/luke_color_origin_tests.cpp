@@ -35,6 +35,19 @@ void stamp(std::vector<float>& row, double start, double scale, std::uint32_t to
     }
 }
 void codec_tests() {
+    {
+        xrfg::LukeOriginCropGuard guard;
+        require(guard.configure(2128,1696)==64,"GTA initial crop guard");
+        for(unsigned i=0;i<20;++i)require(!guard.observe(false,false,false,-1),"black frames moved GTA marker");
+        for(unsigned i=0;i<20;++i)require(!guard.observe(false,true,true,-1),"ambiguous identity moved GTA marker");
+        for(unsigned i=0;i<7;++i)require(!guard.observe(false,true,false,-1),"GTA transient miss moved marker");
+        require(guard.observe(false,true,false,-1)&&guard.inset==96,"sustained GTA loss did not move marker");
+        require(!guard.observe(true,true,false,32),"safe decoded GTA marker moved");
+        require(guard.observe(true,true,false,4)&&guard.inset==128,"measured near-edge GTA marker not protected");
+        for(unsigned i=0;i<1000;++i)guard.observe(false,true,false,-1);
+        require(guard.inset==512,"GTA loss recovery was not bounded");
+        require(guard.configure(2400,1920)==64,"GTA crop guard did not reset on geometry change");
+    }
     // V634 Horizon: every observed AFW publication gap follows a committed
     // opposite-eye capture rejected because the cross-eye counter stayed equal.
     // First gap: AFW 557 -> 559, lost color token 558, Luke render 5316.
@@ -111,7 +124,7 @@ void codec_tests() {
     stamp(row,32,1,0);
     require(!xrfg::decode_luke_origin_row(row).token,"zero token accepted");
     xrfg::LukeColorOriginLayout layout;
-    require(xrfg::luke_origin_inset_for_title(L"gta5_enhanced.EXE")==std::array<unsigned,2>{0,32},"GTA Enhanced case-insensitive protected policy");
+    require(xrfg::luke_origin_inset_for_title(L"gta5_enhanced.EXE")==std::array<unsigned,2>{64,32},"GTA Enhanced case-insensitive protected policy");
     require(xrfg::luke_origin_inset_for_title(L"Outlaws.exe")==std::array<unsigned,2>{256,32},"Outlaws protected policy changed");
     require(xrfg::luke_origin_inset_for_title(L"TLOU-I.exe")==std::array<unsigned,2>{32,32},"TLOU1 margins missing");
     {
@@ -207,7 +220,7 @@ void codec_tests() {
         require(gta[1]==height/6,"GTA scripted inset did not follow full-size eye height");
         require(xrfg::compact_luke_origin_layout(3424,height,2987,height,layout,gta[0],gta[1]),
             "GTA scripted full-size layout rejected");
-        require(layout.bands[0].y>height/8+16&&layout.scan.height==76&&layout.scan.width==697,
+        require(layout.bands[0].y>height/8+16&&layout.scan.height==76&&layout.scan.width==761,
             "GTA scripted inset must retain its band and the wider 32-row translation window");
         for(const auto* name:{L"Outlaws.exe",L"GTA5.exe",L"DeadSpace.exe",L"KingdomCome.exe",L"HorizonForbiddenWest.exe"})
             require(xrfg::luke_origin_inset_for_title(name,height)==xrfg::luke_origin_inset_for_title(name),
@@ -482,12 +495,13 @@ void bright_hdr_gpu_test(bool gta=false) {
     auto source=gpu.texture(1024,1024,DXGI_FORMAT_R16G16B16A16_FLOAT);
     auto eye=gpu.texture(1024,744,DXGI_FORMAT_R16G16B16A16_FLOAT);
     const unsigned top=gta?406U:282U;
+    const unsigned marker_x=gta?66U:2U;
     xrfg::configure_luke_color_origin_extent(1024,744);
     constexpr std::uint32_t expected=0x12345;
     xrfg::LukeColorOriginRect written{};
     check(xrfg::mark_luke_color_origin(gpu.list.Get(),source.Get(),expected,D3D12_RESOURCE_STATE_COMMON,
         gpu.device.Get(),{},DXGI_FORMAT_UNKNOWN,&written),"DOOM HDR stamp");
-    require(written.x==2&&written.y==top&&written.width==256&&written.height==8,
+    require(written.x==marker_x&&written.y==top&&written.width==256&&written.height==8,
         "DOOM HDR fix changed marker geometry/copy budget");
     D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;
     D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=16384;
@@ -498,7 +512,7 @@ void bright_hdr_gpu_test(bool gta=false) {
     D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=source.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     dst.pResource=readback.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     dst.PlacedFootprint.Footprint={DXGI_FORMAT_R16G16B16A16_FLOAT,256,8,1,2048};
-    const D3D12_BOX box{2,top,0,258,top+8,1};gpu.list->CopyTextureRegion(&dst,0,0,0,&src,&box);
+    const D3D12_BOX box{marker_x,top,0,marker_x+256,top+8,1};gpu.list->CopyTextureRegion(&dst,0,0,0,&src,&box);
     gpu.transition(source.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
     gpu.crop(source.Get(),eye.Get(),0,140,1024,744);gpu.submit();
     std::uint32_t token{};check(xrfg::read_luke_color_origin(gpu.queue.Get(),eye.Get(),&token,
@@ -975,6 +989,51 @@ void gta_protected_gpu_test() {
     wchar_t executable[MAX_PATH]{};GetModuleFileNameW(nullptr,executable,MAX_PATH);
     const auto* name=wcsrchr(executable,L'\\');
     require(_wcsicmp(name?name+1:executable,L"GTA5_Enhanced.exe")==0,"GTA GPU test requires shipping process-name routing");
+    {
+        // PID7020 retained the barcode payload but clipped its sync prefix at
+        // the left eye edge. Exercise the actual writer/reader with a further
+        // 16/32-pixel translation, independently of any output-to-eye crop.
+        Gpu shifted;
+        auto original=shifted.texture(2128,1696);
+        xrfg::configure_luke_color_origin_extent(2128,1696);
+        constexpr std::uint32_t identity=0x12345;
+        check(xrfg::mark_luke_color_origin(shifted.list.Get(),original.Get(),identity,
+            D3D12_RESOURCE_STATE_COMMON,shifted.device.Get()),"GTA translated marker writer");
+        std::vector<ComPtr<ID3D12Resource>> translated;
+        for(unsigned offset:{16U,32U}) {
+            auto eye=shifted.texture(2128,1696);
+            shifted.crop(original.Get(),eye.Get(),offset,0,2128-offset,1696);
+            translated.push_back(std::move(eye));
+        }
+        shifted.submit();
+        for(const auto& eye:translated) {
+            std::uint32_t token{};
+            check(xrfg::read_luke_color_origin(shifted.queue.Get(),eye.Get(),&token,
+                D3D12_RESOURCE_STATE_COMMON,5000),"GTA left translation clipped marker sync");
+            require(token==identity,"GTA translated marker changed exact CRC identity");
+        }
+    }
+    {
+        // The fixed r1 inset loses its prefix after a 96-pixel final crop.
+        // Feed real GPU misses back to the writer until a complete CRC returns.
+        Gpu adaptive;
+        auto original=adaptive.texture(2128,1696),eye=adaptive.texture(2128,1696);
+        xrfg::configure_luke_color_origin_extent(2128,1696);
+        bool recovered=false;
+        for(unsigned attempt=0;attempt<24&&!recovered;++attempt) {
+            if(attempt)adaptive.reset();
+            check(xrfg::mark_luke_color_origin(adaptive.list.Get(),original.Get(),0x54321,
+                D3D12_RESOURCE_STATE_COMMON,adaptive.device.Get()),"GTA adaptive writer");
+            adaptive.crop(original.Get(),eye.Get(),96,0,2032,1696);
+            adaptive.submit();
+            std::uint32_t token{};
+            const auto hr=xrfg::read_luke_color_origin(adaptive.queue.Get(),eye.Get(),&token,
+                D3D12_RESOURCE_STATE_COMMON,5000);
+            require(hr==S_OK||hr==HRESULT_FROM_WIN32(ERROR_NOT_FOUND),"GTA adaptive readback failed");
+            if(hr==S_OK) {require(token==0x54321,"GTA feedback fabricated a CRC identity");recovered=true;}
+        }
+        require(recovered,"GTA crop feedback failed to recover a fully clipped prefix");
+    }
     // Captured V691 failure class: chromatic channels each retain a valid CRC
     // while their spatially offset weighted luminance loses the sync/payload.
     std::vector<std::byte> chromatic(800*4*4,std::byte{102});
@@ -1001,7 +1060,7 @@ void gta_protected_gpu_test() {
     xrfg::configure_luke_color_origin_extent(1553,1696);
     xrfg::LukeColorOriginRect written{};constexpr std::uint32_t expected=223;
     check(xrfg::mark_luke_color_origin(gpu.list.Get(),source.Get(),expected,D3D12_RESOURCE_STATE_COMMON,gpu.device.Get(),{},DXGI_FORMAT_UNKNOWN,&written),"GTA original writer");
-    require(written.x==577&&written.y==284&&written.width==256&&written.height==8,"GTA actual process did not select scripted-safe inset");
+    require(written.x==641&&written.y==284&&written.width==256&&written.height==8,"GTA actual process did not select scripted-safe inset");
     std::vector<ComPtr<ID3D12Resource>> eyes;
     std::vector<ComPtr<ID3D12Resource>> masks;
     for(unsigned crop:{0U,288U,575U})for(int shift:{-16,-8,0,8,16}) {
@@ -1021,7 +1080,7 @@ void gta_protected_gpu_test() {
     gpu.reset();auto wide=gpu.texture(3424,2736);
     xrfg::configure_luke_color_origin_extent(2987,2736);
     check(xrfg::mark_luke_color_origin(gpu.list.Get(),wide.Get(),expected+1,D3D12_RESOURCE_STATE_COMMON,gpu.device.Get(),{},DXGI_FORMAT_UNKNOWN,&written),"GTA large scripted writer");
-    require(written.x==439&&written.y==458,"GTA large source marker misplaced");
+    require(written.x==503&&written.y==458,"GTA large source marker misplaced");
     eyes.clear();masks.clear();
     for(unsigned crop:{0U,219U,437U})for(bool scripted:{false,true}) {
         auto eye=gpu.texture(2987,2736);gpu.crop(wide.Get(),eye.Get(),crop,0,2987,2736);
