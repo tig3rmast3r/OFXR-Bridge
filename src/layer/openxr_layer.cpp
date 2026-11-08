@@ -14000,7 +14000,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 }
             }
             const bool aer_single=success && state->nvidia_options.ofr && job->pair && job->snapshot.aer_fresh_mask!=3;
-            if(aer_single) {real=std::move(synthetic);job->pair=false;}
+            if(aer_single) {real=std::move(synthetic);real->blackbar_pose.paired=false;job->pair=false;}
             if(success && state->nvidia_options.ofr && (aer_single || job->pair))
                 xrfg::embedded::ofr_last_success_ms=GetTickCount64();
             xrfg::bridge_flight_logger().end(build_token,

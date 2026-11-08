@@ -254,6 +254,8 @@ static int panel_metadata_contract() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    const bool aer_path=route.starts_with("aer-");if(aer_path)route.erase(0,4);
+    const bool aer_swap=aer_path&&route.starts_with("swap-");if(aer_swap)route.erase(0,5);
     if(route=="rife-memory-recovery") {
         xrfg_fixture::ControlProfile profile;Fixture f(true);f.unblock();
         auto dispatch=std::make_shared<Dispatch>();auto state=std::make_shared<SessionState>(dispatch);
@@ -386,7 +388,7 @@ int main(int argc,char** argv) {
             auto requested=xrfg::embedded::snapshot().desired;
             check(requested.ofr && requested.ofr_swap==swap,"AER reaches shipping runtime");
             auto effective=effective_session_settings(*session,requested);
-            check(effective.enabled && effective.backend==2 && effective.scale==3 &&
+            check(effective.enabled && effective.backend==requested.backend && effective.scale==requested.scale &&
                 effective.hybrid==(method==3) && effective.rife_model==(method==4?controls.rife_model:-1) &&
                 effective.frame_generation==(method>=3?0:method) && effective.rife_multiplier==2,
                 "AER preserves chosen generator and quality, limits only multiplier");
@@ -705,6 +707,7 @@ int main(int argc,char** argv) {
         desired.lower_vram=b;desired.separate_synthesis=a;
         desired.motion_vectors=route=="fsr" || route=="hybrid" || route=="dlssg";
         desired.triple_frame_gen=triple;desired.prefer_fps=triple || deep;
+        if(aer_path){desired.advanced_mode=true;desired.ofr_enabled=true;desired.ofr_swap=aer_swap;}
         check(xrfg::autonomous::request(desired),"publish the global experiment with its actual route");
         xrfg::autonomous::apply_runtime_settings();
     }
@@ -2131,6 +2134,7 @@ int main(int argc,char** argv) {
         "private RIFE must not enter legacy presenter mode when application frames overlap");
     if(rife_inherited)check(f.real_ends>=1+(input_count-8)*3,
         "RIFE3 acknowledgement alone is insufficient: native outputs must include the extra intermediates");
+    if(aer_path)check(state->nvidia_options.ofr && xrfg::embedded::ofr_last_success_ms.load()!=0,"AER actually reached the common output path");
     f.transport->stop();
     for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
     xr_ok(layer_destroy_swapchain_impl(chain),"shipping destroy");

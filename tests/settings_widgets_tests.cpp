@@ -15,7 +15,7 @@
 namespace {
 using namespace xrfg::autonomous;
 int checks{};
-void require(bool value, const char* detail) {
+void require(bool value, const std::string& detail) {
     ++checks;
     if (!value) throw std::runtime_error(detail);
 }
@@ -740,7 +740,7 @@ void aer_framegen_widgets() {
         require(snapshot().desired.ofr_swap,"Swap toggle saved");
         const auto multiplier=snapshot().desired.rife_multiplier;
         view.choose("RIFE multiplier",1,"3X");
-        require(snapshot().desired.rife_multiplier==multiplier && generation_multiplier(snapshot().desired)==2,"AER disables higher multiplier buttons without erasing saved selection");
+        require(snapshot().desired.rife_multiplier==multiplier && generation_multiplier(snapshot().desired)==2,"AER disables higher multiplier buttons: before="+std::to_string(multiplier)+" after="+std::to_string(snapshot().desired.rife_multiplier)+" aer="+std::to_string(snapshot().desired.ofr_enabled)+" fg="+std::to_string(snapshot().desired.frame_generation));
         view.select_tab("Reconstruction");view.draw(true);
         require(view.rendered_text.find("OFR")==std::string::npos && view.rendered_text.find("OFR size")==std::string::npos,"Reconstruction no longer contains separate OFR method");
         settings.advanced_mode=false;settings.ofr_enabled=false;settings.ofr_swap=false;require(request(settings),"reset AER UI pass");
@@ -754,7 +754,8 @@ int main(int argc, char** argv) {
             L"-" + std::to_wstring(GetTickCount64()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", profile.c_str());
     try {
-        if (argc == 2 && std::strcmp(argv[1], "--gpu-telemetry") == 0) gpu_telemetry_and_quality();
+        if (argc == 2 && std::strcmp(argv[1], "--aer-framegen") == 0) aer_framegen_widgets();
+        else if (argc == 2 && std::strcmp(argv[1], "--gpu-telemetry") == 0) gpu_telemetry_and_quality();
         else if (argc == 2 && std::strcmp(argv[1], "--desktop-header") == 0) desktop_header_is_not_a_headset_control();
         else if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--route-multiplier") == 0) route_multiplier_widgets();
