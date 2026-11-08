@@ -417,7 +417,11 @@ int main(int argc,char** argv) {
                 second.projections[0].views[older].pose.position.x==float(20+older),"other eye cameras retained");
             for(unsigned eye=0;eye<2;++eye)check(first.projections[0].views[eye].subImage.imageArrayIndex==eye &&
                 second.projections[0].views[eye].subImage.imageArrayIndex==eye,"Swap never exchanges physical eyes");
-            controls.ofr_enabled=false;
+            controls.enabled=false;
+            check(xrfg::autonomous::request(controls),"AER master off");xrfg::autonomous::apply_runtime_settings();
+            check(!effective_session_settings(*session,xrfg::embedded::snapshot().desired).enabled &&
+                selected_afw_mode()==xrfg::embedded::afw_snapshot().desired.mode,"FG master off disables AER and restores reconstruction policy");
+            controls.enabled=true;controls.ofr_enabled=false;
             check(xrfg::autonomous::request(controls),"AER deselect");xrfg::autonomous::apply_runtime_settings();
             effective=effective_session_settings(*session,xrfg::embedded::snapshot().desired);
             check(!effective.ofr && effective.enabled && effective.rife_multiplier==xrfg::autonomous::runtime_multiplier(xrfg::autonomous::snapshot().desired),"ordinary multiplier preference restored");

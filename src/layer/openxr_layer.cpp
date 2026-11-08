@@ -6069,9 +6069,10 @@ XrResult layer_create_session_impl(
     state->vdxr_legacy = true;
 #endif
     const auto game_preferences=xrfg::autonomous::snapshot().desired;
-    state->afw_only=state->luke_afw_enabled && game_preferences.afw_only && !xrfg::embedded::snapshot().desired.ofr;
-    state->luke_shared_swapchains=game_preferences.luke_shared_swapchains;
     auto initial_control = xrfg::embedded::snapshot();
+    state->afw_only=state->luke_afw_enabled && game_preferences.afw_only &&
+        !(initial_control.desired.ofr&&initial_control.desired.enabled);
+    state->luke_shared_swapchains=game_preferences.luke_shared_swapchains;
     initial_control.desired=effective_session_settings(*state,initial_control.desired);
     state->optical_flow_backend = initial_control.desired.backend == 0
         ? xrfg::D3D12OpticalFlowBackend::fidelity_fx : xrfg::D3D12OpticalFlowBackend::nvidia;
@@ -17486,10 +17487,10 @@ XrResult layer_end_frame_impl(
     };
 
     const auto afw_control = xrfg::embedded::afw_snapshot();
-    bool afw_selected = state->luke_afw_enabled &&
-        afw_control.desired.mode != 0 && !state->nvidia_options.ofr;
-    const bool ofxr_was_enabled = state->menu_enabled;
     const auto desired_control = xrfg::embedded::snapshot();
+    bool afw_selected = state->luke_afw_enabled && afw_control.desired.mode != 0 &&
+        !(desired_control.desired.ofr&&desired_control.desired.enabled);
+    const bool ofxr_was_enabled = state->menu_enabled;
     auto startup_request = state->luke_afw_startup.pending();
     if (!afw_selected || desired_control.desired.enabled) {
         state->luke_afw_startup.observe_failure();
