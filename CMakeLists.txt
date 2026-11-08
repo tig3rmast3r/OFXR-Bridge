@@ -2602,3 +2602,8 @@ if(TARGET xrfg_d3d12_history_tests)
     add_test(NAME xrfg_ofr_endpoints_gpu COMMAND xrfg_d3d12_history_tests ofr)
     set_tests_properties(xrfg_ofr_endpoints_gpu PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
 endif()
+
+if(TARGET xrfg_private_runtime_layer_tests)
+    add_test(NAME xrfg_ofr_controls COMMAND xrfg_private_runtime_layer_tests ofr-controls)
+    set_tests_properties(xrfg_ofr_controls PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()

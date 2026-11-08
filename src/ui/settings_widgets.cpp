@@ -860,7 +860,7 @@ bool framewarp(Panel& p) {
         if(segmented(p,"OFR size","Size",draft.ofr_scale,{{"100%"},{"75%"},{"50%"},{"25%"}},kHelpResolution))changed=true;
         changed|=toggle_row(p,"OFR swap","Swap phase",draft.ofr_swap,kHelpOfrSwap);
         notice(p,Tone::idle,"Experimental AER reconstruction. Uses its own flow engine while selected; normal framegen settings are retained.");
-        if(state.connected && r.afw_only) notice(p,Tone::warn,"Restart the game to leave Reconstruction-only transport and activate OFR.");
+        if(state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode) notice(p,Tone::warn,"Restart the game to leave Reconstruction-only transport and activate OFR.");
         const char* delivery=r.ofr_delivery==1?"Alternating eye releases":r.ofr_delivery==2?"Paired releases (phase assumed)":"Learning release cadence";
         notice(p,Tone::idle,delivery);
         return changed;

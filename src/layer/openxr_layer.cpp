@@ -1892,6 +1892,7 @@ unsigned rife_frames(const SessionState& state) noexcept {
 }
 
 [[nodiscard]] bool djules_triple_active(const SessionState& state) noexcept {
+    if(state.nvidia_options.ofr)return false;
     if(ordered_multiframe(state))return state.menu_enabled && rife_frames(state)>2;
     if(direct_reduced_outputs(state) && !extra_output_capacity(state)) return false;
     if (state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::native_dlss)
@@ -1906,6 +1907,7 @@ unsigned native_frame_multiplier(const SessionState& state) noexcept {
     return state.three_slot_director && djules_triple_active(state);
 }
 [[nodiscard]] bool djules_deep_active(const SessionState& state) noexcept {
+    if(state.nvidia_options.ofr)return false;
     return !direct_reduced_outputs(state) && state.djules_deep_pipeline && djules_native_scheduler(state) && !djules_triple_director(state);
 }
 
@@ -9013,6 +9015,18 @@ struct GeneratedFrameEndInfo {
     std::vector<std::shared_ptr<xrfg::D3D12FrameSynthesizer>>
         pending_current_copies;
 };
+
+// Keep cameras attached to the exact endpoint pixels selected by OFR.
+bool realign_ofr_paired_metadata(GeneratedFrameEndInfo& first,
+    GeneratedFrameEndInfo& second,const ProjectionSnapshot& previous,bool swap) noexcept {
+    if(first.projections.size()!=1 || second.projections.size()!=1 || previous.layers.size()!=1 ||
+       first.projections[0].views.size()!=2 || second.projections[0].views.size()!=2 || previous.layers[0].views.size()!=2) return false;
+    const auto eye=xrfg::ofr::newer_eye(swap);
+    auto& a=first.projections[0].views[eye];auto& b=second.projections[0].views[eye];
+    b.pose=a.pose;b.fov=a.fov;
+    a.pose=previous.layers[0].views[eye].pose;a.fov=previous.layers[0].views[eye].fov;
+    return true;
+}
 
 // Observer only. A pending application release does not establish whether S
 // itself is ready, and a successful EndFrame does not establish GPU completion.
@@ -18575,16 +18589,9 @@ XrResult layer_end_frame_impl(
     }
 
     const bool ofr_single=state->nvidia_options.ofr && pair_ready && state->ofr_fresh_mask!=3;
-    if(state->nvidia_options.ofr && pair_ready && previous_snapshot) {
-        if(!ofr_single) {
-            const auto eye=xrfg::ofr::newer_eye(state->nvidia_options.ofr_swap);
-            auto& first=first_generated.projections[0].views[eye];
-            auto& second=current_generated.projections[0].views[eye];
-            second.pose=first.pose;second.fov=first.fov;
-            first.pose=previous_snapshot->layers[0].views[eye].pose;
-            first.fov=previous_snapshot->layers[0].views[eye].fov;
-        }
-    }
+    if(state->nvidia_options.ofr && pair_ready && previous_snapshot && !ofr_single &&
+       !realign_ofr_paired_metadata(first_generated,current_generated,*previous_snapshot,state->nvidia_options.ofr_swap))
+        return bypass_generation(GenerationPrepareReason::generated_end_info_failed);
     bool extra_ready=pair_ready && djules_triple_active(*state);
     if(extra_ready) {
         auto extra_destinations = synthetic_destinations;
