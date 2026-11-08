@@ -1670,6 +1670,15 @@ private:
 
 // Keep the user's OFXR selection untouched on disk. AFW-only is a startup
 // transport choice, not another generation backend or a Neural Rendering switch.
+[[nodiscard]] int selected_afw_mode() {
+    const auto reconstruction=xrfg::embedded::afw_snapshot().desired;
+    return reconstruction.ofr?0:reconstruction.mode;
+}
+[[nodiscard]] bool temporal_generation_requested() {
+    const auto control=xrfg::embedded::snapshot().desired;
+    return control.enabled || control.ofr;
+}
+
 [[nodiscard]] xrfg::embedded::Settings effective_session_settings(
     const SessionState& state, xrfg::embedded::Settings requested) noexcept {
     if(requested.ofr) {
@@ -2752,13 +2761,13 @@ void configure_session_guide_capture(const SessionState& state) {
     // turning AFW back on, but do not record native snapshots/markers here.
     const bool raw_luke_ofxr = state.luke_afw_enabled &&
         state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr &&
-        !state.hybrid_requested && xrfg::embedded::afw_snapshot().desired.mode == 0;
-    const bool outputs_needed=xrfg::embedded::snapshot().desired.enabled ||
-        (state.luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode!=0);
+        !state.hybrid_requested && selected_afw_mode() == 0;
+    const bool outputs_needed=temporal_generation_requested() ||
+        (state.luke_afw_enabled && selected_afw_mode()!=0);
     const bool enabled=xrfg::neural_rendering::status().enabled ||
         state.uevr_osr_active.load(std::memory_order_acquire) ||
         (outputs_needed && !raw_luke_ofxr && state.dlss_motion_vectors && (!state.luke_fresh_only ||
-            (!state.afw_only && xrfg::embedded::snapshot().desired.enabled) || xrfg::embedded::afw_snapshot().desired.mode!=0));
+            (!state.afw_only && temporal_generation_requested()) || selected_afw_mode()!=0));
     if(!enabled)
         xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::configure_ngx_guide_capture(state.d3d12_queue.Get(),enabled);
@@ -4199,7 +4208,7 @@ void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) 
     if(!session || !session->luke_afw_enabled || session->graphics_binding!=SessionGraphicsBinding::d3d11 ||
         session->application_frame_in_progress)return;
     const bool native_ready=(session->graphics_binding_capabilities&8ULL)!=0;
-    const bool afw_needed=xrfg::embedded::afw_snapshot().desired.mode!=0;
+    const bool afw_needed=selected_afw_mode()!=0;
     if(native_ready && (!afw_needed || session->luke_afw))return;
     // A sealed Outlaws session cannot discover a different owner or allocate
     // new XR outputs. A provider retired while OFF may resume on the already
@@ -6094,7 +6103,7 @@ XrResult layer_create_session_impl(
     state->luke_afw_enabled = xrfg::native_ingress::luke_detected();
     state->hybrid_requested=initial_control.desired.hybrid;
     if(state->hybrid_requested &&
-        !(state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode != 0) &&
+        !(state->luke_afw_enabled && selected_afw_mode() != 0) &&
         xrfg::dlss_motion_vector_publications()!=0) {
         // The flow runs at the Hybrid route's own resolution.
         state->nvidia_options.hybrid=true;
@@ -6103,14 +6112,14 @@ XrResult layer_create_session_impl(
         state->frame_generation_mode != xrfg::D3D12FrameGenerationMode::ofxr;
     const auto experimental_ini = current_layer_directory() / L"ofxr_bridge.ini";
     state->luke_afw_enabled = xrfg::native_ingress::luke_detected();
-    state->luke_fresh_only=state->luke_afw_enabled && xrfg::luke_hfw_producer_supported();
+    state->luke_fresh_only=state->luke_afw_enabled && !state->nvidia_options.ofr && xrfg::luke_hfw_producer_supported();
     state->luke_afw_odd_serial_is_left = xrfg::luke_host_odd_serial_is_left(
         xrfg::luke_host_game_directory(), experimental_ini);
     if (state->luke_afw_enabled && !state->nvidia_options.ofr) state->dlss_motion_vectors = true;
     state->djules_history_wait_enabled.store(ordinary_djules_route(*state), std::memory_order_relaxed);
     state->control_revision = initial_control.revision;
     state->generation_outputs_needed=state->menu_enabled ||
-        (state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode!=0);
+        (state->luke_afw_enabled && selected_afw_mode()!=0);
     state->separate_synthesis = effective_memory_control(*state,initial_control.desired.separate_synthesis);
     state->lower_vram = effective_memory_control(*state,initial_control.desired.lower_vram);
     state->single_director_requested = (initial_control.desired.pacing_mode==1);
@@ -6502,7 +6511,7 @@ XrResult layer_create_session_impl(
             if(SUCCEEDED(queue_result) && state->d3d12_queue)
                 state->graphics_binding_capabilities |= 8ULL;
             if (state->luke_afw_enabled && SUCCEEDED(queue_result) &&
-                xrfg::embedded::afw_snapshot().desired.mode!=0) {
+                selected_afw_mode()!=0) {
                 auto afw = std::make_shared<xrfg::LukeAfwSynthesizer>();
                 const HRESULT afw_result = afw->initialize(
                     state->d3d12_device.Get(), state->d3d12_queue.Get(),
@@ -7115,8 +7124,8 @@ XrResult layer_wait_frame_impl(
         // the worker can hold it while waiting for GPU completion. Producer
         // ownership is resolved only at the release/EndFrame handoffs.
         if (!adaptive_nvidia_presenter && !(state->luke_fresh_only &&
-            (state->afw_only || !xrfg::embedded::snapshot().desired.enabled) &&
-            xrfg::embedded::afw_snapshot().desired.mode==0)) {
+            (state->afw_only || !temporal_generation_requested()) &&
+            selected_afw_mode()==0)) {
             if (!state->d3d12_synthesis_queue)
                 static_cast<void>(wait_for_previous_session_synthesis(state,true));
             else
@@ -8301,8 +8310,8 @@ XrResult release_swapchain_image_locked(
 
     const bool idle_luke = state->session->luke_fresh_only &&
         (!state->session->luke_source_filter_armed ||
-         ((state->session->afw_only || !xrfg::embedded::snapshot().desired.enabled) &&
-          xrfg::embedded::afw_snapshot().desired.mode == 0));
+         ((state->session->afw_only || !temporal_generation_requested()) &&
+          selected_afw_mode() == 0));
     if (idle_luke) { history.reset(); d3d11_interop.reset(); }
     // Worker handoff precedes call_mutex on both APIs. The synchronous/pipelined
     // routes still need their own ownership gate, but never enter it from the director.
@@ -8319,8 +8328,8 @@ XrResult release_swapchain_image_locked(
         static_cast<void>(wait_for_previous_session_synthesis(state->session));
     }
     std::unique_lock<std::mutex> gpu_lock;
-    const bool captures_needed=xrfg::embedded::snapshot().desired.enabled ||
-        (state->session->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode!=0);
+    const bool captures_needed=temporal_generation_requested() ||
+        (state->session->luke_afw_enabled && selected_afw_mode()!=0);
     if (state->session->manual_control.stop_requested() || !captures_needed ||
         !state->projection_history_needed.load(std::memory_order_acquire)) {
         // Preserve the application's acquire/wait/release bookkeeping, but
@@ -8739,7 +8748,7 @@ XrResult release_swapchain_with_identity(
     bool worker_source = false;
     bool luke_duplicate = false;
     const bool afw_producer = state->session->luke_afw_enabled &&
-        xrfg::embedded::afw_snapshot().desired.mode != 0;
+        selected_afw_mode() != 0;
     {
         std::scoped_lock lock(state->mutex);
         worker_source = state->frame_generation != nullptr;
@@ -8788,7 +8797,7 @@ XrResult release_swapchain_with_identity(
         return result;
     }
     if (worker_source && !afw_producer &&
-        (!state->session->luke_fresh_only || (state->session->luke_source_filter_armed && !state->session->afw_only && xrfg::embedded::snapshot().desired.enabled))) {
+        (!state->session->luke_fresh_only || (state->session->luke_source_filter_armed && !state->session->afw_only && temporal_generation_requested()))) {
         // Only ordinary native D12 color captures use this early handoff.
         // Bridges, OSR/AFW, shared composition inputs and other backends retain
         // their existing ownership gates.
@@ -16453,9 +16462,9 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     if (force_startup_rendezvous && control.desired.enabled) return E_ABORT;
     // Published AER guides are not guides for the reconstructed peer eye.
     const bool hybrid_ready=control.desired.hybrid &&
-        !(state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode != 0) &&
+        !(state->luke_afw_enabled && selected_afw_mode() != 0) &&
         xrfg::dlss_motion_vector_publications()!=0;
-    const bool afw_needed=!control.desired.ofr && state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode!=0;
+    const bool afw_needed=!control.desired.ofr && state->luke_afw_enabled && selected_afw_mode()!=0;
     const bool outputs_needed=control.desired.enabled || afw_needed;
     const bool afw_use_changed=state->luke_afw_resources_needed &&
         afw_needed!=*state->luke_afw_resources_needed;
@@ -17312,7 +17321,7 @@ XrResult layer_end_frame_impl(
     // for a repeat, so the application's releases name the scene instead and
     // the meter shows new game frames, as it does with AFW or OSR on.
     if(!interface_stamp.scene_owner && state->luke_afw_enabled &&
-        xrfg::embedded::afw_snapshot().desired.mode==0) {
+        selected_afw_mode()==0) {
         interface_stamp.scene_owner=0x52454C4541534501ULL;
         interface_stamp.scene_serial=state->app_image_releases.load(std::memory_order_relaxed)+1;
     }

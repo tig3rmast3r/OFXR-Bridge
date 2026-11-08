@@ -619,6 +619,10 @@ bool generation(Panel& p) {
     bool changed=false;
     const float right=right_edge();
     title(p,"Frame generation");
+    if(draft.ofr_enabled) {
+        notice(p,Tone::idle,"OFR supplies the temporal reconstruction. Select its engine and Size under Reconstruction. Ordinary framegen preferences are retained for when OFR is off.");
+        return false;
+    }
     ImGui::SameLine();
     ImGui::SetCursorPosX(right-kSwitchWidth);
     changed|=switch_control(p,"Enable frame generation",draft.enabled,kHelpEnable);
@@ -1141,7 +1145,8 @@ bool tests(Panel& p) {
     if(state.benchmark.message[0])reason(p,state.benchmark.message);
     if(state.benchmark.csv_path[0]) reason(p,(std::string("CSV: ")+state.benchmark.csv_path).c_str());
     const bool modern=pacing_comparison_runtime(state.runtime);
-    const bool locked=active||!permitted||!state.connected;
+    if(draft.ofr_enabled)notice(p,Tone::idle,"Turn OFR off before running the ordinary framegen benchmark suites.");
+    const bool locked=active||!permitted||!state.connected||draft.ofr_enabled;
     group_title(p,"Suites");
     const bool optical=suite(p,"Without vectors","Run###Tests without vectors",benchmark_plan(false,false,modern,draft.advanced_mode).size(),locked);
     const bool complete=suite(p,"Complete","Run###Complete tests",benchmark_plan(true,false,modern,draft.advanced_mode).size(),locked);
@@ -1332,6 +1337,7 @@ std::string section_summary(const Panel& p,int index,bool& live,bool& alert) {
     alert=false;
     switch(index) {
     case 0: {
+        if(draft.ofr_enabled)return "Managed by OFR";
         live=interface_generation_active(state);
         if(!draft.enabled)return "Off";
         constexpr const char* names[]{"OFXR","FSR 3.1","DLSS-G","Hybrid","RIFE"};
@@ -1340,6 +1346,7 @@ std::string section_summary(const Panel& p,int index,bool& live,bool& alert) {
         return text;
     }
     case 1: {
+        if(draft.ofr_enabled){live=state.connected&&state.runtime.ofr_running;return "OFR";}
         live=state.connected && draft.afw_mode!=0 && state.runtime.afw_running && !state.runtime.afw_flat_scene;
         if(draft.afw_mode==0)return "Off";
         std::string text=draft.ofr_enabled ? "OFR" : draft.luke_osr==2 ? "OSR" : "AFW";
