@@ -1051,6 +1051,77 @@ void gta_protected_gpu_test() {
     require(!xrfg::luke_original_scene_identity(observed_tokens,{0,1}),"erased GPU markers invented a real scene identity");
     std::cout<<"GTA protected GPU: "<<checks<<" checks PASS\n";
 }
+void recovery_tests() {
+    xrfg::LukeOriginSearchPosition position;
+    position.configure(1);
+    xrfg::LukeColorOriginDecode absent{},found{711,false,400,407,700,955};
+    position.observed(absent,0,0,1024,512,100);
+    require(!position.scan_due(100)&&!position.scan_due(2099)&&position.scan_due(2100),
+        "marker loss did not wait two seconds before the first search");
+    position.observed(absent,0,0,1024,512,2000);
+    require(position.scan_due(2100),"repeated missing reads postponed search forever");
+    position.scanned(2100);
+    require(!position.scan_due(4099)&&position.scan_due(4100),"recovery search is not throttled to two seconds");
+    require(position.locate(found,0,0,1024,512)&&position.lost,"snapshot hint falsely restored a live token");
+    position.observed(found,0,0,1024,512,5000);
+    require(!position.lost&&!position.scan_due(9000)&&position.region.x==668&&position.region.y==384,
+        "live marker did not lock position and stop wider scans");
+    position.observed(absent,0,0,1024,512,9000);
+    require(position.lost&&position.region.width&&!position.scan_due(10999)&&position.scan_due(11000),
+        "new loss did not retain the compact position during its grace period");
+    position.observed(found,0,0,1024,512,10500);
+    require(!position.lost&&!position.scan_due(12000)&&position.region.x==668,
+        "transient marker recovery did not cancel the wider search");
+    position.observed(absent,0,0,1024,512,10600);
+    require(!position.scan_due(12599)&&position.scan_due(12600),"new transient loss reused an older deadline");
+    auto bad=found;bad.ambiguous=true;
+    require(!position.locate(bad,0,0,1024,512),"ambiguous snapshot learned a position");
+    position.configure(2);
+    require(!position.region.width&&!position.lost&&!position.next_scan_ms,"resize retained stale recovery state");
+
+    Gpu gpu;auto source=gpu.texture(1024,512),eye=gpu.texture(1024,512);
+    std::vector<ComPtr<ID3D12Resource>> uploads;
+    const auto draw=[&](std::uint32_t token,unsigned x,unsigned y) {
+        uploads.push_back(gpu.black_rows(source.Get(),0,512));uploads.push_back(gpu.black_rows(eye.Get(),0,512));
+        xrfg::configure_luke_color_origin_extent(1024,512);
+        xrfg::LukeColorOriginRect written{};
+        check(xrfg::mark_luke_color_origin(gpu.list.Get(),source.Get(),token,D3D12_RESOURCE_STATE_COMMON,
+            gpu.device.Get(),{},DXGI_FORMAT_UNKNOWN,&written),"recovery stamp");
+        gpu.crop(source.Get(),eye.Get(),written.x,written.y,256,8,x,y);gpu.submit();
+    };
+    const auto recover=[&](std::uint32_t expected) {
+        const auto deadline=GetTickCount64()+10000;
+        while(GetTickCount64()<deadline) {
+            std::uint32_t token{};const auto hr=xrfg::read_luke_color_origin(gpu.queue.Get(),eye.Get(),&token,
+                D3D12_RESOURCE_STATE_COMMON,5000);
+            require(!token||token==expected,"recovery returned a stale snapshot token");
+            if(SUCCEEDED(hr)&&token==expected)return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        require(false,"whole-eye GPU recovery timed out");
+    };
+    draw(711,700,400);recover(711);
+    // Same texture and dimensions, a completely different location and ID.
+    // The previous compact ROI now contains a black menu, not a new marker.
+    gpu.reset();uploads.push_back(gpu.black_rows(eye.Get(),0,512));gpu.submit();
+    std::uint32_t token{};
+    require(xrfg::read_luke_color_origin(gpu.queue.Get(),eye.Get(),&token,D3D12_RESOURCE_STATE_COMMON,5000)==
+        HRESULT_FROM_WIN32(ERROR_NOT_FOUND)&&!token,"menu reused learned marker identity");
+    gpu.reset();draw(712,120,240);recover(712);
+    std::cout<<"Periodic origin recovery: "<<checks<<" checks PASS\n";
+}
+int search_capture(char** argv) {
+    const unsigned width=std::stoul(argv[3]),height=std::stoul(argv[4]),pitch=std::stoul(argv[5]);
+    std::vector<std::byte> pixels(std::size_t(pitch)*height);
+    std::ifstream input(argv[2],std::ios::binary);require(bool(input),"search capture missing");
+    input.read(reinterpret_cast<char*>(pixels.data()),pixels.size());
+    const auto start=std::chrono::steady_clock::now();
+    const auto found=xrfg::find_luke_origin_position({pixels.data(),DXGI_FORMAT_B8G8R8A8_UNORM,width,height,pitch,true});
+    std::cout<<"SEARCH token="<<found.token<<" ambiguous="<<found.ambiguous<<" x="<<found.first_column
+        <<".."<<found.last_column<<" y="<<found.first_row<<" ms="
+        <<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<<'\n';
+    return found.token&&!found.ambiguous?0:1;
+}
 int captured_decode_benchmark(char** argv) {
  constexpr unsigned width=260,height=303,pitch=14080;
  std::array<std::vector<std::byte>,2> bytes;
@@ -1068,7 +1139,9 @@ int captured_decode_benchmark(char** argv) {
  std::sort(serial_ms.begin(),serial_ms.end());std::sort(parallel_ms.begin(),parallel_ms.end());std::cout<<"CAPTURED_DECODE serial_ms="<<serial_ms[7]<<" parallel_ms="<<parallel_ms[7]<<" token0="<<expected[0].token<<" token1="<<expected[1].token<<" ambiguous="<<expected[0].ambiguous<<','<<expected[1].ambiguous<<'\n';return 0;
 }
 int main(int argc,char** argv) {
-    try { if(argc==2 && std::string_view(argv[1])=="doom-hdr") {bright_hdr_gpu_test();return 0;}
+    try { if(argc==6&&std::string_view(argv[1])=="search-capture")return search_capture(argv);
+        if(argc==2&&std::string_view(argv[1])=="recovery") {recovery_tests();return 0;}
+        if(argc==2 && std::string_view(argv[1])=="doom-hdr") {bright_hdr_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="gta-protected") {gta_protected_gpu_test();return 0;}
         if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();windowed_decode_tests();rgb_windowed_decode_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }

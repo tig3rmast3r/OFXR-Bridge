@@ -74,6 +74,53 @@ struct Uploads {
     std::array<ComPtr<ID3D12Resource>, 2> colors;        // black, dim white
     std::array<ComPtr<ID3D12Resource>, 2> bright_colors; // black, full white (float outputs)
 };
+struct OriginSearchJob {
+    struct Image {
+        std::uint64_t geometry{};
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        LukeColorOriginDecode decoded{};
+        bool rgb_fallback{};
+    };
+    std::array<Image,2> images{};
+    ComPtr<ID3D12Resource> readback;
+    ComPtr<ID3D12Fence> fence;
+    UINT64 bytes{},value{};
+    bool started{};
+    std::atomic_bool ready{};
+};
+void start_origin_search(const std::shared_ptr<OriginSearchJob>& job) noexcept {
+    if(!job||job->started||!job->fence||job->fence->GetCompletedValue()<job->value)return;
+    try {
+        std::thread([job] {
+            try {
+                // Copy to ordinary cached memory before decoding. In particular
+                // do not borrow the frame reader's readback, lock or CPU pool.
+                std::array<std::vector<std::byte>,2> pixels;
+                void* mapped{};const D3D12_RANGE range{0,static_cast<SIZE_T>(job->bytes)};
+                if(SUCCEEDED(job->readback->Map(0,&range,&mapped))) {
+                    try {
+                        for(unsigned i=0;i<2;++i)if(job->images[i].geometry) {
+                            const auto& f=job->images[i].footprint;
+                            const auto pitch=f.Footprint.Width*luke_origin_pixel_bytes(f.Footprint.Format);
+                            pixels[i].resize(std::size_t(pitch)*f.Footprint.Height);
+                            for(unsigned y=0;y<f.Footprint.Height;++y)
+                                std::memcpy(pixels[i].data()+std::size_t(y)*pitch,
+                                    static_cast<const std::byte*>(mapped)+f.Offset+std::size_t(y)*f.Footprint.RowPitch,pitch);
+                        }
+                    } catch(...) { const D3D12_RANGE empty{};job->readback->Unmap(0,&empty);throw; }
+                    const D3D12_RANGE empty{};job->readback->Unmap(0,&empty);
+                    for(unsigned i=0;i<2;++i)if(job->images[i].geometry&&!pixels[i].empty()) {
+                        const auto& f=job->images[i].footprint.Footprint;
+                        job->images[i].decoded=find_luke_origin_position({pixels[i].data(),f.Format,
+                            f.Width,f.Height,f.Width*luke_origin_pixel_bytes(f.Format),job->images[i].rgb_fallback});
+                    }
+                }
+            } catch(...) {} // Allocation/map failure leaves recovery pending.
+            job->ready.store(true,std::memory_order_release);
+        }).detach();
+        job->started=true;
+    } catch(...) {} // Keep the owned, already-submitted snapshot and retry.
+}
 struct Reader {
     std::mutex mutex;
     ComPtr<ID3D12CommandQueue> queue;
@@ -86,6 +133,8 @@ struct Reader {
     HANDLE event{};
     bool poisoned{};
     std::array<LukeOriginRowWindow, 2> windows{}; // per color slot, under mutex
+    std::array<LukeOriginSearchPosition,2> positions{};
+    std::shared_ptr<OriginSearchJob> search;
     // Black bars: a measurement is adopted once kBarAgreement consecutive ones
     // agree within kBarTolerance pixels, so a dark scene beside a bar does not
     // move the mark from frame to frame. Under mutex.
@@ -484,6 +533,24 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
     };
     try {
         if (!queue) return finish(E_POINTER);
+        std::shared_ptr<Reader> reader;
+        HRESULT result=get_reader(queue,reader);
+        if(FAILED(result))return finish(result);
+        std::scoped_lock lock(reader->mutex);
+        if(reader->search) {
+            start_origin_search(reader->search);
+            if(reader->search->ready.load(std::memory_order_acquire)) {
+                for(unsigned i=0;i<2;++i) {
+                    const auto& found=reader->search->images[i];auto& position=reader->positions[i];
+                    if(found.geometry&&found.geometry==position.geometry&&position.lost&&
+                        position.locate(found.decoded,0,0,found.footprint.Footprint.Width,found.footprint.Footprint.Height))
+                        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,0,1323,
+                            (std::uint64_t(position.region.x)<<32)|position.region.y,
+                            (std::uint64_t(position.region.width)<<32)|position.region.height);
+                }
+                reader->search.reset();
+            }
+        }
         const auto output_extent=g_output_extent.load(std::memory_order_acquire);
         unsigned valid_count{};
         for (unsigned i=0; i<count; ++i) {
@@ -507,14 +574,15 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
                 report_origin_layout(false,2,output_extent,extent_bits(static_cast<UINT>(original.Width),original.Height));
                 results[i]=E_PENDING; continue;
             }
+            std::uint64_t key=1469598103934665603ULL;
+            for(const std::uint64_t value:{original.Width,std::uint64_t(original.Height),std::uint64_t(original.Format)})
+                {key^=value;key*=1099511628211ULL;}
+            auto& position=reader->positions[i];position.configure(key|1);
+            if(position.region.width&&position.region.height)plan.layout.scan=position.region;
             plan.valid=true; ++valid_count;
             reports[i].width=plan.layout.scan.width; reports[i].height=plan.layout.scan.height;
         }
         if (!valid_count) return finish(results[0]);
-        std::shared_ptr<Reader> reader;
-        HRESULT result=get_reader(queue,reader);
-        if (FAILED(result)) return finish(result);
-        std::scoped_lock lock(reader->mutex);
         const bool timing=bridge_flight_logger().ram_enabled() || bridge_flight_logger().enabled();
         const auto phase=[&](unsigned stage,HRESULT hr) {
             if (timing) bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
@@ -531,6 +599,31 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
                 ~(UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT)-1);
             reader->device->GetCopyableFootprints(&roi,0,1,offset,&plan.footprint,nullptr,nullptr,nullptr);
             bytes=plan.footprint.Offset+UINT64(plan.footprint.Footprint.RowPitch)*roi.Height;
+        }
+        std::shared_ptr<OriginSearchJob> search;
+        const auto now=GetTickCount64();
+        if(!reader->search) {
+            for(unsigned i=0;i<count;++i)if(plans[i].valid&&reader->positions[i].scan_due(now)) {
+                reader->positions[i].scanned(now);
+                if(!search)search=std::make_shared<OriginSearchJob>();
+                auto& image=search->images[i];image.geometry=reader->positions[i].geometry;
+                image.rgb_fallback=gta_color_origin();
+                auto desc=plans[i].original;desc.MipLevels=1;
+                const auto offset=(search->bytes+D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT-1)&
+                    ~(UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT)-1);
+                reader->device->GetCopyableFootprints(&desc,0,1,offset,&image.footprint,nullptr,nullptr,nullptr);
+                search->bytes=image.footprint.Offset+UINT64(image.footprint.Footprint.RowPitch)*desc.Height;
+            }
+            if(search) {
+                D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;
+                D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
+                desc.Width=search->bytes;desc.Height=desc.DepthOrArraySize=desc.MipLevels=desc.SampleDesc.Count=1;
+                desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                const auto hr=reader->device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&search->readback));
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,hr,1322,search->bytes,now);
+                if(FAILED(hr))search.reset(); // Compact reads continue independently.
+            }
         }
         // Black bars: the middle column (top and bottom) and middle row (left)
         // of the first valid eye.
@@ -581,6 +674,12 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             const auto& scan=plan.layout.scan;
             const D3D12_BOX box{scan.x,scan.y,0,scan.x+scan.width,scan.y+scan.height,1};
             reader->list->CopyTextureRegion(&destination,0,0,0,&source,&box);
+            if(search&&search->images[i].geometry) {
+                destination.pResource=search->readback.Get();
+                destination.PlacedFootprint=search->images[i].footprint;
+                reader->list->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
+                destination.pResource=reader->readback.Get();
+            }
             if (static_cast<int>(i)==bars_from) {
                 const UINT width=static_cast<UINT>(plan.original.Width),height=plan.original.Height;
                 destination.PlacedFootprint=column_footprint;
@@ -599,10 +698,12 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
         if (FAILED(result)) return finish(result);
         ID3D12CommandList* lists[]{reader->list.Get()};
         if(receipt)receipt->submitted=true;
+        if(search)reader->search=search; // Own the snapshot even if Signal fails.
         queue->ExecuteCommandLists(1,lists);
         const auto value=reader->next_fence++;
         result=queue->Signal(reader->fence.Get(),value);
         if (FAILED(result)) { reader->poisoned=true; return finish(result); }
+        if(search) {search->fence=reader->fence;search->value=value;}
         if(receipt) {receipt->fence=reader->fence;receipt->value=value;}
         reader->last_fence=value;
         phase(126,static_cast<HRESULT>(valid_count)); // Number of colors in this submission.
@@ -616,6 +717,7 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
                 reinterpret_cast<std::uintptr_t>(reader->device.Get()),49305);
             return finish(result);
         }
+        start_origin_search(reader->search);
         void* mapped{}; const D3D12_RANGE range{0,static_cast<SIZE_T>(bytes)};
         result=reader->readback->Map(0,&range,&mapped);
         if (FAILED(result)) return finish(result);
@@ -675,6 +777,9 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             results[i]=decoded[i].ambiguous ? HRESULT_FROM_WIN32(ERROR_INVALID_DATA) :
                 decoded[i].token ? S_OK : HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
             if(SUCCEEDED(results[i]))tokens[i]=decoded[i].token;else decode_status=results[i];
+            const auto& p=plans[i];
+            reader->positions[i].observed(decoded[i],p.layout.scan.x,p.layout.scan.y,
+                static_cast<unsigned>(p.original.Width),p.original.Height,GetTickCount64());
         }
         const D3D12_RANGE no_write{0,0}; reader->readback->Unmap(0,&no_write);
         phase(125,decode_status);
@@ -683,6 +788,22 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
       catch (...) { return finish(E_FAIL); }
 }
 } // namespace
+
+LukeColorOriginDecode find_luke_origin_position(const LukeColorOriginImage& image) noexcept {
+    // One row cannot enter the parallel decoder pool. A slow recovery search
+    // must never hold that pool's call mutex against the live frame decoder.
+    if(!image.pixels||image.height>8192)return {};
+    for(unsigned y=0;y<image.height;++y) {
+        auto row=image;row.pixels+=std::size_t(y)*image.row_pitch;row.height=1;
+        LukeColorOriginDecode decoded{};
+        decode_luke_origin_images(std::span(&row,1),std::span(&decoded,1));
+        if(decoded.token&&!decoded.ambiguous&&decoded.first_column>=0) {
+            decoded.first_row=decoded.last_row=static_cast<int>(y);
+            return decoded;
+        }
+    }
+    return {};
+}
 
 void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
     std::span<LukeColorOriginDecode> results, std::span<bool> nonblack) noexcept {
@@ -732,6 +853,8 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
                 if(observe_color)nonblack[i]=nonblack[i]||color_rows[y]!=0;
                 if(!row.token)continue;
                 if(result.token&&result.token!=row.token)result.ambiguous=true;result.token=row.token;
+                if(row.first_column>=0)result.first_column=result.first_column<0?row.first_column:std::min(result.first_column,row.first_column);
+                result.last_column=std::max(result.last_column,row.last_column);
                 const auto scan_row=static_cast<int>(y-offsets[i]);
                 if(run_first<0||scan_row>run_last+2)run_first=scan_row;
                 run_last=scan_row;
@@ -762,6 +885,8 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
                             const auto decoded=decode_luke_origin_row(row);
                             found.ambiguous|=decoded.ambiguous;
                             if(decoded.token) {
+                                if(decoded.first_column>=0)found.first_column=found.first_column<0?decoded.first_column:std::min(found.first_column,decoded.first_column);
+                                found.last_column=std::max(found.last_column,decoded.last_column);
                                 if(found.token&&found.token!=decoded.token)found.ambiguous=true;
                                 found.token=decoded.token;
                             }
@@ -777,6 +902,8 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
                 if(!decoded.token)continue;
                 if(result.token&&result.token!=decoded.token)result.ambiguous=true;
                 result.token=decoded.token;
+                if(decoded.first_column>=0)result.first_column=result.first_column<0?decoded.first_column:std::min(result.first_column,decoded.first_column);
+                result.last_column=std::max(result.last_column,decoded.last_column);
                 const auto scan_row=static_cast<int>(y);
                 if(run_first<0||scan_row>run_last+2)run_first=scan_row;
                 run_last=scan_row;

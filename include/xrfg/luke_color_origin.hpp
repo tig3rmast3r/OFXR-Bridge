@@ -34,7 +34,7 @@ constexpr bool luke_origin_white(std::uint32_t token, unsigned x) noexcept {
     return (x % 4 < 2) == luke_origin_bit(token, x / 4);
 }
 // Image batches also report the first/last scanned row holding the token.
-struct LukeColorOriginDecode { std::uint32_t token{}; bool ambiguous{}; int first_row{-1}, last_row{-1}; };
+struct LukeColorOriginDecode { std::uint32_t token{}; bool ambiguous{}; int first_row{-1}, last_row{-1}; int first_column{-1},last_column{-1}; };
 inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) noexcept {
     try {
         if (row.size() < 96 || row.size() > 16384) return {};
@@ -166,6 +166,10 @@ inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) 
                         if (!valid || !token || checksum != luke_origin_crc(token)) continue;
                         if (result.token && result.token != token) result.ambiguous = true;
                         result.token = token;
+                        const int left=static_cast<int>(std::floor(origin-cell));
+                        const int right=static_cast<int>(std::ceil(origin+127*cell));
+                        result.first_column=result.first_column<0?left:std::min(result.first_column,left);
+                        result.last_column=std::max(result.last_column,right);
                     }
                 }
             }
@@ -304,6 +308,48 @@ unsigned decode_luke_origin_images_windowed(std::span<const LukeColorOriginImage
     std::span<const std::uint64_t> geometry, std::span<LukeOriginRowWindow> windows,
     std::span<LukeColorOriginDecode> results, std::span<bool> nonblack = {}) noexcept;
 struct LukeColorOriginRect { unsigned x{}, y{}, width{}, height{}; };
+// A search result is only a position hint. Identity always comes from a new
+// compact read of the current color, never the older asynchronous snapshot.
+struct LukeOriginSearchPosition {
+    std::uint64_t geometry{}, next_scan_ms{};
+    LukeColorOriginRect region{};
+    bool lost{};
+    void configure(std::uint64_t key) noexcept {
+        if(geometry!=key) { *this={};geometry=key; }
+    }
+    bool scan_due(std::uint64_t now) const noexcept { return lost&&now>=next_scan_ms; }
+    void scanned(std::uint64_t now) noexcept { next_scan_ms=now+2000; }
+    bool locate(const LukeColorOriginDecode& decoded, unsigned x, unsigned y,
+        unsigned width,unsigned height) noexcept {
+        if(!decoded.token||decoded.ambiguous||decoded.first_row<0||decoded.last_row<decoded.first_row||
+            decoded.first_column<0||decoded.last_column<decoded.first_column)return false;
+        const auto left=std::uint64_t(x)+decoded.first_column,right=std::uint64_t(x)+decoded.last_column;
+        const auto top=std::uint64_t(y)+decoded.first_row,bottom=std::uint64_t(y)+decoded.last_row;
+        if(right>=width||bottom>=height)return false;
+        const unsigned rx=left>32?static_cast<unsigned>(left)-32:0;
+        const unsigned ry=top>16?static_cast<unsigned>(top)-16:0;
+        region={rx,ry,static_cast<unsigned>(std::min<std::uint64_t>(width,right+33))-rx,
+            static_cast<unsigned>(std::min<std::uint64_t>(height,bottom+17))-ry};
+        return true;
+    }
+    void observed(const LukeColorOriginDecode& decoded,unsigned x,unsigned y,
+        unsigned width,unsigned height,std::uint64_t now) noexcept {
+        const bool recovered=region.width!=0;
+        const bool missing=!locate(decoded,x,y,width,height);
+        // Debounce the transition, not each failed read: sustained loss must
+        // eventually search, while every new loss gets its own grace period.
+        if(missing&&!lost)next_scan_ms=std::max(next_scan_ms,now+2000);
+        lost=missing;
+        // The normal layout already covers all negotiated crop offsets. Keep
+        // that protection; only a wider-search recovery overrides its ROI.
+        // Retain a recovered position through transient loss so the returning
+        // live marker can cancel recovery without any full-eye GPU copy.
+        if(!recovered)region={};
+    }
+};
+// Exhaustive full-width rows on a sleeping recovery worker. Stops on the first
+// complete unambiguous CRC; callers use only its location, then re-read live.
+LukeColorOriginDecode find_luke_origin_position(const LukeColorOriginImage& image) noexcept;
 inline constexpr unsigned kLukeOriginHeight = 8;
 inline constexpr unsigned kLukeOriginMargin = 2;
 struct LukeColorOriginLayout {
