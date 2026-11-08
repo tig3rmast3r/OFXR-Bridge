@@ -12,6 +12,8 @@ void EvaluateBeforeUpscale(unsigned int handle, ID3D12GraphicsCommandList* list,
     const NVSDK_NGX_Parameter* parameters, ID3D12CommandQueue* timingQueue = nullptr);
 void EvaluateAfterUpscale(unsigned int handle, ID3D12GraphicsCommandList* list,
     const NVSDK_NGX_Parameter* parameters, ID3D12CommandQueue* timingQueue = nullptr);
+bool EvaluateAfterUpscaleNeedsCopyback(unsigned int handle, ID3D12GraphicsCommandList* list,
+    const NVSDK_NGX_Parameter* parameters, ID3D12CommandQueue* timingQueue = nullptr);
 std::vector<NrSubmissionReceipt> TakeCommandListSubmissionReceipts(
     unsigned int count, ID3D12CommandList* const* lists);
 void CompleteCommandListSubmission(ID3D12CommandQueue* queue,

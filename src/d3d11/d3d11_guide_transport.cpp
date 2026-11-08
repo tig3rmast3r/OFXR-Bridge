@@ -30,25 +30,10 @@ struct D3D11GuideTransport::Impl {
     ComPtr<ID3D12Fence> copy12,done12;
     HANDLE event{};
     std::uint64_t copied{},submitted{};
-    bool recording{},pending_copies{};
+    bool recording{};
     ~Impl() { if (event) CloseHandle(event); }
-    bool complete() const { return !pending_copies && (!submitted || !done12 || done12->GetCompletedValue()>=submitted); }
-    HRESULT flush_copies() {
-        if (!pending_copies) return S_OK;
-        HRESULT result=context->Signal(copy11.Get(),++copied);
-        if (FAILED(result)) return result;
-        context->Flush();
-        result=queue->Wait(copy12.Get(),copied);
-        if (SUCCEEDED(result)) pending_copies=false;
-        return result;
-    }
+    bool complete() const { return !submitted || !done12 || done12->GetCompletedValue()>=submitted; }
     HRESULT drain() {
-        // A failed/abandoned evaluation may have recorded D11 copies without
-        // submitting its D12 list. Retire those copies before releasing storage.
-        if (pending_copies) {
-            HRESULT result=flush_copies(); if (FAILED(result)) return result;
-            result=queue->Signal(done12.Get(),++submitted); if (FAILED(result)) return result;
-        }
         if (complete()) return S_OK;
         HRESULT result=done12->SetEventOnCompletion(submitted,event);
         if (FAILED(result)) return result;
@@ -59,7 +44,6 @@ struct D3D11GuideTransport::Impl {
         if (desc.ArraySize!=1 || desc.MipLevels!=1 || desc.SampleDesc.Count!=1) return E_INVALIDARG;
         auto& texture=textures[role]; const auto& old=texture.source;
         if (texture.d12 && old.Width==desc.Width && old.Height==desc.Height && old.Format==desc.Format) return S_OK;
-        if (texture.d12) {const HRESULT result=drain(); if (FAILED(result)) return result;}
         DXGI_FORMAT format=desc.Format;
         if (format==DXGI_FORMAT_D32_FLOAT) format=DXGI_FORMAT_R32_TYPELESS;
         if (format==DXGI_FORMAT_D16_UNORM) format=DXGI_FORMAT_R16_TYPELESS;
@@ -217,13 +201,13 @@ HRESULT D3D11GuideTransport::copy(Role role, ID3D11Resource* source) noexcept {
         result=impl_->prepare(role,texture.Get()); if (FAILED(result)) return result;
         if (impl_->textures[role].unpacked) {result=impl_->unpack(impl_->textures[role],texture.Get()); if (FAILED(result)) return result;}
         else impl_->context->CopyResource(impl_->textures[role].d11.Get(),texture.Get());
-        impl_->pending_copies=true; return S_OK;
+        result=impl_->context->Signal(impl_->copy11.Get(),++impl_->copied); if (FAILED(result)) return result;
+        impl_->context->Flush(); return impl_->queue->Wait(impl_->copy12.Get(),impl_->copied);
     } catch (...) { return E_FAIL; }
 }
 HRESULT D3D11GuideTransport::submit() noexcept {
     if (!impl_ || !impl_->recording) return E_UNEXPECTED;
     HRESULT result=impl_->list->Close(); impl_->recording=false; if (FAILED(result)) return result;
-    result=impl_->flush_copies(); if (FAILED(result)) return result;
     ID3D12CommandList* lists[]{impl_->list.Get()}; impl_->queue->ExecuteCommandLists(1,lists);
     result=impl_->queue->Signal(impl_->done12.Get(),++impl_->submitted);
     report_dlss_motion_vector_submission(impl_->queue.Get(),1,lists);

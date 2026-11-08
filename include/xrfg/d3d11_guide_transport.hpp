@@ -14,7 +14,6 @@ public:
     ~D3D11GuideTransport();
     HRESULT initialize(ID3D11DeviceContext*, ID3D12Device*, ID3D12CommandQueue*) noexcept;
     HRESULT begin() noexcept;
-    // Record copies immediately on the game context; submit fences the batch.
     HRESULT copy(Role, ID3D11Resource*) noexcept;
     HRESULT submit() noexcept;
     HRESULT copy_back(Role, ID3D11Resource*) noexcept;

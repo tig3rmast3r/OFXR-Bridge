@@ -176,10 +176,9 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     auto& t=*f->transport;
     auto color=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Color));
     auto output=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Output));
+    if(output)clear_d3d11_guide_receipt(output.Get());
     auto motion=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_MotionVectors));
     auto depth_texture=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Depth));
-    const auto nr=neural_rendering::status();
-    const bool before=nr.enabled && nr.before_sr && color;
     // Depth is optional (0.2 V505): vectors alone drive Hybrid, as in Ready
     // or Not on 0.2. Luke Ross titles keep requiring it.
     if(!output||!motion||(!depth_texture&&luke_detected())) {
@@ -190,7 +189,7 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     if(const auto hr=t.copy(D3D11GuideTransport::motion,motion.Get());FAILED(hr)){note(5,hr,describe(motion.Get()));return fail();}
     const HRESULT depth_result=depth_texture?t.copy(D3D11GuideTransport::depth,depth_texture.Get()):E_POINTER;
     if(FAILED(depth_result)&&luke_detected()){note(6,depth_result,describe(depth_texture.Get()));return fail();}
-    if(before)if(const auto hr=t.copy(D3D11GuideTransport::color,color.Get());FAILED(hr)){note(7,hr,describe(color.Get()));return fail();}
+    if(color)if(const auto hr=t.copy(D3D11GuideTransport::color,color.Get());FAILED(hr)){note(7,hr,describe(color.Get()));return fail();}
     Parameters shadow(p,&t,SUCCEEDED(depth_result));
     DlssMotionVectorPublication g{};g.stream=reinterpret_cast<std::uintptr_t>(handle);
     g.producer_queue=queue.Get();g.verified_producer_device=device.Get();
@@ -220,18 +219,13 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
         capture_log("d3d11_stream_textures",extent(motion.Get()),extent(depth_texture.Get()),extent(output.Get()),
             describe(motion.Get()));
     }
-    if(before) {
-        nr_guides(t,true);
-        neural_rendering::before_sr(f->identity,t.list(),&shadow,queue.Get());
-        nr_guides(t,false);
-        if(FAILED(t.submit()))return raw();
-        if(FAILED(t.copy_back(D3D11GuideTransport::color,color.Get())))return raw();
-    }
-    // Capture guides before SR can recycle them, but fence them together with
-    // its output unless pre-SR NR needs the earlier submission and color return.
-    const auto result=raw();
-    if(NVSDK_NGX_FAILED(result)){if(!before)(void)t.submit();return result;}
-    if(before&&FAILED(t.begin()))return result;
+    nr_guides(t,true);
+    if(color)neural_rendering::before_sr(f->identity,t.list(),&shadow,queue.Get());
+    nr_guides(t,false);
+    if(FAILED(t.submit()))return raw();
+    if(color&&FAILED(t.copy_back(D3D11GuideTransport::color,color.Get())))return raw();
+    const auto result=raw();if(NVSDK_NGX_FAILED(result))return result;
+    if(FAILED(t.begin()))return result;
     if(FAILED(t.copy(D3D11GuideTransport::output,output.Get()))){(void)t.submit();return result;}
     g.output=t.resource(D3D11GuideTransport::output);g.producer_command_list=t.list();
     g.resource_state=g.depth_resource_state=g.output_resource_state=D3D12_RESOURCE_STATE_COMMON;
@@ -242,13 +236,16 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     note(!frame?9:g.depth?10:11,depth_result,describe(depth_texture.Get()));
     nr_guides(t,true);
     barrier(t,D3D11GuideTransport::output,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    neural_rendering::after_sr(f->identity,t.list(),&shadow,queue.Get());
+    const bool output_may_change=neural_rendering::after_sr_needs_copyback(f->identity,t.list(),&shadow,queue.Get());
     barrier(t,D3D11GuideTransport::output,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
     nr_guides(t,false);
     if(frame&&g.protect_snapshot_lifetime&&embedded::afw_snapshot().desired.mode!=0&&!nested_evaluation)
         mark_luke_color_origin(t.list(),g.output,frame->color_origin_token,D3D12_RESOURCE_STATE_COMMON,
             device.Get(),{g.output_x,g.output_y,g.output_width,g.output_height});
-    if(SUCCEEDED(t.submit())&&SUCCEEDED(t.copy_back(D3D11GuideTransport::output,output.Get()))&&frame) {
+    // Keep the original stages and every output that may carry NR or origin
+    // writes. Otherwise SR already produced the same pixels on the game device.
+    const bool copyback=output_may_change || g.protect_snapshot_lifetime || nested_evaluation || luke_detected();
+    if(SUCCEEDED(t.submit())&&(!copyback||SUCCEEDED(t.copy_back(D3D11GuideTransport::output,output.Get())))&&frame) {
         set_d3d11_guide_receipt(output.Get(),{generation,g.stream,frame->publication,g.output_width,g.output_height});
         (void)claim_d3d11_guides(game_device.Get(),generation);
     }
