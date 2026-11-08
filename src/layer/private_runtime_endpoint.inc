@@ -145,5 +145,16 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     dispatch->enumerate_swapchain_images=private_runtime_enumerate;
     dispatch->acquire_swapchain_image=private_runtime_acquire;dispatch->wait_swapchain_image=private_runtime_wait_image;
     dispatch->release_swapchain_image=private_runtime_release;dispatch->get_instance_proc_addr=private_runtime_get_proc;
-    state->private_runtime=std::move(transport);state->dispatch=std::move(dispatch);return S_OK;
+    state->private_runtime=std::move(transport);state->dispatch=std::move(dispatch);
+    // The private endpoint owns application Wait/Begin/End admission. HFW's
+    // older inline source-only clock must not bypass that admission and drop
+    // EndFrame on a held CPU render identity. After loading, that combination
+    // can spin virtual frames forever while starving the physical consumer.
+    // Keep native Legacy/AFW-only paths (no installed endpoint) unchanged.
+    if(state->luke_fresh_only) {
+        state->luke_fresh_only=false;
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_filter,
+            16,handle_value(state->handle),0,0);
+    }
+    return S_OK;
 }

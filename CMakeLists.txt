@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.916.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.917.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2579,4 +2579,9 @@ endif()
 if(TARGET xrfg_three_slot_director_tests)
     add_test(NAME xrfg_luke_private_startup COMMAND xrfg_three_slot_director_tests luke-private-startup)
     set_tests_properties(xrfg_luke_private_startup PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
+if(TARGET xrfg_three_slot_director_tests)
+    add_test(NAME xrfg_luke_private_clock COMMAND xrfg_three_slot_director_tests luke-private-clock)
+    set_tests_properties(xrfg_luke_private_clock PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()
