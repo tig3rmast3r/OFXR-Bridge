@@ -25,17 +25,17 @@ void automatic_choice_rules() {
     check(!benchmark_best({}),"empty results never invent a winner");
     check(benchmark_best({s(90,60),s(88.99,20)})==0,"more than one FPS loss is not hidden by low latency");
     check(benchmark_best({s(90,60),s(89,40)})==1,"one FPS is equivalent, so choose lower latency");
-    check(benchmark_best({s(90,40,8),s(89.5,43,1)})==1,"within three ms prefer stable FPS range");
-    check(benchmark_best({s(90,40,8),s(89.5,43.01,1)})==0,"stability cannot hide more than three ms latency");
+    check(benchmark_best({s(90,40,8),s(89.5,43,1)})==1,"within five ms prefer stable FPS range");
+    check(benchmark_best({s(90,40,8),s(89.5,45.01,1)})==0,"stability cannot hide more than five ms latency");
     check(benchmark_best({s(90,40,2,8),s(90,41,2,1)})==1,"equal FPS ranges use latency range");
     check(benchmark_best({s(90,40),s(90,39)})==1,"identical stability chooses exact lower latency");
     check(benchmark_best({s(90,40),s(89.5,40)})==0,"remaining tie chooses exact higher FPS");
     check(benchmark_best({s(90,40),s(89.1,35),s(88.2,30)})==1,"near-tie chains cannot drift below global FPS tolerance");
-    check(benchmark_best({s(90,40,5),s(90,41.5,4),s(90,44,1)})==1,"latency tolerance stays anchored to the global minimum");
+    check(benchmark_best({s(90,40,5),s(90,41.5,4),s(90,46,1)})==1,"latency tolerance stays anchored to the global minimum");
     BenchmarkSamples data;data.fps={89,90,91};data.latency={39,40,41};
     const auto score=benchmark_score(data,true);
     check(score.valid && score.fps==90 && score.latency==40 && score.fps_range==2 && score.latency_range==2,
-        "ranking uses the measured medians and complete min-max ranges");
+        "ranking uses the measured mean FPS, median latency and complete min-max ranges");
     check(!benchmark_score(data,false).valid,"failed and partial measurements cannot win");
     data.fps={90};check(!benchmark_score(data,true).valid,"single sample does not establish stability");
     data.fps={89,90};data.latency.clear();check(!benchmark_score(data,true).valid,"missing estimated latency cannot win");
@@ -73,11 +73,12 @@ void quality_choice_rules() {
     check(benchmark_best({score(81,20,0,4100,0,true),score(90,30)},true)==1,"unknown refresh never enables AFW priority");
 
 }
+#include "benchmark_cadence_tests.inc"
 int main() {
     const auto root=std::filesystem::temp_directory_path()/(L"ofxr-suite-"+std::to_wstring(GetCurrentProcessId()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",root.c_str());
     try {
-        buffer_plan_contract();automatic_choice_rules();quality_choice_rules();
+        buffer_plan_contract();automatic_choice_rules();quality_choice_rules();cadence_choice_rules();
         for(bool modern:{false,true})for(bool advanced:{false,true})for(bool luke:{false,true})for(bool full:{false,true}) {
             const auto plan=benchmark_plan(full,luke,modern,advanced);
             const auto expected=modern?(luke?74:full?97:73):(luke?20:full?25:19);
@@ -112,7 +113,7 @@ int main() {
         for(double hz:{72.,80.,90.,120.,144.}){
             auto plan=benchmark_plan(true,false,true,false);
             const auto boundary=std::find_if(plan.begin(),plan.end(),[](const auto& p){return p.generation==4 && p.rife_multiplier==3;})-plan.begin();
-            BenchmarkScore capped{hz,40,1,1,true};capped.display_hz=hz;capped.fps_min=hz-1;
+            BenchmarkScore capped{hz,40,1,1,true};capped.display_hz=hz;capped.fps_min=hz-.01;
             benchmark_prune_rife(plan,boundary,{capped});
             check(std::none_of(plan.begin(),plan.end(),[](const auto& p){return p.rife_multiplier==3;}),"3X skip follows arbitrary actual headsetHz");
             plan=benchmark_plan(true,false,true,false);capped.fps=hz-2;capped.fps_min=hz-3;
@@ -124,17 +125,17 @@ int main() {
         auto cheap=normal;cheap.fps=89;cheap.latency=20;cheap.osr_lower_quality=true;
         check(benchmark_best({normal,cheap},true)==0,"normal OSR wins over cheap when both reconstruction-only results qualify90percent");
         normal.fps=80;check(benchmark_best({normal,cheap},true)==1,"cheap OSR can win when normal misses90percent");
-        auto optical=BenchmarkScore{90,40,1,1,true};optical.display_hz=90;optical.fps_min=89.5;
+        auto optical=BenchmarkScore{90,40,1,1,true};optical.display_hz=90;optical.fps_min=89.999;
         auto rife=optical;rife.rife=true;rife.latency=43;
         auto vector=rife;vector.rife=false;vector.vectors=true;
-        check(benchmark_best({optical,rife})==1,"RIFE wins within3ms over other non-vectors");
-        check(benchmark_best({optical,rife,vector})==2,"native vectors precede RIFE within3ms");
-        rife.latency=43.01;vector.latency=43.01;
-        check(benchmark_best({optical,rife,vector})==0,"no route preference exceeds3ms");
+        check(benchmark_best({optical,rife})==1,"RIFE wins within5ms over other non-vectors");
+        check(benchmark_best({optical,rife,vector})==2,"native vectors precede RIFE within5ms");
+        rife.latency=45.01;vector.latency=45.01;
+        check(benchmark_best({optical,rife,vector})==0,"no route preference exceeds5ms");
         rife.latency=40;rife.fps_min=60;
         check(!benchmark_at_refresh(rife) && benchmark_best({rife,optical})==1,"median90 with a deep drop loses stable full refresh");
-        optical.display_hz=120;optical.fps=120;optical.fps_min=119;
+        optical.display_hz=120;optical.fps=120;optical.fps_min=119.999;
         check(benchmark_at_refresh(optical),"full-refresh stability follows headset Hz");
-        std::cout<<"Benchmark matrices, RIFE exact settings, four Luke reconstructions, stable refresh,3ms and vector/RIFE priorities PASS\n";return 0;
+        std::cout<<"Benchmark matrices, RIFE exact settings, four Luke reconstructions, stable refresh,5ms and vector/RIFE priorities PASS\n";return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

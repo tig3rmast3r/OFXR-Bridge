@@ -6,6 +6,7 @@
 #include <optional>
 #include <vector>
 #include "xrfg/scene_presentation_rate.hpp"
+#include "xrfg/delivery_cadence.hpp"
 
 namespace xrfg {
 
@@ -86,6 +87,7 @@ public:
     // This does not identify the source scene image. Attaches lazily on
     // the first call of any accessor after mark_established(), once.
     [[nodiscard]] std::optional<float> delivered_fps(std::int64_t now_ns) noexcept;
+    [[nodiscard]] DeliveryCadenceBatch delivered_cadence(std::int64_t now_ns) noexcept;
     struct SubmissionProbe {std::uint32_t frame{};double time{};float ready{};bool valid{};};
     [[nodiscard]] SubmissionProbe scene_submission_probe() noexcept;
     void scene_submission_completed(SubmissionProbe before,SceneIdentity scene) noexcept;

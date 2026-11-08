@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string_view>
 #include <vector>
+#include "xrfg/delivery_cadence.hpp"
 
 namespace xrfg {
 
@@ -29,8 +30,10 @@ class FpsCounter {
 public:
     void submitted(std::int64_t now_ns, bool synthetic, bool new_content = true) noexcept;
     [[nodiscard]] FpsSnapshot snapshot(std::int64_t now_ns) const noexcept;
+    [[nodiscard]] DeliveryCadenceBatch cadence(std::int64_t now_ns) const noexcept {return cadence_.snapshot(now_ns);}
     void reset() noexcept { *this = {}; }
 private:
+    DeliveryCadenceLog cadence_;
     struct Bucket {
         std::int64_t epoch{-1};
         std::uint32_t output{};

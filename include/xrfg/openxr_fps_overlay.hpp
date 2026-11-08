@@ -39,7 +39,8 @@ public:
     // retain direct, separate UI surfaces. A busy inventory defers admission.
     using NativeSwapchainCount=std::function<std::optional<unsigned>()>;
     void set_native_swapchain_count_source(NativeSwapchainCount source);
-    void set_runtime_acceptance_source(std::function<std::optional<float>(std::int64_t)> source, bool direct=false) noexcept;
+    void set_runtime_acceptance_source(std::function<std::optional<float>(std::int64_t)> source, bool direct=false,
+        std::function<DeliveryCadenceBatch(std::int64_t)> cadence={}) noexcept;
     using ObservedEndFrame=std::function<XrResult(const XrFrameEndInfo*,const std::shared_ptr<InterfaceDeliveryReceipt>&)>;
     struct PreparedEndFrame { XrResult result{XR_SUCCESS}; ObservedEndFrame submit; };
     using PrepareEndFrame=std::function<PreparedEndFrame()>;

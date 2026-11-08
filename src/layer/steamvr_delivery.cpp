@@ -174,6 +174,10 @@ struct SteamVrDelivery::Impl {
     bool owns_context{};
     ScenePresentationRate scene_receipts;
     std::optional<ScenePresentationRate::Rate> scene_rate;
+    DeliveryCadenceLog cadence;
+    std::uint32_t cadence_last_index{};
+    bool cadence_seen{};
+    std::int64_t cadence_observed_ns{-1},cadence_source_ns{};
 
     float delivered{};
     std::int64_t delivered_at_ns{-1};
@@ -313,10 +317,18 @@ struct SteamVrDelivery::Impl {
             system != nullptr ? 1 : 0);
     }
 
-    void poll_window() noexcept {
+    void poll_window(std::int64_t now) noexcept {
         std::array<vr::Compositor_FrameTiming, 64> window{};
         window[0].m_nSize = sizeof(vr::Compositor_FrameTiming);
         const auto filled = compositor->GetFrameTimings(window.data(), 64);
+        if(filled<=window.size())for(unsigned i=0;i<filled;++i) {
+            const auto& t=window[i];
+            if(!t.m_nNumFramePresents||(cadence_seen&&t.m_nFrameIndex<=cadence_last_index)||
+                !std::isfinite(t.m_flSystemTimeInSeconds)||t.m_flSystemTimeInSeconds<0)continue;
+            cadence_source_ns=static_cast<std::int64_t>(t.m_flSystemTimeInSeconds*1e9);
+            cadence.record(cadence_source_ns);cadence_last_index=t.m_nFrameIndex;
+            cadence_seen=true;cadence_observed_ns=now;
+        }
         presentation_rate = filled <= window.size()
             ? compositor_presentation_rate(std::span<const vr::Compositor_FrameTiming>(window.data(), filled))
             : std::nullopt;
@@ -371,6 +383,16 @@ std::optional<ScenePresentationRate::Rate> SteamVrDelivery::scene_fps(std::int64
     try {
         if(!delivered_fps(now))return {};
         std::scoped_lock lock(impl_->mutex);return impl_->scene_rate;
+    }catch(...){return {};}
+}
+
+DeliveryCadenceBatch SteamVrDelivery::delivered_cadence(std::int64_t now) noexcept {
+    try {
+        if(!impl_)return {};
+        std::scoped_lock lock(impl_->mutex);
+        if(!impl_->usable||impl_->cadence_observed_ns<0||now<impl_->cadence_observed_ns)return {};
+        // Same existing GetFrameTimings poll, no additional compositor call.
+        return impl_->cadence.snapshot(impl_->cadence_source_ns+now-impl_->cadence_observed_ns);
     }catch(...){return {};}
 }
 
@@ -455,7 +477,7 @@ std::optional<float> SteamVrDelivery::delivered_fps(std::int64_t now) noexcept {
         if (!impl_->usable) {
             return std::nullopt;
         }
-        impl_->poll_window();
+        impl_->poll_window(now);
         impl_->close_window(now);
         if (impl_->delivered_at_ns < 0 ||
             now - impl_->delivered_at_ns > kStaleNanoseconds) {

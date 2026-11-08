@@ -113,22 +113,46 @@ inline double benchmark_median(std::vector<double> values) {
 }
 struct BenchmarkSamples {
     std::vector<double> fps,latency,refresh_hz;
+    std::vector<std::uint64_t> fps_times;
+    BenchmarkCadenceSamples delivery,accepted;
+    unsigned delivery_source{};
     std::uint64_t last_ms{};
     bool generated{};
     void observe(const InterfaceTelemetry& m,std::uint64_t started,std::uint64_t end) {
         if(!m.updated_ms || m.updated_ms==last_ms || m.updated_ms<started+kBenchmarkSettleMs || m.updated_ms>=end) return;
         last_ms=m.updated_ms;
-        if((m.output_source==InterfaceSource::steamvr_delivery ||
+        const bool source_valid=m.output_source==InterfaceSource::steamvr_delivery ||
             m.output_source==InterfaceSource::steamvr_scene_delivery ||
             m.output_source==InterfaceSource::accepted_scene_submissions ||
-            m.output_source==InterfaceSource::runtime_accepted_delivery) && m.rates_valid &&
-            std::isfinite(m.output_fps) && m.output_fps>=0) fps.push_back(m.output_fps);
+            m.output_source==InterfaceSource::runtime_accepted_delivery;
+        if(source_valid) {
+            delivery_source=static_cast<unsigned>(m.output_source);
+            delivery.observe(m.output_cadence,delivery_source,m.updated_ms,started+kBenchmarkSettleMs);
+            accepted.observe(m.accepted_cadence,1,m.updated_ms,started+kBenchmarkSettleMs);
+        } else {delivery.unavailable();accepted.unavailable();}
+        if(source_valid && m.rates_valid && std::isfinite(m.output_fps) && m.output_fps>=0) {
+            fps.push_back(m.output_fps);fps_times.push_back(m.updated_ms);
+        }
         if(m.cycle_estimated_valid && std::isfinite(m.cycle_estimated_ms) && m.cycle_estimated_ms>=0)
             latency.push_back(m.cycle_estimated_ms);
         generated |= m.generating;
         if(std::isfinite(m.display_hz) && m.display_hz>0)refresh_hz.push_back(m.display_hz);
     }
 };
+inline constexpr double kBenchmarkLatencyWindowMs=5.0;
+inline double benchmark_sample_mean(const BenchmarkSamples& samples) {
+    if(samples.fps.empty())return 0;
+    if(samples.fps_times.size()==samples.fps.size()&&samples.fps.size()>1) {
+        double sum{},duration{};
+        for(std::size_t i=1;i<samples.fps.size();++i) {
+            if(samples.fps_times[i]<=samples.fps_times[i-1])continue;
+            const double dt=double(samples.fps_times[i]-samples.fps_times[i-1]);
+            sum+=(samples.fps[i-1]+samples.fps[i])*.5*dt;duration+=dt;
+        }
+        if(duration>0)return sum/duration;
+    }
+    double sum{};for(double x:samples.fps)sum+=x;return sum/samples.fps.size();
+}
 struct BenchmarkScore {
     double fps{}, latency{}, fps_range{}, latency_range{};
     bool valid{};
@@ -139,25 +163,66 @@ struct BenchmarkScore {
     bool triple{},rife{};
     double fps_min{-1};
     bool osr{},osr_lower_quality{};
+    // fps is the mean used by selection; old CSV medians remain separate.
+    double fps_median{};
+    bool cadence_valid{};
+    double frame_jitter_ms{-1},frame_p95_ms{-1},frame_p99_ms{-1},late_percent{-1};
+    std::uint64_t counted_intervals{},missed_slots{};
+    double observed_seconds{};
+    unsigned mean_source{}; // 1 output cadence,2 accepted unique cadence,3 sampled estimate
+    unsigned delivery_source{};
+    bool cadence_incomplete{};
 };
 inline BenchmarkScore benchmark_score(const BenchmarkSamples& samples,bool complete) {
     // A partial/failed trial, unknown timing or a single sample cannot establish
     // both performance and stability. Never turn missing measurements into zero.
-    const auto measured=[](const auto& values) {
-        return values.size()>=2 && std::all_of(values.begin(),values.end(),[](double x) {
-            return std::isfinite(x) && x>0;
+    const auto measured=[](const auto& values,bool zero=false) {
+        return values.size()>=2 && std::all_of(values.begin(),values.end(),[&](double x) {
+            return std::isfinite(x) && (zero?x>=0:x>0);
         });
     };
-    if(!complete || !measured(samples.fps) || !measured(samples.latency))return {};
+    if(!complete || !measured(samples.fps,true) || !measured(samples.latency))return {};
     const auto fps=std::minmax_element(samples.fps.begin(),samples.fps.end());
     const auto latency=std::minmax_element(samples.latency.begin(),samples.latency.end());
-    BenchmarkScore result{benchmark_median(samples.fps),benchmark_median(samples.latency),
+    BenchmarkScore result{benchmark_sample_mean(samples),benchmark_median(samples.latency),
         *fps.second-*fps.first,*latency.second-*latency.first,true};
-    result.fps_min=*fps.first;return result;
+    result.fps_min=*fps.first;result.fps_median=benchmark_median(samples.fps);
+    result.display_hz=benchmark_median(samples.refresh_hz);result.mean_source=3;
+    result.delivery_source=samples.delivery_source;
+    const auto delivery=samples.delivery.stats(result.display_hz),accepted=samples.accepted.stats(result.display_hz);
+    result.cadence_incomplete=(samples.delivery.attempted()&&!delivery.valid)||
+        (samples.accepted.attempted()&&!accepted.valid);
+    if(delivery.valid) {
+        const bool unique=accepted.valid&&accepted.mean_fps<delivery.mean_fps;
+        const auto& count=unique?accepted:delivery;
+        result.fps=count.mean_fps;result.mean_source=unique?2:1;
+        result.counted_intervals=count.frames;result.observed_seconds=count.seconds;
+        result.cadence_valid=accepted.valid;
+        result.frame_jitter_ms=delivery.jitter_ms;result.frame_p95_ms=delivery.p95_ms;
+        result.frame_p99_ms=delivery.p99_ms;result.late_percent=delivery.late_percent;
+        result.missed_slots=delivery.missed_slots;
+    }
+    result.valid=std::isfinite(result.fps)&&result.fps>0;return result;
 }
 inline bool benchmark_at_refresh(const BenchmarkScore& score) {
-    return score.valid && score.display_hz>0 && score.fps+1e-3>=score.display_hz &&
-        (score.fps_min<0 || score.fps_min+1e-3>=score.display_hz-1.0);
+    if(!score.valid||score.display_hz<=0||score.fps+.05<score.display_hz||score.cadence_incomplete)return false;
+    if(score.cadence_valid)return score.missed_slots==0 && score.frame_p99_ms>=0 &&
+        score.frame_p99_ms<=1.25*1000.0/score.display_hz;
+    // Unsupported receipts remain an explicitly labelled estimate. Do not call
+    // 89FPS minima fixed90, or infer regular deliveries from a 90FPS median.
+    return score.fps_min>=0 && score.fps_min+.001>=score.display_hz-.1;
+}
+inline auto benchmark_stability_key(const BenchmarkScore& s) {
+    return std::tuple{s.cadence_valid?0:1,
+        s.cadence_valid?s.late_percent:0.0,
+        s.cadence_valid?s.frame_jitter_ms:s.fps_range,
+        s.cadence_valid?s.frame_p99_ms:s.latency_range};
+}
+inline bool benchmark_stability_equivalent(const BenchmarkScore& a,const BenchmarkScore& b) {
+    if(a.cadence_valid!=b.cadence_valid)return false;
+    if(a.cadence_valid)return a.late_percent<=b.late_percent+1e-6 &&
+        a.frame_jitter_ms<=b.frame_jitter_ms+.05 && a.frame_p99_ms<=b.frame_p99_ms+.1;
+    return a.fps_range<=b.fps_range+.05 && a.latency_range<=b.latency_range+.1;
 }
 inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScore>& scores,bool luke=false) {
     // Anchor tolerances to the global maxima/minima, not pairwise comparisons:
@@ -169,6 +234,7 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         if(luke && !benchmark_afw_quality_allowed(s.shading,s.eye_long_side))continue;
         pool.push_back(i);
     }
+    if(pool.empty())return {};
     const auto full_quality=[&](std::size_t i){return scores[i].shading==0 && !scores[i].osr_lower_quality;};
     // Reconstruction-only is an explicit quality/latency preference, before the ordinary
     // full-refresh lock. Prefer normal quality when both results reach90%Hz.
@@ -197,6 +263,7 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         });
         if(has_full_quality)std::erase_if(pool,[&](auto i){return !full_quality(i);});
     }
+    if(pool.empty())return {};
     const bool optical_at_refresh=std::any_of(pool.begin(),pool.end(),[&](auto i) {
         return !scores[i].vectors && at_refresh(scores[i]);
     });
@@ -224,19 +291,27 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
     std::vector<std::size_t> vectors;
     if(optical_fps>0)for(const auto i:pool)if(scores[i].vectors &&
         (optical_at_refresh ? at_refresh(scores[i]) : optical_fps-scores[i].fps<=3+epsilon) &&
-        scores[i].latency<=optical_latency+3+epsilon)vectors.push_back(i);
-    if(!vectors.empty()) {pool=std::move(vectors);keep_fps(pool);}
-    else pool=std::move(ordinary);
+        scores[i].latency<=optical_latency+kBenchmarkLatencyWindowMs+epsilon)vectors.push_back(i);
+    // Keep quality preferences as tie-breaks AFTER stability, rather than
+    // forcing an unstable vector/RIFE candidate over a steadier peer.
+    keep_fps(vectors); // preserve the existing one-FPS vector-to-vector group
+    pool=std::move(ordinary);
+    for(auto i:vectors)if(std::find(pool.begin(),pool.end(),i)==pool.end())pool.push_back(i);
     double lowest=std::numeric_limits<double>::infinity();
     for(const auto i:pool)lowest=std::min(lowest,scores[i].latency);
-    std::erase_if(pool,[&](auto i){return scores[i].latency-lowest>3+epsilon;});
+    std::erase_if(pool,[&](auto i){return scores[i].latency-lowest>kBenchmarkLatencyWindowMs+epsilon;});
+    const auto stable=*std::min_element(pool.begin(),pool.end(),[&](auto a,auto b) {
+        return benchmark_stability_key(scores[a])<benchmark_stability_key(scores[b]);});
+    std::erase_if(pool,[&](auto i){return !benchmark_stability_equivalent(scores[i],scores[stable]);});
+    const bool vector=std::any_of(pool.begin(),pool.end(),[&](auto i){return scores[i].vectors;});
+    if(vector)std::erase_if(pool,[&](auto i){return !scores[i].vectors;});
     const bool rife=std::any_of(pool.begin(),pool.end(),[&](auto i){return scores[i].rife && !scores[i].vectors;});
     if(rife)std::erase_if(pool,[&](auto i){return !scores[i].rife && !scores[i].vectors;});
     std::optional<std::size_t> best;
     for(const auto i:pool) {
         const auto& score=scores[i];
-        if(score.latency-lowest>3+epsilon)continue;
-        const auto order=[](const auto& s) {return std::tuple{s.fps_range,s.latency_range,s.latency,-s.fps};};
+        if(score.latency-lowest>kBenchmarkLatencyWindowMs+epsilon)continue;
+        const auto order=[](const auto& s) {return std::tuple{s.latency,-s.fps};};
         if(!best || order(score)<order(scores[*best]))best=i;
     }
     return best;

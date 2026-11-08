@@ -82,6 +82,7 @@ struct OpenXrFpsOverlay::Impl {
     bool native_content_counter{};
     bool direct_acceptance{};
     std::function<std::optional<float>(std::int64_t)> runtime_acceptance;
+    std::function<DeliveryCadenceBatch(std::int64_t)> runtime_cadence;
     std::optional<float> runtime_rate(std::int64_t now) {
         if(runtime_acceptance)return runtime_acceptance(now);
         if(direct_acceptance){const auto s=counter.snapshot(now);if(s.sample_valid)return s.submitted_fps;}
@@ -902,8 +903,12 @@ struct OpenXrFpsOverlay::Impl {
         const auto fps = counter.snapshot(now);
         InterfaceTelemetry out{};
         poll_presented_output(delivery, now, out);
+        if(delivery)out.output_cadence=delivery->delivered_cadence(now);
+        out.accepted_cadence=counter.cadence(now);
         if(const auto accepted=runtime_rate(now)) {
             out.output_fps=*accepted;out.output_source=InterfaceSource::runtime_accepted_delivery;
+            out.output_cadence=runtime_cadence?runtime_cadence(now):counter.cadence(now);
+            out.accepted_cadence=out.output_cadence;
         }
         out.game_fps = fps.real_fps;
         out.generated_fps = fps.generated_fps;
@@ -916,6 +921,7 @@ struct OpenXrFpsOverlay::Impl {
             if(const auto scene=accepted_scenes.rate(now)) {
                 out.output_fps=scene->output;
                 out.output_source=InterfaceSource::accepted_scene_submissions;
+                out.output_cadence=out.accepted_cadence=accepted_scenes.cadence(now);
                 // Without OFXR the old real counter counts held AFW pairs/XR
                 // calls. Use actual source/AFW production identities instead.
                 if(!fps.active) {out.game_fps=scene->real;out.generated_fps=scene->generated;}
@@ -1119,8 +1125,10 @@ void OpenXrFpsOverlay::set_delivery_source(SteamVrDelivery* delivery) noexcept {
 void OpenXrFpsOverlay::set_native_swapchain_count_source(NativeSwapchainCount source) {
     std::scoped_lock lock(impl_->mutex);impl_->ui_native_count=std::move(source);impl_->ui_pair_choice.reset();
 }
-void OpenXrFpsOverlay::set_runtime_acceptance_source(std::function<std::optional<float>(std::int64_t)> source,bool direct) noexcept {
+void OpenXrFpsOverlay::set_runtime_acceptance_source(std::function<std::optional<float>(std::int64_t)> source,bool direct,
+    std::function<DeliveryCadenceBatch(std::int64_t)> cadence) noexcept {
     std::scoped_lock lock(impl_->mutex);impl_->runtime_acceptance=std::move(source);impl_->direct_acceptance=direct;
+    impl_->runtime_cadence=std::move(cadence);
 }
 void OpenXrFpsOverlay::set_unique_content_only(bool enabled) noexcept {
     std::scoped_lock lock(impl_->mutex);

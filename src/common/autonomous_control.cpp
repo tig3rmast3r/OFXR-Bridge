@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 90001;
+constexpr std::uint32_t kAbi = 92101;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1063,7 +1063,21 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
         csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_working_set_bytes);rec.stream<<',';
         csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_private_commit_bytes);rec.stream<<','<<quoted(verdict)<<','<<s.pacing_mode<<','<<rec.runtime<<','<<rec.legacy_vdxr<<','<<rec.eye_long_side<<',';
         if(rec.samples.refresh_hz.empty())rec.stream<<"N/A";else rec.stream<<benchmark_median(rec.samples.refresh_hz);
-        rec.stream<<','<<rec.vector_success<<','<<rec.bridge_buffer_capacity<<','<<s.luke_osr<<','<<s.luke_osr_lower_quality<<'\n';
+        rec.stream<<','<<rec.vector_success<<','<<rec.bridge_buffer_capacity<<','<<s.luke_osr<<','<<s.luke_osr_lower_quality;
+        const auto measured=benchmark_score(rec.samples,std::string_view(verdict)=="complete");
+        if(measured.valid) {
+            const char* source=measured.mean_source==1?"output frame intervals":measured.mean_source==2?
+                "accepted unique frame intervals":"sample-weighted estimate";
+            rec.stream<<','<<measured.fps<<','<<quoted(source)<<',';
+            if(measured.mean_source!=3)rec.stream<<measured.counted_intervals<<','<<measured.observed_seconds;
+            else rec.stream<<"N/A,N/A";
+            rec.stream<<','<<measured.cadence_valid<<','<<measured.delivery_source<<',';
+            if(measured.cadence_valid)rec.stream<<measured.frame_jitter_ms<<','<<measured.frame_p95_ms<<','
+                <<measured.frame_p99_ms<<','<<measured.missed_slots<<','<<measured.late_percent;
+            else rec.stream<<"N/A,N/A,N/A,N/A,N/A";
+            rec.stream<<','<<measured.cadence_incomplete;
+        } else rec.stream<<",N/A,N/A,N/A,N/A,0,N/A,N/A,N/A,N/A,N/A,N/A,1";
+        rec.stream<<'\n';
         rec.stream.flush();
         if(!rec.stream)throw std::runtime_error("CSV write failed");
     }
@@ -1088,7 +1102,7 @@ void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const Runtim
     rec.stream.open(path,std::ios::out|std::ios::trunc);
     rec.stream.imbue(std::locale::classic());rec.stream<<std::fixed<<std::setprecision(3);
     if(!rec.stream)throw std::runtime_error("Cannot create benchmark CSV");
-    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleMinimumMinMs,CycleMinimumMedianMs,CycleMinimumMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors,BridgeBuffer,OSRMode,OSRLowerQuality\n";
+    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleMinimumMinMs,CycleMinimumMedianMs,CycleMinimumMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors,BridgeBuffer,OSRMode,OSRLowerQuality,OutputFPSMean,FPSMeanSource,MeanFrameIntervals,MeanObservedSeconds,CadenceValid,CadenceSource,FrameIntervalStdDevMs,FrameIntervalP95Ms,FrameIntervalP99Ms,EstimatedMissedSlots,LongIntervalPercent,CadenceIncomplete\n";
     rec.stream.flush();if(!rec.stream)throw std::runtime_error("Cannot write benchmark CSV header");
     std::snprintf(b.csv_path,sizeof(b.csv_path),"%s",utf8_path(rec.layout_path).c_str());
 }
@@ -1134,8 +1148,8 @@ void suite_complete(Shared& shared,const SuiteRecorder& rec,std::uint64_t now) {
     auto label=result.label;
     const auto fps=std::minmax_element(result.samples.fps.begin(),result.samples.fps.end());
     const auto latency=std::minmax_element(result.samples.latency.begin(),result.samples.latency.end());
-    std::snprintf(b.message,sizeof(b.message),"Complete. Selected %s: %.1f FPS (%.1f-%.1f), %.1f ms (%.1f-%.1f).%s",
-        label.c_str(),score.fps,*fps.first,*fps.second,score.latency,*latency.first,*latency.second,
+    std::snprintf(b.message,sizeof(b.message),"Complete. Selected %s: %.2f mean FPS%s (%.1f-%.1f), %.1f ms (%.1f-%.1f).%s",
+        label.c_str(),score.fps,score.mean_source==3?" est.":"",*fps.first,*fps.second,score.latency,*latency.first,*latency.second,
         restart_afw_only ? " Restart the game to activate Frame Reconstruction only." : "");
 }
 void suite_advance(Shared& shared,SuiteRecorder& rec,std::uint64_t now) {

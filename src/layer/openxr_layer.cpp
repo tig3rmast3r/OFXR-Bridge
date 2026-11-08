@@ -6460,7 +6460,8 @@ XrResult layer_create_session_impl(
         if(state->dispatch->virtual_desktop_runtime ||
             state->dispatch->runtime_name.find("Pimax OpenXR")!=std::string::npos) {
             const auto rate=state->runtime_acceptance;
-            state->fps_overlay->set_runtime_acceptance_source(rate?std::function<std::optional<float>(std::int64_t)>([rate](auto now){return rate->rate(now);}):std::function<std::optional<float>(std::int64_t)>{},!rate);
+            state->fps_overlay->set_runtime_acceptance_source(rate?std::function<std::optional<float>(std::int64_t)>([rate](auto now){return rate->rate(now);}):std::function<std::optional<float>(std::int64_t)>{},!rate,
+                rate?std::function<xrfg::DeliveryCadenceBatch(std::int64_t)>([rate](auto now){return rate->cadence(now);}):std::function<xrfg::DeliveryCadenceBatch(std::int64_t)>{});
         }
         state->fps_overlay->set_unique_content_only(state->luke_fresh_only);
         state->fps_overlay->set_luke_scene_measurement(xrfg::native_ingress::luke_detected());

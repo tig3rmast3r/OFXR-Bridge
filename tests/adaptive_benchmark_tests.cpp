@@ -103,6 +103,17 @@ void controller(bool modern,bool full,bool luke,double base,double two,double th
     if(!multipliers[3])require(layout.find("RIFE Very High 3X")!=std::string::npos && layout.find("n.a.")!=std::string::npos,"pruned3X tiers retain empty export cells");
     require(layout.find("4X")==std::string::npos,"no4X columns in temporary suite");
     const auto details=read(layout_path.parent_path()/(layout_path.stem().wstring()+L"-details.csv"));
+    require(details.find("OutputFPSMean,FPSMeanSource,MeanFrameIntervals,MeanObservedSeconds,CadenceValid,CadenceSource,")!=std::string::npos,
+        "details append explicit mean, provenance and cadence without changing summary cells");
+    require(details.find("sample-weighted estimate")!=std::string::npos,
+        "legacy telemetry without per-frame receipts is explicitly estimated");
+    const auto columns=[](std::string_view line) {
+        unsigned count=1;bool quoted=false;
+        for(char c:line) {if(c=='\"')quoted=!quoted;else if(c==','&&!quoted)++count;}return count;
+    };
+    std::istringstream records(details);std::string line;std::getline(records,line);
+    const auto width=columns(line);require(width==51,"details retain 39 old columns plus 12 appended metrics");
+    while(std::getline(records,line))if(!line.empty())require(columns(line)==width,"all detail records match the header width");
     if(multipliers[3])require(details.find(",3,0,")!=std::string::npos,"details record the actual RIFE multiplier");
     require(r.dlssg_preset_request==1,"suite never changes the startup NVIDIA preset");
     std::cout<<"suite modern="<<modern<<" full="<<full<<" luke="<<luke<<" trials="<<done<<" RIFE="<<multipliers[2]<<'/'<<multipliers[3]<<'/'<<multipliers[4]<<" PASS\n";

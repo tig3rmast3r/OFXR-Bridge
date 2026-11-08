@@ -39,6 +39,7 @@ FpsCounter::Bucket& FpsCounter::bucket(std::int64_t now) noexcept {
 
 void FpsCounter::submitted(std::int64_t now, bool synthetic, bool new_content) noexcept {
     if (!new_content) return;
+    cadence_.record(now);
     auto& entry = bucket(now);
     ++entry.output;
     if (synthetic) ++entry.generated;

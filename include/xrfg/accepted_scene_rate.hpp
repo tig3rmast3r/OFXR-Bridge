@@ -1,5 +1,6 @@
 #pragma once
 #include "xrfg/scene_presentation_rate.hpp"
+#include "xrfg/delivery_cadence.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -14,15 +15,18 @@ class AcceptedSceneRate {
     std::array<Sample,1024> samples_{};
     std::size_t seen_next_{}, next_{};
     std::int64_t first_{-1}, unknown_{-1}, known_{-1};
+    DeliveryCadenceLog cadence_;
 public:
+    DeliveryCadenceBatch cadence(std::int64_t now) const noexcept {return cadence_.snapshot(now);}
     std::array<std::int64_t,3> diagnostic_times() const noexcept {return {first_,unknown_,known_};}
     void accepted(std::int64_t at,SceneIdentity scene) noexcept {
         if(at<0)return;
         if(first_<0)first_=at;
-        if(!scene) {unknown_=std::max(unknown_,at);return;}
+        if(!scene) {unknown_=std::max(unknown_,at);cadence_.invalidate();return;}
         known_=std::max(known_,at);
         if(std::find(seen_.begin(),seen_.end(),scene)!=seen_.end())return;
         seen_[seen_next_++%seen_.size()]=scene;
+        cadence_.record(at);
         samples_[next_++%samples_.size()]={at,scene};
     }
     std::optional<ScenePresentationRate::Rate> rate(std::int64_t now) const noexcept {
