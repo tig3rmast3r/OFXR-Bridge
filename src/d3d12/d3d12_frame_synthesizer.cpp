@@ -7623,7 +7623,8 @@ struct D3D12FrameSynthesizer::Impl {
             output_ticket->synthetic_destination_index =
                 synthetic_destination_index;
             output_ticket->current_destination_index = current_destination_index;
-            output_ticket->aer_retimed=nvidia_options.ofr;
+            output_ticket->held_capture=true;
+        output_ticket->aer_retimed=nvidia_options.ofr;
         output_ticket->synthetics_in_target_camera = true;
             return S_OK;
         }

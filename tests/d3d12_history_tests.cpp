@@ -3647,6 +3647,15 @@ void test_stereo_motion_synthesis_beats_same_pixel_blend(
             require(actual_synthetic==*midpoint_reference,"Alternating delivery changed the coherent midpoint");
             require(actual_current==current,"Alternating delivery must not rewrite the unused endpoint");
         }
+        if(validate_repeated_capture) {
+            xrfg::D3D12FrameSynthesisTicket held{};
+            require_hresult(synthesizer.submit_pair(capture_b,static_views,static_views,0,0,&held,
+                std::nullopt,{},false,.5F,{},std::nullopt,false,1),"AER held peer submission");
+            require_hresult(synthesizer.wait_for_previous_submission(30000),"AER held peer completion");
+            require(held.held_capture && held.aer_retimed,"AER recognizes the unchanged resource as a held peer");
+            const auto held_current=readback_pattern(fixture,current_destinations[0].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+            require(held_current==current,"AER held peer comes from raw current history, not a rewritten earlier output");
+        }
         require(operation_succeeded(synthesizer.wait_for_idle()),"OFR drain failed");
         fixture.require_no_debug_errors();return;
     }
@@ -6134,7 +6143,7 @@ int main(int argc, char** argv) {
                 test_stereo_motion_synthesis_beats_same_pixel_blend(fixture,backend,false,options,&reference);
                 options.ofr=true;
                 for(bool swap:{false,true}) {options.ofr_swap=swap;
-                    for(unsigned mask:{3u,1u,2u})test_stereo_motion_synthesis_beats_same_pixel_blend(fixture,backend,false,options,&reference,mask);
+                    for(unsigned mask:{3u,1u,2u})test_stereo_motion_synthesis_beats_same_pixel_blend(fixture,backend,mask==1,options,&reference,mask);
                 }
             }
             fixture.require_no_debug_errors();return 0;
@@ -6150,7 +6159,7 @@ int main(int argc, char** argv) {
                 options.ofr=true;
                 for(bool swap:{false,true}) {
                     options.ofr_swap=swap;
-                    for(unsigned mask:{3u,1u,2u})test_stereo_motion_synthesis_beats_same_pixel_blend(fixture,backend,false,options,&reference,mask);
+                    for(unsigned mask:{3u,1u,2u})test_stereo_motion_synthesis_beats_same_pixel_blend(fixture,backend,mask==1,options,&reference,mask);
                 }
             }
             fixture.require_no_debug_errors();return 0;

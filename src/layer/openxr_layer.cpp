@@ -13271,7 +13271,10 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         }
 
         if (SUCCEEDED(submit_result)) {
-            output.native_result=ticket.native_result;
+            // The unchanged peer is a real endpoint, not a provider refusal.
+            // Only the fresh eye contributes a native generation-success receipt.
+            output.native_result=state->session->nvidia_options.ofr&&ticket.held_capture
+                ? nullptr : ticket.native_result;
             output.aer_retimed=ticket.aer_retimed;
             output.synthetics_in_target_camera=!synthetic_views.empty() && ticket.synthetics_in_target_camera;
         }

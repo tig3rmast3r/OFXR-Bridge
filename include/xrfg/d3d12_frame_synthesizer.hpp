@@ -108,6 +108,7 @@ struct D3D12FrameSynthesisTicket {
     // camera and go to the runtime with B's pose.
     bool synthetics_in_target_camera{};
     bool aer_retimed{}; // accepted AER output transaction, distinct from provider bypass
+    bool held_capture{}; // repeated history sample; valid unchanged peer in AER
 };
 
 // Completed direct-queue GPU intervals for one NVIDIA Optical Flow pair.
