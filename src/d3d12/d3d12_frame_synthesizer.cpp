@@ -5335,10 +5335,11 @@ struct D3D12FrameSynthesizer::Impl {
         ID3D12Resource* current, std::span<const D3D12ReprojectionView> views) noexcept {
         if(!nvidia_options.ofr || !ofr_paired) return;
         const unsigned newer=nvidia_options.ofr_swap?0:1;
-        for(const auto& view:views) {
+        for(UINT index=0;index<views.size();++index) {
+            const auto& view=views[index];
             if(view.logical_eye!=newer) continue;
             const auto desc=raw_previous->GetDesc();
-            const UINT slice=view.array_slice==UINT32_MAX?0:view.array_slice;
+            const UINT slice=view.array_slice==UINT32_MAX?index:view.array_slice;
             const auto rect=view.image_rect;
             const UINT x=rect.width?rect.offset_x:0, y=rect.height?rect.offset_y:0;
             const UINT w=rect.width?rect.width:static_cast<UINT>(desc.Width);
