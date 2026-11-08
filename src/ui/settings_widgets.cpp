@@ -451,8 +451,8 @@ constexpr Help kHelpPreset{"DLSS-G preset","C uses Lite blending; A uses Full qu
 constexpr Help kHelpGenerated{"Generated resolution","Resolution of DLSS-G generated frames. Requires compatible NVIDIA DLSS-G hardware and runtime."};
 constexpr Help kHelpMethod{"Reconstruction","Rebuilds the eye the game skipped this frame. Applies live. Off stops it for every game, Luke Ross and UEVR alike; frame generation and Neural Rendering stay independent."};
 constexpr Help kHelpOsr{"OSR","OFXR Stereo Reconstruction. OFXR renders the missing eye itself from the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame. Used with Luke Ross and UEVR."};
-constexpr Help kHelpOfr{"OFR","OFXR Framegen Reconstruction. Select only for AER games: temporally aligns the eyes using same-eye optical flow. Requires history and adds lookahead."};
-constexpr Help kHelpOfrSwap{"Swap phase","Reverses which eye is assumed older. Does not exchange left and right images. Re-primes both histories."};
+constexpr Help kHelpOfr{"AER framegen","Declares AER input and alternates real/generated eyes using the selected generator. 2X only. Requires history; source phase is assumed. Saved per game."};
+constexpr Help kHelpOfrSwap{"Swap","Reverses which eye is assumed older. Does not exchange left and right images. Re-primes both histories."};
 constexpr Help kHelpAfw{"AFW","Legacy. Reconstructs the missing eye with the AFW provider. Luke Ross only."};
 constexpr Help kHelpOnly{"Frame Reconstruction only","Removes frame generation from the pipeline. Each application frame goes straight to the headset, and only the missing eye is reconstructed. The best choice for latency."};
 constexpr Help kHelpOsrQuality{"OSR quality","Faster reduces reconstruction work and may soften object edges. Colour stays full resolution. Live."};
@@ -619,10 +619,6 @@ bool generation(Panel& p) {
     bool changed=false;
     const float right=right_edge();
     title(p,"Frame generation");
-    if(draft.ofr_enabled) {
-        notice(p,Tone::idle,"OFR supplies the temporal reconstruction. Select its engine and Size under Reconstruction. Ordinary framegen preferences are retained for when OFR is off.");
-        return false;
-    }
     ImGui::SameLine();
     ImGui::SetCursorPosX(right-kSwitchWidth);
     changed|=switch_control(p,"Enable frame generation",draft.enabled,kHelpEnable);
@@ -631,6 +627,17 @@ bool generation(Panel& p) {
         return changed;
     }
 
+    if(draft.advanced_mode) {
+        changed|=toggle_row(p,"AER framegen","AER framegen",draft.ofr_enabled,kHelpOfr);
+        changed|=toggle_row(p,"Swap","AER Swap",draft.ofr_swap,kHelpOfrSwap,!draft.ofr_enabled);
+    }
+    if(draft.ofr_enabled) {
+        notice(p,Tone::idle,"AER framegen: 2X only. Uses the selected generator, quality and pacing. OSR/AFW are bypassed while framegen is enabled.");
+        if(state.connected) {
+            const char* delivery=state.runtime.ofr_delivery==1?"Alternating eye releases":state.runtime.ofr_delivery==2?"Paired releases (phase assumed)":"Learning release cadence";
+            reason(p,delivery);
+        }
+    }
     const bool no_vectors=state.connected && interface_vectors_text(state,GetTickCount64())=="None";
     auto routes=kRoutes;
     for(int i=1;i<4;++i)if(no_vectors) {routes[i].tag="No DLSS";routes[i].warn=true;}
@@ -643,18 +650,18 @@ bool generation(Panel& p) {
     const bool djules=draft.frame_generation==0 && draft.backend==3;
     const bool dlssg=draft.frame_generation==2;
     if(draft.frame_generation==4) {
-        int multiplier=draft.rife_multiplier-2;
-        if(segmented(p,"Multiplier","RIFE multiplier",multiplier,{{"2X"},{"3X"},{"4X"}},kHelpRifeMultiplier)) {
+        int multiplier=draft.ofr_enabled?0:draft.rife_multiplier-2;
+        if(segmented(p,"Multiplier","RIFE multiplier",multiplier,{{"2X"},{"3X",draft.ofr_enabled},{"4X",draft.ofr_enabled}},kHelpRifeMultiplier)) {
             draft.rife_multiplier=multiplier+2;changed=true;
         }
     } else if(djules||dlssg) {
         // DLSS-G also offers 4X (multi-frame generation), saved as its
         // frame_multiplier; 0.2.13 stops at 3X.
-        int multiplier=dlssg && draft.frame_multiplier==4 ? 2 : draft.triple_frame_gen ? 1 : 0;
+        int multiplier=draft.ofr_enabled?0:dlssg && draft.frame_multiplier==4 ? 2 : draft.triple_frame_gen ? 1 : 0;
         const bool locked=draft.lower_vram && !draft.separate_synthesis;
         const bool picked=dlssg
-            ? segmented(p,"Multiplier","Multiplier",multiplier,{{"2X"},{"3X"},{"4X"}},kHelpMultiplier,locked)
-            : segmented(p,"Multiplier","Multiplier",multiplier,{{"2X"},{"3X"}},kHelpMultiplier,locked);
+            ? segmented(p,"Multiplier","Multiplier",multiplier,{{"2X"},{"3X",draft.ofr_enabled},{"4X",draft.ofr_enabled}},kHelpMultiplier,locked)
+            : segmented(p,"Multiplier","Multiplier",multiplier,{{"2X"},{"3X",draft.ofr_enabled}},kHelpMultiplier,locked);
         if(picked) {
             draft.triple_frame_gen=multiplier>=1;
             if(dlssg)draft.frame_multiplier=multiplier==2 ? 4 : 2;
@@ -664,11 +671,11 @@ bool generation(Panel& p) {
             reason(p,"4X needs a GPU with DLSS multi-frame generation and the private SteamVR route with a D3D12 game; otherwise it runs at the highest multiplier the session supports.");
     } else if(optical_multiplier_route(draft)) {
         // Saved per route: each OFXR engine and Hybrid keep their own.
-        int multiplier=std::clamp(draft.frame_multiplier,2,4)-2;
-        if(segmented(p,"Multiplier","Multiplier",multiplier,{{"2X"},{"3X"},{"4X"}},kHelpMultiplier)) {
+        int multiplier=draft.ofr_enabled?0:std::clamp(draft.frame_multiplier,2,4)-2;
+        if(segmented(p,"Multiplier","Multiplier",multiplier,{{"2X"},{"3X",draft.ofr_enabled},{"4X",draft.ofr_enabled}},kHelpMultiplier)) {
             draft.frame_multiplier=multiplier+2;changed=true;
         }
-        if(draft.frame_multiplier>2)
+        if(!draft.ofr_enabled&&draft.frame_multiplier>2)
             reason(p,"Needs the private SteamVR route and a D3D12 game. VDXR and Pimax stop at 3X.");
     }
 
@@ -833,42 +840,24 @@ bool framewarp(Panel& p) {
     const auto& r=state.runtime;
     const auto now=GetTickCount64();
     const bool fresh=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
-    const bool ofr=draft.ofr_enabled;
     const bool osr=draft.luke_osr==2;
-    const char* source=!state.connected ? "No active game" : ofr ? "AER (selected by user)" : r.luke_detected ? "Luke Ross detected" :
+    const char* source=!state.connected ? "No active game" : r.luke_detected ? "Luke Ross detected" :
         r.uevr_osr ? "UEVR Alternating detected" : "None detected";
-    const bool active=state.connected && fresh && (ofr ? r.ofr_running : draft.afw_mode!=0 && r.afw_running && !r.afw_flat_scene);
-    const char* activity=!ofr && draft.afw_mode==0 ? "Off" : active ? "Active" :
-        state.connected && fresh && r.afw_flat_scene ? "2D scene (no stereo source)" :
-        ofr || reconstruction_source(r) ? "Waiting" : "N/A";
+    const bool active=state.connected && fresh && draft.afw_mode!=0 && r.afw_running && !r.afw_flat_scene;
+    const char* activity=draft.ofr_enabled&&draft.enabled ? "AER framegen" : draft.afw_mode==0 ? "Off" : active ? "Active" :
+        state.connected&&fresh&&r.afw_flat_scene ? "2D scene (no stereo source)" : reconstruction_source(r)?"Waiting":"N/A";
     const float right=right_edge();
-    title(p,"Reconstruction");
-    state_pill(p,active ? Tone::ok : Tone::idle,activity,right);
+    title(p,"Reconstruction");state_pill(p,active?Tone::ok:Tone::idle,activity,right);
     row(p,"Source",{},text_width(face_sans,p.m.body,source));
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("%s",source);
-
+    ImGui::AlignTextToFramePadding();ImGui::TextDisabled("%s",source);
     bool changed=false;
-    int reconstruction=ofr ? 3 : draft.afw_mode==0 ? 0 : osr ? 1 : 2;
-    if(segmented(p,"Method","Reconstruction",reconstruction,{{"Off",false,kHelpMethod},{"OSR",false,kHelpOsr},{"AFW",false,kHelpAfw},{"OFR",false,kHelpOfr}},kHelpMethod)) {
-        draft.ofr_enabled=reconstruction==3;
+    int reconstruction=draft.afw_mode==0?0:osr?1:2;
+    if(segmented(p,"Method","Reconstruction",reconstruction,{{"Off",false,kHelpMethod},{"OSR",false,kHelpOsr},{"AFW",false,kHelpAfw}},kHelpMethod)) {
         if(reconstruction==0)draft.afw_mode=0;
-        else {
-            draft.luke_osr=reconstruction==1 ? 2 : 0;
-            if(draft.afw_mode==0)draft.afw_mode=3;
-        }
+        else {draft.luke_osr=reconstruction==1?2:0;if(draft.afw_mode==0)draft.afw_mode=3;}
         changed=true;
     }
-    if(draft.ofr_enabled) {
-        if(segmented(p,"OFR engine","Engine",draft.ofr_backend,{{"FidelityFX"},{"OFXR"}},kHelpOfr))changed=true;
-        if(segmented(p,"OFR size","Size",draft.ofr_scale,{{"100%"},{"75%"},{"50%"},{"25%"}},kHelpResolution))changed=true;
-        changed|=toggle_row(p,"OFR swap","Swap phase",draft.ofr_swap,kHelpOfrSwap);
-        notice(p,Tone::idle,"Experimental AER reconstruction. Uses its own flow engine while selected; normal framegen settings are retained.");
-        if(state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode) notice(p,Tone::warn,"Restart the game to leave Reconstruction-only transport and activate OFR.");
-        const char* delivery=r.ofr_delivery==1?"Alternating eye releases":r.ofr_delivery==2?"Paired releases (phase assumed)":"Learning release cadence";
-        notice(p,Tone::idle,delivery);
-        return changed;
-    }
+    if(draft.ofr_enabled&&draft.enabled)notice(p,Tone::idle,"AER framegen is enabled under Frame generation. OSR/AFW preferences are retained and resume when it is off.");
     if(draft.afw_mode!=0 && draft.luke_osr!=2 && r.uevr_osr)
         notice(p,Tone::warn,"UEVR is reconstructed by OSR only: select OSR to reconstruct its missing eye.");
     changed|=toggle_row(p,"Frame Reconstruction only","Frame Reconstruction only",draft.afw_only,kHelpOnly,false,"Restart game");
@@ -1145,7 +1134,7 @@ bool tests(Panel& p) {
     if(state.benchmark.message[0])reason(p,state.benchmark.message);
     if(state.benchmark.csv_path[0]) reason(p,(std::string("CSV: ")+state.benchmark.csv_path).c_str());
     const bool modern=pacing_comparison_runtime(state.runtime);
-    if(draft.ofr_enabled)notice(p,Tone::idle,"Turn OFR off before running the ordinary framegen benchmark suites.");
+    if(draft.ofr_enabled)notice(p,Tone::idle,"Turn AER framegen off before running the ordinary benchmark suites.");
     const bool locked=active||!permitted||!state.connected||draft.ofr_enabled;
     group_title(p,"Suites");
     const bool optical=suite(p,"Without vectors","Run###Tests without vectors",benchmark_plan(false,false,modern,draft.advanced_mode).size(),locked);
@@ -1337,19 +1326,20 @@ std::string section_summary(const Panel& p,int index,bool& live,bool& alert) {
     alert=false;
     switch(index) {
     case 0: {
-        if(draft.ofr_enabled)return "Managed by OFR";
+
         live=interface_generation_active(state);
         if(!draft.enabled)return "Off";
         constexpr const char* names[]{"OFXR","FSR 3.1","DLSS-G","Hybrid","RIFE"};
         std::string text=names[std::clamp(draft.frame_generation,0,4)];
         if(draft.frame_generation!=1)text+=" "+std::to_string(generation_multiplier(draft))+"X";
+        if(draft.ofr_enabled)text+=" / AER";
         return text;
     }
     case 1: {
-        if(draft.ofr_enabled){live=state.connected&&state.runtime.ofr_running;return "OFR";}
+
         live=state.connected && draft.afw_mode!=0 && state.runtime.afw_running && !state.runtime.afw_flat_scene;
         if(draft.afw_mode==0)return "Off";
-        std::string text=draft.ofr_enabled ? "OFR" : draft.luke_osr==2 ? "OSR" : "AFW";
+        std::string text=draft.luke_osr==2 ? "OSR" : "AFW";
         if(draft.afw_only)text+=" only";
         return text;
     }

@@ -73,7 +73,7 @@ struct Settings {
     int luke_osr_cover{};  // OSR: band cover in depth texels beyond the hole, 0..8
     int luke_osr_trim{};   // OSR: object-edge texels replaced too, 0..2
     int luke_osr_fill{2};  // OSR: band fill gain, 1..8
-    bool ofr_enabled{}; // Explicit AER temporal reconstruction, exclusive with OSR/AFW.
+    bool ofr_enabled{}; // Advanced AER framegen modifier, common to all 2X methods.
     int ofr_backend{}; // 0 FidelityFX, 1 OFXR optical flow (NVIDIA).
     int ofr_scale{2}; // 0 100%, 1 75%, 2 50%, 3 25%; per-axis flow size.
     bool ofr_swap{}; // Reverse temporal phase, never the logical eye mapping.

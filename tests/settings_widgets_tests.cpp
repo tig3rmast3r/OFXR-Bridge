@@ -723,6 +723,31 @@ void desktop_header_is_not_a_headset_control() {
     require(called==1,"desktop may render its profile header");
 }
 
+void aer_framegen_widgets() {
+    auto saved=snapshot().desired;auto settings=saved;
+    settings.frame_generation=4;settings.enabled=true;settings.advanced_mode=false;
+    settings.ofr_enabled=false;settings.ofr_swap=false;settings.rife_multiplier=4;
+    require(request(settings),"AER UI basic setup");
+    for(bool compact:{false,true}) {
+        Context view(compact?ImVec2(1024,768):ImVec2(690,1000),compact);
+        view.draw();view.draw(true);
+        require(view.rendered_text.find("AER framegen")==std::string::npos,"AER flag hidden in Basic");
+        settings.advanced_mode=true;require(request(settings),"AER Advanced setup");view.draw();view.draw(true);
+        require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")!=std::string::npos,"Advanced shows both AER flags");
+        view.activate("/Generation_","AER framegen");view.draw();view.draw();
+        require(snapshot().desired.ofr_enabled && snapshot().desired.frame_generation==4,"AER toggle preserves selected RIFE method");
+        view.activate("/Generation_","AER Swap");view.draw();view.draw();
+        require(snapshot().desired.ofr_swap,"Swap toggle saved");
+        const auto multiplier=snapshot().desired.rife_multiplier;
+        view.choose("RIFE multiplier",1,"3X");
+        require(snapshot().desired.rife_multiplier==multiplier && generation_multiplier(snapshot().desired)==2,"AER disables higher multiplier buttons without erasing saved selection");
+        view.select_tab("Reconstruction");view.draw(true);
+        require(view.rendered_text.find("OFR")==std::string::npos && view.rendered_text.find("OFR size")==std::string::npos,"Reconstruction no longer contains separate OFR method");
+        settings.advanced_mode=false;settings.ofr_enabled=false;settings.ofr_swap=false;require(request(settings),"reset AER UI pass");
+    }
+    require(request(saved),"restore AER UI fixture settings");
+}
+
 int main(int argc, char** argv) {
     const auto profile = std::filesystem::temp_directory_path() /
         (L"ofxr-settings-widgets-" + std::to_wstring(GetCurrentProcessId()) +
@@ -733,7 +758,7 @@ int main(int argc, char** argv) {
         else if (argc == 2 && std::strcmp(argv[1], "--desktop-header") == 0) desktop_header_is_not_a_headset_control();
         else if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--route-multiplier") == 0) route_multiplier_widgets();
-        else { desktop_header_is_not_a_headset_control(); rebase_and_publish(); rife_catalog();rife_widgets();release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); }
+        else { desktop_header_is_not_a_headset_control(); rebase_and_publish(); rife_catalog();rife_widgets();release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); aer_framegen_widgets(); }
         std::filesystem::remove(configuration_path());
         std::filesystem::remove(profile/L"dlssg-profile-selection.ini");
         std::filesystem::remove(profile);

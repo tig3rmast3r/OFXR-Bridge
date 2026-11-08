@@ -5799,9 +5799,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.current_copy_command_list->CopyResource(
             current_destination,
             current_resource);
-        record_ofr_endpoints(slot.current_copy_command_list.Get(), previous_resource,
-            synthetic_destinations[synthetic_destination_index].resource.Get(), current_destination,
-            {current_source.views.data(),current_source.view_count});
+
         // DIAGNOSTIC. The real frame is otherwise indistinguishable from one
         // that never arrived: the purple marker rides only on the synthetic,
         // so a steady purple square means either "only synthetics are shown"
@@ -6374,9 +6372,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.current_copy_command_list->CopyResource(
             current_destination,
             current_resource);
-        record_ofr_endpoints(slot.current_copy_command_list.Get(), previous_resource,
-            synthetic_destinations[synthetic_destination_index].resource.Get(), current_destination,
-            {current_source.views.data(),current_source.view_count});
+
         // DIAGNOSTIC. The real frame is otherwise indistinguishable from one
         // that never arrived: the purple marker rides only on the synthetic,
         // so a steady purple square means either "only synthetics are shown"
@@ -6653,7 +6649,7 @@ struct D3D12FrameSynthesizer::Impl {
                 auto* selected=FAILED(result)&&job.fallback?job.fallback.Get():job.commands.Get();
                 ID3D12CommandList* lists[]{selected};queue->ExecuteCommandLists(1,lists);
                 two_frame_capture_submission(queue.Get(),1,lists);
-                if(job.copy){ID3D12CommandList* copies[]{job.copy.Get()};queue->ExecuteCommandLists(1,copies);}
+                if(job.copy && !(nvidia_options.ofr&&FAILED(generated))){ID3D12CommandList* copies[]{job.copy.Get()};queue->ExecuteCommandLists(1,copies);}
                 job.result->mask.store(SUCCEEDED(generated)?((1U<<job.result->outputs)-1U):0U,std::memory_order_release);
                 result=queue->Signal(fence.Get(),job.value);
                 if(FAILED(result))rife_error.store(result,std::memory_order_release);
@@ -7627,7 +7623,8 @@ struct D3D12FrameSynthesizer::Impl {
             output_ticket->synthetic_destination_index =
                 synthetic_destination_index;
             output_ticket->current_destination_index = current_destination_index;
-            output_ticket->synthetics_in_target_camera = true;
+            output_ticket->aer_retimed=nvidia_options.ofr;
+        output_ticket->synthetics_in_target_camera = true;
             return S_OK;
         }
 
@@ -7738,6 +7735,16 @@ struct D3D12FrameSynthesizer::Impl {
             }
             return result;
         }
+        const bool aer_retimed=nvidia_options.ofr && (!native_dlss || native_pair_generated);
+        if(aer_retimed && ofr_paired) {
+            auto* list=slot.current_copy_command_list.Get();
+            auto barrier=transition_barrier(current_destination,release_state,D3D12_RESOURCE_STATE_COPY_DEST);
+            list->ResourceBarrier(1,&barrier);
+            record_ofr_endpoints(list,previous.resource.Get(),synthetic_destination,current_destination,
+                {next.views.data(),next.view_count});
+            barrier=transition_barrier(current_destination,D3D12_RESOURCE_STATE_COPY_DEST,release_state);
+            list->ResourceBarrier(1,&barrier);
+        }
         result = rife && nvidia_options.rife_async ? S_OK : queue->Wait(
             previous.producer_fence.Get(),
             previous.ticket.fence_value);
@@ -7815,6 +7822,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         if (native_dlss) output_ticket->native_result = native_dlss->last_result();
         if(rife && nvidia_options.rife_async)output_ticket->native_result=slot.rife_result;
+        output_ticket->aer_retimed=aer_retimed;
         output_ticket->previous_serial = previous_serial;
         output_ticket->current_serial = current.serial;
         output_ticket->fence_value = fence_value;

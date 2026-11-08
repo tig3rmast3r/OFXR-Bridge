@@ -107,6 +107,7 @@ struct D3D12FrameSynthesisTicket {
     // frame - a native DLSS FG pair NGX skipped - so its synthetics show B's
     // camera and go to the runtime with B's pose.
     bool synthetics_in_target_camera{};
+    bool aer_retimed{}; // accepted AER output transaction, distinct from provider bypass
 };
 
 // Completed direct-queue GPU intervals for one NVIDIA Optical Flow pair.

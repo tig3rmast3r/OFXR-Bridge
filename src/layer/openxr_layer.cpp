@@ -633,6 +633,7 @@ struct ProjectionSnapshot {
     std::optional<xrfg::LukeRenderIdentity> luke_identity;
     std::uint64_t app_release_value{};
     std::vector<ProjectionCaptureOrder> capture_order;
+    unsigned aer_fresh_mask{3};
 };
 
 struct ProjectionStreamContinuity {
@@ -1672,24 +1673,16 @@ private:
 // transport choice, not another generation backend or a Neural Rendering switch.
 [[nodiscard]] int selected_afw_mode() {
     const auto reconstruction=xrfg::embedded::afw_snapshot().desired;
-    return reconstruction.ofr?0:reconstruction.mode;
+    return reconstruction.ofr&&xrfg::embedded::snapshot().desired.enabled?0:reconstruction.mode;
 }
 [[nodiscard]] bool temporal_generation_requested() {
     const auto control=xrfg::embedded::snapshot().desired;
-    return control.enabled || control.ofr;
+    return control.enabled;
 }
 
 [[nodiscard]] xrfg::embedded::Settings effective_session_settings(
     const SessionState& state, xrfg::embedded::Settings requested) noexcept {
-    if(requested.ofr) {
-        // A local reconstruction trial owns the temporal engine while selected.
-        // Normal FG preferences remain stored and are restored on deselection.
-        requested.enabled=true;requested.backend=requested.ofr_backend?2:0;
-        requested.scale=requested.ofr_scale;requested.preset=1;
-        requested.backward=false;requested.motion_vectors=0;requested.frame_generation=0;
-        requested.hybrid=false;requested.rife_model=-1;requested.rife_multiplier=2;
-        requested.native_scale=100;
-    }
+    if(requested.ofr) requested.rife_multiplier=2;
 #if !defined(_WIN64)
     // 0.2 V576: the 32-bit layer has NVIDIA optical flow alone - FidelityFX,
     // NGX (DLSS-G), FSR's provider and RIFE are x64 only - and 32-bit games
@@ -1916,7 +1909,6 @@ unsigned native_frame_multiplier(const SessionState& state) noexcept {
     return state.three_slot_director && djules_triple_active(state);
 }
 [[nodiscard]] bool djules_deep_active(const SessionState& state) noexcept {
-    if(state.nvidia_options.ofr)return false;
     return !direct_reduced_outputs(state) && state.djules_deep_pipeline && djules_native_scheduler(state) && !djules_triple_director(state);
 }
 
@@ -4050,6 +4042,7 @@ create_d3d11_frame_generation_swapchains(
         }
         auto* synthesis_queue = isolated_luke ? session->luke_synthesis_queue.Get() : session->d3d12_queue.Get();
         auto synthesis_options=session->nvidia_options;
+        if(state->panel_source)synthesis_options.ofr=false;
         // Async RIFE owns a distinct per-eye queue. Keep ingress/AFW on the
         // capture lane; only immutable post-AFW work may leave the GPU lock.
         const bool asynchronous_luke_rife=async_luke_rife_queue(
@@ -6093,7 +6086,7 @@ XrResult layer_create_session_impl(
         static_cast<xrfg::D3D12NvidiaInputScale>(initial_control.desired.scale),
         initial_control.desired.backward,
         state->nvidia_new_route, xrfg::flow_encoding_for_route(state->nvidia_new_route), state->nvidia_new_route, initial_control.desired.native_scale};
-    state->nvidia_options.ofr=initial_control.desired.ofr;
+    state->nvidia_options.ofr=initial_control.desired.ofr&&initial_control.desired.enabled;
     state->nvidia_options.ofr_swap=initial_control.desired.ofr_swap;
     state->nvidia_options.rife_model=initial_control.desired.rife_model;
     state->nvidia_options.rife_resolution_percent=initial_control.desired.rife_resolution;
@@ -9193,6 +9186,7 @@ struct SynthesisJob {
     std::vector<std::shared_ptr<PanelInput>> panels;
     xrfg::D3D12PresentationTransform presentation_transform{};
     ProjectionSnapshot snapshot;
+    std::optional<ProjectionSnapshot> aer_previous;
     std::optional<ProjectionSnapshot> synthetic_camera, extra_camera, third_camera;
     std::vector<ProjectionResourceMapping> mappings;
     std::shared_ptr<GeneratedFrameEndInfo> metadata;
@@ -10933,7 +10927,7 @@ void stop_continuous_presenter(
 
 [[nodiscard]] bool three_slot_generation_session(
     const std::shared_ptr<SessionState>& state) noexcept {
-    return !state->nvidia_options.ofr && !presenter_forbidden(*state) && !djules_inline_runtime(*state) && state->menu_enabled && state->frame_generation_mode !=
+    return !presenter_forbidden(*state) && !djules_inline_runtime(*state) && state->menu_enabled && state->frame_generation_mode !=
                xrfg::D3D12FrameGenerationMode::fsr3 &&
            ((state->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
              (state->nvidia_new_route || fresh_luke_director_worker(*state))) ||
@@ -12592,6 +12586,7 @@ struct PreparedGeneration {
     std::size_t current_slot{};
     std::size_t synthetic_slot{};
     bool synthetics_in_target_camera{};
+    bool aer_retimed{};
     bool preserve_previous{};
     bool publication_deferred{};
     std::uint32_t current_destination_index{
@@ -12798,7 +12793,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     std::span<const xrfg::D3D12ReprojectionView> synthetic_views = {},
     std::span<const xrfg::D3D12ReprojectionView> extra_views = {},
     float third_fraction=.75F, std::span<const xrfg::D3D12ReprojectionView> third_views={},
-    const PanelInput* panel_input=nullptr) noexcept {
+    const PanelInput* panel_input=nullptr,unsigned aer_fresh_mask=3) noexcept {
     PreparedGeneration output{};
     try {
         // AFW's frozen source is transport, never a temporal OFXR prime.
@@ -13147,7 +13142,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                                                   static_cast<std::uint32_t>((synthetic_runtime_slot+1)%generation->synthetic_runtime_rings) * generation->synthetic_images_per_slot + extra_image.acquired_index,
                                                   extra_fraction, extra_views,request_third?static_cast<UINT>((synthetic_runtime_slot+2)%generation->synthetic_runtime_rings)*generation->synthetic_images_per_slot+third_image.acquired_index:UINT32_MAX,
                                                   third_fraction,third_views}} : std::nullopt,
-                                          !synthetic_views.empty(), state->session->ofr_fresh_mask);
+                                          !synthetic_views.empty(), aer_fresh_mask);
                 } else {
                     submit_result = synthesizer->submit_prime(
                                           *capture,
@@ -13276,6 +13271,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
 
         if (SUCCEEDED(submit_result)) {
             output.native_result=ticket.native_result;
+            output.aer_retimed=ticket.aer_retimed;
             output.synthetics_in_target_camera=!synthetic_views.empty() && ticket.synthetics_in_target_camera;
         }
         if (SUCCEEDED(submit_result) && !worker_submission &&
@@ -13497,7 +13493,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 interpolation_fraction, worker_submission, captured_transform, false, post_afw_input, nullptr, extra_fraction,
                 target ? std::span<const xrfg::D3D12ReprojectionView>{*target} : std::span<const xrfg::D3D12ReprojectionView>{},
                 extra ? std::span<const xrfg::D3D12ReprojectionView>{*extra} : std::span<const xrfg::D3D12ReprojectionView>{},
-                third_fraction,third?std::span<const xrfg::D3D12ReprojectionView>{*third}:std::span<const xrfg::D3D12ReprojectionView>{});
+                third_fraction,third?std::span<const xrfg::D3D12ReprojectionView>{*third}:std::span<const xrfg::D3D12ReprojectionView>{},nullptr,snapshot.aer_fresh_mask);
             all_expected_kind =
                 all_expected_kind && generation.kind == expected_kind;
             all_anchor_current =
@@ -13882,7 +13878,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 job->current->source_sequence, job->current->previous_sequence,
                 static_cast<std::uint64_t>(prepared.kind));
             audit.stage=2;
-            if(prepared.kind!=PreparedGenerationKind::none)
+            if(prepared.kind!=PreparedGenerationKind::none && !state->nvidia_options.ofr)
                 prepare_panel_generation(*state,job->snapshot,job->panels,prepared,job->fraction,job->extra_fraction,true,job->third_fraction);
             // All source tickets/cameras are now copied into the queued jobs.
             // Their consumer leases/fences protect the old history; the third
@@ -13902,6 +13898,14 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 }
             }
             bool success = finish_worker_outputs(state, prepared, job->current->source_sequence);
+            if(success && state->nvidia_options.ofr && job->pair &&
+               !std::all_of(prepared.resources.begin(),prepared.resources.end(),[](const auto& r){
+                   return r.panel || (r.generation.aer_retimed && (!r.generation.native_result ||
+                       r.generation.native_result->mask.load(std::memory_order_acquire)!=0));})) {
+                prepared={};job->pair=false;job->triple=false;job->quad=false;
+                prepared=prepare_projection_frame(job->snapshot,job->mappings,false,.5F,true,&job->presentation_transform);
+                success=finish_worker_outputs(state,prepared,job->current->source_sequence);
+            }
             if(success)audit.stage=3;
             const auto auxiliary_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_aux_complete,
@@ -13960,6 +13964,9 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                     synthetic_info.synthetic = true;
                     synthetic_info.composition_images = job->metadata->composition_images;
                     synthetic_info.djules_leader=job->triple && state->nvidia_options.rife_model<0;
+                    if(success && state->nvidia_options.ofr && job->snapshot.aer_fresh_mask==3) {
+                        success=job->aer_previous && realign_ofr_paired_metadata(synthetic_info,*real,*job->aer_previous,state->nvidia_options.ofr_swap);
+                    }
                     if (success) synthetic = make_presenter_owned_frame(std::move(synthetic_info));
                     success = success && synthetic != nullptr;
                     if(success && job->triple) {
@@ -13992,6 +13999,10 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                     }
                 }
             }
+            const bool aer_single=success && state->nvidia_options.ofr && job->pair && job->snapshot.aer_fresh_mask!=3;
+            if(aer_single) {real=std::move(synthetic);job->pair=false;}
+            if(success && state->nvidia_options.ofr && (aer_single || job->pair))
+                xrfg::embedded::ofr_last_success_ms=GetTickCount64();
             xrfg::bridge_flight_logger().end(build_token,
                 xrfg::BridgeFlightOperation::timing_worker_build, success ? 0 : -1,
                 job->current->source_sequence, job->current->previous_sequence);
@@ -14850,10 +14861,11 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     job->snapshot = post_afw_frame ? post_afw_frame->snapshot : snapshot;
     std::optional<ProjectionSnapshot> previous;
     { std::scoped_lock lock(state->mutex); previous=state->previous_projection; }
-    job->fraction=synthetic_interpolation_fraction(state,previous,job->snapshot);
+    job->aer_previous=previous;
+    job->fraction=state->nvidia_options.ofr?.5F:synthetic_interpolation_fraction(state,previous,job->snapshot);
     job->extra_fraction=synthetic_interpolation_fraction(state,previous,job->snapshot,1);
     job->third_fraction=synthetic_interpolation_fraction(state,previous,job->snapshot,2);
-    if (previous && xrfg::autonomous::r19_camera_enabled.load(std::memory_order_acquire)) {
+    if (previous && (state->nvidia_options.ofr || xrfg::autonomous::r19_camera_enabled.load(std::memory_order_acquire))) {
         job->synthetic_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->fraction);
         job->extra_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->extra_fraction);
         job->third_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->third_fraction);
@@ -16464,7 +16476,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     const bool hybrid_ready=control.desired.hybrid &&
         !(state->luke_afw_enabled && selected_afw_mode() != 0) &&
         xrfg::dlss_motion_vector_publications()!=0;
-    const bool afw_needed=!control.desired.ofr && state->luke_afw_enabled && selected_afw_mode()!=0;
+    const bool afw_needed=!(control.desired.ofr&&control.desired.enabled) && state->luke_afw_enabled && selected_afw_mode()!=0;
     const bool outputs_needed=control.desired.enabled || afw_needed;
     const bool afw_use_changed=state->luke_afw_resources_needed &&
         afw_needed!=*state->luke_afw_resources_needed;
@@ -16587,7 +16599,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(control.desired.preset),
         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
         nvidia_new_route, xrfg::flow_encoding_for_route(nvidia_new_route), nvidia_new_route, control.desired.native_scale};
-    options.ofr=control.desired.ofr;options.ofr_swap=control.desired.ofr_swap;
+    options.ofr=control.desired.ofr&&control.desired.enabled;options.ofr_swap=control.desired.ofr_swap;
     options.rife_model=control.desired.rife_model;
     options.rife_resolution_percent=control.desired.rife_resolution;
     options.rife_multiplier=control.desired.rife_multiplier;
@@ -16800,6 +16812,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             }
         }
         auto synthesis_options=options;
+        if(chain->panel_source)synthesis_options.ofr=false;
         if(chain->frame_generation && state->graphics_binding==SessionGraphicsBinding::d3d11)
             synthesis_options.rife_async=async_luke_rife_queue(*state,
                 chain->frame_generation->isolated_luke_synthesis,options.rife_model);
@@ -17474,7 +17487,7 @@ XrResult layer_end_frame_impl(
 
     const auto afw_control = xrfg::embedded::afw_snapshot();
     bool afw_selected = state->luke_afw_enabled &&
-        afw_control.desired.mode != 0 && !xrfg::embedded::snapshot().desired.ofr;
+        afw_control.desired.mode != 0 && !state->nvidia_options.ofr;
     const bool ofxr_was_enabled = state->menu_enabled;
     const auto desired_control = xrfg::embedded::snapshot();
     auto startup_request = state->luke_afw_startup.pending();
@@ -18117,7 +18130,7 @@ XrResult layer_end_frame_impl(
         const auto decision=xrfg::ofr::classify(prior,sources);
         if(!sources[0].serial || !sources[1].serial)
             return bypass_generation(GenerationPrepareReason::missing_capture);
-        state->ofr_fresh_mask=decision.fresh;
+        state->ofr_fresh_mask=decision.fresh;current_snapshot.aer_fresh_mask=decision.fresh;
         if(!decision.fresh) {
             if(use_continuous_presenter) {
                 consume_application_frame(state,current_snapshot.display_time,
@@ -18301,7 +18314,7 @@ XrResult layer_end_frame_impl(
         // The optical consumer owns the exact XR captures, not a native SR
         // pair. Preserve the separately pinned HFW source-filter contract.
         const bool raw_luke_optical = !state->luke_fresh_only && luke_color_only_ofxr(*state);
-        const auto luke = afw_selected || raw_luke_optical ? LukePairDecision{} : luke_pair_decision(projection_mappings);
+        const auto luke = state->nvidia_options.ofr || afw_selected || raw_luke_optical ? LukePairDecision{} : luke_pair_decision(projection_mappings);
         update_luke_application_clock(*state, afw_selected || raw_luke_optical || luke.identity.has_value() || luke.action == LukePairDecision::Action::drop,
             luke.action == LukePairDecision::Action::drop);
         if (luke.reset) {
@@ -18366,6 +18379,7 @@ XrResult layer_end_frame_impl(
             {std::scoped_lock lock(state->presenter_mutex);source_sequence=state->director_anchor_sequence;}
             std::scoped_lock lock(state->mutex);
             state->previous_projection = current_snapshot;
+            if(state->nvidia_options.ofr)state->ofr_last_mask=current_snapshot.aer_fresh_mask;
             remember_projection_stream(*state,current_snapshot,source_sequence);
             state->generation_failure_streak = 0;
         }
@@ -18407,6 +18421,9 @@ XrResult layer_end_frame_impl(
         : prepare_projection_frame(
               current_snapshot, mapping_span, metadata_pairable, interpolation_fraction, false, nullptr, {},
               extra_fraction, synthetic_camera ? &*synthetic_camera : nullptr, extra_camera ? &*extra_camera : nullptr);
+    if(state->nvidia_options.ofr && prepared.kind==PreparedGenerationKind::pair &&
+       !std::all_of(prepared.resources.begin(),prepared.resources.end(),[](const auto& r){return r.panel||r.generation.aer_retimed;}))
+        return bypass_generation(GenerationPrepareReason::synthesis_busy);
     if(prepared.kind!=PreparedGenerationKind::none && !state->nvidia_options.ofr) {
         const auto panel_inputs=freeze_panel_inputs(*state,current_snapshot,mapping_span);
         prepare_panel_generation(*state,current_snapshot,panel_inputs,prepared,interpolation_fraction,extra_fraction,false,third_fraction);

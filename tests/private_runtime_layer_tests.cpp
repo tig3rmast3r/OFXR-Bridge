@@ -376,18 +376,22 @@ int main(int argc,char** argv) {
     if(route=="ofr-controls") {
         xrfg_fixture::ControlProfile profile;
         auto dispatch=std::make_shared<Dispatch>();auto session=std::make_shared<SessionState>(dispatch);
-        for(int backend:{0,1})for(bool swap:{false,true}) {
+        for(int method:{0,1,2,3,4})for(bool swap:{false,true}) {
             auto controls=xrfg::autonomous::snapshot().desired;
-            controls.ofr_enabled=true;controls.ofr_backend=backend;controls.ofr_scale=2;controls.ofr_swap=swap;
-            controls.enabled=false;controls.frame_generation=4;
-            check(xrfg::autonomous::request(controls),"OFR controls request");
+            controls.advanced_mode=true;controls.ofr_enabled=true;controls.ofr_swap=swap;
+            controls.enabled=true;controls.frame_generation=method;controls.backend=2;
+            controls.scale=3;controls.rife_multiplier=4;controls.frame_multiplier=4;controls.triple_frame_gen=true;
+            check(xrfg::autonomous::request(controls),"AER controls request");
             xrfg::autonomous::apply_runtime_settings();
             auto requested=xrfg::embedded::snapshot().desired;
-            check(requested.ofr && requested.ofr_backend==backend && requested.ofr_swap==swap,"OFR reaches shipping runtime");
+            check(requested.ofr && requested.ofr_swap==swap,"AER reaches shipping runtime");
             auto effective=effective_session_settings(*session,requested);
-            check(effective.enabled && effective.backend==(backend?2:0) && effective.scale==2 &&
-                !effective.hybrid && effective.rife_model==-1 && effective.frame_generation==0 && !effective.backward,
-                "OFR owns a half-scale optical engine independently of saved FG preferences");
+            check(effective.enabled && effective.backend==2 && effective.scale==3 &&
+                effective.hybrid==(method==3) && effective.rife_model==(method==4?controls.rife_model:-1) &&
+                effective.frame_generation==(method>=3?0:method) && effective.rife_multiplier==2,
+                "AER preserves chosen generator and quality, limits only multiplier");
+            check(!xrfg::embedded::djules_pipeline_snapshot().triple_frame_gen,"AER suppresses normal triple request");
+            check(selected_afw_mode()==0,"AER bypasses OSR/AFW while framegen runs");
             session->nvidia_options.ofr=true;session->nvidia_options.ofr_swap=swap;
             session->menu_enabled=true;session->djules_triple_requested=true;
             session->ofr_delivery=2;check(djules_application_period(*session,11'111'111)==22'222'222,"paired physical pacing");
@@ -412,9 +416,9 @@ int main(int argc,char** argv) {
             for(unsigned eye=0;eye<2;++eye)check(first.projections[0].views[eye].subImage.imageArrayIndex==eye &&
                 second.projections[0].views[eye].subImage.imageArrayIndex==eye,"Swap never exchanges physical eyes");
             controls.ofr_enabled=false;
-            check(xrfg::autonomous::request(controls),"OFR deselect");xrfg::autonomous::apply_runtime_settings();
+            check(xrfg::autonomous::request(controls),"AER deselect");xrfg::autonomous::apply_runtime_settings();
             effective=effective_session_settings(*session,xrfg::embedded::snapshot().desired);
-            check(!effective.ofr && !effective.enabled && effective.rife_model>=0,"ordinary FG preference restored");
+            check(!effective.ofr && effective.enabled && effective.rife_multiplier==xrfg::autonomous::runtime_multiplier(xrfg::autonomous::snapshot().desired),"ordinary multiplier preference restored");
         }
         std::puts("OFR shipping controls, effective engine, camera endpoints and physical pacing PASS");return 0;
     }

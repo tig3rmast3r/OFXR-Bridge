@@ -45,6 +45,14 @@ void codec() {
         const auto merged=xrfg::autonomous::merge_changes(desired,desired,ofr);
         require(merged.ofr_enabled && merged.ofr_backend==backend && merged.ofr_swap==swap,"OFR profile merge");
     }
+    for(int method:{0,1,2,3,4}) {
+        auto aer=desired;aer.frame_generation=method;aer.ofr_enabled=true;
+        aer.rife_multiplier=4;aer.frame_multiplier=4;aer.triple_frame_gen=true;
+        require(xrfg::autonomous::generation_multiplier(aer)==2 && xrfg::autonomous::runtime_multiplier(aer)==2,
+            "AER framegen is 2X for every method");
+        require(aer.rife_multiplier==4 && aer.frame_multiplier==4 && aer.triple_frame_gen,
+            "AER effective cap retains stored ordinary multiplier preferences");
+    }
     require(!desired.nr_second_pass,"second Neural Rendering pass defaults off");
     require(!xrfg::autonomous::parse_settings("[ofxr]\nnr_enabled=1\n").nr_second_pass,
         "existing profiles retain one Neural Rendering pass");

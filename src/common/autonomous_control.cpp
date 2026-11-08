@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 92301;
+constexpr std::uint32_t kAbi = 92401;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -378,12 +378,14 @@ bool optical_multiplier_route(const Settings& s) noexcept {
     return (s.frame_generation == 0 && s.backend != 3) || s.frame_generation == 3;
 }
 int generation_multiplier(const Settings& s) noexcept {
+    if(s.ofr_enabled)return 2;
     if (s.frame_generation == 4) return s.rife_multiplier;
     if (optical_multiplier_route(s)) return s.frame_multiplier;
     if (s.frame_generation == 2 && s.frame_multiplier == 4) return 4;
     return s.triple_frame_gen ? 3 : 2;
 }
 int runtime_multiplier(const Settings& s) noexcept {
+    if(s.ofr_enabled)return 2;
     if (s.frame_generation == 4) return s.rife_multiplier;
     if (optical_multiplier_route(s)) return s.frame_multiplier;
     // DLSS-G 3X keeps its own triple_frame_gen route; only 4X is passed on.
@@ -1560,7 +1562,7 @@ std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) no
 }
 std::string_view interface_reconstruction_text(const Snapshot& s,std::uint64_t now_ms) noexcept {
     const auto& r=s.runtime;
-    if(s.desired.ofr_enabled) return s.connected && r.ofr_running ? "OFR: AER" : "OFR: Waiting";
+
     if(!s.connected || s.desired.afw_mode==0)return "OSR: Off";
     const bool osr=normalize_osr_reconstruction(s.desired.luke_osr)==2;
     const bool active=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000 &&

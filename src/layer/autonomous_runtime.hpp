@@ -71,7 +71,7 @@ inline void apply_runtime_settings() {
     a.ofr=s.ofr_enabled;a.ofr_backend=s.ofr_backend;a.ofr_scale=s.ofr_scale;a.ofr_swap=s.ofr_swap;
     a.osr=s.luke_osr; a.osr_cover=s.luke_osr_cover; a.osr_trim=s.luke_osr_trim; a.osr_fill=s.luke_osr_fill;
     if (!embedded::request_afw(a)) return;
-    if (!embedded::set_djules_triple_frame_gen(s.triple_frame_gen)) return;
+    if (!embedded::set_djules_triple_frame_gen(s.triple_frame_gen&&!s.ofr_enabled)) return;
     if (!embedded::set_djules_prefer_fps(s.prefer_fps || s.triple_frame_gen)) return;
     if (!embedded::set_overlay_setting(s.overlay_enabled?s.overlay_position:0)) return;
     if (!embedded::set_logging_setting(s.diagnostics)) return;
@@ -123,9 +123,9 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     const auto now=GetTickCount64();
     out.afw_flat_scene=afw.flat_scene;
     const auto ofr_last=embedded::ofr_last_success_ms.load(std::memory_order_relaxed);
-    out.ofr_running=afw.desired.ofr && ofr_last && now>=ofr_last && now-ofr_last<2000;
+    out.ofr_running=afw.desired.ofr && control.desired.enabled && ofr_last && now>=ofr_last && now-ofr_last<2000;
     out.ofr_delivery=embedded::ofr_delivery.load(std::memory_order_relaxed);
-    out.afw_running=!afw.desired.ofr && !afw.flat_scene && afw.desired.mode!=0 && afw.last_success_ms &&
+    out.afw_running=!(afw.desired.ofr&&control.desired.enabled) && !afw.flat_scene && afw.desired.mode!=0 && afw.last_success_ms &&
         now>=afw.last_success_ms && now-afw.last_success_ms<2000;
     out.nr_running=nr.running;
     out.nr_model_missing=nr.enabled && nr.model_missing;

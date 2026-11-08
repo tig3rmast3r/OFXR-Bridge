@@ -3625,6 +3625,7 @@ void test_stereo_motion_synthesis_beats_same_pixel_blend(
         pair.previous_serial == capture_a.serial &&
             pair.current_serial == capture_b.serial,
         "motion pair synthesis ticket is incorrect");
+    require_hresult(synthesizer.wait_for_previous_submission(30000),"endpoint test waits its own complete output receipt");
     const StereoPattern actual_current = readback_pattern(
         fixture,
         current_destinations[1].Get(),
@@ -3650,6 +3651,12 @@ void test_stereo_motion_synthesis_beats_same_pixel_blend(
         fixture.require_no_debug_errors();return;
     }
     if(midpoint_reference)*midpoint_reference=actual_synthetic;
+    if(nvidia_options.rife_model>=0) {
+        require(actual_current==current,"RIFE baseline B remains exact");
+        require(actual_synthetic!=previous && actual_synthetic!=current,"RIFE baseline generated actual intermediate content");
+        require_hresult(synthesizer.wait_for_idle(),"RIFE baseline drain");fixture.require_no_debug_errors();return;
+    }
+
     require(actual_current == current, "motion current output is not a bit-exact copy of B");
     require(
         actual_synthetic != previous && actual_synthetic != current,
@@ -6117,6 +6124,22 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 #include "synthesis_memory_lifecycle_tests.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1&&std::string_view(argv[1])=="ofr-rife") {
+        try {
+            D3D12WarpFixture fixture(true);
+            for(bool asynchronous:{false,true}) {
+                StereoPattern reference{};xrfg::D3D12NvidiaOpticalFlowOptions options{};
+                options.rife_model=2;options.rife_resolution_percent=18;options.rife_async=asynchronous;
+                const auto backend=xrfg::D3D12OpticalFlowBackend::nvidia;
+                test_stereo_motion_synthesis_beats_same_pixel_blend(fixture,backend,false,options,&reference);
+                options.ofr=true;
+                for(bool swap:{false,true}) {options.ofr_swap=swap;
+                    for(unsigned mask:{3u,1u,2u})test_stereo_motion_synthesis_beats_same_pixel_blend(fixture,backend,false,options,&reference,mask);
+                }
+            }
+            fixture.require_no_debug_errors();return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1&&std::string_view(argv[1])=="ofr") {
         try {
             D3D12WarpFixture fixture(true);
