@@ -7,6 +7,7 @@
 #include "xrfg/luke_afw_continuity.hpp"
 #include "xrfg/luke_recording_scope.hpp"
 #include "xrfg/luke_guide_window.hpp"
+#include "xrfg/luke_eye_canvas.hpp"
 #include "xrfg/luke_physical_projection.hpp"
 #include "xrfg/luke_pose_camera.hpp"
 #include "xrfg/luke_gta_eye_reference.hpp"
@@ -1508,8 +1509,8 @@ bool LukeAfwSynthesizer::history_reset_ready() noexcept {
 
 HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
     ID3D12Resource* destination_color, const DlssMotionVectorFrame& guide,
-    const D3D12ReprojectionView& source_view,
-    const D3D12ReprojectionView& destination_view,
+    const D3D12ReprojectionView& physical_source_view,
+    const D3D12ReprojectionView& physical_destination_view,
     std::uint32_t source_eye,
     float xr_eye_baseline,
     const embedded::AfwSettings& settings,bool native_peer_camera,
@@ -1525,8 +1526,13 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             return E_INVALIDARG;
         report_stage(AfwStage::arguments_valid, S_OK, source_eye,
             guide.publication);
-        const auto color_desc = source_color->GetDesc();
-        const auto destination_desc = destination_color->GetDesc();
+        const auto physical_source_desc = source_color->GetDesc();
+        const auto physical_destination_desc = destination_color->GetDesc();
+        auto color_desc = physical_source_desc;
+        auto destination_desc = physical_destination_desc;
+        auto source_view = physical_source_view;
+        auto destination_view = physical_destination_view;
+        bool eye_canvas{};
         const auto depth_desc = guide.depth->GetDesc();
         const auto motion_desc = guide.motion_vectors->GetDesc();
         const std::uint64_t color_extent =
@@ -1581,7 +1587,27 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             }
             return DXGI_ERROR_UNSUPPORTED;
         };
-        if (!compatible_color(color_desc, destination_desc)) return reject_input(1);
+        if (!compatible_color(color_desc, destination_desc)) {
+            // OSR-only adaptation. Keep the original format/sample/array guards;
+            // no guessed crop, scaled colour or changed submitted XR projection.
+            if(settings.osr!=static_cast<int>(OsrReconstruction::full))return reject_input(1);
+            const auto fov=[](const auto& v){return std::array<float,4>{v.fov.angle_left,
+                v.fov.angle_right,v.fov.angle_up,v.fov.angle_down};};
+            const auto rect=[](const auto& v){return std::array<unsigned,4>{v.image_rect.offset_x,
+                v.image_rect.offset_y,v.image_rect.width,v.image_rect.height};};
+            if(color_desc.Width>16384||destination_desc.Width>16384)return reject_input(1);
+            const auto canvas=luke_eye_canvas(static_cast<unsigned>(color_desc.Width),color_desc.Height,
+                static_cast<unsigned>(destination_desc.Width),destination_desc.Height,
+                fov(source_view),fov(destination_view),rect(source_view),rect(destination_view));
+            if(!canvas)return reject_input(1);
+            color_desc.Width=destination_desc.Width=canvas->width;
+            color_desc.Height=destination_desc.Height=canvas->height;
+            if(!compatible_color(color_desc,destination_desc))return reject_input(1);
+            source_view.fov={canvas->source_fov[0],canvas->source_fov[1],canvas->source_fov[2],canvas->source_fov[3]};
+            destination_view.fov={canvas->destination_fov[0],canvas->destination_fov[1],canvas->destination_fov[2],canvas->destination_fov[3]};
+            source_view.image_rect=destination_view.image_rect={0,0,canvas->width,canvas->height};
+            eye_canvas=true;
+        }
         if (color_desc.Width > INT_MAX || color_desc.Height > INT_MAX) return reject_input(2);
         if (!guide.motion_width || !guide.motion_height || !guide.output_width || !guide.output_height)
             return reject_input(3);
@@ -1616,6 +1642,34 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             static_cast<UINT>(color_desc.Width), color_desc.Height);
         if (!depth_window) return reject_input(16 + static_cast<std::uint32_t>(depth_failure));
         if (!motion_window) return reject_input(32 + static_cast<std::uint32_t>(motion_failure));
+        if(eye_canvas) {
+            // Only raster-aligned producer images qualify. Confirm that BOTH
+            // eyes select the same guide grid, otherwise each alternating frame
+            // would rebuild OSR history or reinterpret the other's depth/motion.
+            const auto& peer=guide.previous_opposite_guide;
+            if(!depth_window->raster_x||!depth_window->raster_y||
+                !motion_window->raster_x||!motion_window->raster_y||!peer||!peer->camera_data_valid)
+                return reject_input(60);
+            const auto& f=destination_view.fov;
+            const auto peer_depth=luke_guide_window(peer->camera_view_to_clip,
+                f.angle_left,f.angle_right,f.angle_up,f.angle_down,
+                peer->output_width,peer->output_height,peer->depth_width,peer->depth_height,
+                static_cast<unsigned>(color_desc.Width),color_desc.Height);
+            const auto peer_motion=luke_guide_window(peer->camera_view_to_clip,
+                f.angle_left,f.angle_right,f.angle_up,f.angle_down,
+                peer->output_width,peer->output_height,peer->motion_width,peer->motion_height,
+                static_cast<unsigned>(color_desc.Width),color_desc.Height);
+            if(!peer_depth||!peer_motion||!peer_depth->raster_x||!peer_depth->raster_y||
+                !peer_motion->raster_x||!peer_motion->raster_y||peer_depth->width!=depth_window->width||
+                peer_depth->height!=depth_window->height||peer_motion->width!=motion_window->width||
+                peer_motion->height!=motion_window->height)return reject_input(61);
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,source_eye,1340,
+                (physical_source_desc.Width<<32)|physical_source_desc.Height,
+                (color_desc.Width<<32)|color_desc.Height);
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,1-source_eye,1341,
+                (physical_destination_desc.Width<<32)|physical_destination_desc.Height,
+                (color_desc.Width<<32)|color_desc.Height);
+        }
         const UINT cropped_depth_width = depth_window->width;
         const UINT cropped_depth_height = depth_window->height;
         const UINT cropped_motion_width = motion_window->width;
@@ -2140,8 +2194,15 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         if(quality_divisor>1)
             impl_->color_scale.record(impl_->device.Get(),command_list,source_color,D3D12_RESOURCE_STATE_COMMON,
                 static_cast<UINT>(color_desc.Width),color_desc.Height,input.color.texture,input.color.initial_state,impl_->work_width,impl_->work_height,0);
-        else copy(impl_->renderer, command_list, input.color, color_source,
-            color_box, 0, 0);
+        else if(eye_canvas) {
+            const auto copies=luke_canvas_copies(static_cast<unsigned>(physical_source_desc.Width),
+                physical_source_desc.Height,static_cast<unsigned>(color_desc.Width),color_desc.Height);
+            for(unsigned i=0;i<copies.count;++i) {
+                const auto& r=copies.regions[i];
+                const D3D12_BOX box{r.left,r.top,0,r.right,r.bottom,1};
+                copy(impl_->renderer,command_list,input.color,color_source,box,r.x,r.y);
+            }
+        } else copy(impl_->renderer, command_list, input.color, color_source,color_box,0,0);
         report_stage(AfwStage::color_copied, S_OK, source_eye,
             guide.publication);
 
@@ -2928,8 +2989,9 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             TextureDesc destination{};
             destination.texture = destination_color;
             destination.initial_state = D3D12_RESOURCE_STATE_COMMON;
-            copy(impl_->renderer, command_list, destination, final_color,
-                color_box, 0, 0);
+            const D3D12_BOX output_box{0,0,0,static_cast<unsigned>(physical_destination_desc.Width),
+                physical_destination_desc.Height,1};
+            copy(impl_->renderer,command_list,destination,final_color,output_box,0,0);
             report_stage(AfwStage::output_copied, S_OK, source_eye,
                 guide.publication);
             if (two_frame_capture_active()) {
@@ -2938,8 +3000,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 output.stream = guide.stream;
                 output.capture_serial = guide.publication;
                 output.eye = static_cast<std::int32_t>(1U - source_eye);
-                output.width = static_cast<std::uint32_t>(color_desc.Width);
-                output.height = color_desc.Height;
+                output.width = static_cast<std::uint32_t>(physical_destination_desc.Width);
+                output.height = physical_destination_desc.Height;
                 two_frame_capture_record_ng_x(output, impl_->device.Get(),
                     command_list, destination_color,
                     D3D12_RESOURCE_STATE_COMMON);

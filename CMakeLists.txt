@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.919.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.920.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -171,6 +171,10 @@ if(XRFG_BUILD_TESTS)
     target_include_directories(xrfg_luke_counter_probe_tests PRIVATE include)
     target_compile_features(xrfg_luke_counter_probe_tests PRIVATE cxx_std_20)
     add_test(NAME xrfg_luke_counter_probe_tests COMMAND xrfg_luke_counter_probe_tests)
+    add_executable(xrfg_luke_eye_canvas_tests tests/luke_eye_canvas_tests.cpp)
+    target_include_directories(xrfg_luke_eye_canvas_tests PRIVATE include)
+    target_compile_features(xrfg_luke_eye_canvas_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_luke_eye_canvas_tests COMMAND xrfg_luke_eye_canvas_tests)
     add_executable(xrfg_gta_headlock_tests tests/luke_gta_headlock_tests.cpp)
     target_include_directories(xrfg_gta_headlock_tests PRIVATE include)
     target_compile_features(xrfg_gta_headlock_tests PRIVATE cxx_std_20)
