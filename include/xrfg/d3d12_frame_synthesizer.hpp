@@ -386,6 +386,10 @@ public:
     // transport is unchanged. Caller excludes new captures/presenter use.
     [[nodiscard]] HRESULT suspend_flow_resources() noexcept;
 
+    // Resume a suspended provider at the drained configuration boundary,
+    // before capture/GPU submission locks are acquired for a new frame.
+    [[nodiscard]] HRESULT resume_flow_resources() noexcept;
+
     // Returns S_OK and consumes one completed NVIDIA timing record, S_FALSE
     // when none is ready, or an error for an invalid output pointer/readback.
     [[nodiscard]] HRESULT consume_nvidia_gpu_timing(

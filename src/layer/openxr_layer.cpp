@@ -16928,6 +16928,11 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
                         ? xrfg::D3D12FrameGenerationMode::ofxr
                         : generation_mode);
             }
+            // All old eye providers were suspended above. Allocate the new
+            // active RIFE provider here, before frame submission can hold the
+            // producer GPU mutex while a cold worker imports its resources.
+            if(SUCCEEDED(result) && control.desired.enabled && options.rife_model>=0)
+                result=synthesis->resume_flow_resources();
         }
         if (SUCCEEDED(result) && chain->frame_generation &&
             chain->frame_generation->afw_temporal_synthesizer) {
@@ -16939,6 +16944,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
                 result = temporal->reconfigure(
                     backend, synthesis_options, xrfg::D3D12FrameGenerationMode::ofxr);
             }
+            if(SUCCEEDED(result) && control.desired.enabled && afw_needed && options.rife_model>=0)
+                result=temporal->resume_flow_resources();
         }
         if(SUCCEEDED(result) && chain->frame_generation &&
             state->graphics_binding==SessionGraphicsBinding::d3d11)

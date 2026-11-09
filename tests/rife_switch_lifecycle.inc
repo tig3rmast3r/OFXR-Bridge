@@ -27,6 +27,10 @@ void test_rife_switch_lifecycle(D3D12WarpFixture& fixture) {
             require(!provider.asynchronous_rife_enabled(),"suspended reconfiguration created an unused RIFE worker");
         }
         require(!xrfg::rife_memory_for_adapter(luid,false).active,"an old RIFE worker survived full provider suspension");
+        if(epoch%2)for(auto& provider:providers) {
+            require_hresult(provider.resume_flow_resources(),"resume RIFE at the drained control boundary");
+            require(provider.asynchronous_rife_enabled(),"active RIFE resume did not create its private worker");
+        }
         for(unsigned eye=0;eye<2;++eye) {
             xrfg::D3D12HistoryCaptureTicket capture;
             require_hresult(histories[eye]->capture(0,&capture),"switch prime capture");

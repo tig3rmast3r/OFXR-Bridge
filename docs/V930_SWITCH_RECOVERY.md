@@ -11,8 +11,9 @@ Local trial from V929, ABI92501. No merge, remote push or live profile edit.
 - RIFE suspension now produces a transport-only context rather than recreating
   another RIFE worker. All shared-history eye consumers retire before provider
   replacement; old RIFE working resources are released before the first new
-  eye is allocated. Lazy restart establishes its private queue before producer
-  synchronization. Completed publication fences remain valid.
+  eye is allocated. Active providers resume at the drained control boundary,
+  outside frame submission; lazy restart also establishes its private queue
+  before producer synchronization. Completed publication fences remain valid.
 - Partial CUDA buffer construction and failed configure close their imports,
   mappings and unconsumed duplicated handles. Model math, engine cache keys
   and TensorRT/compiler code are unchanged. The packaged worker overlay is updated.

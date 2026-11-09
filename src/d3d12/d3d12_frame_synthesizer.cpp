@@ -8043,6 +8043,14 @@ HRESULT D3D12FrameSynthesizer::suspend_flow_resources() noexcept {
       catch (...) { return E_FAIL; }
 }
 
+HRESULT D3D12FrameSynthesizer::resume_flow_resources() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return ensure_flow_resources_locked();
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+      catch (...) { return E_FAIL; }
+}
+
 HRESULT D3D12FrameSynthesizer::replace_resources_locked(D3D12OpticalFlowBackend backend,
     D3D12NvidiaOpticalFlowOptions options,D3D12FrameGenerationMode generation_mode,
     bool defer_flow,bool preserve_completed_tickets) {
