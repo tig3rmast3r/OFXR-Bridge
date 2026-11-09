@@ -6008,6 +6008,7 @@ void test_rife_eye_queue(D3D12WarpFixture& fixture) {
         require(private_queue.Get()!=background.Get(),"asynchronous RIFE must own a private queue");
         ComPtr<ID3D12Fence> switching;
         require_hresult(fixture.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&switching)),"roundtrip gate");
+        require_hresult(synths[eye].retire_previous(),"retire completed anchor before new roundtrip prime");
         require_hresult(histories[eye]->capture(0,&captures[eye]),"fresh roundtrip source capture");
         require_hresult(histories[eye]->commit(captures[eye]),"fresh roundtrip source commit");
         require_hresult(private_queue->Wait(switching.Get(),1),"hold pending RIFE prime");
