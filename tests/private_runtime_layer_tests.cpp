@@ -1095,7 +1095,10 @@ int main(int argc,char** argv) {
         check(state->native_dlss_generated_frames>=1,"DLSS-G benchmark requires actual SDK frame-generation support");
     }
     if(hfw) {
-        if(!(rife_luke && rife_switch && !rife_pacing))
+        if(state->private_runtime)
+            check(!state->luke_fresh_only && !presenter_forbidden(*state),
+                "private endpoint must replace the old HFW inline admission filter");
+        else if(!(rife_luke && rife_switch && !rife_pacing))
             check(fresh_luke_director_worker(*state) && !presenter_forbidden(*state),"HFW source filter incorrectly forces inline synthesis");
         state->single_threaded_d3d11=true;check(presenter_forbidden(*state),"single-threaded guard lost");state->single_threaded_d3d11=false;
         state->split_frame_loop=true;check(presenter_forbidden(*state),"split-loop guard lost");state->split_frame_loop=false;
