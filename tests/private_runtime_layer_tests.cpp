@@ -1916,12 +1916,16 @@ int main(int argc,char** argv) {
             xr_ok(f.transport->drain(),"RIFE phase physical output drained");
             if(rife_luke) {
                 const auto generation=find_swapchain(chain)->frame_generation;
+                const bool post_afw=selected_afw_mode()!=0;
+                const auto active=generation ? (post_afw ? generation->afw_temporal_synthesizer : generation->synthesizer) : nullptr;
                 check(generation && generation->asynchronous_luke_rife &&
-                    generation->afw_temporal_synthesizer->asynchronous_rife_enabled(),
+                    active && active->asynchronous_rife_enabled(),
                     "Luke reconfiguration silently replaced the actual RIFE worker with synchronous execution");
-                check(generation->afw_temporal_synthesizer->submission_queue().Get()!=state->luke_synthesis_queue.Get() &&
+                check(active->submission_queue().Get()!=state->luke_synthesis_queue.Get() &&
                     !generation->afw_source_synthesizer->asynchronous_rife_enabled(),
                     "Luke temporal worker must own its queue while copy-only ingress stays synchronous");
+                if(!post_afw)check(!generation->afw_temporal_synthesizer->asynchronous_rife_enabled(),
+                    "raw Luke route retained an unused post-AFW RIFE worker");
                 std::puts("LUKE_RIFE_RECONFIGURE actual asynchronous worker + independent queue + physical outputs PASS");
             }
             const auto delivered=f.real_ends.load()-rife_phase_start;
