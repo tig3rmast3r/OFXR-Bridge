@@ -14794,7 +14794,6 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     }
     terminal.interface_stamp.scene_owner=0x4146570000000001ULL;
     terminal.interface_stamp.scene_serial=produced.scene_serial;
-    terminal.interface_stamp.reconstruction_reference=!produced.held_afw_pair;
     terminal.new_content=!produced.held_afw_pair;
     const bool captured = capture_projection_snapshot(&terminal.info, &terminal_snapshot);
     terminal_snapshot.blackbar_pose=snapshot.blackbar_pose;

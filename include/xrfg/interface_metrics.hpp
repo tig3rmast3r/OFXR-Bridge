@@ -261,9 +261,6 @@ struct InterfaceFrameStamp {
         aer_mixed=true;
         if(cycle)cycle->source_dependency(aer_history_started_ns);
     }
-    // An OSR/AFW reconstruction carries an admitted real-eye reference too,
-    // while its FPS classification remains independent of AER framegen.
-    bool reconstruction_reference{};
 };
 enum class InterfaceSource : std::uint32_t { none, steamvr_pre_submit_gpu, real_frame_qpc, predicted_display_qpc, application_cpu_qpc, steamvr_display, openxr_period, accepted_submissions, steamvr_delivery, producer_call_qpc, frame_cycle_qpc, frame_cycle_slot_estimate, steamvr_scene_delivery, accepted_scene_submissions, native_frame_cycle_qpc, native_predicted_display_qpc, runtime_accepted_delivery, runtime_return_cycle_qpc, native_runtime_return_cycle_qpc, minimum_cycle_qpc, native_minimum_cycle_qpc };
 struct InterfaceTelemetry {
