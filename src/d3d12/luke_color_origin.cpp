@@ -863,6 +863,17 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
 }
 } // namespace
 
+void retire_luke_color_origin_reader(ID3D12CommandQueue* queue) noexcept {
+    try {
+        auto& c=cache();std::scoped_lock lock(c.mutex);
+        std::erase_if(c.readers,[&](const auto& reader) {
+            if(reader->queue.Get()!=queue || reader.use_count()!=1)return false;
+            const auto completed=reader->fence->GetCompletedValue();
+            return completed==UINT64_MAX || completed>=reader->last_fence;
+        });
+    }catch(...) {}
+}
+
 HRESULT poll_luke_color_origin_pair(const LukeColorOriginReadReceipt& receipt,
     std::array<std::uint32_t,2>& tokens,std::array<HRESULT,2>& results,
     std::array<bool,2>* nonblack) noexcept {

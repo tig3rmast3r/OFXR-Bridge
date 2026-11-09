@@ -120,6 +120,7 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
                 require(blocked,"AER synthesis consumed guides before their own producer receipt");
             } else require_hresult(synthesizer.wait_for_previous_submission(30000),"AER fresh guided pair ready");
             require(!ticket.held_capture,"fresh same-eye input was mistaken for repeated peer");
+            require(ticket.used_game_motion,"native consumer omitted its exact game-motion receipt");
             if(ticket.native_result)native_generated|=ticket.native_result->mask.load()!=0;
             else require(ticket.aer_retimed,"FSR guided pair did not enter AER retiming");
             const auto expected=readback_single_slice(fixture,sources[serial%2],D3D12_RESOURCE_STATE_RENDER_TARGET);

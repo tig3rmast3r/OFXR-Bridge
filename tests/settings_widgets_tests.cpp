@@ -726,12 +726,13 @@ void desktop_header_is_not_a_headset_control() {
 void aer_framegen_widgets() {
     auto saved=snapshot().desired;auto settings=saved;
     settings.frame_generation=4;settings.enabled=true;settings.advanced_mode=false;
-    settings.ofr_enabled=false;settings.ofr_swap=false;settings.rife_multiplier=4;
+    settings.ofr_enabled=false;settings.ofr_swap=true;settings.rife_multiplier=4;
+    require(!sanitize(settings).ofr_swap,"Basic clears an Advanced-only saved Swap");
     require(request(settings),"AER UI basic setup");
     for(bool compact:{false,true}) {
         Context view(compact?ImVec2(1024,768):ImVec2(690,1000),compact);
         view.draw();view.draw(true);
-        require(view.rendered_text.find("AER framegen")==std::string::npos,"AER flag hidden in Basic");
+        require(view.rendered_text.find("AER framegen")==std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"AER and Swap hidden in Basic on desktop and VR");
         settings.advanced_mode=true;require(request(settings),"AER Advanced setup");view.draw();view.draw(true);
         require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")!=std::string::npos,"Advanced shows both AER flags");
         view.activate("/Generation_","AER framegen");view.draw();view.draw();

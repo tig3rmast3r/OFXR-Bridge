@@ -396,6 +396,26 @@ int main(int argc,char** argv) {
         state->presenter_condition.notify_all();check(failure.get()==XR_ERROR_RUNTIME_FAILURE,"worker failure wakes a pending capture with its error");
         std::puts("RIFE source snapshot ownership, per-eye capture credit, strict paths, restart and failure PASS");return 0;
     }
+    if(route=="aer-consumer-status") {
+        xrfg_fixture::ControlProfile profile;
+        auto desired=xrfg::autonomous::snapshot().desired;
+        xrfg::autonomous::select_generation(desired,1,0);
+        desired.enabled=true;desired.advanced_mode=true;desired.ofr_enabled=true;
+        check(xrfg::autonomous::request(desired),"native consumer status setup");
+        xrfg::autonomous::apply_runtime_settings();
+        xrfg::report_dlss_motion_vector_status(xrfg::DlssMotionVectorStatus::temporal_mismatch);
+        const auto publish=[&](xrfg::autonomous::GenerationState state,std::uint64_t proof) {
+            xrfg::autonomous::publish_runtime_status(0,state,S_OK,false,0,nullptr,-1,false,false,
+                false,false,false,true,0,false,0,2,0,proof);
+            return xrfg::autonomous::snapshot().runtime.generation_state;
+        };
+        using S=xrfg::autonomous::GenerationState;
+        check(publish(S::ready,GetTickCount64())==S::ready,"actual native consumer success outranks unrelated global pair mismatch");
+        check(publish(S::ready,0)!=S::ready,"without consumer proof a genuine missing/mismatched pair remains visible");
+        check(publish(S::dispatch_failed,GetTickCount64())==S::dispatch_failed,"fresh success cannot hide current provider failure");
+        check(publish(S::ready,GetTickCount64()-3000)!=S::ready,"old native success cannot mask later guide loss");
+        std::puts("Native consumer status: exact success, missing proof, provider failure and expiry PASS");return 0;
+    }
     if(route=="ofr-controls") {
         xrfg_fixture::ControlProfile profile;
         auto dispatch=std::make_shared<Dispatch>();auto session=std::make_shared<SessionState>(dispatch);

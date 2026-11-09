@@ -953,6 +953,7 @@ struct SessionState {
     xrfg::D3D12OpticalFlowBackend optical_flow_backend{
         xrfg::D3D12OpticalFlowBackend::fidelity_fx};
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
+    std::atomic_uint64_t guided_generation_ms{};
     std::atomic_uint ofr_delivery{}; // 0 learning,1 alternate,2 paired
     unsigned ofr_fresh_mask{3},ofr_last_mask{};
     xrfg::ofr::SourceTracker ofr_source_tracker;
@@ -13196,6 +13197,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                         ticket.current_serial);
                 }
             }
+            if(SUCCEEDED(submit_result) && request_pair && !ticket.held_capture)
+                state->session->guided_generation_ms=ticket.used_game_motion?GetTickCount64():0;
             if (SUCCEEDED(submit_result) && generation->d3d11_interop &&
                 !worker_submission && !defer_d3d11_publication && !late_luke_publication &&
                 !asynchronous_luke_rife) {
@@ -16690,6 +16693,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     // UI/depth enumeration is not permission to allocate generator outputs.
     // This applies equally to optical flow, Hybrid, FSR and DLSS-G, on every
     // runtime. Keep only the separately required Outlaws startup exception.
+    const bool retire_rife_providers=changed && (options.rife_model>=0 || state->nvidia_options.rife_model>=0);
     const bool projected_budget_control = projection_owned_outputs(*state);
     const bool retry_budget = projected_budget_control && (explicit_revision || output_use_changed) &&
         (changed || (output_use_changed && outputs_needed) || (!previously_enabled && control.desired.enabled));
@@ -16702,6 +16706,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     state->ofr_delivery=0;state->ofr_last_mask=0;
     state->ofr_source_tracker.reset();
     state->ofr_source_started_ns={};
+    state->guided_generation_ms=0;
     state->aer_native_guide_cache.reset();
     xrfg::embedded::ofr_last_success_ms=0;xrfg::embedded::ofr_delivery=0;
     state->frame_generation_mode = generation_mode;
@@ -16717,6 +16722,23 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         (control.desired.ofr && control.desired.hybrid) ||
         (state->luke_afw_enabled && !control.desired.ofr);
     if (changed) state->generation_initialization_result = S_OK;
+    if(retire_rife_providers) {
+        // Retire both eyes and all shared-history helpers before replacing any
+        // provider. Per-eye replacement kept the old peer/worker resident while
+        // allocating the new one and prevented last-config CUDA cleanup.
+        std::vector<std::shared_ptr<xrfg::D3D12FrameSynthesizer>> providers;
+        for(const auto& chain:swapchains) {
+            std::scoped_lock lock(chain->mutex);
+            if(const auto& g=chain->frame_generation)for(const auto& provider:
+                {g->synthesizer,g->afw_temporal_synthesizer,g->afw_source_synthesizer})
+                if(provider && std::find(providers.begin(),providers.end(),provider)==providers.end())providers.push_back(provider);
+        }
+        for(const auto& provider:providers) {result=provider->retire_previous();if(FAILED(result))break;}
+        if(SUCCEEDED(result))for(const auto& provider:providers) {result=provider->wait_for_idle();if(FAILED(result))break;}
+        if(SUCCEEDED(result))for(const auto& provider:providers) {result=provider->suspend_flow_resources();if(FAILED(result))break;}
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::embedded_configuration,
+            result,89930,providers.size(),control.revision);
+    }
     std::vector<XrSwapchain> projected_sources, auxiliary_sources;
     bool submitted_sources_known = current && current->type == XR_TYPE_FRAME_END_INFO &&
         (!current->layerCount || current->layers);
@@ -16735,6 +16757,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         }
     }
     for (const auto& chain : swapchains) {
+        if(FAILED(result))break;
         std::unique_lock lock(chain->mutex);
         const bool projected=std::find(projected_sources.begin(),projected_sources.end(),chain->handle)!=projected_sources.end();
         const bool auxiliary=std::find(auxiliary_sources.begin(),auxiliary_sources.end(),chain->handle)!=auxiliary_sources.end();
@@ -17451,7 +17474,7 @@ XrResult layer_end_frame_impl(
             state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && state->luke_shared_swapchains,
         false, // no title forces the INI-only sharing policy
-        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state),state->rife_ready_after_ms.load()); }
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state),state->rife_ready_after_ms.load(),state->guided_generation_ms.load()); }
     } runtime_report_scope{state,end_info};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =

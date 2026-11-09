@@ -24,6 +24,11 @@ struct AerNativeGuideCache {
     xrfg::LukeColorOriginReadReceipt pending;
     unsigned pending_mask{};
     bool poisoned{};
+    std::uint64_t queue_retry_after{};
+    ~AerNativeGuideCache() {
+        pending={};
+        xrfg::retire_luke_color_origin_reader(read_queue.Get());
+    }
 };
 
 bool aer_native_guides_requested(const SessionState& state) noexcept {
@@ -135,12 +140,19 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
         auto& cache=*session->aer_native_guide_cache;
         if(cache.poisoned){clear();return E_FAIL;}
         if(!cache.read_queue) {
+            if(GetTickCount64()<cache.queue_retry_after){clear();return S_FALSE;}
             // Reading on the ingress queue put the CPU's marker wait behind
             // unrelated interop/guide waits. Only the exact pinned capture
             // fences precede this reader; synthesis waits its own guide receipts.
             D3D12_COMMAND_QUEUE_DESC description{};description.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
             const auto hr=session->d3d12_device->CreateCommandQueue(&description,IID_PPV_ARGS(&cache.read_queue));
-            if(FAILED(hr)){clear();return hr;}
+            if(FAILED(hr)) {
+                const auto removed=session->d3d12_device->GetDeviceRemovedReason();
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                    hr,1440,static_cast<std::uint32_t>(removed),inputs[0].capture.serial);
+                cache.queue_retry_after=GetTickCount64()+1000;
+                clear();return FAILED(removed)?removed:S_FALSE;
+            }
             cache.read_queue->SetName(L"OFXR AER exact colour origins");
         }
         if(cache.pending.fence && cache.pending.value) {

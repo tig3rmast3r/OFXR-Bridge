@@ -6166,8 +6166,13 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 #include "history_v474_wait_tests.inc"
 #include "synthesis_memory_lifecycle_tests.inc"
 #include "aer_guide_endpoints.inc"
+#include "rife_switch_lifecycle.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1&&std::string_view(argv[1])=="rife-switch-lifecycle") {
+        try {D3D12WarpFixture fixture(true);test_rife_switch_lifecycle(fixture);fixture.require_no_debug_errors();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1&&std::string_view(argv[1])=="aer-native-compose") {
         try {D3D12WarpFixture fixture;test_guide_composer(fixture);fixture.require_no_debug_errors();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

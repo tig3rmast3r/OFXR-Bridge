@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.929.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.930.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1798,6 +1798,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             target_link_libraries(xrfg_rife_tensorrt_status_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
             set(XRFG_TEST_RIFE_RUNTIME "" CACHE PATH "Isolated portable RIFE runtime for integration tests")
             if(XRFG_TEST_RIFE_RUNTIME)
+                add_test(NAME xrfg_rife_worker_lifetime_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
+                    -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_worker_lifetime_tests.py")
                 add_test(NAME xrfg_rife_worker_memory_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
                     -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_worker_memory_tests.py")
                 add_test(NAME xrfg_rife_trt_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
@@ -2646,4 +2648,13 @@ if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
         add_test(NAME xrfg_aer_alternate_${route}_gpu COMMAND xrfg_private_runtime_layer_tests aer-alternate-${route})
         set_tests_properties(xrfg_aer_alternate_${route}_gpu PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
     endforeach()
+endif()
+
+if(TARGET xrfg_private_runtime_layer_tests)
+    add_test(NAME xrfg_aer_consumer_status COMMAND xrfg_private_runtime_layer_tests aer-consumer-status)
+    set_tests_properties(xrfg_aer_consumer_status PROPERTIES TIMEOUT 15)
+endif()
+if(TARGET xrfg_d3d12_history_tests AND XRFG_TEST_RIFE_GPU)
+    add_test(NAME xrfg_rife_switch_lifecycle_gpu COMMAND xrfg_d3d12_history_tests rife-switch-lifecycle)
+    set_tests_properties(xrfg_rife_switch_lifecycle_gpu PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 endif()

@@ -2807,7 +2807,7 @@ struct D3D12FrameSynthesizer::Impl {
         device = input_device;
         this->input_queue = input_queue;
         queue = input_queue;
-        if (input_nvidia_options.rife_model >= 0 && input_nvidia_options.rife_async) {
+        if (input_nvidia_options.rife_model >= 0 && input_nvidia_options.rife_async && !defer_flow_resources) {
             // Each asynchronous eye owns its GPU submission order. Sharing the
             // session queue lets another eye enqueue a future acquire/history
             // wait ahead of this eye's completion signal, while the runtime
@@ -2831,7 +2831,7 @@ struct D3D12FrameSynthesizer::Impl {
         // both backends, and FidelityFX is the one that had no measurement.
         allow_luke_guide_device_alias =
             input_allow_luke_guide_device_alias;
-        flow_resources_deferred = defer_flow_resources && input_generation_mode == D3D12FrameGenerationMode::ofxr && input_nvidia_options.rife_model<0;
+        flow_resources_deferred = defer_flow_resources && input_generation_mode == D3D12FrameGenerationMode::ofxr;
         requested_gpu_timing = enable_nvidia_gpu_timing;
         nvidia_gpu_timing_enabled = enable_nvidia_gpu_timing && !flow_resources_deferred;
         const UINT node_mask = queue->GetDesc().NodeMask;
@@ -2898,7 +2898,7 @@ struct D3D12FrameSynthesizer::Impl {
                 if (FAILED(result)) return result;
             }
         }
-        if(nvidia_options.rife_model>=0){
+        if(nvidia_options.rife_model>=0 && !flow_resources_deferred){
             if(generation_mode!=D3D12FrameGenerationMode::ofxr)return E_INVALIDARG;
             rife=std::make_unique<D3D12Rife>();
             constexpr float scales[]{1.F,.75F,.5F,.25F,.20F,1.F/6.F,1.F/3.F};
@@ -7879,6 +7879,8 @@ struct D3D12FrameSynthesizer::Impl {
         if (native_dlss) output_ticket->native_result = native_dlss->last_result();
         if(rife && nvidia_options.rife_async)output_ticket->native_result=slot.rife_result;
         output_ticket->aer_retimed=aer_retimed;
+        output_ticket->used_game_motion=!rife && (used_game_motion || hybrid_guides_used) &&
+            (!native_dlss || native_pair_generated);
         output_ticket->previous_serial = previous_serial;
         output_ticket->current_serial = current.serial;
         output_ticket->fence_value = fence_value;
@@ -8388,6 +8390,13 @@ HRESULT D3D12FrameSynthesizer::synchronize_producer_queue(
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr || queue == nullptr) {
             return E_INVALIDARG;
+        }
+        // A suspended RIFE provider acquires its private queue lazily. Create
+        // it before recording the producer receipt, otherwise that receipt
+        // would apply only to the old transport queue.
+        if(impl_->flow_resources_deferred && impl_->nvidia_options.rife_model>=0) {
+            const auto ready=ensure_flow_resources_locked();
+            if(FAILED(ready))return ready;
         }
         if (impl_->queue == nullptr || impl_->acquire_fence == nullptr) {
             return E_UNEXPECTED;

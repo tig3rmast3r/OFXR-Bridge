@@ -94,6 +94,15 @@ int aer_native_guide_cache_test() {
 }
 
 
+#include "d3d12_reported_device_alias.hpp"
+class AerOriginQueueRefusal final:public ReportedDeviceAlias {
+public:
+    using ReportedDeviceAlias::ReportedDeviceAlias;
+    HRESULT STDMETHODCALLTYPE CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC*,REFIID,void** out) override {
+        if(out)*out=nullptr;return E_OUTOFMEMORY;
+    }
+};
+
 int aer_native_guide_join_test() {
     Fixture f(true);f.transport->stop();f.transport.reset();
     constexpr UINT width=800,height=128;
@@ -169,6 +178,16 @@ int aer_native_guide_join_test() {
             ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&future)),"join future ingress gate");
             struct Unblock {ComPtr<ID3D12Fence> fence;~Unblock(){fence->Signal(1);}} unblock{future};
             ok(f.queue->Wait(future.Get(),1),"hold unrelated future ingress");
+            if(n==4) {
+                ComPtr<ID3D12Device> refused;refused.Attach(new AerOriginQueueRefusal(f.device12.Get()));
+                state->d3d12_device=refused;
+                check(refresh_aer_native_guides(state,snapshot,mappings)==S_FALSE,
+                    "healthy-device optional queue OOM must keep real XR delivery instead of losing the session");
+                check(state->aer_native_guide_cache && !state->aer_native_guide_cache->poisoned &&
+                    state->aer_native_guide_cache->queue_retry_after>GetTickCount64(),"queue allocation refusal must back off without poisoning captures");
+                state->d3d12_device=f.device12;
+                state->aer_native_guide_cache->queue_retry_after=0;
+            }
             check(refresh_aer_native_guides(state,snapshot,mappings)==S_OK,"actual native AER colour-token join did not attach both eyes");
             check(state->aer_native_guide_cache->read_queue.Get()!=f.queue.Get(),"join reused the stalled ingress queue");
             for(unsigned e=0;e<2;++e) {

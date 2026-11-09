@@ -480,6 +480,9 @@ HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
 // Two independently decoded colors in one submission/fence/map. The return
 // value covers shared transport; per-eye results retain missing/ambiguous errors.
 struct LukeColorOriginReadResult;
+// Drop a drained session-owned reader instead of keeping its queue until the
+// process-wide LRU fills. In-flight or externally held readers remain owned.
+void retire_luke_color_origin_reader(ID3D12CommandQueue* queue) noexcept;
 struct LukeColorOriginReadReceipt {
     Microsoft::WRL::ComPtr<ID3D12Fence> fence;
     std::uint64_t value{};

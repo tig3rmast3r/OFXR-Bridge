@@ -100,7 +100,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     GenerationState generation=GenerationState::waiting, HRESULT initialization_result=S_OK,
     bool vulkan_detected=false, std::uint32_t provider_error=0,
     const SwapchainBudgetStatus* swapchains=nullptr,int pacing_mode=-1,bool steamvr=false,bool afw_only=false,
-    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false,unsigned buffer_capacity=0,unsigned rife_max_multiplier=2,std::uint64_t rife_after_ms=0) {
+    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false,unsigned buffer_capacity=0,unsigned rife_max_multiplier=2,std::uint64_t rife_after_ms=0,std::uint64_t consumer_guides_ms=0) {
     const auto control=embedded::snapshot();
     const auto afw=embedded::afw_snapshot();
     const auto nr=neural_rendering::status();
@@ -160,9 +160,10 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     if (post_afw && (out.generation_mode == 0 || out.generation_mode == 3))
         out.motion_source = 0; // Complete post-AFW color pair, no native peer-eye guides.
     if (!control.desired.enabled) generation=GenerationState::paused;
+    const bool consumer_guides=consumer_guides_ms && now>=consumer_guides_ms && now-consumer_guides_ms<2000;
     if ((generation==GenerationState::ready || generation==GenerationState::waiting) &&
         (out.motion_source==1 || out.generation_mode==1 || out.generation_mode==2) &&
-        !(out.generation_mode==2 && generation==GenerationState::ready)) {
+        !(generation==GenerationState::ready && (out.generation_mode==2 || consumer_guides))) {
         switch(guides.status) {
         case DlssMotionVectorStatus::waiting_for_dlss: generation=GenerationState::missing_motion; break;
         case DlssMotionVectorStatus::waiting_for_depth: generation=GenerationState::missing_depth; break;

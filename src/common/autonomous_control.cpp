@@ -396,6 +396,7 @@ Settings sanitize(Settings value) noexcept {
     value.benchmark_csv=true;
     if(!value.advanced_mode) {
         const Settings defaults;
+        value.ofr_swap=defaults.ofr_swap;
         value.backward=defaults.backward;
         value.rife_model=defaults.rife_model;value.r19_camera=defaults.r19_camera;
         // Off is a visible primary choice. Reset only the hidden sub-modes.
