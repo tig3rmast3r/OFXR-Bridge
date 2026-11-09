@@ -10,6 +10,7 @@
 #include "xrfg/luke_color_origin.hpp"
 #include "xrfg/luke_native_motion_interval.hpp"
 #include "xrfg/embedded_control.hpp"
+#include "xrfg/luke_origin_capture_policy.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/two_frame_capture.hpp"
 #include "xrfg/neural_rendering.hpp"
@@ -54,6 +55,9 @@
 
 namespace xrfg { namespace {
 using Microsoft::WRL::ComPtr;
+bool origin_marker_required() noexcept {
+    return luke_origin_capture_required(embedded::snapshot().desired,embedded::afw_snapshot().desired);
+}
 using Create = NVSDK_NGX_Result(*)(ID3D12GraphicsCommandList*, NVSDK_NGX_Feature,
     NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
 using Release = NVSDK_NGX_Result(*)(NVSDK_NGX_Handle*);
@@ -568,7 +572,7 @@ public:
                 lifetime_->guide_contract=native_contract_;
                 lifetime_->guide_contract_known=native_contract_.flags_known&&
                     native_contract_.type==NVSDK_NGX_Feature_RayReconstruction;
-                if(native_frame_&&embedded::afw_snapshot().desired.mode!=0) {
+                if(native_frame_&&origin_marker_required()) {
                 const auto stream=kKcdPublicStreamNamespace|lifetime_->identity;
                 const auto sequence=state().public_production_sequences.find(stream);
                 if(sequence==state().public_production_sequences.end()||
@@ -717,7 +721,7 @@ public:
                 owner->frame_->output_x||owner->frame_->output_y) {owner->reject(10);return;}
             const auto view=owner->hdr_&&desc.Format==DXGI_FORMAT_R16G16B16A16_TYPELESS?DXGI_FORMAT_R16G16B16A16_FLOAT:
                 owner->hdr_&&desc.Format==DXGI_FORMAT_R32G32B32A32_TYPELESS?DXGI_FORMAT_R32G32B32A32_FLOAT:DXGI_FORMAT_UNKNOWN;
-            const auto marked=embedded::afw_snapshot().desired.mode==0?S_FALSE:
+            const auto marked=!origin_marker_required()?S_FALSE:
                 mark_luke_color_origin(cmd.Get(),output.Get(),owner->frame_->color_origin_token,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,owner->frame_->verified_producer_device.Get(),
                     {0,0,owner->frame_->output_width,owner->frame_->output_height},view);
@@ -747,7 +751,7 @@ public:
                 !frame_->color_origin_token) {reject(7);return result;}
             const auto view=hdr_&&desc.Format==DXGI_FORMAT_R16G16B16A16_TYPELESS?DXGI_FORMAT_R16G16B16A16_FLOAT:
                 hdr_&&desc.Format==DXGI_FORMAT_R32G32B32A32_TYPELESS?DXGI_FORMAT_R32G32B32A32_FLOAT:DXGI_FORMAT_UNKNOWN;
-            const auto marked=embedded::afw_snapshot().desired.mode==0?S_FALSE:
+            const auto marked=!origin_marker_required()?S_FALSE:
                 mark_luke_color_origin(command_.Get(),output_.Get(),frame_->color_origin_token,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,frame_->verified_producer_device.Get(),
                     {0,0,frame_->output_width,frame_->output_height},view);
@@ -985,7 +989,7 @@ public:
             // and creation, so an old generation cannot mark a reused output.
             std::scoped_lock lock(state().mutex);
             if(aborted_||NVSDK_NGX_FAILED(result)||native_claims_!=1||!native_success_||!live_locked()) {abort();return;}
-            if(public_frame_&&embedded::afw_snapshot().desired.mode!=0) {
+            if(public_frame_&&origin_marker_required()) {
                 const bool hdr=creator_.flags_known&&(creator_.flags&NVSDK_NGX_DLSS_Feature_Flags_IsHDR)!=0;
                 // The injector may leave its private Output in the parameter map.
                 // Its caller's original final target was retained before forwarding.
@@ -1427,7 +1431,7 @@ template<UINT slot> NVSDK_NGX_Result create(ID3D12GraphicsCommandList* list,NVSD
 HRESULT complete_color_resource(ID3D12GraphicsCommandList* list,ID3D12Resource* output,
     const std::shared_ptr<const DlssMotionVectorFrame>& frame,bool hdr) {
     if(!frame||!frame->color_origin_token||!native_ingress::luke_detected()||
-       embedded::afw_snapshot().desired.mode==0)return S_FALSE;
+       !origin_marker_required())return S_FALSE;
     auto color=native(output);
     auto cmd=native(list);if(!color||!cmd||!same(color.Get(),frame->output.Get()))return E_INVALIDARG;
     ComPtr<ID3D12Device> cd,ld;

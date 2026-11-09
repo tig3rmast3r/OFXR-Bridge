@@ -748,18 +748,63 @@ void aer_framegen_widgets() {
     require(request(saved),"restore AER UI fixture settings");
 }
 
+void aer_native_guide_widgets() {
+    const auto saved=snapshot().desired;
+    constexpr const char* cards[]{"OFXR","FSR 3.1","DLSS-G","Hybrid","RIFE"};
+    constexpr int ui_indices[]{0,2,3,1,4};
+    for(bool compact:{false,true})for(int method:{0,1,2,3,4}) {
+        auto settings=saved;settings.advanced_mode=true;settings.ofr_enabled=true;
+        settings.ofr_swap=true;settings.enabled=true;settings.afw_mode=3;
+        select_generation(settings,method,2);
+        require(request(settings),"AER native-guide selected method setup");
+        Snapshot sample=snapshot();sample.connected=true;sample.runtime.luke_detected=true;
+        sample.runtime.vdxr_legacy=false;sample.runtime.ofr_delivery=1;
+        // Historical activity is not evidence of current per-eye availability.
+        sample.runtime.guide_publications=99;sample.runtime.guide_matches=99;sample.runtime.guide_uses=99;
+        Context view(compact?ImVec2(1024,768):ImVec2(690,1200),compact);
+        view.injected_snapshot=&sample;view.draw();view.draw(true);
+        require(snapshot().desired.frame_generation==method && snapshot().desired.ofr_enabled && snapshot().desired.ofr_swap,
+            "AER display never coerces the selected method or phase while inputs are missing");
+        if(method==1 || method==2)
+            require(view.rendered_text.find("Waiting for native DLSS motion vectors and depth")!=std::string::npos,
+                "FSR/DLSS-G report missing AER native inputs instead of claiming readiness from old counters");
+        require(view.rendered_text.find("AFW reconstructs one eye without native guides")==std::string::npos,
+            "AER bypasses saved AFW preferences, so post-AFW warnings do not apply");
+        sample.runtime.upscaler_evaluations=1;sample.runtime.upscaler_motion=true;
+        sample.runtime.upscaler_depth=true;sample.runtime.upscaler_last_seen_ms=GetTickCount64();
+        view.draw(true);
+        require(view.rendered_text.find("Native DLSS motion vectors and depth observed")!=std::string::npos &&
+            view.rendered_text.find("each eye's own released frame")!=std::string::npos,
+            "fresh native input observation remains distinct from exact per-eye guide validation");
+        sample.runtime.upscaler_last_seen_ms=GetTickCount64()-5000;view.draw(true);
+        require(view.rendered_text.find("Native DLSS motion vectors and depth observed")==std::string::npos,
+            "stale DLSS evaluations do not advertise available native AER inputs");
+        sample.runtime.upscaler_last_seen_ms=GetTickCount64();sample.runtime.upscaler_depth=false;view.draw(true);
+        require(view.rendered_text.find("Native DLSS motion vectors and depth observed")==std::string::npos,
+            "motion observation without depth does not advertise complete native AER inputs");
+        // All cards remain selectable before guide capture starts, allowing the
+        // chosen consumer to request inputs without a UI/capture deadlock.
+        view.injected_snapshot=nullptr;view.draw();
+        const int next=(method+1)%5;
+        view.choose("Frame generation",ui_indices[next],cards[next]);
+        require(snapshot().desired.frame_generation==next && snapshot().desired.ofr_enabled &&
+            generation_multiplier(snapshot().desired)==2,"AER allows each selected method and keeps the 2X cap");
+    }
+    require(request(saved),"restore AER native guide UI settings");
+}
+
 int main(int argc, char** argv) {
     const auto profile = std::filesystem::temp_directory_path() /
         (L"ofxr-settings-widgets-" + std::to_wstring(GetCurrentProcessId()) +
             L"-" + std::to_wstring(GetTickCount64()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", profile.c_str());
     try {
-        if (argc == 2 && std::strcmp(argv[1], "--aer-framegen") == 0) aer_framegen_widgets();
+        if (argc == 2 && std::strcmp(argv[1], "--aer-framegen") == 0) {aer_framegen_widgets();aer_native_guide_widgets();}
         else if (argc == 2 && std::strcmp(argv[1], "--gpu-telemetry") == 0) gpu_telemetry_and_quality();
         else if (argc == 2 && std::strcmp(argv[1], "--desktop-header") == 0) desktop_header_is_not_a_headset_control();
         else if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--route-multiplier") == 0) route_multiplier_widgets();
-        else { desktop_header_is_not_a_headset_control(); rebase_and_publish(); rife_catalog();rife_widgets();release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); aer_framegen_widgets(); }
+        else { desktop_header_is_not_a_headset_control(); rebase_and_publish(); rife_catalog();rife_widgets();release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); aer_framegen_widgets();aer_native_guide_widgets(); }
         std::filesystem::remove(configuration_path());
         std::filesystem::remove(profile/L"dlssg-profile-selection.ini");
         std::filesystem::remove(profile);

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.927.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.928.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2623,4 +2623,23 @@ endif()
 if(TARGET xrfg_private_openxr_runtime_tests)
     add_test(NAME xrfg_clean_all_off_bypass COMMAND xrfg_private_openxr_runtime_tests clean-bypass)
     set_tests_properties(xrfg_clean_all_off_bypass PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_openxr_runtime_tests)
+    add_test(NAME xrfg_aer_held_virtual_gpu COMMAND xrfg_private_openxr_runtime_tests held-aer)
+    set_tests_properties(xrfg_aer_held_virtual_gpu PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
+endif()
+if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_d3d12_history_tests)
+    add_test(NAME xrfg_aer_guide_fsr_gpu COMMAND xrfg_d3d12_history_tests aer-guide-fsr)
+    add_test(NAME xrfg_aer_guide_native_gpu COMMAND xrfg_d3d12_history_tests aer-guide-native)
+    set_tests_properties(xrfg_aer_guide_fsr_gpu xrfg_aer_guide_native_gpu PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
+    add_test(NAME xrfg_aer_native_guide_cache COMMAND xrfg_private_runtime_layer_tests aer-native-guide-cache)
+    set_tests_properties(xrfg_aer_native_guide_cache PROPERTIES TIMEOUT 15)
+    foreach(route framework framework-buffer director director-buffer)
+        add_test(NAME xrfg_aer_alternate_${route}_gpu COMMAND xrfg_private_runtime_layer_tests aer-alternate-${route})
+        set_tests_properties(xrfg_aer_alternate_${route}_gpu PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
+    endforeach()
 endif()

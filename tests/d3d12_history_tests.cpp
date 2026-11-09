@@ -6131,8 +6131,27 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 
 #include "history_v474_wait_tests.inc"
 #include "synthesis_memory_lifecycle_tests.inc"
+#include "aer_guide_endpoints.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1&&std::string_view(argv[1])=="aer-guide-fsr") {
+        try {
+            D3D12WarpFixture fixture(true);
+            test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::fsr3);
+            fixture.require_no_debug_errors();return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+#ifdef XRFG_NATIVE_DLSSG
+    if(argc>1&&std::string_view(argv[1])=="aer-guide-native") {
+        try {
+            if(!native_test_has_supported_nvidia_adapter())return 77;
+            D3D12WarpFixture fixture(true);
+            if(!xrfg::native_dlssg_max_generated_frames(fixture.device()))return 77;
+            test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::native_dlss);
+            fixture.require_no_debug_errors();return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+#endif
     if(argc>1&&std::string_view(argv[1])=="ofr-rife") {
         try {
             D3D12WarpFixture fixture(true);

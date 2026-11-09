@@ -1538,6 +1538,15 @@ XrResult PrivateOpenXrRuntime::begin_frame(const XrFrameBeginInfo* info) {
     const auto result=s.begun?XR_FRAME_DISCARDED:XR_SUCCESS;s.begun=1;return result;
 }
 void PrivateOpenXrRuntime::pair_next_end_with_previous() noexcept {impl_->pair_next.store(true);}
+XrResult PrivateOpenXrRuntime::discard_virtual_frame() {
+    auto& s=*impl_;std::scoped_lock accept(s.accept_mutex);
+    {std::scoped_lock lock(s.mutex);
+     if(XR_FAILED(s.failure))return s.failure;
+     if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
+     if(!s.begun)return XR_ERROR_CALL_ORDER_INVALID;
+     s.begun=0;s.pair_next=false;s.next_content_time=0;}
+    s.changed.notify_all();return XR_SUCCESS;
+}
 XrTime PrivateOpenXrRuntime::last_native_display_time() const noexcept {return impl_->last_end_display.load();}
 void PrivateOpenXrRuntime::set_next_end_content_time(XrTime time) noexcept {impl_->next_content_time.store(time);}
 XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::shared_ptr<InterfaceDeliveryReceipt>& delivery) {

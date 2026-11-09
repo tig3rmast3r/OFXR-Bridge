@@ -251,11 +251,15 @@ static int panel_metadata_contract() {
 }
 
 #include "rife_output_banks_tests.inc"
+#include "aer_alternate_delivery.inc"
+#include "aer_native_guide_cache_fixture.inc"
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route.starts_with("aer-alternate-"))return aer_alternate_delivery_test(route);
     const bool aer_path=route.starts_with("aer-");if(aer_path)route.erase(0,4);
     const bool aer_swap=aer_path&&route.starts_with("swap-");if(aer_swap)route.erase(0,5);
+    if(route=="aer-native-guide-cache")return aer_native_guide_cache_test();
     if(route=="rife-memory-recovery") {
         xrfg_fixture::ControlProfile profile;Fixture f(true);f.unblock();
         auto dispatch=std::make_shared<Dispatch>();auto state=std::make_shared<SessionState>(dispatch);

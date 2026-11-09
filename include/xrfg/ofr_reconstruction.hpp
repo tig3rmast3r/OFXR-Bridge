@@ -37,6 +37,9 @@ class SourceTracker {
     bool observed_{};
 public:
     void reset() noexcept { *this={}; }
+    bool held(const std::array<Source,2>& current) const noexcept {
+        return observed_ && previous_==current;
+    }
     Decision observe(const std::array<Source,2>& current) noexcept {
         for(const auto& source:current) if(!source.resource || !source.epoch || !source.serial) {
             reset();return {0,false};

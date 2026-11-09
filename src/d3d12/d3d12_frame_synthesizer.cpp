@@ -4118,6 +4118,41 @@ struct D3D12FrameSynthesizer::Impl {
         return true;
     }
 
+    [[nodiscard]] HRESULT wait_aer_guide_dependencies(
+        const RollingSource& first,const RollingSource& second,
+        const DlssMotionVectorSet* composer=nullptr,bool validate_only=false) noexcept {
+        if(!nvidia_options.ofr ||
+            (generation_mode==D3D12FrameGenerationMode::ofxr && !nvidia_options.hybrid))return S_OK;
+        // Resolving a token may enqueue guide readiness on the ingress queue
+        // AFTER its colour capture was signalled. The isolated synthesis lane
+        // must consume the guide receipts directly; the earlier colour fence
+        // alone does not cover those later waits. No CPU wait or queue-tail
+        // fence is introduced. Composer bridge vectors own their receipts too.
+        std::array<std::pair<ID3D12Fence*,std::uint64_t>,12> waits{};
+        UINT count=0;
+        for(const auto* set:{first.motion_vectors.get(),second.motion_vectors.get(),composer}) {
+            if(!set)continue;
+            for(UINT eye=0;eye<std::min(set->eye_count,kDlssMotionVectorEyeCount);++eye) {
+                const auto& frame=set->eyes[eye];if(!frame)continue;
+                for(const auto* input:{frame.get(),frame->bridge.get()}) {
+                    if(!input || input->producer_queue.Get()==queue.Get())continue;
+                    if(!input->producer_fence || !input->producer_fence_value)return DXGI_ERROR_WAS_STILL_DRAWING;
+                    auto found=std::find_if(waits.begin(),waits.begin()+count,[&](const auto& entry) {
+                        return entry.first==input->producer_fence.Get();
+                    });
+                    if(found!=waits.begin()+count)found->second=std::max(found->second,input->producer_fence_value);
+                    else waits[count++]={input->producer_fence.Get(),input->producer_fence_value};
+                }
+            }
+        }
+        if(validate_only)return S_OK;
+        for(UINT i=0;i<count;++i) {
+            const HRESULT result=queue->Wait(waits[i].first,waits[i].second);
+            if(FAILED(result))return result;
+        }
+        return S_OK;
+    }
+
     void synthetic_target_state(ID3D12GraphicsCommandList* list,
                                 std::uint32_t index, bool rendering) {
         if (release_state == D3D12_RESOURCE_STATE_RENDER_TARGET) return;
@@ -7655,6 +7690,11 @@ struct D3D12FrameSynthesizer::Impl {
             return E_INVALIDARG;
         }
 
+        // Reject an incomplete AER receipt before recording any provider work.
+        // A later complete frame may prime again; missing guides do not burn
+        // the persistent provider or leave its command list recording open.
+        result=wait_aer_guide_dependencies(previous,next,nullptr,true);
+        if(FAILED(result)) {cancel_next();return result;}
         WorkSlot& slot = work_slots[work_slot_index];
         result = reset_work_slot(slot);
         if (FAILED(result)) {
@@ -7745,6 +7785,12 @@ struct D3D12FrameSynthesizer::Impl {
                 {next.views.data(),next.view_count});
             barrier=transition_barrier(current_destination,D3D12_RESOURCE_STATE_COPY_DEST,release_state);
             list->ResourceBarrier(1,&barrier);
+        }
+        result = wait_aer_guide_dependencies(previous,next,slot.guide_composer_inputs.get());
+        if(FAILED(result)) {
+            synthesis_enabled=false;
+            cancel_next();
+            return result;
         }
         result = rife && nvidia_options.rife_async ? S_OK : queue->Wait(
             previous.producer_fence.Get(),

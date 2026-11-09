@@ -762,6 +762,8 @@ struct CompositionImageSlot;
 
 struct UevrAfrOsrState;
 std::shared_ptr<UevrAfrOsrState> make_uevr_afr_osr_state() noexcept;
+struct AerNativeGuideCache;
+
 struct SessionState {
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> panel_synthesis_queue;
     std::vector<std::pair<XrSwapchain,XrTime>> panel_generated;
@@ -954,6 +956,7 @@ struct SessionState {
     std::atomic_uint ofr_delivery{}; // 0 learning,1 alternate,2 paired
     unsigned ofr_fresh_mask{3},ofr_last_mask{};
     xrfg::ofr::SourceTracker ofr_source_tracker;
+    std::shared_ptr<AerNativeGuideCache> aer_native_guide_cache;
     std::array<XrPosef,2> ofr_source_poses{};
     std::array<XrFovf,2> ofr_source_fovs{};
     // D35: bounded opt-in allocation/adapter records; never a pacing input.
@@ -3289,6 +3292,12 @@ void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept 
             xrfg::BridgeFlightOperation::gpu_drain,
             E_FAIL);
     }
+}
+
+bool private_aer_d11_readiness(const SessionState& state) noexcept {
+    return state.nvidia_options.ofr && state.private_runtime && state.luke_afw_enabled &&
+        state.graphics_binding==SessionGraphicsBinding::d3d11 && state.dispatch->steamvr_runtime &&
+        !state.d3d11_bridge && !state.vulkan_bridge;
 }
 
 [[nodiscard]] bool release_private_image(
@@ -13258,7 +13267,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 current_destination_index,request_pair ? std::optional<std::uint32_t>{synthetic_destination_index} : std::nullopt,
                 completed.Get(),ticket.fence_value,&inline_publication);
         }
-        if (SUCCEEDED(submit_result) && inline_publication.fence) {
+        if (SUCCEEDED(submit_result) && inline_publication.fence &&
+            !private_aer_d11_readiness(*state->session)) {
             const auto publication_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_publication_complete,
                 post_afw_input ? post_afw_input->color_identity.application_serial : 0,
@@ -13623,7 +13633,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         // Wait only for this publication, outside the interop mutex. A global
         // idle wait blocks AFW capture/publish on that same bridge and can
         // also inherit the next producer's completion cursor.
-        if (g.worker_generation->d3d11_interop && g.worker_publication.fence) {
+        if (g.worker_generation->d3d11_interop && g.worker_publication.fence &&
+            !private_aer_d11_readiness(*state)) {
             const auto publication_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_publication_complete,
                 source_sequence, handle_value(resource.application_swapchain),
@@ -13636,8 +13647,15 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             success = SUCCEEDED(published) && success;
         }
         if (g.staging_generation) continue;
+        // If publication is still pending, ordinary private Release freezes
+        // readiness on the SAME D11 context after those copies. The endpoint
+        // waits that exact GPU signal before copying its owned image. Do not
+        // block the source producer or falsely supply a completed-image proof.
+        const bool publication_complete=g.worker_publication.fence &&
+            g.worker_publication.fence->GetCompletedValue()!=UINT64_MAX &&
+            g.worker_publication.fence->GetCompletedValue()>=g.worker_publication.copy_complete_value;
         const bool private_ready=state->luke_afw_enabled && state->dispatch->steamvr_runtime &&
-            state->graphics_binding==SessionGraphicsBinding::d3d11 && state->private_runtime;
+            state->graphics_binding==SessionGraphicsBinding::d3d11 && state->private_runtime && publication_complete;
         auto current_proof=private_ready && g.worker_generation->d3d11_interop && g.worker_publication.fence
             ? g.worker_generation->d3d11_interop->published_image(g.worker_publication.current_destination_index,false)
             : Microsoft::WRL::ComPtr<ID3D11Texture2D>{};
@@ -13646,14 +13664,14 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             : Microsoft::WRL::ComPtr<ID3D11Texture2D>{};
         if (g.kind == PreparedGenerationKind::pair)
             success = release_private_image(state.get(), state->dispatch,
-                g.worker_generation->synthetic[g.synthetic_slot],&g.worker_publication,synthetic_proof.Get()) && success;
+                g.worker_generation->synthetic[g.synthetic_slot],private_ready?&g.worker_publication:nullptr,synthetic_proof.Get()) && success;
         if(g.third_handle!=XR_NULL_HANDLE)success=release_private_image(state.get(),state->dispatch,
             g.worker_generation->synthetic[(g.synthetic_slot+2)%g.worker_generation->synthetic_runtime_rings])&&success;
         if (g.extra_handle != XR_NULL_HANDLE)
             success = release_private_image(state.get(), state->dispatch,
                 g.worker_generation->synthetic[(g.synthetic_slot+1)%g.worker_generation->synthetic_runtime_rings]) && success;
         success = release_private_image(state.get(), state->dispatch,
-            g.worker_generation->current[g.current_slot],&g.worker_publication,current_proof.Get()) && success;
+            g.worker_generation->current[g.current_slot],private_ready?&g.worker_publication:nullptr,current_proof.Get()) && success;
     }
     return success;
 }
@@ -15076,6 +15094,8 @@ struct LukeOriginHistoryProbe {
     else poisoned=true; // Submitted without a fence: quarantine leases until session teardown.
     return poisoned?E_FAIL:hr;
 }
+
+#include "aer_native_guides.inc"
 
 // V23189 deliberately owns the whole two-eye transaction. Both private
 // current images are populated first, AFW replaces only the peer, and only then
@@ -16674,6 +16694,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     state->nvidia_options = options;
     state->ofr_delivery=0;state->ofr_last_mask=0;
     state->ofr_source_tracker.reset();
+    state->aer_native_guide_cache.reset();
     xrfg::embedded::ofr_last_success_ms=0;xrfg::embedded::ofr_delivery=0;
     state->frame_generation_mode = generation_mode;
     state->hybrid_requested=control.desired.hybrid;
@@ -17959,6 +17980,23 @@ XrResult layer_end_frame_impl(
     const std::span<const ProjectionResourceMapping> projection_mappings(
         resource_mappings.mappings.data(),
         resource_mappings.mappings.size());
+    // Close held virtual cycles before optional guide admission. An old guide
+    // expiring or a pending marker read must not replace the last coherent
+    // image when the application has released no new source at all.
+    if(state->nvidia_options.ofr && resource_mappings.ready() &&
+        (use_continuous_presenter || state->private_runtime)) {
+        record_projection_capture_order(current_snapshot,projection_mappings);
+        if(state->ofr_source_tracker.held(ofr_sources(current_snapshot,projection_mappings))) {
+            const auto held=use_continuous_presenter ? XR_SUCCESS :
+                state->private_runtime->discard_virtual_frame();
+            if(XR_FAILED(held))return held;
+            consume_application_frame(state,current_snapshot.display_time,
+                consume_in_submission_order,match_latest_by_submission);
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                9230,0,state->ofr_delivery.load(),0);
+            return XR_SUCCESS;
+        }
+    }
     if(state->luke_outlaws_preframe&&resource_mappings.ready()) {
         // Eager histories no longer pass through lazy arming. Color identity
         // still uses the actual submitted projection, never enum order/shape.
@@ -17966,6 +18004,19 @@ XrResult layer_end_frame_impl(
             const auto chain=find_swapchain(mapping.application_swapchain);
             if(chain&&chain->create_info.arraySize==1)
                 xrfg::configure_luke_color_origin_extent(chain->create_info.width,chain->create_info.height);
+        }
+    }
+    if(state->nvidia_options.ofr && state->luke_afw_enabled && state->dlss_motion_vectors &&
+        (state->frame_generation_mode!=xrfg::D3D12FrameGenerationMode::ofxr || state->hybrid_requested)) {
+        record_projection_capture_order(current_snapshot,projection_mappings);
+        const auto guides=refresh_aer_native_guides(state,current_snapshot,projection_mappings);
+        if(FAILED(guides))return XR_ERROR_RUNTIME_FAILURE;
+        if(guides!=S_OK) {
+            state->generation_status=xrfg::autonomous::GenerationState::missing_motion;
+            const bool fsr=state->frame_generation_mode==xrfg::D3D12FrameGenerationMode::fsr3;
+            if(fsr)xrfg::report_fsr_frame_generation_status(xrfg::FsrFrameGenerationStatus::waiting_for_guides);
+            return bypass_generation(fsr?GenerationPrepareReason::fsr_stereo_unavailable:
+                GenerationPrepareReason::native_stereo_unavailable,true);
         }
     }
     const auto panels=panel_sources(*state,current_snapshot,projection_mappings);
@@ -18163,9 +18214,18 @@ XrResult layer_end_frame_impl(
             return bypass_generation(GenerationPrepareReason::missing_capture);
         state->ofr_fresh_mask=decision.fresh;current_snapshot.aer_fresh_mask=decision.fresh;
         if(!decision.fresh) {
-            if(use_continuous_presenter) {
+            // A held application poll is not a new raw stereo image. Passing
+            // it through resets the generator anchor and replaces coherent
+            // output with the original staggered eyes, especially when extra
+            // Director/Buffer credits admit several polls per source render.
+            if(use_continuous_presenter || state->private_runtime) {
+                const auto held=use_continuous_presenter ? XR_SUCCESS :
+                    state->private_runtime->discard_virtual_frame();
+                if(XR_FAILED(held))return held;
                 consume_application_frame(state,current_snapshot.display_time,
                     consume_in_submission_order,match_latest_by_submission);
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                    9230,0,state->ofr_delivery.load(),0);
                 return XR_SUCCESS;
             }
             return bypass_generation(GenerationPrepareReason::missing_capture);
