@@ -15,7 +15,8 @@
 namespace xrfg::native_vulkan::rdr2_camera_probe {
 using Report=void(*)(unsigned,std::int64_t,std::uint64_t,std::uint64_t) noexcept;
 struct Sample {std::uint64_t render{},owner{},sequence{};std::array<unsigned char,256> camera{};
-    DWORD thread{};ULONGLONG captured_ms{};bool valid{};};
+    DWORD thread{};ULONGLONG captured_ms{};bool valid{};
+    std::uint64_t camera_qpc{},camera_frequency{};};
 inline thread_local Sample main_camera;
 struct State {
     std::mutex mutex;
@@ -40,11 +41,14 @@ inline bool read(std::uintptr_t address,void* destination,std::size_t size) noex
 template<class T>bool read(std::uintptr_t address,T& value) noexcept {return read(address,&value,sizeof(value));}
 inline void camera_call(void* owner,bool gun,void* camera) {
     auto& s=state();s.original.load(std::memory_order_acquire)(owner,gun,camera);
+    LARGE_INTEGER stamp{};QueryPerformanceCounter(&stamp);
+    static const auto frequency=[] {LARGE_INTEGER v{};QueryPerformanceFrequency(&v);return std::uint64_t(v.QuadPart);}();
     const auto sequence=s.calls.fetch_add(1,std::memory_order_relaxed)+1;
     const auto object=reinterpret_cast<std::uintptr_t>(owner);
     std::uint64_t selected{},vtable{},after_owner{},after_vtable{},after_render{};
     Sample sample{};sample.owner=object;sample.sequence=sequence;
     sample.thread=GetCurrentThreadId();sample.captured_ms=GetTickCount64();
+    sample.camera_qpc=std::uint64_t(stamp.QuadPart);sample.camera_frequency=frequency;
     std::array<unsigned char,256> verified{};
     sample.valid=read(s.module+s.layout.owner,selected)&&selected==object&&
         read(object,vtable)&&vtable==s.module+s.layout.vtable&&
@@ -86,7 +90,8 @@ inline Sample take() noexcept {
             const auto b=native_ingress::real_vr_dlss_camera::read_float(sample.camera.data(),at);
             if(!std::isfinite(a)||!std::isfinite(b)||std::abs(a-b)>1e-5F*std::max(1.F,std::abs(a)))return fail(6);
         }
-        selected=sample;
+        // Prefer the matching main camera over a later identical gun callback.
+        if(!selected.valid)selected=sample;
     }
     if(!selected.valid)return fail(2);
     if(!read(slot,after_ring_render)||after_ring_render!=render||

@@ -760,6 +760,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->raw_motion_variable_interval = publication.raw_motion_variable_interval;
         frame->compose_native_object_history = publication.compose_native_object_history;
         frame->osr_native_cabin_motion = publication.osr_native_cabin_motion;
+        frame->source_camera_time = publication.source_camera_time;
         frame->gta_headlock=publication.gta_headlock;
         frame->camera_pending = publication.camera_pending && !publication.camera_data_valid;
         frame->depth_x = static_cast<std::uint32_t>(publication.depth_x - depth_dx);

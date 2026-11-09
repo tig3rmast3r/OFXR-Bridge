@@ -25,6 +25,7 @@
 #include "osr_hole_fill_pass.hpp"
 #include "xrfg/osr_hole_fill.hpp"
 #include "osr_full_warp_pass.hpp"
+#include "rdr2_camera_phase_pass.hpp"
 #include "xrfg/osr_full_warp.hpp"
 
 #include <Windows.h>
@@ -509,6 +510,7 @@ struct LukeAfwSynthesizer::Impl {
     AfwColorScale color_scale;
     OsrHoleFill osr; // OSR stereo hole fill, same inputs as the provider
     OsrFullWarp osr_full; // Full OSR: the layer's own peer-eye reconstruction, same inputs
+    Rdr2CameraPhasePass rdr2_phase;
     UINT work_width{},work_height{},quality_divisor{1};
     DXGI_FORMAT checked_quality_format{DXGI_FORMAT_UNKNOWN};
     bool quality_can_scale{};
@@ -1515,7 +1517,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
     std::uint32_t source_eye,
     float xr_eye_baseline,
     const embedded::AfwSettings& settings,bool native_peer_camera,
-    std::optional<Vec3>* reconstructed_position,const LukeAfwVerifiedPeer* verified_peer) noexcept {
+    std::optional<Vec3>* reconstructed_position,const LukeAfwVerifiedPeer* verified_peer,bool camera_phase_allowed) noexcept {
     if(reconstructed_position)reconstructed_position->reset();
     try {
         std::scoped_lock lock(mutex_);
@@ -2536,6 +2538,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 seed.source_color=verified_peer->color;seed.source_depth=peer.depth.Get();
                 seed.source_depth_state=peer.depth_resource_state;
                 OsrFullHistory kept{};kept.publication=peer.publication;kept.stream=peer.stream;kept.epoch=peer.epoch;
+                kept.source_time=peer.source_camera_time;
                 kept.dejitter[0]=-pw->fraction_x+kOsrFullDepthAlignX-peer.jitter_x;
                 kept.dejitter[1]=-pw->fraction_y+kOsrFullDepthAlignY-peer.jitter_y;
                 const auto& pc=*verified_peer_camera;
@@ -2770,6 +2773,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             // Never retain or extrapolate it on a subsequent eye; current
             // original motion still uses the GPU-classified exact endpoints.
             in.retain_history_motion=!guide.raw_motion_variable_interval;
+            in.retain_classified_motion=guide.raw_motion_variable_interval;
             in.background_history_only = gap_background && history_usable;
             // The validated binding/mode is available during normal play.
             // tracking_valid is diagnostic-only and must not gate rendering.
@@ -2781,8 +2785,10 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             // The history frame's own motion needs that eye's frame before it
             // for the camera's share: the two publications back it points to.
             in.use_history_motion = history_usable && !gap_background && history.has_motion &&
-                !guide.raw_motion_variable_interval &&
+                (!guide.raw_motion_variable_interval || history.classified_motion) &&
                 history.previous_publication != 0 && history.previous_publication + (history.native_motion?1:2) == history.publication;
+            in.use_classified_history_motion=guide.raw_motion_variable_interval && history.classified_motion &&
+                history.publication+1==guide.publication && in.use_history_motion;
             in.history_motion_scale[0] = history.motion_scale[0];
             in.history_motion_scale[1] = history.motion_scale[1];
             // Depth texel (i, j) holds the scene at (i, j) + 0.5 + (rounded -
@@ -2898,11 +2904,36 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     std::copy_n(forward_history_previous.values, 16, in.forward_history_previous);
                 }
             }
+            if(guide.raw_motion_variable_interval) {
+                std::optional<float> midpoint,advance;
+                if(in.use_current_history_motion && in.detect_motion_interval && guide.previous_same_guide && guide.previous_opposite_guide)
+                    midpoint=osr_source_midpoint(guide.source_camera_time,guide.previous_opposite_guide->source_camera_time,
+                        guide.previous_same_guide->source_camera_time);
+                if(in.use_classified_history_motion)advance=osr_source_history_advance(guide.source_camera_time,
+                    history.source_time,history.previous_source_time);
+                if(midpoint)in.current_motion_fraction=*midpoint;
+                if(advance)in.history_advance_fraction=*advance;
+                auto& log=bridge_flight_logger();
+                const auto stamp=[&](const DlssMotionVectorFrame& frame,unsigned role) {
+                    const auto& t=frame.source_camera_time;
+                    log.event(BridgeFlightOperation::luke_afw_stage,t.sequence,1380,frame.publication,t.ticks);
+                    log.event(BridgeFlightOperation::luke_afw_stage,t.frequency,1381,frame.publication,t.owner);
+                    two_frame_capture_timeline("osr_source_qpc",role,frame.publication,t.ticks,t.frequency);
+                };
+                stamp(guide,0);
+                if(guide.previous_opposite_guide)stamp(*guide.previous_opposite_guide,1);
+                if(guide.previous_same_guide)stamp(*guide.previous_same_guide,2);
+                std::uint32_t a{},b{};std::memcpy(&a,&in.current_motion_fraction,4);std::memcpy(&b,&in.history_advance_fraction,4);
+                log.event(BridgeFlightOperation::luke_afw_stage,(midpoint?1:0)|(advance?2:0)|(in.use_classified_history_motion?4:0),
+                    1382,guide.publication,(std::uint64_t(a)<<32)|b);
+                two_frame_capture_timeline("osr_source_fraction",(midpoint?1:0)|(advance?2:0),guide.publication,a,b);
+            }
             two_frame_capture_timeline("osr_current_motion_interval",in.use_current_history_motion?(in.adjacent_motion?1:2):0,
                 guide.stream,guide.publication,history.publication);
             impl_->osr_full.record(impl_->device.Get(), command_list, in);
             OsrFullHistory kept{};
             kept.publication = guide.publication; kept.stream = guide.stream; kept.epoch = guide.epoch;
+            kept.source_time = guide.source_camera_time;
             // Composed motion value x guide scale = pixels of the guide's motion
             // grid, which is the depth grid (the windows are checked equal).
             kept.motion_scale[0] = guide.scale_x; kept.motion_scale[1] = guide.scale_y;
@@ -2939,7 +2970,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             // 1321: stored original N1 (bit0), eligible this frame (bit1).
             // b=current publication, c=the history field's native previous endpoint.
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
-                (history.native_motion?1:0)|((in.native_history_motion&&in.use_history_motion)?2:0),
+                (history.native_motion?1:0)|((in.native_history_motion&&in.use_history_motion)?2:0)|
+                    (history.classified_motion?4:0)|(in.use_classified_history_motion?8:0),
                 1321,guide.publication,history.previous_publication);
             // 1312: the de-jitter applied to the source depth this frame:
             // result = float bits of (window fraction x, y) packed high/low,
@@ -2960,7 +2992,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 scene.stream = guide.stream;
                 scene.capture_serial = guide.publication;
                 scene.eye = static_cast<std::int32_t>(peer_eye);
-                scene.width = 6; scene.height = 1;
+                scene.width = 8; scene.height = 1;
                 two_frame_capture_record_ng_x(scene, impl_->device.Get(), command_list,
                     impl_->osr_full.scene_state(), impl_->osr_full.scene_state_state());
                 TwoFrameImageInfo stereo{};
@@ -3061,6 +3093,48 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 }
             }
         }
+        }
+        if(full_osr && guide.raw_motion_variable_interval && camera_phase_allowed && !guide.reset && !eye_canvas) {
+            std::optional<Rdr2CameraPhase> phase;
+            const unsigned peer_eye=1-source_eye;
+            const auto to_array=[](const Matrix4x4& m){Rdr2Matrix a;std::copy_n(m.values,16,a.begin());return a;};
+            // Only exact previously consumed head poses may remove the headset
+            // contribution from native game yaw. A retained/unseen peer cannot.
+            if(temporal_camera_valid && verified_peer_camera && native_previous && middle &&
+               impl_->previous_source_publication[peer_eye]==middle->publication &&
+               impl_->previous_source_publication[source_eye]==native_previous->publication &&
+               rdr2_head_stable(source_view.pose.orientation,impl_->previous_source_xr_orientation[peer_eye]) &&
+               rdr2_head_stable(impl_->previous_source_xr_orientation[peer_eye],impl_->previous_source_xr_orientation[source_eye])) {
+                const auto now=rdr2_game_yaw(to_array(camera.source_view_to_world),source_view.pose.orientation);
+                const auto peer=rdr2_game_yaw(to_array(verified_peer_camera->source_view_to_world),impl_->previous_source_xr_orientation[peer_eye]);
+                const auto same=rdr2_game_yaw(to_array(impl_->previous_source_camera[source_eye].source_view_to_world),impl_->previous_source_xr_orientation[source_eye]);
+                if(now&&peer&&same)phase=rdr2_camera_phase(guide.source_camera_time,middle->source_camera_time,
+                    native_previous->source_camera_time,*now,*peer,*same);
+            }
+            HRESULT phase_ready=S_FALSE;
+            if(phase && std::abs(phase->yaw)>1e-5F) {
+                phase_ready=impl_->rdr2_phase.prepare(impl_->device.Get(),static_cast<UINT>(color_desc.Width),color_desc.Height,quality_format);
+                if(SUCCEEDED(phase_ready)) {
+                    const auto mapping=[&](bool peer) {
+                        return rdr2_phase_mapping(to_array(peer?provider_camera.destination_clip_to_view:provider_camera.source_clip_to_view),
+                            to_array(peer?provider_camera.destination_view_to_world:provider_camera.source_view_to_world),
+                            to_array(peer?provider_camera.destination_world_to_view:provider_camera.source_world_to_view),
+                            to_array(peer?provider_camera.destination_view_to_clip:provider_camera.source_view_to_clip),phase->yaw);
+                    };
+                    impl_->rdr2_phase.record(impl_->device.Get(),command_list,source_color,impl_->osr_full.scene_state(),source_eye,mapping(false));
+                    impl_->rdr2_phase.record(impl_->device.Get(),command_list,final_color.texture,impl_->osr_full.scene_state(),peer_eye,mapping(true));
+                    // Both are private output images. History was copied before
+                    // this operation and always remains in its original camera.
+                    TextureDesc real{};real.texture=impl_->rdr2_phase.output(source_eye);real.initial_state=D3D12_RESOURCE_STATE_COMMON;
+                    TextureDesc target{};target.texture=source_color;target.initial_state=D3D12_RESOURCE_STATE_COMMON;
+                    copy(impl_->renderer,command_list,target,real,color_box,0,0);
+                    final_color.texture=impl_->rdr2_phase.output(peer_eye);final_color.initial_state=D3D12_RESOURCE_STATE_COMMON;
+                }
+            }
+            const float seconds=phase?phase->seconds:0,yaw=phase?phase->yaw:0;std::uint32_t a{},b{};
+            std::memcpy(&a,&seconds,4);std::memcpy(&b,&yaw,4);
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,phase_ready,1383,guide.publication,(std::uint64_t(a)<<32)|b);
+            two_frame_capture_timeline("rdr2_camera_phase",phase_ready,guide.publication,a,b);
         }
         report_stage(AfwStage::evaluate_end, S_OK, source_eye,
             guide.publication);

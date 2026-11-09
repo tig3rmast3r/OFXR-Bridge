@@ -15628,7 +15628,7 @@ struct LukeOriginHistoryProbe {
                 destination_images[destination.prepared.current_destination_index],
                 *source.guide, source.views.front(), destination.views.front(),
                 source.logical_eye, *xr_eye_baseline, afw_settings,native_peer_camera,&reconstructed_position,
-                rdr2?&verified_peer:nullptr);
+                rdr2?&verified_peer:nullptr,rdr2 && !session->menu_enabled);
             afw_evaluated = SUCCEEDED(afw_result);
         }
         if(afw_evaluated && reconstructed_position) {

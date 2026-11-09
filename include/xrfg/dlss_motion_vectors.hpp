@@ -1,4 +1,5 @@
 #pragma once
+#include "xrfg/osr_source_timing.hpp"
 #include "xrfg/luke_gta_headlock.hpp"
 
 #include <d3d12.h>
@@ -104,6 +105,7 @@ struct DlssMotionVectorPublication {
     std::uint64_t source_clock_owner{},source_clock_sequence{};
     // Cyberpunk OSR: exact pre-REAL-VR N1 capture, never inferred from N2.
     bool osr_native_cabin_motion{};
+    OsrSourceTime source_camera_time{};
 };
 
 // A camera attached to a published frame at its submission.
@@ -243,6 +245,7 @@ struct DlssMotionVectorFrame {
     std::array<float, 4> placed_motion_rect{};
     std::uint64_t source_clock_owner{},source_clock_sequence{};
     bool osr_native_cabin_motion{};
+    OsrSourceTime source_camera_time{};
 };
 
 // The vector and depth rectangles a consumer maps the guide's output onto:

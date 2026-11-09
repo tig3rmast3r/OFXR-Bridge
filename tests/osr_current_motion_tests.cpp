@@ -6,6 +6,7 @@
 #include <bit>
 #include <cmath>
 #include <string_view>
+#include "rdr2_camera_phase_pass.hpp"
 
 namespace {
 UINT grey(unsigned value) { return 0xff000000u | value | (value << 8) | (value << 16); }
@@ -552,6 +553,104 @@ void variable_interval(unsigned eye) {
     std::printf("Variable native interval eye=%u: N1/N2 changes and ambiguous refusal PASS\n",eye);
 }
 
+
+
+void timed_midpoint(unsigned eye,bool low) {
+    Fixture f;std::vector<UINT> a(width*height),b(width*height),current(width*height),mv(width*height,0x4400u);
+    for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x) {
+        a[y*width+x]=grey(40+(x*7+y*11)%80);b[y*width+x]=a[y*width+x]^0x00300000u;
+    }
+    for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x)current[y*width+x]=a[y*width+std::min(x+4,width-1)];
+    warm(f,a);auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT),original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    begin(f);f.upload(field.Get(),mv.data());f.upload(original.Get(),mv.data());submit(f);
+    save(f,eye,a,.2F,field.Get(),{101,11,3});save(f,1-eye,b,.2F,field.Get(),{102,22,4});
+    auto in=inputs(f,eye);in.lower_quality=low;in.use_history_motion=false;in.use_current_history_motion=true;
+    in.source_motion=field.Get();in.adjacent_motion=original.Get();in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;in.detect_motion_interval=true;
+    for(unsigned i=0;i<4;++i)for(unsigned m:{0u,1u,2u,4u})in.current_history_data[m*16+i*5]=1;
+    in.current_history_data[50]=in.current_history_data[54]=1;in.current_history_data[56]=in.current_history_data[57]=1;in.current_history_data[62]=1;
+    const std::vector<float> depth(width*height,.2F);
+    for(float fraction:{.25F,.5F,.75F}) {
+        in.current_motion_fraction=fraction;const auto output=render_with_inputs(f,in,current,depth);
+        const unsigned shift=unsigned(4*fraction);
+        for(unsigned y=16;y<height-16;++y)for(unsigned x=32;x<width-32;++x)
+            check(output[y*width+x]==b[y*width+x+shift],"N2 current correspondence must use measured fraction instead of fixed half");
+    }
+    in.detect_motion_interval=false;in.current_motion_fraction=.25F;in.current_history_data[62]=0;
+    const auto control=render_with_inputs(f,in,current,depth);
+    for(unsigned y=16;y<height-16;++y)for(unsigned x=32;x<width-32;++x)
+        check(control[y*width+x]==b[y*width+x+2],"non-RDR2 N2 keeps its established midpoint");
+    std::printf("Timed N2 midpoint eye=%u low=%u: quarter/half/three-quarter and non-RDR2 control PASS\n",eye,low);
+}
+
+// Store the original field and its GPU receipt together. A hostile composed
+// field (+32) must never be mistaken for the measured original (+4).
+void classified_history(unsigned eye,bool low,unsigned interval) {
+    Fixture f;std::vector<UINT> a(width*height),b(width*height),shifted(width*height),zero(width*height);
+    for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x) {
+        a[y*width+x]=grey(60+(x*13+y*7)%100);
+        b[y*width+x]=grey(60+((x+5)*13+(y+3)*7)%100);
+    }
+    for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x)
+        shifted[y*width+x]=(interval==1?b:a)[y*width+std::min(x+4,width-1)];
+    warm(f,a);auto composed=f.texture(DXGI_FORMAT_R16G16_FLOAT),original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    begin(f);f.upload(composed.Get(),zero.data());submit(f);
+    save(f,eye,a,.2F,composed.Get(),{101,11,3});
+    save(f,1-eye,interval==0?a:b,.2F,composed.Get(),{102,22,4});
+    const std::vector<UINT> bad(width*height,0x5000u),raw(width*height,0x4400u);
+    const std::vector<float> depth(width*height,.2F);
+    begin(f);f.upload(composed.Get(),bad.data());f.upload(original.Get(),raw.data());
+    f.upload(f.color.Get(),shifted.data());f.upload(f.depth.Get(),depth.data());
+    auto seed=inputs(f,eye);seed.source_motion=composed.Get();seed.adjacent_motion=original.Get();
+    seed.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;seed.use_current_history_motion=true;
+    seed.detect_motion_interval=true;seed.retain_classified_motion=true;seed.retain_history_motion=false;
+    seed.current_history_data[56]=seed.current_history_data[57]=1;seed.current_history_data[62]=1;
+    f.warp.record(f.device.Get(),f.list.Get(),seed);
+    xrfg::OsrFullHistory kept{};kept.publication=103;kept.stream=11;kept.epoch=3;
+    f.warp.record_history_update(f.list.Get(),seed,kept);auto state=f.readback(f.warp.scene_state());submit(f);f.warp.commit();
+    void* ptr{};ok(state.buffer->Map(0,nullptr,&ptr),"classified state");const auto actual=static_cast<const UINT*>(ptr)[5];state.buffer->Unmap(0,nullptr);
+    check(actual==interval,"seed original interval classification");
+    check(f.warp.history(eye).classified_motion&&f.warp.history(eye).previous_publication==101,
+        "raw field retains its exact same-eye endpoint and classification");
+    // Overwrite the producer texture AND the live classifier. The old receipt
+    // and field must remain immutable when the next eye classifies differently.
+    begin(f);f.upload(original.Get(),bad.data());submit(f);
+    auto in=inputs(f,1-eye);in.lower_quality=low;in.use_classified_history_motion=true;
+    in.history_advance_fraction=.25F;
+    std::vector<UINT> next(width*height);
+    const auto advance_color=[&](unsigned shift) {
+        for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x)
+            next[y*width+x]=shifted[y*width+std::min(x+shift,width-1)];
+    };
+    advance_color(1);
+    const auto output=render_with_inputs(f,in,next,depth);
+    in.use_history_motion=false;
+    const auto reference=render_with_inputs(f,in,next,depth);
+    unsigned changed=0,matched=0,count=0;
+    for(unsigned y=16;y<height-16;++y)for(unsigned x=32;x<width-32;++x) {
+        ++count;changed+=output[y*width+x]!=reference[y*width+x];
+        matched+=output[y*width+x]==shifted[y*width+x+1];
+    }
+    if(interval==2 && matched!=count)std::fprintf(stderr,"classified eye=%u low=%u matched=%u/%u changed=%u sample=%08x want=%08x ref=%08x\n",eye,low,matched,count,changed,output[24*width+48],shifted[24*width+49],reference[24*width+48]);
+    if(interval==2){check(changed>0,"classified raw N2 must advance history");check(matched==count,"quarter interval advances raw four-pixel field by one, never composed +32");}
+    else check(output==reference,"N1 and ambiguous histories must retain the camera-only fallback");
+    if(interval==2) {
+        in.use_history_motion=true;in.history_advance_fraction=.75F;
+        advance_color(3);const auto later=render_with_inputs(f,in,next,depth);
+        for(unsigned y=16;y<height-16;++y)for(unsigned x=32;x<width-32;++x)
+            check(later[y*width+x]==shifted[y*width+x+3],"three-quarter history advance");
+        auto far_depths=depth;auto background=next;
+        for(unsigned y=24;y<48;++y)for(unsigned x=48;x<80;++x) {
+            far_depths[y*width+x]=.05F;background[y*width+x]=grey(190);
+        }
+        const auto refused=render_with_inputs(f,in,background,far_depths);
+        // A local depth change must reveal current background, not the old
+        // moving foreground. Distinct colours make the refusal observable.
+        for(unsigned y=28;y<44;++y)for(unsigned x=52;x<76;++x)
+            check(refused[y*width+x]==background[y*width+x],"current-depth disagreement refuses moved old foreground");
+    }
+    std::printf("Classified original history eye=%u low=%u interval=%u PASS\n",eye,low,interval);
+}
+
 void unclassified_history(unsigned eye,bool low) {
     Fixture f;
     std::vector<UINT> old(width*height),current(width*height),motion(width*height,eye?0xd000u:0x5000u);
@@ -586,7 +685,18 @@ void unclassified_history(unsigned eye,bool low) {
     std::printf("Unclassified composed history eye=%u lower=%u: spurious displacement refused PASS\n",eye,low);
 }
 }
+#include "rdr2_next_targets.inc"
 int main(int argc,char** argv) {
+    if(argc==2&&std::string_view(argv[1])=="camera-phase") {
+        rdr2_phase_cpu();rdr2_phase_gpu(DXGI_FORMAT_R8G8B8A8_UNORM);rdr2_phase_gpu(DXGI_FORMAT_B8G8R8A8_UNORM);return 0;
+    }
+    if(argc==2&&std::string_view(argv[1])=="history-edge") {
+        for(unsigned eye:{0u,1u})for(bool low:{false,true})rdr2_clean_history_edge(eye,low);return 0;
+    }
+    if(argc==2&&std::string_view(argv[1])=="classified-history") {
+        for(unsigned eye:{0u,1u})for(bool low:{false,true})for(unsigned interval:{0u,1u,2u})classified_history(eye,low,interval);
+        for(unsigned eye:{0u,1u})for(bool low:{false,true})timed_midpoint(eye,low);return 0;
+    }
     if(argc==2&&std::string_view(argv[1])=="unclassified-history") {
         for(unsigned eye:{0u,1u})for(bool low:{false,true})unclassified_history(eye,low);return 0;
     }

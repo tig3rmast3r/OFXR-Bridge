@@ -16,6 +16,7 @@
 #include "osr_full_resolve_lower_shader.hpp"
 #include "osr_full_resolve_map_shader.hpp"
 #include "xrfg/osr_full_warp.hpp"
+#include "xrfg/osr_source_timing.hpp"
 
 namespace xrfg {
 // Root constants of src/d3d12/osr_full_warp.hlsl, in declaration order. The
@@ -54,6 +55,8 @@ struct OsrFullHistory {
     bool native_motion{}; // original one-publication field; never interpret it as composed N2
     float native_stereo[16]{};
     float previous_dejitter[2]{};
+    bool classified_motion{}; // retained original field AND its own GPU interval receipt
+    OsrSourceTime source_time{}, previous_source_time{};
 };
 
 // OSR (OFXR Stereo Reconstruction), full reconstruction, GPU side. Private
@@ -75,7 +78,7 @@ class OsrFullWarp {
     void* current_history_mapped_{};
     bool scene_initialized_{};
     bool lower_active_{};
-    std::array<Tracked, 2> history_color_{}, history_depth_{}, history_motion_{};
+    std::array<Tracked, 2> history_color_{}, history_depth_{}, history_motion_{}, history_interval_{};
     std::array<OsrFullHistory, 2> history_{};
     std::array<OsrFullHistory,2> pending_{};
     std::array<bool,2> pending_valid_{};
@@ -83,7 +86,7 @@ class OsrFullWarp {
     UINT depth_width_{}, depth_height_{}, color_width_{}, color_height_{};
     DXGI_FORMAT format_{DXGI_FORMAT_UNKNOWN};
     static constexpr DXGI_FORMAT kMotionFormat = DXGI_FORMAT_R16G16_FLOAT; // kLukeAfwMotionFormat
-    static constexpr UINT kSrvCount = 15, kUavCount = 8;
+    static constexpr UINT kSrvCount = 16, kUavCount = 8;
     static constexpr UINT kDescriptorsPerBlock = kSrvCount + kUavCount;
     enum Block : UINT { block_clear, block_splat_stereo, block_splat_history, block_splat_offset,
         block_resolve, block_inpaint, block_resolve_map, block_count };
@@ -137,7 +140,7 @@ class OsrFullWarp {
         if (FAILED(result)) return result;
         D3D12_HEAP_PROPERTIES upload{}; upload.Type = D3D12_HEAP_TYPE_UPLOAD;
         D3D12_RESOURCE_DESC data{}; data.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        data.Width = 320; data.Height = 1; data.DepthOrArraySize = 1; data.MipLevels = 1;
+        data.Width = 336; data.Height = 1; data.DepthOrArraySize = 1; data.MipLevels = 1;
         data.SampleDesc.Count = 1; data.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         result = device->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &data,
             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&current_history_data_));
@@ -206,7 +209,7 @@ class OsrFullWarp {
         const DXGI_FORMAT srv_formats[kSrvCount]{DXGI_FORMAT_R32_FLOAT, format_, DXGI_FORMAT_R32_UINT,
             DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_FLOAT, format_, DXGI_FORMAT_R32_UINT, format_,
             kMotionFormat, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT,
-            DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32_FLOAT, adjacent_format, format_};
+            DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32_FLOAT, adjacent_format, format_, DXGI_FORMAT_R32_UINT};
         const DXGI_FORMAT uav_formats[kUavCount]{DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, format_,
             DXGI_FORMAT_R32_UINT, format_, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT};
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
@@ -219,7 +222,7 @@ class OsrFullWarp {
             srv.Texture2D = {}; srv.Texture2D.MipLevels = 1;
             if (i == 11) {
                 srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-                srv.Buffer = {}; srv.Buffer.NumElements = 20;
+                srv.Buffer = {}; srv.Buffer.NumElements = 21;
             }
             device->CreateShaderResourceView(srvs[i], &srv, cpu); // null view when absent
             cpu.ptr += increment_;
@@ -273,7 +276,9 @@ public:
         ID3D12Resource* adjacent_motion{}; // immutable original N1 field, not composed same-eye motion
         D3D12_RESOURCE_STATES adjacent_motion_state{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
         DXGI_FORMAT adjacent_motion_format{kMotionFormat};
-        float current_history_data[80]{}; // shader CurrentHistoryData rows0..19
+        float current_history_data[84]{}; // rows0..19 transforms; row20 timing
+        bool retain_classified_motion{}, use_classified_history_motion{};
+        float current_motion_fraction{.5F}, history_advance_fraction{.5F};
         float forward_stereo[16]{};           // source clip -> destination clip
         float forward_history[16]{};          // history clip -> destination clip
         float forward_history_previous[16]{}; // history clip -> clip of that eye's frame before it
@@ -323,7 +328,7 @@ public:
         // Typeless so the F8 capture, which knows R32_TYPELESS, can read them;
         // the views are R32_UINT.
         result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, stereo_);
-        if (SUCCEEDED(result)) result = create_texture(device, 6, 1, DXGI_FORMAT_R32_TYPELESS, true, scene_state_);
+        if (SUCCEEDED(result)) result = create_texture(device, 8, 1, DXGI_FORMAT_R32_TYPELESS, true, scene_state_);
         if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, history_splat_);
         if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, history_offset_);
         if (SUCCEEDED(result)) result = create_texture(device, color_width, color_height, color_format, true, warped_);
@@ -333,6 +338,7 @@ public:
             result = create_texture(device, color_width, color_height, color_format, false, history_color_[eye]);
             if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_FLOAT, false, history_depth_[eye]);
             if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, kMotionFormat, false, history_motion_[eye]);
+            if (SUCCEEDED(result)) result = create_texture(device, 1, 1, DXGI_FORMAT_R32_UINT, false, history_interval_[eye]);
         }
         if (FAILED(result)) { output_.resource.Reset(); return result; }
         depth_width_ = depth_width; depth_height_ = depth_height;
@@ -379,8 +385,14 @@ public:
         if(detect_interval)constants.flags|=4096u;
         if(current_motion && in.adjacent_motion && in.conservative_cabin_history)constants.flags|=1024u;
         if((constants.flags&1024u)!=0 && in.native_history_motion && in.use_history_motion)constants.flags|=2048u;
-        if (current_motion) {
+        const bool classified_history=in.use_history && in.use_history_motion && in.use_classified_history_motion;
+        if(detect_interval)constants.flags|=32768u;
+        if(classified_history)constants.flags|=65536u;
+        if (current_motion || classified_history) {
             std::memcpy(current_history_mapped_, in.current_history_data, sizeof(in.current_history_data));
+            auto* timing_data=static_cast<float*>(current_history_mapped_);
+            timing_data[80]=std::isfinite(in.current_motion_fraction)&&in.current_motion_fraction>=.15F&&in.current_motion_fraction<=.85F?in.current_motion_fraction:.5F;
+            timing_data[81]=std::isfinite(in.history_advance_fraction)&&in.history_advance_fraction>=.1F&&in.history_advance_fraction<=1.F?in.history_advance_fraction:.5F;
         }
         const bool motion_readable = (in.source_motion_state & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) != 0;
         const bool depth_readable = (in.source_depth_state & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) != 0;
@@ -388,6 +400,7 @@ public:
         Tracked& history_depth = history_depth_[destination_eye];
         Tracked& history_color = history_color_[destination_eye];
         Tracked& history_motion = history_motion_[destination_eye];
+        auto& history_interval=history_interval_[destination_eye];
         Barriers barriers;
         // 1. clear
         barriers.track(stereo_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -400,6 +413,7 @@ public:
             barriers.track(history_depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             barriers.track(history_color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             barriers.track(history_motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            if(classified_history)barriers.track(history_interval,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         if(detect_interval) {
             barriers.track(history_color_[source_eye],D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -410,8 +424,9 @@ public:
             {in.source_depth, in.source_color, nullptr, nullptr,
              in.use_history ? history_depth.resource.Get() : nullptr,
              in.use_history ? history_color.resource.Get() : nullptr,
-             nullptr,nullptr,nullptr,nullptr,nullptr,detect_interval?current_history_data_.Get():nullptr,
-             nullptr,detect_interval?in.adjacent_motion:nullptr,detect_interval?history_color_[source_eye].resource.Get():nullptr},
+             nullptr,nullptr,nullptr,nullptr,nullptr,(detect_interval||classified_history)?current_history_data_.Get():nullptr,
+             nullptr,detect_interval?in.adjacent_motion:nullptr,detect_interval?history_color_[source_eye].resource.Get():nullptr,
+             classified_history?history_interval.resource.Get():nullptr},
             {stereo_.resource.Get(), history_splat_.resource.Get(), nullptr, nullptr, nullptr, history_offset_.resource.Get()},in.adjacent_motion_format),
             constants, depth_width_, depth_height_);
         barriers.uav(stereo_.resource.Get());
@@ -446,9 +461,16 @@ public:
                 history_constants.source_dejitter[1]=in.native_history_previous_dejitter[1];
                 barriers.track(history_depth_[source_eye],D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);barriers.flush(list);
             }
+            if(classified_history) {
+                history_constants.flags|=16384u;
+                std::memcpy(history_constants.backward_source,in.backward_source,sizeof(history_constants.backward_source));
+                std::memcpy(history_constants.source_dejitter,in.source_dejitter,sizeof(in.source_dejitter));
+            }
             const std::array<ID3D12Resource*, kSrvCount> srvs{history_depth.resource.Get(), nullptr, nullptr, nullptr,
-                nullptr, nullptr, nullptr, nullptr, history_motion.resource.Get(), nullptr,nullptr,nullptr,
-                (history_constants.flags&2048u)!=0?history_depth_[source_eye].resource.Get():nullptr};
+                nullptr, nullptr, nullptr, nullptr, history_motion.resource.Get(), nullptr,nullptr,
+                classified_history?current_history_data_.Get():nullptr,
+                classified_history?in.source_depth:((history_constants.flags&2048u)!=0?history_depth_[source_eye].resource.Get():nullptr),
+                nullptr,nullptr,classified_history?history_interval.resource.Get():nullptr};
             dispatch(list, splat_history_.Get(), bind(device, block_splat_history, srvs, {history_splat_.resource.Get()}),
                 history_constants, depth_width_, depth_height_);
             barriers.uav(history_splat_.resource.Get());
@@ -516,6 +538,7 @@ public:
         barriers.track(history_depth, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(history_color, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(history_motion, D3D12_RESOURCE_STATE_COMMON);
+        if(classified_history)barriers.track(history_interval,D3D12_RESOURCE_STATE_COMMON);
         barriers.flush(list);
         mark(5);
     }
@@ -532,19 +555,27 @@ public:
         const auto& opposite=this->history(1-source_eye);
         const auto adjacent_desc=in.adjacent_motion?in.adjacent_motion->GetDesc():D3D12_RESOURCE_DESC{};
         const float crop_x=in.current_history_data[60],crop_y=in.current_history_data[61];
-        const bool native_motion=in.conservative_cabin_history && in.use_current_history_motion && in.adjacent_motion &&
+        const bool original_copyable=in.use_current_history_motion && in.adjacent_motion &&
             in.current_history_data[62]==1 && in.adjacent_motion_format==kMotionFormat && adjacent_desc.Format==kMotionFormat &&
             opposite.publication!=0 && opposite.publication+1==history.publication &&
             std::isfinite(crop_x)&&std::isfinite(crop_y)&&crop_x>=0&&crop_y>=0 &&
             crop_x==std::floor(crop_x)&&crop_y==std::floor(crop_y) &&
             double(crop_x)+depth_width_<=double(adjacent_desc.Width) && double(crop_y)+depth_height_<=double(adjacent_desc.Height);
-        ID3D12Resource* motion_source=native_motion?in.adjacent_motion:in.source_motion;
-        const auto motion_state=native_motion?in.adjacent_motion_state:in.source_motion_state;
-        const bool copy_motion=motion_source!=nullptr && in.retain_history_motion;
+        const bool native_motion=in.conservative_cabin_history && original_copyable;
+        const auto same=this->history(source_eye);
+        const bool classified_motion=in.retain_classified_motion && in.detect_motion_interval && !in.reset_history &&
+            original_copyable && same.publication!=0 && same.publication+2==history.publication &&
+            same.stream==history.stream && same.epoch==history.epoch;
+        const bool original_motion=native_motion||classified_motion;
+        ID3D12Resource* motion_source=original_motion?in.adjacent_motion:in.source_motion;
+        const auto motion_state=original_motion?in.adjacent_motion_state:in.source_motion_state;
+        const bool copy_motion=motion_source!=nullptr && (in.retain_history_motion||classified_motion);
+        auto& interval=history_interval_[source_eye];
         Barriers barriers;
         barriers.track(color, D3D12_RESOURCE_STATE_COPY_DEST);
         barriers.track(depth, D3D12_RESOURCE_STATE_COPY_DEST);
         if (copy_motion) barriers.track(motion, D3D12_RESOURCE_STATE_COPY_DEST);
+        if(classified_motion) {barriers.track(interval,D3D12_RESOURCE_STATE_COPY_DEST);barriers.track(scene_state_,D3D12_RESOURCE_STATE_COPY_SOURCE);}
         barriers.transition(in.source_color, in.source_color_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
         barriers.transition(in.source_depth, in.source_depth_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
         if (copy_motion) barriers.transition(motion_source,motion_state,D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -558,10 +589,12 @@ public:
         };
         copy(color.resource.Get(), in.source_color, color_width_, color_height_);
         copy(depth.resource.Get(), in.source_depth, depth_width_, depth_height_,depth_x,depth_y);
-        if (copy_motion) copy(motion.resource.Get(),motion_source,depth_width_,depth_height_,native_motion?static_cast<UINT>(crop_x):0,native_motion?static_cast<UINT>(crop_y):0);
+        if (copy_motion) copy(motion.resource.Get(),motion_source,depth_width_,depth_height_,original_motion?static_cast<UINT>(crop_x):0,original_motion?static_cast<UINT>(crop_y):0);
+        if(classified_motion)copy(interval.resource.Get(),scene_state_.resource.Get(),1,1,5,0);
         barriers.track(color, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(depth, D3D12_RESOURCE_STATE_COMMON);
         if (copy_motion) barriers.track(motion, D3D12_RESOURCE_STATE_COMMON);
+        if(classified_motion) {barriers.track(interval,D3D12_RESOURCE_STATE_COMMON);barriers.track(scene_state_,D3D12_RESOURCE_STATE_COMMON);}
         barriers.transition(in.source_color, D3D12_RESOURCE_STATE_COPY_SOURCE, in.source_color_state);
         barriers.transition(in.source_depth, D3D12_RESOURCE_STATE_COPY_SOURCE, in.source_depth_state);
         if (copy_motion) barriers.transition(motion_source,D3D12_RESOURCE_STATE_COPY_SOURCE,motion_state);
@@ -569,7 +602,8 @@ public:
         auto& pending=pending_[source_eye];
         pending = history;
         pending.has_motion = copy_motion;
-        pending.native_motion=native_motion;
+        pending.native_motion=native_motion;pending.classified_motion=classified_motion;
+        pending.previous_source_time=same.source_time;
         pending.previous_publication=native_motion?opposite.publication:history_[source_eye].publication;
         pending.camera_previous=native_motion?opposite.camera:history_[source_eye].camera;
         if(native_motion) {
@@ -592,7 +626,7 @@ public:
     void discard() noexcept {
         for (Tracked* t : {&stereo_, &history_splat_, &history_offset_, &warped_, &resolved_, &output_, &scene_state_, &lower_map_,
             &history_color_[0], &history_color_[1], &history_depth_[0], &history_depth_[1],
-            &history_motion_[0], &history_motion_[1]})
+            &history_motion_[0], &history_motion_[1], &history_interval_[0], &history_interval_[1]})
             t->state = D3D12_RESOURCE_STATE_COMMON;
         pending_valid_ = {};
     }

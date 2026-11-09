@@ -57,6 +57,8 @@ Buffer<float4> CurrentHistoryData : register(t11);
 Texture2D<float> NativePreviousDepth : register(t12);
 Texture2D<float2> AdjacentMotion : register(t13); // original native current->peer, immutable owned snapshot
 Texture2D<float4> NativePreviousColor : register(t14); // exact source-eye N2 history
+Texture2D<uint> HistoryInterval : register(t15); // classification stored with this exact raw history field
+// CurrentHistoryData row20: current->peer fraction, history advance fraction.
 SamplerState LinearClamp : register(s0);
 
 cbuffer Osr : register(b0) {
@@ -155,8 +157,12 @@ void classify_interval(uint lane) {
         if(lane<stride){IntervalOne[lane]+=IntervalOne[lane+stride];IntervalTwo[lane]+=IntervalTwo[lane+stride];}
         GroupMemoryBarrierWithGroupSync();
     }
-    if(lane==0)SceneState[uint2(5,0)]=IntervalOne[0]>=32 && IntervalOne[0]>2*IntervalTwo[0]?1u:
-        (IntervalTwo[0]>=32 && IntervalTwo[0]>2*IntervalOne[0]?2u:0u);
+    if(lane==0) {
+        SceneState[uint2(5,0)]=IntervalOne[0]>=32 && IntervalOne[0]>2*IntervalTwo[0]?1u:
+            (IntervalTwo[0]>=32 && IntervalTwo[0]>2*IntervalOne[0]?2u:0u);
+        SceneState[uint2(6,0)]=(Flags&65536u)!=0?HistoryInterval.Load(int3(0,0,0)):0u;
+        SceneState[uint2(7,0)]=asuint((Flags&32768u)!=0?CurrentHistoryData[20].x:.5);
+    }
 }
 bool original_is_adjacent() {
     return CurrentHistoryData[15].z==1 && ((Flags&4096u)==0 || SceneState[uint2(5,0)]==1);
@@ -305,7 +311,9 @@ float2 history_texel_now(int2 t, float z, out bool locked) {
     // GTA's unlocked cabin cannot infer attachment/object motion from the old
     // composed field: it leaves mirror and pillar fragments on the background.
     // Keep hard-near protection and current original-N1 correspondence intact.
-    if (!locked && (Flags&1024u)==0 && ((Flags&512u)==0 || z>SkyDepth) && SceneState[uint2(4, 0)] != 0 && (MotionScale.x != 0.0 || MotionScale.y != 0.0)) {
+    if (!locked && (Flags&1024u)==0 && ((Flags&512u)==0 || z>SkyDepth) &&
+        ((Flags&16384u)==0 || HistoryInterval.Load(int3(0,0,0))==2u) &&
+        SceneState[uint2(4, 0)] != 0 && (MotionScale.x != 0.0 || MotionScale.y != 0.0)) {
         float2 total = HistoryMotion.Load(int3(t, 0)) * MotionScale;
         float2 ndc = float2(pos.x / DepthSize.x * 2.0 - 1.0, 1.0 - pos.y / DepthSize.y * 2.0);
         float4 q = mul(float4(ndc, z, 1.0), BackwardHistory);
@@ -320,8 +328,9 @@ float2 history_texel_now(int2 t, float z, out bool locked) {
             // can still animate by several pixels between its real eye frames.
             // Hard-near weapons bypass this branch above: their composed field
             // can contain unreliable camera/stereo residue and stays ignored.
-            if (locked) now = pos - 0.5 * total;
-            else if (all(isfinite(object))) now = pos - 0.5 * object;
+            const float advance=(Flags&16384u)!=0?CurrentHistoryData[20].y:.5;
+            if (locked) now = pos - advance * total;
+            else if (all(isfinite(object))) now = pos - advance * object;
         }
     }
     return now;
@@ -366,6 +375,26 @@ bool history_landing(uint2 id, out float2 p, out uint word, out float2 origin) {
                 p = landing;
                 word = max(asuint(max(zd, FarDepth)), 2u) & ~HistoryLockedBit;
                 ok = true;
+            }
+        }
+    }
+    if(ok && (Flags&16384u)!=0 && HistoryInterval.Load(int3(0,0,0))==2u) {
+        // A classified older field may still be wrong on an animated edge.
+        // Refuse a landed foreground surface the current eye sees through.
+        const float landing_z=asfloat(word&~3u);
+        const float2 ndc=(p+.5)/float2(DepthSize)*float2(2,-2)+float2(-1,1);
+        const float4 q=mul(float4(ndc,landing_z,1),BackwardSource);
+        if(!all(isfinite(q)) || q.w<=1e-8)ok=false;
+        else {
+            const float2 at=(q.xy/q.w*float2(.5,-.5)+.5)*float2(DepthSize);
+            const float expected=max(q.z/q.w,0);
+            if(all(at>=0)&&all(at<float2(DepthSize))) {
+                const int2 base=int2(floor(at-SourceDejitter-.5));float near=0;
+                [unroll] for(int yy=0;yy<2;++yy) [unroll] for(int xx=0;xx<2;++xx) {
+                    const float d=NativePreviousDepth.Load(int3(clamp(base+int2(xx,yy),int2(0,0),int2(DepthSize)-1),0));
+                    if(isfinite(d))near=max(near,d);
+                }
+                ok=expected<=SkyDepth || near>=expected*(1-DepthTolerance)-FarDepth;
             }
         }
     }
@@ -678,6 +707,28 @@ bool current_confirms_background(float2 ndc,float z,float4 history_color) {
     return confirmed;
 }
 
+// RDR2's DLSS colour can contain an old foreground edge while its depth is
+// already background. When that background is occluded in the current eye,
+// depth rejection alone cannot distinguish the contaminated colour. Fetch a
+// nearby clean sample on the background side, requiring a full depth footprint.
+bool clean_rdr2_history_edge(float2 at,float z,float2 toward,out float4 color,out float2 clean_at) {
+    color=0;clean_at=at;bool found=false;
+    if(length(toward)>.25) {
+        const float2 direction=-normalize(toward);
+        [unroll] for(int step=1;step<=4;++step) {
+            const float2 candidate=at+direction*step;
+            if(!found && all(candidate>=1)&&all(candidate<float2(DepthSize)-1) &&
+               surface_quad_agrees(HistoryDepth,candidate,z,HistoryDejitter)) {
+                float near=0;halo_direction(HistoryDepth,int2(floor(candidate-HistoryDejitter)),z,near);
+                if(near<=z*EdgeRatio+FarDepth) {
+                    color=sample_nearest(HistoryColor,candidate/float2(DepthSize));clean_at=candidate;found=true;
+                }
+            }
+        }
+    }
+    return found;
+}
+
 bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, out float4 result, out uint word) {
     word = HistorySplat.Load(int3(c, 0));
     result = 0;
@@ -703,6 +754,13 @@ bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, o
         const int2 t = int2(floor(at_scene - HistoryDejitter));
         float history_near = 0.0;
         const float2 toward = halo_direction(HistoryDepth, t, at_depth, history_near);
+        if((Flags&4096u)!=0 && history_near>at_depth*EdgeRatio+FarDepth &&
+           !current_confirms_background(ndc,asfloat(word&~3u),result)) {
+            float4 clean=0;float2 clean_at=0;
+            found=clean_rdr2_history_edge(at_scene,at_depth,toward,clean,clean_at);
+            if(found){result=clean;g_history_position=clean_at;}
+            // The old edge is never reused as a supposedly verified background.
+        }
         // The anti-aliased edge of a camera-attached surface (the weapon, the
         // arms) stays where it was in this eye's view: the surface keeps its
         // place, so its edge pixels are never stale. Both tests treat it as
@@ -711,7 +769,7 @@ bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, o
         // edge is. Dropped, the lit rim of the arm became a 2-3 px mirrored
         // line alternating with the real frames' rim, a band around the
         // weapon (Cyberpunk, F8 of 2026-11-02 10:06:52).
-        if (history_near > at_depth * EdgeRatio + FarDepth && history_near < LockedDepth &&
+        else if (history_near > at_depth * EdgeRatio + FarDepth && history_near < LockedDepth &&
             (halo_parallax(BackwardHistory, ndc, at_depth, history_near, toward) > HaloParallax ||
              !nearer_surface_present(c, at_depth)) &&
             !current_confirms_background(ndc,asfloat(word & ~3u),result))
@@ -966,8 +1024,8 @@ bool current_history(float2 source_at, float source_z, float2 target_at, bool st
     // Divide by homogeneous VIEW W before mixing: averaging NDC/reversed
     // depths would give the wrong depth for a surface moving toward the camera.
     const bool adjacent=original_is_adjacent();
-    const float fraction=adjacent?CurrentHistoryData[15].w:.5;
-    float4 middle = adjacent?lerp(current_history_transform(now,0)/nw,current_history_transform(old,4)/ow,fraction):
+    const float fraction=adjacent?CurrentHistoryData[15].w:((Flags&32768u)!=0?CurrentHistoryData[20].x:.5);
+    float4 middle = (adjacent||(Flags&32768u)!=0)?lerp(current_history_transform(now,0)/nw,current_history_transform(old,4)/ow,fraction):
         .5*(current_history_transform(now,0)/nw+current_history_transform(old,4)/ow);
     if (!all(isfinite(middle)) || middle.w<=1e-8) break;
     previous_at=float2((middle.x/middle.w+1)*.5*DepthSize.x,(1-middle.y/middle.w)*.5*DepthSize.y);
@@ -982,7 +1040,7 @@ bool current_history(float2 source_at, float source_z, float2 target_at, bool st
         const float2 pa=float2((a.x/a.w+1)*.5*DepthSize.x,(1-a.y/a.w)*.5*DepthSize.y);
         const float2 pb=float2((b.x/b.w+1)*.5*DepthSize.x,(1-b.y/b.w)*.5*DepthSize.y);
         previous_at=target_at+fraction*(pb-pa);
-        middle=adjacent?lerp(a/nw,b/ow,fraction):.5*(a/nw+b/ow);
+        middle=(adjacent||(Flags&32768u)!=0)?lerp(a/nw,b/ow,fraction):.5*(a/nw+b/ow);
     }
     if(adjacent) {
         // N1 is a direct measured correspondence into THIS eye's last real
@@ -1301,6 +1359,17 @@ void OsrFullResolveLower(uint3 id:SV_DispatchThreadID) {
     else at+=lower_project(float2(id.xy)+.5,asfloat(word&~3u),pick==2)-lower_project(float2(base)+.5,asfloat(word&~3u),pick==2);
     if(!all(isfinite(at)) || any(at<0) || any(at>=float2(DepthSize))){WarpedOut[id.xy]=0;ResolvedOut[id.xy]=0;return;}
 
+    [branch] if(pick==2 && (Flags&4096u)!=0) {
+        // A shared 2x2 lookup can step from clean background into the old edge
+        // on its second colour pixel. Re-evaluate only mixed-depth history
+        // footprints at full resolution, retaining cheap interior decisions.
+        const int2 t=int2(floor(at-HistoryDejitter));float near=0,farthest=1;
+        [unroll] for(int y=-2;y<=2;++y) [unroll] for(int x=-2;x<=2;++x) {
+            const float z=HistoryDepth.Load(int3(clamp(t+int2(x,y),int2(0,0),int2(DepthSize)-1),0));
+            near=max(near,z);farthest=min(farthest,z);
+        }
+        [branch] if(near>farthest*EdgeRatio+FarDepth){resolve_pixel(id);return;}
+    }
     [branch] if(pick==2)WarpedOut[id.xy]=sample_nearest(HistoryColor,at/float2(DepthSize));
     else WarpedOut[id.xy]=sample_sharp(SourceColor,at/float2(DepthSize));
     ResolvedOut[id.xy]=(word&~3u)|((metadata>>2)&3);

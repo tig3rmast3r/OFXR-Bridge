@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.928.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.929.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -183,6 +183,10 @@ if(XRFG_BUILD_TESTS)
     target_include_directories(xrfg_gta_runtime_binding_tests PRIVATE include)
     target_compile_features(xrfg_gta_runtime_binding_tests PRIVATE cxx_std_20)
     add_test(NAME xrfg_gta_runtime_binding_tests COMMAND xrfg_gta_runtime_binding_tests)
+    add_executable(xrfg_osr_source_timing_tests tests/osr_source_timing_tests.cpp)
+    target_include_directories(xrfg_osr_source_timing_tests PRIVATE include)
+    target_compile_features(xrfg_osr_source_timing_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_osr_source_timing COMMAND xrfg_osr_source_timing_tests)
     add_executable(xrfg_rdr2_runtime_binding_tests tests/rdr2_runtime_binding_tests.cpp)
     target_include_directories(xrfg_rdr2_runtime_binding_tests PRIVATE include)
     target_compile_features(xrfg_rdr2_runtime_binding_tests PRIVATE cxx_std_20)
@@ -2512,7 +2516,12 @@ if(WIN32 AND XRFG_BUILD_TESTS)
  target_link_libraries(xrfg_osr_current_motion_tests PRIVATE d3d12 dxgi)
  add_dependencies(xrfg_osr_current_motion_tests xrfg_d3d12_history)
  add_test(NAME xrfg_osr_current_motion_gpu COMMAND xrfg_osr_current_motion_tests)
- set_tests_properties(xrfg_osr_current_motion_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+ set_tests_properties(xrfg_osr_current_motion_gpu PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+ add_test(NAME xrfg_osr_rdr2_classified_history COMMAND xrfg_osr_current_motion_tests classified-history)
+ add_test(NAME xrfg_osr_rdr2_history_edge COMMAND xrfg_osr_current_motion_tests history-edge)
+ add_test(NAME xrfg_osr_rdr2_camera_phase COMMAND xrfg_osr_current_motion_tests camera-phase)
+ set_tests_properties(xrfg_osr_rdr2_history_edge xrfg_osr_rdr2_camera_phase PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+ set_tests_properties(xrfg_osr_rdr2_classified_history PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
  add_executable(xrfg_osr_screen_motion_tests tests/osr_screen_motion_tests.cpp)
  target_include_directories(xrfg_osr_screen_motion_tests PRIVATE include src/d3d12 "${XRFG_GENERATED_SHADER_DIR}")
  target_compile_features(xrfg_osr_screen_motion_tests PRIVATE cxx_std_20)
@@ -2548,6 +2557,12 @@ if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_d3d12_history)
 endif()
 
 if(WIN32 AND TARGET xrfg_d3d12_history)
+ add_custom_command(OUTPUT "${XRFG_GENERATED_SHADER_DIR}/rdr2_camera_phase_shader.hpp"
+  COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CameraPhase /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+   /Fh "${XRFG_GENERATED_SHADER_DIR}/rdr2_camera_phase_shader.hpp" /Vn g_xrfg_rdr2_camera_phase_shader "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/rdr2_camera_phase.hlsl"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/rdr2_camera_phase.hlsl")
+ add_custom_target(xrfg_rdr2_phase_shader DEPENDS "${XRFG_GENERATED_SHADER_DIR}/rdr2_camera_phase_shader.hpp")
+ add_dependencies(xrfg_d3d12_history xrfg_rdr2_phase_shader)
  add_custom_command(OUTPUT "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_lower_shader.hpp"
   COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullResolveLower /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
    /Fh "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_lower_shader.hpp" /Vn g_xrfg_osr_full_resolve_lower_shader "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"

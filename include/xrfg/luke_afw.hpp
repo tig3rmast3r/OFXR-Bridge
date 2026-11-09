@@ -54,7 +54,8 @@ public:
         const embedded::AfwSettings& settings,
         bool native_peer_camera=false,
         std::optional<Vec3>* reconstructed_position=nullptr,
-        const LukeAfwVerifiedPeer* verified_peer=nullptr) noexcept;
+        const LukeAfwVerifiedPeer* verified_peer=nullptr,
+        bool camera_phase_allowed=false) noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
     // Prepare a fresh isolated provider while published XR pixels stay intact.
