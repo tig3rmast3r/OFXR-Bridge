@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.926.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.927.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -179,6 +179,10 @@ if(XRFG_BUILD_TESTS)
     target_include_directories(xrfg_gta_headlock_tests PRIVATE include)
     target_compile_features(xrfg_gta_headlock_tests PRIVATE cxx_std_20)
     add_test(NAME xrfg_gta_headlock_tests COMMAND xrfg_gta_headlock_tests)
+    add_executable(xrfg_gta_runtime_binding_tests tests/gta_runtime_binding_tests.cpp)
+    target_include_directories(xrfg_gta_runtime_binding_tests PRIVATE include)
+    target_compile_features(xrfg_gta_runtime_binding_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_gta_runtime_binding_tests COMMAND xrfg_gta_runtime_binding_tests)
     add_executable(xrfg_rdr2_runtime_binding_tests tests/rdr2_runtime_binding_tests.cpp)
     target_include_directories(xrfg_rdr2_runtime_binding_tests PRIVATE include)
     target_compile_features(xrfg_rdr2_runtime_binding_tests PRIVATE cxx_std_20)

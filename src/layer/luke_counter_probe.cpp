@@ -1,6 +1,7 @@
 #include "xrfg/luke_counter_probe.hpp"
 #include "xrfg/luke_gta_headlock.hpp"
 #include <windows.h>
+#include "xrfg/bridge_flight_logger.hpp"
 
 namespace xrfg {
 namespace {
@@ -45,9 +46,14 @@ struct GtaBinding {
         // Select the already-loaded game-local proxy, never the system DXGI.
         const auto module=game_luke_module();if(!module)return;
         base=reinterpret_cast<std::uintptr_t>(module);
-        if(const auto detected=luke_gta_headlock_binding(base,read_self)) {
+        unsigned refusal{};
+        if(const auto detected=luke_gta_headlock_binding(base,read_self,&refusal)) {
             layout=*detected;supported=true;
         }
+        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+            supported?1:-static_cast<std::int64_t>(refusal),1370,layout.runtime_pointer,layout.runtime_vtable);
+        if(supported)bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+            layout.render_offset,1371,layout.yaw_offset,layout.mode_offset);
     }
 };
 }
