@@ -733,7 +733,7 @@ void aer_framegen_widgets() {
         Context view(compact?ImVec2(1024,768):ImVec2(690,1000),compact);
         view.draw();view.draw(true);
         require(view.rendered_text.find("AER framegen")==std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"AER and Swap hidden in Basic on desktop and VR");
-        settings.advanced_mode=true;require(request(settings),"AER Advanced setup");view.draw();view.draw(true);
+        settings.advanced_mode=true;settings.ofr_swap=false;require(request(settings),"AER Advanced setup");view.draw();view.draw(true);
         require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")!=std::string::npos,"Advanced shows both AER flags");
         view.activate("/Generation_","AER framegen");view.draw();view.draw();
         require(snapshot().desired.ofr_enabled && snapshot().desired.frame_generation==4,"AER toggle preserves selected RIFE method");

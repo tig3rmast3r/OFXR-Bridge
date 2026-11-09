@@ -396,7 +396,7 @@ int main(int argc,char** argv) {
         state->presenter_condition.notify_all();check(failure.get()==XR_ERROR_RUNTIME_FAILURE,"worker failure wakes a pending capture with its error");
         std::puts("RIFE source snapshot ownership, per-eye capture credit, strict paths, restart and failure PASS");return 0;
     }
-    if(route=="aer-consumer-status") {
+    if(route=="consumer-status") {
         xrfg_fixture::ControlProfile profile;
         auto desired=xrfg::autonomous::snapshot().desired;
         xrfg::autonomous::select_generation(desired,1,0);
