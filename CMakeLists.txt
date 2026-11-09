@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.925.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.926.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -179,6 +179,10 @@ if(XRFG_BUILD_TESTS)
     target_include_directories(xrfg_gta_headlock_tests PRIVATE include)
     target_compile_features(xrfg_gta_headlock_tests PRIVATE cxx_std_20)
     add_test(NAME xrfg_gta_headlock_tests COMMAND xrfg_gta_headlock_tests)
+    add_executable(xrfg_rdr2_runtime_binding_tests tests/rdr2_runtime_binding_tests.cpp)
+    target_include_directories(xrfg_rdr2_runtime_binding_tests PRIVATE include)
+    target_compile_features(xrfg_rdr2_runtime_binding_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_rdr2_runtime_binding_tests COMMAND xrfg_rdr2_runtime_binding_tests)
     add_executable(xrfg_gta_eye_reference_tests tests/luke_gta_eye_reference_tests.cpp)
     target_include_directories(xrfg_gta_eye_reference_tests PRIVATE include)
     target_compile_features(xrfg_gta_eye_reference_tests PRIVATE cxx_std_20)
@@ -748,6 +752,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_compile_features(xrfg_vulkan_capture_suspended_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_vulkan_capture_suspended_tests PRIVATE VK_NO_PROTOTYPES NOMINMAX WIN32_LEAN_AND_MEAN)
         add_test(NAME xrfg_vulkan_capture_suspended_tests COMMAND xrfg_vulkan_capture_suspended_tests)
+        add_executable(xrfg_vulkan_luke_camera_tests tests/vulkan_luke_camera_tests.cpp src/ingress/vulkan_command_stream.cpp)
+        target_include_directories(xrfg_vulkan_luke_camera_tests PRIVATE include "${XRFG_VULKAN_INCLUDE_DIR}")
+        target_compile_features(xrfg_vulkan_luke_camera_tests PRIVATE cxx_std_20)
+        target_compile_definitions(xrfg_vulkan_luke_camera_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN VK_NO_PROTOTYPES XRFG_VULKAN_CAMERA_ENTRY_TESTS)
+        target_link_libraries(xrfg_vulkan_luke_camera_tests PRIVATE safetyhook)
+        add_test(NAME xrfg_vulkan_luke_camera COMMAND xrfg_vulkan_luke_camera_tests)
 
         set_tests_properties(xrfg_vulkan_queue_layer_tests PROPERTIES TIMEOUT 10)
     endif()
@@ -908,7 +918,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(xrfg_vulkan_capture_suspended_tests PROPERTIES
             PASS_REGULAR_EXPRESSION "Shipping Vulkan capture stays suspended")
         add_test(NAME xrfg_shipping_vulkan_scope COMMAND xrfg_vulkan_capture_suspended_tests "$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>")
-        foreach(game DOOMTheDarkAges TheGreatCircle)
+        foreach(game DOOMTheDarkAges TheGreatCircle RDR2)
             add_test(NAME xrfg_shipping_luke_bootstrap_${game} COMMAND "${CMAKE_COMMAND}"
                 "-DTEST_EXE=$<TARGET_FILE:xrfg_vulkan_capture_suspended_tests>"
                 "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
@@ -924,6 +934,13 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/shipping-flat-doom"
             -DGAME_EXE=DOOMTheDarkAges.exe -DMODE=flat
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_vulkan_shipping.cmake")
+        add_test(NAME xrfg_shipping_flat_rdr2_scope COMMAND "${CMAKE_COMMAND}"
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_vulkan_capture_suspended_tests>"
+            "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+            "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/shipping-flat-rdr2"
+            -DGAME_EXE=RDR2.exe -DMODE=flat
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_vulkan_shipping.cmake")
+        set_tests_properties(xrfg_shipping_flat_rdr2_scope PROPERTIES TIMEOUT 25)
     endif()
     target_include_directories(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE "${XRFG_DLSS_SDK_ROOT}/include" "${XRFG_DEPENDENCY_ROOT}/Streamline")
     target_include_directories(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE
@@ -1151,6 +1168,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/doom-hdr-origin"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_doom_hdr_origin_test.cmake")
         set_tests_properties(xrfg_doom_hdr_origin PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        add_test(NAME xrfg_rdr2_hdr_origin COMMAND ${CMAKE_COMMAND}
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_color_origin_tests>"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/rdr2-hdr-origin"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_rdr2_hdr_origin_test.cmake")
+        set_tests_properties(xrfg_rdr2_hdr_origin PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 
         set_tests_properties(xrfg_luke_color_origin PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_outlaws_protected_origin COMMAND ${CMAKE_COMMAND}
@@ -1758,6 +1780,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_synthesis_init_diagnostics COMMAND xrfg_d3d12_history_tests init-diagnostics)
         set_tests_properties(xrfg_synthesis_init_diagnostics PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_luke_deferred_flow_copy COMMAND xrfg_d3d12_history_tests copy-deferred)
+        add_test(NAME xrfg_luke_ordered_history COMMAND xrfg_d3d12_history_tests ordered-history)
+        set_tests_properties(xrfg_luke_ordered_history PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         set_tests_properties(xrfg_luke_deferred_flow_copy PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_executable(xrfg_luke_ofxr_performance_probe tests/luke_ofxr_performance_probe.cpp)
         add_test(NAME xrfg_luke_quarter_flow_quality COMMAND xrfg_luke_ofxr_performance_probe quarter-quality)

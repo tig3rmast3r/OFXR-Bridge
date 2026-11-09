@@ -754,8 +754,10 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->camera_frame_token = publication.camera_frame_token;
         frame->camera_frame_token_valid = publication.camera_frame_token_valid;
         frame->native_production_sequence = publication.native_production_sequence;
+        frame->source_clock_owner=publication.source_clock_owner;frame->source_clock_sequence=publication.source_clock_sequence;
         frame->raw_motion_native_span = publication.raw_motion_native_span;
         frame->raw_motion_native_span_confirmed = publication.raw_motion_native_span_confirmed;
+        frame->raw_motion_variable_interval = publication.raw_motion_variable_interval;
         frame->compose_native_object_history = publication.compose_native_object_history;
         frame->gta_headlock=publication.gta_headlock;
         frame->camera_pending = publication.camera_pending && !publication.camera_data_valid;
@@ -784,7 +786,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->raw_previous_clip_to_clip = publication.raw_previous_clip_to_clip;
         frame->producer_command_list = publication.producer_command_list;
         const bool may_interleave = publication.protect_snapshot_lifetime &&
-            !frame->native_production_sequence && frame->publication >= 3 && stream.latest &&
+            (!frame->native_production_sequence||frame->source_clock_owner) && frame->publication >= 3 && stream.latest &&
             stream.latest->publication + 1 != frame->publication;
         const auto interleaved_middle = may_interleave
             ? protected_publication(state, frame->publication - 1) : nullptr;
@@ -1029,7 +1031,7 @@ bool attach_dlss_motion_vector_camera(std::uint64_t stream_id, std::uint64_t pub
             // As publish decides for a camera that arrives with its frame: under
             // alternate-eye rendering the other eye's frame lies between this
             // one and its same-eye predecessor, and calibration spans the three.
-            const bool may_interleave = !frame.native_production_sequence && frame.publication >= 3 &&
+            const bool may_interleave = (!frame.native_production_sequence||frame.source_clock_owner) && frame.publication >= 3 &&
                 stream.previous && stream.previous->publication + 1 != frame.publication;
             const auto interleaved_middle = may_interleave ? protected_publication(state, frame.publication - 1) : nullptr;
             const auto interleaved_older = may_interleave ? protected_publication(state, frame.publication - 2) : nullptr;
@@ -2697,7 +2699,7 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
         }
         const auto& current = *origin;
         auto previous = *std::prev(origin);
-        const bool may_interleave = !current->native_production_sequence && current->publication >= 3 &&
+        const bool may_interleave = (!current->native_production_sequence||current->source_clock_owner) && current->publication >= 3 &&
             previous->publication + 1 != current->publication;
         const auto interleaved_middle = may_interleave
             ? protected_publication(state, current->publication - 1) : nullptr;

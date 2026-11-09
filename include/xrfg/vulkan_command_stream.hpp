@@ -66,9 +66,14 @@ PFN_vkVoidFunction resolve_command(VkDevice device,const char* name,
 // Early selected-game coverage of actual loader exports, including pointers
 // cached before GIPA/GDPA interception. Internal work uses their trampolines.
 unsigned install_command_entry_hooks(void* loader_module) noexcept;
+// Read-only REAL VR camera observation on actual native device entries, also
+// covering dispatchers cached by REAL VR before the public resolver is hooked.
+void install_luke_camera_device_dispatch(VkDevice,PFN_vkGetInstanceProcAddr,PFN_vkGetDeviceProcAddr) noexcept;
 PFN_vkVoidFunction unhooked_command(PFN_vkVoidFunction function) noexcept;
 // The current actual prefix/continuation for native NGX and raw copy commands.
 VkCommandBuffer native(VkCommandBuffer original) noexcept;
+// Canonical recording identity for its current prefix or continuation alias.
+VkCommandBuffer original_recording(VkCommandBuffer command) noexcept;
 // Returns only the device associated with an observed native allocation.
 VkDevice device_for(VkCommandBuffer original) noexcept;
 // External-memory ownership transfers use the observed original command-pool

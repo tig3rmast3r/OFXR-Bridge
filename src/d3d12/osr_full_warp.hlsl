@@ -56,6 +56,7 @@ RWTexture2D<float4> LowerMapOut : register(u7);
 Buffer<float4> CurrentHistoryData : register(t11);
 Texture2D<float> NativePreviousDepth : register(t12);
 Texture2D<float2> AdjacentMotion : register(t13); // original native current->peer, immutable owned snapshot
+Texture2D<float4> NativePreviousColor : register(t14); // exact source-eye N2 history
 SamplerState LinearClamp : register(s0);
 
 cbuffer Osr : register(b0) {
@@ -119,6 +120,47 @@ static const int2 FillDirections[8] = {
 groupshared uint SceneValid[64];
 groupshared uint SceneChanged[64];
 groupshared uint SceneSource[64];
+
+groupshared uint IntervalOne[64];
+groupshared uint IntervalTwo[64];
+// RDR2's original field can reference either retained eye. Classify once per
+// frame, using a fixed 576-sample colour vote, never a per-pixel interval mix.
+// Exact CPU history identities are a prerequisite; ambiguity disables motion.
+void classify_interval(uint lane) {
+    uint one=0,two=0;
+    if((Flags&4096u)!=0) {
+        uint aw,ah;AdjacentMotion.GetDimensions(aw,ah);
+        [loop] for(uint i=lane;i<576u;i+=64u) {
+            const float2 uv=.05+.9*(float2(i%32u,i/32u)+.5)/float2(32,18);
+            const int2 t=int2(floor(uv*DepthSize-SourceDejitter));
+            const int2 address=t+int2(CurrentHistoryData[15].xy);
+            if(any(address<0)||any(address>=int2(aw,ah)))continue;
+            const float2 raw=AdjacentMotion.Load(int3(address,0))*CurrentHistoryData[14].xy;
+            if(!all(isfinite(raw))||any(abs(raw)>4096))continue;
+            const float2 at=uv+raw/float2(DepthSize);
+            if(any(at<0)||any(at>=1))continue;
+            const float3 a=SourceColor.SampleLevel(LinearClamp,uv,0).rgb;
+            const float3 b=HistoryColor.SampleLevel(LinearClamp,at,0).rgb;
+            const float3 c=NativePreviousColor.SampleLevel(LinearClamp,at,0).rgb;
+            if(!all(isfinite(a))||!all(isfinite(b))||!all(isfinite(c)))continue;
+            const float e1=dot(abs(a-b),float3(1,1,1))/3;
+            const float e2=dot(abs(a-c),float3(1,1,1))/3;
+            one+=(e1<.15 && e1+.015<e2)?1u:0u;
+            two+=(e2<.15 && e2+.015<e1)?1u:0u;
+        }
+    }
+    IntervalOne[lane]=one;IntervalTwo[lane]=two;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for(uint stride=32;stride>0;stride>>=1) {
+        if(lane<stride){IntervalOne[lane]+=IntervalOne[lane+stride];IntervalTwo[lane]+=IntervalTwo[lane+stride];}
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if(lane==0)SceneState[uint2(5,0)]=IntervalOne[0]>=32 && IntervalOne[0]>2*IntervalTwo[0]?1u:
+        (IntervalTwo[0]>=32 && IntervalTwo[0]>2*IntervalOne[0]?2u:0u);
+}
+bool original_is_adjacent() {
+    return CurrentHistoryData[15].z==1 && ((Flags&4096u)==0 || SceneState[uint2(5,0)]==1);
+}
 
 // Only group zero participates. Reuse the clear dispatch, existing cameras,
 // colour and depth; 576 samples independent of headset resolution.
@@ -192,7 +234,7 @@ void classify_scene(uint lane) {
 
 [numthreads(8, 8, 1)]
 void OsrFullClear(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
-    if (all(group == 0)) classify_scene(lane);
+    if (all(group == 0)) { classify_scene(lane); classify_interval(lane); }
     if (any(id.xy >= DepthSize)) return;
     SplatOut[id.xy] = 0;
     SplatOut2[id.xy] = 0;
@@ -616,6 +658,26 @@ bool nearer_surface_present(int2 c, float z) {
     return present;
 }
 
+// RDR2: a nearby history edge alone is not evidence that this background
+// pixel is contaminated. Retain it only if CURRENT source depth and colour
+// independently corroborate that same world point. Occluded/unmatched pixels
+// still take the existing rejection path.
+bool current_confirms_background(float2 ndc,float z,float4 history_color) {
+    bool confirmed=false;
+    [unroll] do {
+    if((Flags&(4096u|8192u))==0)break;
+    const float4 q=mul(float4(ndc,z,1),BackwardSource);
+    if(!all(isfinite(q))||q.w<=1e-8)break;
+    const float2 p=float2((q.x/q.w+1)*.5*DepthSize.x,(1-q.y/q.w)*.5*DepthSize.y);
+    const float expected=max(q.z/q.w,0);
+    if(any(p<1)||any(p>=float2(DepthSize)-1)||!isfinite(expected))break;
+    if(!surface_quad_agrees(SourceDepth,p,expected,SourceDejitter))break;
+    const float3 current=SourceColor.SampleLevel(LinearClamp,p/float2(DepthSize),0).rgb;
+    confirmed=all(isfinite(current))&&all(abs(current-history_color.rgb)<=ArbiterGap);
+    } while(false);
+    return confirmed;
+}
+
 bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, out float4 result, out uint word) {
     word = HistorySplat.Load(int3(c, 0));
     result = 0;
@@ -651,7 +713,8 @@ bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, o
         // weapon (Cyberpunk, F8 of 2026-11-02 10:06:52).
         if (history_near > at_depth * EdgeRatio + FarDepth && history_near < LockedDepth &&
             (halo_parallax(BackwardHistory, ndc, at_depth, history_near, toward) > HaloParallax ||
-             !nearer_surface_present(c, at_depth)))
+             !nearer_surface_present(c, at_depth)) &&
+            !current_confirms_background(ndc,asfloat(word & ~3u),result))
             found = false;
     }
     return found;
@@ -784,14 +847,14 @@ bool adjacent_history_disoccluded(float2 source_at,float source_z,float2 ndc) {
     bool stale=false;
     [unroll] do {
     if((Flags&256u)==0)break;
-    if(CurrentHistoryData[15].z!=1||SceneState[uint2(4,0)]==0||source_z<=SkyDepth||source_z>=LockedDepth)break;
+    if(!original_is_adjacent()||SceneState[uint2(4,0)]==0||source_z<=SkyDepth||source_z>=LockedDepth)break;
     const int2 t=int2(floor(source_at-SourceDejitter));
     uint aw=0,ah=0;AdjacentMotion.GetDimensions(aw,ah);
     const int2 address=t+int2(CurrentHistoryData[15].xy);
     if(any(address<0)||any(address>=int2(aw,ah)))break;
     const float2 original=AdjacentMotion.Load(int3(address,0));
     if(!all(isfinite(original))||any(abs(original)>=65504))break;
-    const float2 at=source_at+original*CurrentHistoryData[14].xy+HistoryDejitter-SourceDejitter;
+    const float2 at=source_at+original*CurrentHistoryData[14].xy+((Flags&4096u)!=0?float2(0,0):HistoryDejitter-SourceDejitter);
     if(any(at<0)||any(at>=float2(DepthSize)))break;
     const float4 now=float4(source_at.x/DepthSize.x*2-1,1-source_at.y/DepthSize.y*2,source_z,1);
     const float4 camera=current_history_transform(now,0);
@@ -826,14 +889,14 @@ bool adjacent_local_history(float2 source_at,float source_z,bool strict_surface,
     color=0;previous_at=0;
     bool found=false;
     [unroll] do {
-    if(CurrentHistoryData[15].z!=1)break;
+    if(!original_is_adjacent())break;
     const int2 t=int2(floor(source_at-SourceDejitter));
     uint aw=0,ah=0;AdjacentMotion.GetDimensions(aw,ah);
     const int2 address=t+int2(CurrentHistoryData[15].xy);
     if(any(address<0)||any(address>=int2(aw,ah)))break;
     const float2 original=AdjacentMotion.Load(int3(address,0));
     if(!all(isfinite(original))||any(abs(original)>=65504))break;
-    const float2 at=source_at+original*CurrentHistoryData[14].xy+HistoryDejitter-SourceDejitter;
+    const float2 at=source_at+original*CurrentHistoryData[14].xy+((Flags&4096u)!=0?float2(0,0):HistoryDejitter-SourceDejitter);
     if(any(abs(at-source_at)>4096)||any(at<0)||any(at>=float2(DepthSize)))break;
     const float4 now=float4(source_at.x/DepthSize.x*2-1,1-source_at.y/DepthSize.y*2,source_z,1);
     const float4 peer=mul(now,Forward);
@@ -872,7 +935,14 @@ bool current_history(float2 source_at, float source_z, float2 target_at, bool st
     // Hard-near protection remains for inferred/composed motion. Only the
     // independently validated original N1 attachment above may precede it.
     if(source_z>=LockedDepth)break;
-    const float2 total = HistoryMotion.Load(int3(t,0)) * CurrentHistoryData[14].xy;
+    if((Flags&4096u)!=0 && SceneState[uint2(5,0)]==0)break;
+    float2 total = HistoryMotion.Load(int3(t,0)) * CurrentHistoryData[14].xy;
+    if((Flags&4096u)!=0 && SceneState[uint2(5,0)]==2) {
+        uint aw,ah;AdjacentMotion.GetDimensions(aw,ah);
+        const int2 address=t+int2(CurrentHistoryData[15].xy);
+        if(any(address<0)||any(address>=int2(aw,ah)))break;
+        total=AdjacentMotion.Load(int3(address,0))*CurrentHistoryData[14].xy;
+    }
     if (!all(isfinite(total)) || any(abs(total)>4096)) break;
     const float4 now = float4(source_at.x/DepthSize.x*2-1,1-source_at.y/DepthSize.y*2,source_z,1);
     const float4 camera_before = current_history_transform(now,8);
@@ -895,7 +965,7 @@ bool current_history(float2 source_at, float source_z, float2 target_at, bool st
     if (!isfinite(nw) || !isfinite(ow) || nw<=1e-8 || ow<=1e-8) break;
     // Divide by homogeneous VIEW W before mixing: averaging NDC/reversed
     // depths would give the wrong depth for a surface moving toward the camera.
-    const bool adjacent=CurrentHistoryData[15].z==1;
+    const bool adjacent=original_is_adjacent();
     const float fraction=adjacent?CurrentHistoryData[15].w:.5;
     float4 middle = adjacent?lerp(current_history_transform(now,0)/nw,current_history_transform(old,4)/ow,fraction):
         .5*(current_history_transform(now,0)/nw+current_history_transform(old,4)/ow);
@@ -924,7 +994,7 @@ bool current_history(float2 source_at, float source_z, float2 target_at, bool st
         if(any(address<0)||any(address>=int2(aw,ah)))break;
         const float2 original=AdjacentMotion.Load(int3(address,0));
         if(!all(isfinite(original))||any(abs(original)>=65504))break;
-        previous_at=source_at+original*CurrentHistoryData[14].xy+HistoryDejitter-SourceDejitter;
+        previous_at=source_at+original*CurrentHistoryData[14].xy+((Flags&4096u)!=0?float2(0,0):HistoryDejitter-SourceDejitter);
         if(any(abs(previous_at-source_at)>4096))break;
     }
     const float expected=middle.z/middle.w;
@@ -969,7 +1039,8 @@ bool cabin_background_history(int2 c,float2 ndc,out float4 color,out uint word,o
                 float near=0;
                 const float2 toward=halo_direction(HistoryDepth,int2(floor(g_fetch_position-HistoryDejitter)),g_fetch_depth,near);
                 if(near>g_fetch_depth*EdgeRatio+FarDepth &&
-                   (halo_parallax(BackwardHistory,ndc,g_fetch_depth,near,toward)>HaloParallax || !nearer_surface_present(c,g_fetch_depth)))break;
+                   (halo_parallax(BackwardHistory,ndc,g_fetch_depth,near,toward)>HaloParallax || !nearer_surface_present(c,g_fetch_depth)) &&
+                   !current_confirms_background(ndc,z,color))break;
                 word=(asuint(z)&~3u)|TagHistory;at=g_fetch_position;found=true;break;
             }
             // Solve old.z/old.w = sampled old depth for the destination z.
@@ -995,6 +1066,7 @@ void resolve_pixel(uint3 id) {
     float4 color = 0;
     uint word = 0;
     const bool history = (Flags & 2u) != 0 && SceneState[uint2(0, 0)] != 0;
+    bool rejected_source_halo=false;
     if (resolve_image(StereoDepth, SourceDepth, SourceColor, BackwardSource, SourceDejitter, false, c, ndc, color, word)) {
         const float2 stereo_at = g_fetch_position;
         const float stereo_depth = g_fetch_depth;
@@ -1025,7 +1097,7 @@ void resolve_pixel(uint3 id) {
         // correlation 0.95, the warped other eye 0.70; AFW's output matches
         // its previous frame exactly in fine detail. (Rounds 7-11 applied
         // this only at silhouettes, bands and sky.)
-        if (history && !adjacent_history_disoccluded(stereo_at,stereo_depth,ndc)) {
+        if (history && (Flags&8192u)==0 && !adjacent_history_disoccluded(stereo_at,stereo_depth,ndc)) {
             const float zs = asfloat(word & ~3u);
             const bool sky = zs <= SkyDepth;
             // A silhouette in the destination (depth contrast) or a band next
@@ -1156,14 +1228,19 @@ void resolve_pixel(uint3 id) {
             }
         }
         if (source_halo_stale(stereo_at, stereo_depth, ndc)) {
-            WarpedOut[id.xy] = 0;
-            ResolvedOut[id.xy] = 0; // a band pixel: the inpaint mirrors clean background
+            // RDR2: the AA silhouette has background depth, so it shifts
+            // separately from the character. Try real peer background before
+            // mirroring it. This remains distinct from a genuine disocclusion.
+            rejected_source_halo=history && (Flags&(4096u|8192u))!=0;
+            if(!rejected_source_halo) {
+                WarpedOut[id.xy]=0;ResolvedOut[id.xy]=0;return;
+            }
+        } else {
+            g_pick=1;g_pick_at=stereo_at;g_pick_word=word;g_pick_tag=TagStereo;
+            WarpedOut[id.xy] = color;
+            ResolvedOut[id.xy] = (word & ~3u) | TagStereo;
             return;
         }
-        g_pick=1;g_pick_at=stereo_at;g_pick_word=word;g_pick_tag=TagStereo;
-        WarpedOut[id.xy] = color;
-        ResolvedOut[id.xy] = (word & ~3u) | TagStereo;
-        return;
     }
     if(history && (Flags&1024u)!=0) {
         float2 background_at=0;
@@ -1179,9 +1256,11 @@ void resolve_pixel(uint3 id) {
         // only this eye sees, and the inpaint mirrored a second copy of the
         // weapon into them: a double image in parts of the weapon, orange
         // (moved) in debug.
-        const bool legitimate = (word & HistoryLockedBit) != 0 ||
-            hidden_from_source(ndc, asfloat(word & ~3u)) ||
-            history_ray_unchanged(ndc, asfloat(word & ~3u));
+        const bool legitimate = hidden_from_source(ndc, asfloat(word & ~3u)) ||
+            current_confirms_background(ndc,asfloat(word & ~3u),color) ||
+            (rejected_source_halo && source_sees_not_farther(ndc,asfloat(word & ~3u))) ||
+            ((Flags&8192u)==0 && ((word & HistoryLockedBit) != 0 ||
+             history_ray_unchanged(ndc, asfloat(word & ~3u))));
         if(legitimate){g_pick=2;g_pick_at=g_history_position;g_pick_word=word;g_pick_tag=TagHistory;}
         WarpedOut[id.xy] = legitimate ? color : 0;
         ResolvedOut[id.xy] = (word & ~3u) | (legitimate ? TagHistory : TagMoved);

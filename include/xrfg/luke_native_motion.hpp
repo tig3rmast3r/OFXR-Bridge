@@ -112,7 +112,10 @@ inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
     }
     auto next=[](std::uint32_t v){++v;return v?v:1;};
     failure=4;
-    if(current.native_production_sequence || middle.native_production_sequence || older.native_production_sequence) {
+    if(interleaved&&current.source_clock_owner) {
+        // The exact shared render clock was checked by the interleaved matcher;
+        // each eye feature retains its own independent NGX production counter.
+    } else if(current.native_production_sequence || middle.native_production_sequence || older.native_production_sequence) {
         // KCD camera receipt IDs count probes rather than rendered frames.
         // Require all three exact SR productions, including every failed
         // capture; do not compact successful publications or mix identities.

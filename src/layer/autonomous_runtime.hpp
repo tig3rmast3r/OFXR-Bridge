@@ -134,6 +134,12 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.nr_evaluations=nr.evaluations;
     if (nr.enabled && !nr.reason.empty()) snprintf(out.message,sizeof(out.message),"%s",nr.reason.c_str());
     const auto ingress=native_ingress::statistics();
+    if(ingress.luke&&(bridge_flight_logger().enabled()||bridge_flight_logger().ram_enabled())) {
+        static std::atomic_uint64_t last_camera_report{};auto previous=last_camera_report.load(std::memory_order_relaxed);
+        if(now>=previous+1000&&last_camera_report.compare_exchange_strong(previous,now,std::memory_order_relaxed))
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                ingress.camera_rejected&&!ingress.camera_accepted?1:0,1347,ingress.camera_accepted,ingress.camera_rejected);
+    }
     out.luke_detected = ingress.luke != 0;
     out.uevr_osr = uevr_osr_attached.load(std::memory_order_acquire);
     out.vulkan_detected = vulkan_detected || (ingress.luke && native_vulkan::luke_vulkan_process());

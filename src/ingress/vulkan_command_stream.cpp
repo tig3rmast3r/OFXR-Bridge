@@ -4,6 +4,8 @@
 #include "vulkan_command_submit.hpp"
 #include "xrfg/native_export_address.hpp"
 #include <safetyhook.hpp>
+#include <stdexcept>
+#include "vulkan_luke_camera.hpp"
 
 namespace xrfg::native_vulkan {
 namespace {
@@ -79,14 +81,28 @@ std::shared_ptr<DeviceState> queue_device(VkQueue queue) {
     auto& r=registry();std::scoped_lock lock(r.mutex);
     auto found=r.dispatch.find(dispatch_key(queue));return found==r.dispatch.end()?nullptr:found->second;
 }
+PFN_vkVoidFunction camera_entry_original(const char* name)noexcept;
 template<class T>T load(DeviceState& device,const char* name) {
+    if(auto original=camera_entry_original(name))return reinterpret_cast<T>(original);
     std::scoped_lock lock(device.mutex);
     auto found=device.functions.find(name);
     if(found!=device.functions.end())return reinterpret_cast<T>(unhooked_command(found->second));
     auto function=device.gdpa?device.gdpa(device.device,name):nullptr;
     device.functions.emplace(name,function);return reinterpret_cast<T>(unhooked_command(function));
 }
+struct CameraEntryCall {const char* name{};PFN_vkVoidFunction original{};};
+thread_local CameraEntryCall camera_entry_call;
+std::mutex camera_entry_mutex;
+std::unordered_set<VkDevice> camera_entry_devices;
+struct CameraEntryScope {CameraEntryCall previous;
+    CameraEntryScope(const char* name,PFN_vkVoidFunction original):previous(camera_entry_call){camera_entry_call={name,original};}
+    ~CameraEntryScope(){camera_entry_call=previous;}
+};
+PFN_vkVoidFunction camera_entry_original(const char* name)noexcept {
+    return camera_entry_call.name&&!strcmp(camera_entry_call.name,name)?camera_entry_call.original:nullptr;
+}
 template<class T>T guide_fallback(const char* name) {
+    if(auto original=camera_entry_original(name))return reinterpret_cast<T>(original);
     auto& r=registry();PFN_vkVoidFunction fn{};
     {std::scoped_lock lock(r.mutex);auto it=r.guide_fallbacks.find(name);if(it!=r.guide_fallbacks.end())fn=it->second;}
     return reinterpret_cast<T>(unhooked_command(fn));
@@ -145,6 +161,7 @@ struct SiteFunction {
     struct Entry {uint64_t serial{};PFN_vkVoidFunction function{};};
     std::array<std::atomic<const Entry*>,4> entries{};
     template<class T>T get(DeviceState& device,const char* name) {
+        if(auto original=camera_entry_original(name))return reinterpret_cast<T>(original);
         for(auto& slot:entries) {
             const auto* entry=slot.load(std::memory_order_acquire);
             if(!entry)break;
@@ -236,6 +253,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_vkBeginCommandBuffer(VkCommandBuffer origina
     std::unique_lock lock(d->mutex);DisposedRecordings abandoned;
     auto& chain=d->commands[original];release_chain(*d,chain,abandoned);
     auto result=fn(original,info);if(result==VK_SUCCESS) {
+        luke_camera::begin(d->device,original);
         chain.actual=original;chain.recording=true;chain.flags=info?info->flags:0;chain.epoch=++d->next_epoch;
         d->tracker.OnBegin(original,info);
     }lock.unlock();notify_abandoned(abandoned);return result;
@@ -366,8 +384,43 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_vkQueueSubmit2KHR(VkQueue queue,uint32_t cou
     auto d=queue_device(queue);if(d)return submit2(load<PFN_vkQueueSubmit2>(*d,"vkQueueSubmit2KHR"),queue,count,submits,fence);auto f=guide_fallback<PFN_vkQueueSubmit2>("vkQueueSubmit2KHR");return f?f(queue,count,submits,fence):VK_ERROR_INITIALIZATION_FAILED;
 }
 
+#include "vulkan_luke_camera_dispatch.inc"
 #include "vulkan_command_dispatch.inc"
+#include "vulkan_luke_camera_entries.inc"
+#if defined(XRFG_VULKAN_CAMERA_ENTRY_TESTS)
+unsigned camera_stub_a{},camera_stub_b{};
+bool camera_stub_nested{};
+unsigned char camera_stub_data_a[1024]{},camera_stub_data_b[1024]{};
+__declspec(noinline) VkResult VKAPI_CALL camera_fake_map_b(VkDevice,VkDeviceMemory,VkDeviceSize,VkDeviceSize,VkMemoryMapFlags,void** data) {
+    ++camera_stub_b;*data=camera_stub_data_b;return VK_SUCCESS;
 }
+__declspec(noinline) VkResult VKAPI_CALL camera_fake_map_a(VkDevice device,VkDeviceMemory memory,VkDeviceSize offset,VkDeviceSize size,VkMemoryMapFlags flags,void** data) {
+    ++camera_stub_a;
+    if(camera_stub_nested){volatile PFN_vkMapMemory nested=&camera_fake_map_b;void* ignored{};nested(device,memory,offset,size,flags,&ignored);}
+    *data=camera_stub_data_a;return VK_SUCCESS;
+}
+#endif
+}
+#if defined(XRFG_VULKAN_CAMERA_ENTRY_TESTS)
+bool test_camera_native_entry_forwarding() {
+    if(!install_camera_native_entry("vkMapMemory",reinterpret_cast<PFN_vkVoidFunction>(&camera_fake_map_a))||
+        !install_camera_native_entry("vkMapMemory",reinterpret_cast<PFN_vkVoidFunction>(&camera_fake_map_b)))return false;
+    const auto device=reinterpret_cast<VkDevice>(std::uintptr_t{91});
+    const auto memory=reinterpret_cast<VkDeviceMemory>(std::uintptr_t{92});
+    luke_camera::allocated(device,memory,1024);
+    volatile PFN_vkMapMemory a=&camera_fake_map_a,b=&camera_fake_map_b;
+    void* data{};
+    if(a(device,memory,0,1024,0,&data)!=VK_SUCCESS||data!=camera_stub_data_a||camera_stub_a!=1||camera_stub_b)return false;
+    if(b(device,memory,0,1024,0,&data)!=VK_SUCCESS||data!=camera_stub_data_b||camera_stub_a!=1||camera_stub_b!=1)return false;
+    camera_stub_nested=true;
+    if(a(device,memory,0,1024,0,&data)!=VK_SUCCESS||data!=camera_stub_data_a||camera_stub_a!=2||camera_stub_b!=2)return false;
+    // An unsupported/shared dispatcher must not route another Vulkan ABI
+    // through the first observer registered at that address.
+    if(install_camera_native_entry("vkFreeDescriptorSets",reinterpret_cast<PFN_vkVoidFunction>(&camera_fake_map_a)))return false;
+    if(a(device,memory,0,1024,0,&data)!=VK_SUCCESS||data!=camera_stub_data_a||camera_stub_a!=3||camera_stub_b!=3)return false;
+    return camera_entry_call.original==nullptr;
+}
+#endif
 
 PFN_vkVoidFunction unhooked_command(PFN_vkVoidFunction function) noexcept {
     auto& r=registry();std::scoped_lock lock(r.mutex);
@@ -416,6 +469,40 @@ bool initialize_commands(VkInstance instance,VkPhysicalDevice physical,VkDevice 
     d->tracker.SetFunctionTable(fns);auto& r=registry();std::scoped_lock lock(r.mutex);
     if(r.devices.contains(device))return true;r.devices[device]=d;r.dispatch[dispatch_key(device)]=d;registry_generation.fetch_add(1,std::memory_order_release);return true;
 }
+void install_luke_camera_device_dispatch(VkDevice device,PFN_vkGetInstanceProcAddr gipa,PFN_vkGetDeviceProcAddr gdpa) noexcept {
+    if(!luke_camera::enabled()||!device||!gdpa)return;
+    try {
+        if(!initialize_commands({}, {},device,gipa,gdpa))return;
+        {std::scoped_lock lock(camera_entry_mutex);if(camera_entry_devices.contains(device))return;camera_entry_devices.insert(device);}
+        const char* names[]{"vkAllocateMemory","vkFreeMemory","vkMapMemory","vkUnmapMemory",
+            "vkCreateBuffer","vkDestroyBuffer","vkBindBufferMemory","vkBindBufferMemory2","vkBindBufferMemory2KHR",
+            "vkUpdateDescriptorSets","vkAllocateDescriptorSets","vkFreeDescriptorSets","vkResetDescriptorPool","vkDestroyDescriptorPool",
+            "vkCreateShaderModule","vkDestroyShaderModule","vkCreateComputePipelines","vkDestroyPipeline",
+            "vkCmdBindPipeline","vkCmdBindDescriptorSets","vkCmdDispatch"};
+        std::array<PFN_vkVoidFunction,std::size(names)> addresses{};
+        for(unsigned i=0;i<std::size(names);++i) {
+            addresses[i]=gdpa(device,names[i]);
+            if(!addresses[i]) {
+                if((luke_camera::required_hooks&(1ULL<<i))&&luke_camera::reporter.load(std::memory_order_acquire))
+                    luke_camera::reporter.load(std::memory_order_acquire)(1335,i,0,1);
+                continue;
+            }
+            if(!install_camera_native_entry(names[i],addresses[i])) {
+                if(const auto report=luke_camera::reporter.load(std::memory_order_acquire))
+                    report(1335,i,reinterpret_cast<std::uint64_t>(addresses[i]),camera_entry_failure);
+            }
+        }
+        std::uint64_t failed{};
+        {std::scoped_lock lock(camera_entry_mutex);
+            for(unsigned i=0;i<std::size(names);++i) {
+                if(!addresses[i]){if(luke_camera::required_hooks&(1ULL<<i))failed|=1ULL<<i;continue;}
+                auto found=camera_entry_addresses.find(reinterpret_cast<void*>(addresses[i]));
+                if(found==camera_entry_addresses.end()||!found->second->name||!found->second->active)failed|=1ULL<<i;
+            }
+        }
+        if(failed)luke_camera::state().hook_failures.fetch_or(failed,std::memory_order_release);
+    }catch(...) {luke_camera::tracking_poisoned.store(true,std::memory_order_release);luke_camera::observer.store(nullptr,std::memory_order_release);}
+}
 PFN_vkVoidFunction resolve_command(VkDevice device,const char* name,PFN_vkVoidFunction original) noexcept {
     if(!name||!original)return original;
     // GIPA may resolve every device command before VkDevice exists. The
@@ -436,6 +523,10 @@ PFN_vkVoidFunction resolve_command(VkDevice device,const char* name,PFN_vkVoidFu
 }
 VkCommandBuffer native(VkCommandBuffer original) noexcept {
     auto d=command_device(original);if(!d)return original;std::scoped_lock lock(d->mutex);return native_locked(*d,original);
+}
+VkCommandBuffer original_recording(VkCommandBuffer command) noexcept {
+    auto d=command_device(command);if(!d)return command;
+    std::scoped_lock lock(d->mutex);original_locked(*d,command);return command;
 }
 VkDevice device_for(VkCommandBuffer original) noexcept {
     auto d=command_device(original);if(!d)return {};

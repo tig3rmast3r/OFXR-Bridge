@@ -579,6 +579,7 @@ Statistics statistics() noexcept {
     auto& s=hooks();std::scoped_lock lock(s.mutex);
     return {luke_detected(),streamline_camera::hooked(),camera_accepted.load(),camera_rejected.load(),submissions.load()};
 }
+void record_native_camera_accepted() noexcept {++camera_accepted;}
 LukeContextDiagnostics luke_context_diagnostics() noexcept {
     auto& s=hooks();std::scoped_lock lock(s.mutex);
     return {has_luke_context.load(std::memory_order_acquire),bool(s.execute),bool(s.create_queue),

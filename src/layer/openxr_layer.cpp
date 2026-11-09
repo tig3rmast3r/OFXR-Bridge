@@ -15030,12 +15030,12 @@ struct LukeOriginHistoryProbe {
     std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
     xrfg::D3D12HistoryCaptureTicket capture;
 };
-// Only a native reset uses this preflight. Pin the two exact released captures
-// before reading CRCs, without acquiring or changing any XR destination image.
+// Reset preflight and RDR2's per-frame origin check pin the exact released
+// captures before reading CRCs, without changing any XR destination image.
 [[nodiscard]] HRESULT read_luke_capture_origins(ID3D12CommandQueue* queue,
     const std::array<LukeOriginHistoryProbe,2>& inputs,
     std::array<std::uint32_t,2>& tokens,std::array<HRESULT,2>& results,
-    bool& poisoned) noexcept {
+    bool& poisoned, std::array<bool,2>* nonblack=nullptr, bool ordered_history=false) noexcept {
     std::array<xrfg::D3D12HistoryConsumerLease,2> leases{};
     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>,2> resources;
     std::array<Microsoft::WRL::ComPtr<ID3D12Fence>,2> producers;
@@ -15045,7 +15045,7 @@ struct LukeOriginHistoryProbe {
     for(unsigned i=0;i<2;++i) {
         if(!inputs[i].history) {cancel();return E_POINTER;}
         const auto hr=inputs[i].history->acquire_consumer(inputs[i].capture,&leases[i],
-            resources[i].GetAddressOf(),producers[i].GetAddressOf());
+            resources[i].GetAddressOf(),producers[i].GetAddressOf(),ordered_history?queue:nullptr);
         if(FAILED(hr)) {cancel();return hr;}
         ++acquired;
         const auto wait=queue->Wait(producers[i].Get(),inputs[i].capture.fence_value);
@@ -15053,7 +15053,7 @@ struct LukeOriginHistoryProbe {
     }
     xrfg::LukeColorOriginReadReceipt receipt;
     const auto hr=xrfg::read_luke_color_origin_pair(queue,{resources[0].Get(),resources[1].Get()},
-        tokens,results,D3D12_RESOURCE_STATE_COMMON,250,nullptr,&receipt);
+        tokens,results,D3D12_RESOURCE_STATE_COMMON,250,nonblack,&receipt);
     if(receipt.fence&&receipt.value) {
         for(unsigned i=0;i<2;++i)if(FAILED(inputs[i].history->retire_consumer(leases[i],receipt.fence.Get(),receipt.value)))poisoned=true;
     } else if(!receipt.submitted)cancel();
@@ -15275,6 +15275,28 @@ struct LukeOriginHistoryProbe {
             session->luke_afw_last_pair.reset();}
         std::array<std::uint64_t,2> publications{};
         std::array<std::uint32_t,2> origin_tokens{};
+        std::array<HRESULT,2> origin_results{};
+        std::array<bool,2> origin_nonblack{};
+        static const bool rdr2=[] {wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
+            const auto* name=wcsrchr(path,L'\\');return !_wcsicmp(name?name+1:path,L"RDR2.exe");}();
+        if(rdr2) {
+            // Read the exact immutable history tickets before private output
+            // acquisition/copying. The consumer leases and producer fences
+            // protect these same pixels through readback; no prior-token cache.
+            std::array<LukeOriginHistoryProbe,2> inputs;
+            for(unsigned i=0;i<2;++i) {
+                if(!entries[i].source_capture) {output.reason=GenerationPrepareReason::missing_capture;return output;}
+                std::scoped_lock lock(entries[i].swapchain->mutex);
+                inputs[i].history=entries[i].swapchain->d3d12_history;
+                inputs[i].capture=entries[i].source_capture->capture;
+            }
+            if(session->luke_warmup_probe_poisoned) {output.reason=GenerationPrepareReason::missing_capture;return output;}
+            const auto result=read_luke_capture_origins(session->d3d12_queue.Get(),inputs,origin_tokens,origin_results,
+                session->luke_warmup_probe_poisoned,&origin_nonblack,true);
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,result,1350,
+                inputs[0].capture.serial,inputs[1].capture.serial);
+            if(FAILED(result)) {output.reason=GenerationPrepareReason::missing_capture;return output;}
+        }
         // Each color is frozen by its own history ticket. Copy into disjoint
         // AFW scratch, then resolve only the token actually present in it.
         for(std::size_t index=0;index<entries.size();++index) {
@@ -15289,8 +15311,6 @@ struct LukeOriginHistoryProbe {
             }
         }
         std::array<ID3D12Resource*,2> origin_colors{};
-        std::array<HRESULT,2> origin_results{};
-        std::array<bool,2> origin_nonblack{};
         for(std::size_t index=0;index<entries.size();++index) {
             auto& entry=entries[index];const auto images=entry.generation->d3d11_interop->current_destination_images();
             if(entry.prepared.current_destination_index>=images.size()) {
@@ -15298,24 +15318,26 @@ struct LukeOriginHistoryProbe {
             }
             origin_colors[index]=images[entry.prepared.current_destination_index];
         }
-        const auto read_origins = [&] {
-            // Both colors are already frozen in disjoint scratch on this queue.
-            // Submit their small marker copies together: one GPU/CPU rendezvous,
-            // independent tokens/results and the same producer ordering. No new
-            // frame of history or delayed eye selection is introduced.
-            xrfg::read_luke_color_origin_pair(session->d3d12_queue.Get(),
-                origin_colors,origin_tokens,origin_results,D3D12_RESOURCE_STATE_COMMON,250,
-                (gta||xrfg::bridge_flight_logger().enabled())?&origin_nonblack:nullptr);
-        };
-        if (entries[0].generation->isolated_luke_synthesis && entries[1].generation->isolated_luke_synthesis) {
-            // The reader owns its allocator/readback lock. Its CPU decode must
-            // not exclude OFXR submission on the other lane. Scratch stays on
-            // the capture queue and is never an OFXR destination.
-            read_origins();
-        } else {
-            std::scoped_lock lock(session->gpu_mutex);
-            read_origins();
-        }
+        if(!rdr2) {
+            const auto read_origins = [&] {
+                // Both colors are already frozen in disjoint scratch on this queue.
+                // Submit their small marker copies together: one GPU/CPU rendezvous,
+                // independent tokens/results and the same producer ordering. No new
+                // frame of history or delayed eye selection is introduced.
+                xrfg::read_luke_color_origin_pair(session->d3d12_queue.Get(),
+                    origin_colors,origin_tokens,origin_results,D3D12_RESOURCE_STATE_COMMON,250,
+                    (gta||xrfg::bridge_flight_logger().enabled())?&origin_nonblack:nullptr);
+            };
+            if (entries[0].generation->isolated_luke_synthesis && entries[1].generation->isolated_luke_synthesis) {
+                // The reader owns its allocator/readback lock. Its CPU decode must
+                // not exclude OFXR submission on the other lane. Scratch stays on
+                // the capture queue and is never an OFXR destination.
+                read_origins();
+            } else {
+                std::scoped_lock lock(session->gpu_mutex);
+                read_origins();
+            }
+        } // Other games retain scratch-image marker reads.
         output.original_scene=xrfg::luke_original_scene_identity(
             {SUCCEEDED(origin_results[0])?origin_tokens[0]:0,
              SUCCEEDED(origin_results[1])?origin_tokens[1]:0},
@@ -15598,11 +15620,15 @@ struct LukeOriginHistoryProbe {
         const auto& afw_settings = afw_status.desired;
         {
             std::scoped_lock gpu_lock(session->gpu_mutex);
+            const xrfg::LukeAfwVerifiedPeer verified_peer{
+                destination_images[destination.prepared.current_destination_index],
+                destination.guide.get(),SUCCEEDED(origin_results[destination_index])?origin_tokens[destination_index]:0};
             afw_result = session->luke_afw->synthesize(
                 source_images[source.prepared.current_destination_index],
                 destination_images[destination.prepared.current_destination_index],
                 *source.guide, source.views.front(), destination.views.front(),
-                source.logical_eye, *xr_eye_baseline, afw_settings,native_peer_camera,&reconstructed_position);
+                source.logical_eye, *xr_eye_baseline, afw_settings,native_peer_camera,&reconstructed_position,
+                rdr2?&verified_peer:nullptr);
             afw_evaluated = SUCCEEDED(afw_result);
         }
         if(afw_evaluated && reconstructed_position) {

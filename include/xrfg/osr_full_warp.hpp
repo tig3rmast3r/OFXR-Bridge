@@ -122,6 +122,12 @@ constexpr float kOsrFullLockedRatio = 0.5F;
 // starting beyond. A near wall taken for attached loses nothing where the
 // other eye's warp shows it, which then wins as for the gun.
 constexpr float kOsrFullLockedDistanceMetres = 0.6F;
+// Distance alone does not establish camera attachment in RDR2: nearby terrain
+// and characters are world geometry. Reversed depth 2 disables this shortcut.
+constexpr float osr_full_attachment_depth(float depth, bool world_geometry) noexcept {
+    return world_geometry ? 2.0F : depth;
+}
+
 
 // Reversed depth of a point straight ahead at view distance `distance` (game
 // units) through a row-vector view_to_clip; 2 (never reached) when unknown.

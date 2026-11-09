@@ -98,6 +98,10 @@ struct DlssMotionVectorPublication {
     // evaluation that publishes this guide. Calibration waits for it.
     bool camera_pending{};
     bool raw_motion_native_span_confirmed{};
+    bool raw_motion_variable_interval{}; // RDR2: verify original field against both exact eye histories
+    // Exact native camera source clock shared by independently observed eye
+    // features. Does not replace each feature's NGX production sequence.
+    std::uint64_t source_clock_owner{},source_clock_sequence{};
 };
 
 // A camera attached to a published frame at its submission.
@@ -123,6 +127,7 @@ struct DlssNativeCameraHistory {
     std::array<float,16> projection{},inverse_projection{};
     std::uint64_t native_production_sequence{};
     std::uint32_t raw_motion_native_span{1};
+    std::uint64_t source_clock_owner{},source_clock_sequence{};
 };
 struct DlssMotionVectorFrame {
     std::uint64_t stream{};
@@ -231,8 +236,10 @@ struct DlssMotionVectorFrame {
     // the part of the vectors that lands on it. MSFS 2024's foveated
     // periphery spreads a few hundred render columns over a whole eye.
     bool raw_motion_native_span_confirmed{};
+    bool raw_motion_variable_interval{}; // RDR2: verify original field against both exact eye histories
     bool placed{};
     std::array<float, 4> placed_motion_rect{};
+    std::uint64_t source_clock_owner{},source_clock_sequence{};
 };
 
 // The vector and depth rectangles a consumer maps the guide's output onto:
@@ -290,7 +297,7 @@ inline DlssNativeCameraHistory dlss_native_camera_history(const DlssMotionVector
         f.camera_frame_token_valid&&f.camera_data_valid&&f.camera_matrices_valid,
         f.reset,f.jittered,f.jitter_x,f.jitter_y,f.camera_position,f.camera_right,
         f.camera_up,f.camera_forward,f.camera_view_to_clip,f.camera_clip_to_view,
-        f.native_production_sequence,f.raw_motion_native_span};
+        f.native_production_sequence,f.raw_motion_native_span,f.source_clock_owner,f.source_clock_sequence};
 }
 
 constexpr std::uint32_t kDlssMotionVectorEyeCount = 2;

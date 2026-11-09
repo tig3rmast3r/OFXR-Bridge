@@ -201,9 +201,10 @@ inline DXGI_FORMAT luke_origin_upload_format(DXGI_FORMAT resource, DXGI_FORMAT p
 // contrast. Exact in half, 11/10-bit and 32-bit floats.
 inline constexpr float kLukeOriginHdrWhite = 1.f / 16.f;
 // bright: 1.0 on float outputs (see LukeColorOriginLayout::bright).
-inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white, bool bright = false) noexcept {
+inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white, bool bright = false,unsigned hdr_unit_shift = 0) noexcept {
+    hdr_unit_shift=std::min(hdr_unit_shift,8U);
     if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
-        const auto level = static_cast<std::uint16_t>(white ? (bright ? 0x3c00 : 0x2c00) : 0); // 1 or 2^-4
+        const auto level = static_cast<std::uint16_t>(white ? (bright ? 0x3c00 : 0x2c00)+(hdr_unit_shift<<10) : 0);
         const std::uint16_t values[]{level, level, level, 0x3c00};
         std::memcpy(pixel, values, sizeof(values));
     } else if (format == DXGI_FORMAT_R16G16B16A16_UNORM) {
@@ -212,11 +213,12 @@ inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white, 
         std::memcpy(pixel, values, sizeof(values));
     } else if (format == DXGI_FORMAT_R11G11B10_FLOAT) {
         // Unsigned 5-bit exponents, 6/6/5-bit mantissas. Exactly 2^-4 (or 1) RGB.
-        const std::uint32_t value = !white ? 0 : bright ? (0x3c0U | (0x3c0U << 11) | (0x1e0U << 22))
-            : (0x2c0U | (0x2c0U << 11) | (0x160U << 22));
+        const auto rg=(bright?0x3c0U:0x2c0U)+(hdr_unit_shift<<6);
+        const auto b=(bright?0x1e0U:0x160U)+(hdr_unit_shift<<5);
+        const std::uint32_t value = white?(rg|(rg<<11)|(b<<22)):0;
         std::memcpy(pixel, &value, sizeof(value));
     } else if (format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
-        const float level = white ? (bright ? 1.f : kLukeOriginHdrWhite) : 0.f, values[]{level, level, level, 1.f};
+        const float level = white ? std::ldexp(bright ? 1.f : kLukeOriginHdrWhite,hdr_unit_shift) : 0.f, values[]{level, level, level, 1.f};
         std::memcpy(pixel, values, sizeof(values));
     } else {
         const std::uint32_t value = format == DXGI_FORMAT_R10G10B10A2_UNORM
@@ -458,6 +460,7 @@ struct LukeColorOriginPatch {
     std::array<LukeColorOriginRect,8> bands{};
     std::array<bool,8> bright{};
     unsigned band_count{};
+    unsigned hdr_unit_shift{};
 };
 inline constexpr unsigned kLukeOriginPatchMaximumBytes = 8 * kLukeOriginWidth * kLukeOriginHeight * 16;
 bool luke_color_origin_patch_layout(unsigned texture_width, unsigned texture_height,

@@ -1,8 +1,15 @@
 #pragma once
 #include <nvsdk_ngx_params.h>
 #include <cstdint>
+#include <cmath>
 
 namespace xrfg {
+// Older SR integrations can successfully return zero for the optional
+// frame-time parameter. Luke's established D3D12 capture policy uses a nominal
+// positive interval in that case; Vulkan must use the same admission policy.
+inline float ngx_luke_frame_time_ms(float supplied) noexcept {
+    return std::isfinite(supplied)&&supplied>0.F?supplied:16.6667F;
+}
 struct NgxFeatureMetadata {
     std::uint32_t identity{};
     NVSDK_NGX_Feature type{NVSDK_NGX_Feature_SuperSampling};

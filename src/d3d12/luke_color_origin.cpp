@@ -59,6 +59,14 @@ bool bright_primary_origin() noexcept {
     }();
     return selected;
 }
+unsigned origin_hdr_unit_shift() noexcept {
+    static const unsigned shift=[] {
+        wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
+        const auto* name=wcsrchr(path,L'\\');
+        return luke_origin_hdr_unit_shift_for_title(name?name+1:path);
+    }();
+    return shift;
+}
 bool gta_color_origin() noexcept {
     static const bool result=[] {wchar_t p[MAX_PATH]{};GetModuleFileNameW(nullptr,p,MAX_PATH);
         const auto* n=wcsrchr(p,L'\\');return !_wcsicmp(n?n+1:p,L"GTA5_Enhanced.exe");}();
@@ -228,7 +236,7 @@ HRESULT immutable_upload(ID3D12Device* device, DXGI_FORMAT format, UINT height,
     const auto pixel_bytes = luke_origin_pixel_bytes(format);
     for (UINT y = 0; y < height; ++y)
         for (UINT x = 0; x < 2; ++x)
-            luke_origin_pixel(bytes + static_cast<UINT64>(y) * 256 + x * pixel_bytes, format, white, bright);
+            luke_origin_pixel(bytes + static_cast<UINT64>(y) * 256 + x * pixel_bytes, format, white, bright,origin_hdr_unit_shift());
     const D3D12_RANGE written{0, static_cast<SIZE_T>(desc.Width)};
     output->Unmap(0, &written);
     return S_OK;
@@ -426,6 +434,7 @@ bool luke_color_origin_patch_layout(unsigned texture_width, unsigned texture_hei
             patch->bands[band]=area;patch->bright[band]=layout.bright[band]||primary_bright;
         }
         patch->band_count=layout.band_count;
+        patch->hdr_unit_shift=origin_hdr_unit_shift();
         return patch->band_count!=0;
     } catch (...) { return false; }
 }
@@ -436,7 +445,7 @@ void luke_color_origin_patch_pixels(const LukeColorOriginPatch& patch, DXGI_FORM
     for(unsigned band=0;band<patch.band_count;++band)
         for(unsigned y=0;y<kLukeOriginHeight;++y)
             for(unsigned x=0;x<kLukeOriginWidth;++x,pixels+=bytes)
-                luke_origin_pixel(pixels,format,luke_origin_white(token,(x/2)*2),patch.bright[band]);
+                luke_origin_pixel(pixels,format,luke_origin_white(token,(x/2)*2),patch.bright[band],patch.hdr_unit_shift);
 }
 HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* color,
     std::uint32_t token, D3D12_RESOURCE_STATES state, ID3D12Device* native_device,

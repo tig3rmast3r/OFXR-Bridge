@@ -1242,8 +1242,7 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     g.resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     g.depth_resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     g.frame_time_delta_ms=get<float>(p,NVSDK_NGX_Parameter_FrameTimeDeltaInMsec,16.6667F);
-    if(luke && (!std::isfinite(g.frame_time_delta_ms) || g.frame_time_delta_ms<=0))
-        g.frame_time_delta_ms=16.6667F;
+    if(luke)g.frame_time_delta_ms=ngx_luke_frame_time_ms(g.frame_time_delta_ms);
     g.camera_near=get<float>(p,"DLSSG.CameraNear",camera_near);
     g.camera_far=get<float>(p,"DLSSG.CameraFar",camera_far);
     // Unknown flags defer to the camera's own depth convention.

@@ -5,6 +5,7 @@
 #undef main
 #include <bit>
 #include <cmath>
+#include <string_view>
 
 namespace {
 UINT grey(unsigned value) { return 0xff000000u | value | (value << 8) | (value << 16); }
@@ -61,7 +62,7 @@ void save(Fixture& f,unsigned eye,const std::vector<UINT>& color,float z,ID3D12R
     xrfg::OsrFullHistory kept{};kept.publication=identity.publication;kept.stream=identity.stream;kept.epoch=identity.epoch;
     f.warp.record_history_update(f.list.Get(),in,kept);submit(f);f.warp.commit();
 }
-void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=false,bool zero=false,bool hard_near=false,bool reverse=false,bool screen_locked=false,float history_scale=1.F,bool adjacent=false) {
+void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=false,bool zero=false,bool hard_near=false,bool reverse=false,bool screen_locked=false,float history_scale=1.F,bool adjacent=false,bool world_near=false) {
     Fixture f;std::vector<UINT> previous(width*height),current(width*height),motion(width*height,0);
     for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
         previous[y*width+x]=grey(35+(x*7+y*11)%90);
@@ -91,7 +92,7 @@ void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=fa
         identity(f.warp.history(1-eye)),identity(f.warp.history(eye)),peer_id,same_id,2,true,false);
     check(in.use_current_history_motion,"production gate activates actual A/B/A native identities BEFORE GPU test");
     if(adjacent)check(xrfg::osr_full_adjacent_motion_usable(current_id,peer_id,peer_id,1,true,true,false),"direct original interval uses independent exact peer gate");
-    in.locked_depth=hard_near?.6F:2.F;
+    in.locked_depth=xrfg::osr_full_attachment_depth(hard_near?.6F:2.F,world_near);
     for(unsigned i=0;i<4;++i) for(unsigned m:{0u,1u,2u,4u})in.current_history_data[m*16+i*5]=1;
     if(screen_locked)in.current_history_data[32+12]=24.F/float(width);
     in.current_history_data[0]=in.current_history_data[16]=history_scale;
@@ -113,7 +114,7 @@ void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=fa
     }
     const std::vector<float> depths(width*height,current_z);
     const auto output=render_with_inputs(f,in,current,depths);
-    if(invalid_native||zero||hard_near) {
+    if(invalid_native||zero||(hard_near&&!world_near)) {
         in.use_current_history_motion=false;
         const auto baseline=render_with_inputs(f,in,current,depths);
         check(output==baseline,"invalid native depth, static and hard-hard_near retain old path");
@@ -443,8 +444,160 @@ void adjacent_disocclusion(unsigned eye,bool low,bool moving,bool hidden=false) 
     std::printf("N1 disocclusion eye=%u lower=%u moving=%u PASS\n",eye,low,moving);
 }
 
+void gap_background(unsigned eye,bool low,bool halo=false,bool corroborated=false) {
+    Fixture f;std::vector<UINT> old(width*height),current(width*height,grey(150));
+    std::vector<float> old_depth(width*height,.1F),depth(width*height,.1F);
+    for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x) {
+        old[y*width+x]=corroborated?grey(80):grey(50+x%30);
+        if(corroborated)current[y*width+x]=grey(82);
+        if(x>=50&&x<=70){current[y*width+x]=grey(10);depth[y*width+x]=.8F;}
+        if(halo && !corroborated && x>=48 && x<=49)current[y*width+x]=grey(30); // AA colour with background depth
+        if(x>=(corroborated?52:63)&&x<=83){old[y*width+x]=grey(30);old_depth[y*width+x]=.8F;}
+    }
+    warm(f,old);begin(f);f.upload(f.color.Get(),old.data());f.upload(f.depth.Get(),old_depth.data());
+    auto keep=inputs(f,1-eye);xrfg::OsrFullHistory h{};h.publication=100;
+    f.warp.record_history_update(f.list.Get(),keep,h);submit(f);f.warp.commit();
+    auto in=inputs(f,eye);in.lower_quality=low;in.background_history_only=true;
+    in.use_history_motion=false;in.forward_stereo[8]=.25F;in.backward_source[8]=-.25F;
+    const auto result=render_with_inputs(f,in,current,depth);
+    for(unsigned y=18;y<height-18;++y) {
+        for(unsigned x=halo?50:55;x<=(halo?(corroborated?50:51):58);++x)check(result[y*width+x]==old[y*width+x],"gap uses retained real occluded background");
+        check(result[y*width+74]==grey(10),"gap history never replaces current character");
+        check(result[y*width+20]==grey(corroborated?82:150),"gap history never replaces visible current background");
+    }
+    in.use_history=false;const auto unavailable=render_with_inputs(f,in,current,depth);
+    check(result[height/2*width+(corroborated?50:56)]!=unavailable[height/2*width+(corroborated?50:56)],"gap fixture distinguishes real history from mirrored fill");
+    std::printf("Gap background eye=%u lower=%u: real occluded fill and current foreground PASS\n",eye,low);
 }
-int main() {
+
+void verified_pair_history(unsigned eye,bool low) {
+    Fixture f;std::vector<UINT> old(width*height,grey(40)),peer(width*height),current(width*height);
+    std::vector<float> depths(width*height);
+    for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x) {
+        peer[y*width+x]=grey(80+(x+y)%10);current[y*width+x]=grey(90+(x+y)%10);
+        depths[y*width+x]=.2F+float((x+y)%10)*.0001F;
+    }
+    warm(f,old);save(f,eye,old,.2F,nullptr,{101,11,3});save(f,1-eye,old,.2F,nullptr,{98,22,4});
+    auto desc=f.depth->GetDesc();desc.Width+=6;desc.Height+=4;
+    D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+    ComPtr<ID3D12Resource> cropped;
+    ok(f.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&cropped)),"padded peer depth");
+    const auto retain_peer=[&] {
+        f.upload(f.color.Get(),peer.data());f.upload(f.depth.Get(),depths.data());
+        f.transition(f.depth.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        f.transition(cropped.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=f.depth.Get();to.pResource=cropped.Get();
+        from.Type=to.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        f.list->CopyTextureRegion(&to,3,2,0,&from,nullptr);
+        f.transition(f.depth.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
+        f.transition(cropped.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
+        auto seed=inputs(f,1-eye);seed.source_depth=cropped.Get();
+        xrfg::OsrFullHistory h{};h.publication=102;h.stream=22;h.epoch=4;
+        f.warp.record_history_update(f.list.Get(),seed,h,3,2);
+    };
+    // A failed/abandoned batch must not publish the speculative peer identity.
+    begin(f);retain_peer();check(f.warp.history(1-eye).publication==102,"pending verified peer visible to same-list reconstruction");
+    ok(f.list->Close(),"close abandoned peer batch");f.warp.discard();
+    check(f.warp.history(1-eye).publication==98&&f.warp.history(eye).publication==101,"abandoned peer batch restored both identities");
+    begin(f);retain_peer();
+    f.upload(f.color.Get(),current.data());f.upload(f.depth.Get(),depths.data());
+    auto in=inputs(f,eye);in.lower_quality=low;in.use_history_motion=false;
+    f.warp.record(f.device.Get(),f.list.Get(),in);
+    xrfg::OsrFullHistory h{};h.publication=103;h.stream=11;h.epoch=3;
+    f.warp.record_history_update(f.list.Get(),in,h);
+    auto peer_color=f.readback(f.warp.history_color(1-eye));
+    auto peer_depth=f.readback(f.warp.history_depth(1-eye));
+    auto current_color=f.readback(f.warp.history_color(eye));submit(f);f.warp.commit();
+    check(f.warp.history(eye).publication==103&&f.warp.history(1-eye).publication==102,"one submission commits BOTH exact real eye histories");
+    Fixture::Readback* colors[]{&peer_color,&current_color};
+    const UINT* expected_colors[]{peer.data(),current.data()};
+    for(unsigned i=0;i<2;++i) {
+        void* bytes{};ok(colors[i]->buffer->Map(0,nullptr,&bytes),"paired history color read");
+        for(unsigned y=0;y<height;++y)check(!std::memcmp(static_cast<char*>(bytes)+colors[i]->footprint.Offset+y*colors[i]->footprint.Footprint.RowPitch,expected_colors[i]+y*width,width*4),"paired history pixels retain original eye, not generated or overwritten source");
+        colors[i]->buffer->Unmap(0,nullptr);
+    }
+    void* bytes{};ok(peer_depth.buffer->Map(0,nullptr,&bytes),"paired history depth read");
+    for(unsigned y=0;y<height;++y)check(!std::memcmp(static_cast<char*>(bytes)+peer_depth.footprint.Offset+y*peer_depth.footprint.Footprint.RowPitch,depths.data()+y*width,width*4),"paired history depth uses exact native crop");
+    peer_depth.buffer->Unmap(0,nullptr);
+    std::printf("Verified pair eye=%u low=%u: same-list original colors, cropped depth, two commits and rollback PASS\n",eye,low);
+}
+
+void variable_interval(unsigned eye) {
+    Fixture f;std::vector<UINT> a(width*height),b(width*height),zero(width*height);
+    for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x) {
+        a[y*width+x]=grey(60+(x*13+y*7)%120);
+        b[y*width+x]=grey(60+((x+5)*13+(y+3)*7)%120);
+    }
+    warm(f,a);auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    begin(f);f.upload(field.Get(),zero.data());submit(f);
+    save(f,eye,a,.2F,field.Get(),{101,11,3});
+    save(f,1-eye,b,.2F,field.Get(),{102,22,4});
+    auto original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    begin(f);f.upload(original.Get(),zero.data());submit(f);
+    auto in=inputs(f,eye);in.source_motion=field.Get();in.adjacent_motion=original.Get();
+    in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;
+    in.use_current_history_motion=true;in.detect_motion_interval=true;
+    in.current_history_data[56]=in.current_history_data[57]=1;in.current_history_data[62]=1;
+    for(unsigned expected:{1u,2u,1u,2u,0u}) {
+        const auto& pixels=expected==1?b:a;
+        // Identical histories provide no evidence: reject rather than latch.
+        if(!expected)save(f,1-eye,a,.2F,field.Get(),{102,22,4});
+        begin(f);f.upload(f.color.Get(),pixels.data());
+        std::vector<float> z(width*height,.2F);f.upload(f.depth.Get(),z.data());
+        f.warp.record(f.device.Get(),f.list.Get(),in);auto r=f.readback(f.warp.scene_state());submit(f);
+        void* ptr{};ok(r.buffer->Map(0,nullptr,&ptr),"interval result map");
+        const auto actual=static_cast<const UINT*>(ptr)[5];r.buffer->Unmap(0,nullptr);
+        check(actual==expected,"frame-wide original field selects matching retained eye; ambiguity refuses");
+    }
+    std::printf("Variable native interval eye=%u: N1/N2 changes and ambiguous refusal PASS\n",eye);
+}
+
+void unclassified_history(unsigned eye,bool low) {
+    Fixture f;
+    std::vector<UINT> old(width*height),current(width*height),motion(width*height,eye?0xd000u:0x5000u);
+    std::vector<float> depths(width*height,.2F);
+    for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x) {
+        old[y*width+x]=grey(50+(x*7+y*11)%90);
+        current[y*width+x]=old[y*width+x]^0x00100000u;
+    }
+    warm(f,old);auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    begin(f);f.upload(field.Get(),motion.data());submit(f);
+    const auto seed=[&](bool retain) {
+        begin(f);f.upload(f.color.Get(),old.data());f.upload(f.depth.Get(),depths.data());
+        auto in=inputs(f,1-eye);in.source_motion=field.Get();in.retain_history_motion=retain;
+        xrfg::OsrFullHistory kept{};kept.publication=102;kept.stream=22;kept.epoch=4;
+        f.warp.record_history_update(f.list.Get(),in,kept);submit(f);f.warp.commit();
+    };
+    auto in=inputs(f,eye);in.lower_quality=low;
+    // Positive control: this is a real GPU field that deforms own-eye detail.
+    seed(true);check(f.warp.history(1-eye).has_motion,"verified field remains eligible");
+    const auto broken=render_with_inputs(f,in,current,depths);
+    in.use_history_motion=false;
+    const auto reference=render_with_inputs(f,in,current,depths);
+    check(broken!=reference,"spurious 32-pixel field must visibly alter production warp");
+    // Same pixels/depth, but a field composed from an unknown N1/N2 interval.
+    // It must not survive as an allegedly verified same-eye history vector.
+    seed(false);
+    in.use_history_motion=f.warp.history(1-eye).has_motion;
+    const auto repaired=render_with_inputs(f,in,current,depths);
+    check(repaired==reference,"unknown composed field must not deform later own-eye detail");
+    check(f.warp.history(1-eye).publication==102&&!f.warp.history(1-eye).has_motion,
+        "retain exact colour/depth/camera identity without unverified motion");
+    std::printf("Unclassified composed history eye=%u lower=%u: spurious displacement refused PASS\n",eye,low);
+}
+}
+int main(int argc,char** argv) {
+    if(argc==2&&std::string_view(argv[1])=="unclassified-history") {
+        for(unsigned eye:{0u,1u})for(bool low:{false,true})unclassified_history(eye,low);return 0;
+    }
+    if(argc>4){for(unsigned eye:{0u,1u})for(bool low:{false,true})verified_pair_history(eye,low);return 0;}
+    if(argc>3){for(unsigned eye:{0u,1u})for(bool low:{false,true})gap_background(eye,low,true,true);return 0;}
+    if(argc>2){for(unsigned eye:{0u,1u})for(bool low:{false,true})current_vectors(eye,low,.8F,false,false,true,false,false,1.F,false,true);return 0;}
+    if(argc>1){for(unsigned eye:{0u,1u})for(bool low:{false,true})gap_background(eye,low,true);return 0;}
+    variable_interval(0);variable_interval(1);
+    for(unsigned eye:{0u,1u})for(bool low:{false,true})unclassified_history(eye,low);
+    for(unsigned eye:{0u,1u})for(bool low:{false,true})verified_pair_history(eye,low);
+    for(unsigned eye:{0u,1u})for(bool low:{false,true})gap_background(eye,low);
     for(unsigned eye:{0u,1u})for(bool lower:{false,true}) {
         cabin_background(eye,lower);
         cabin_outside_history(eye,lower);

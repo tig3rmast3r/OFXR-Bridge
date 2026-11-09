@@ -41,11 +41,11 @@ int main() {
     check(xrfg::luke_game_camera_config_from_ini(ini).axes ==
         xrfg::LukeProducerCameraAxes::native_view_rows,
         "An inactive DOOM section must not select its camera convention");
-    for(const char* section:{"GTAVE","gtave"}) {
+    for(const char* section:{"GTAVE","gtave","RDR2","rdr2"}) {
         write((std::string("[")+section+"]\nWorldScale=1.1\n").c_str());
         check(xrfg::luke_game_camera_config_from_ini(ini).axes ==
             xrfg::LukeProducerCameraAxes::native_view_rows,
-            "GTA Enhanced keeps original view rows for scene and native camera history");
+            "GTA Enhanced and decoded RDR2 keep view rows for scene and native camera history");
     }
     for(const auto& sample:xrfg::tests::gta_native_camera_fixtures) {
         std::array<float,16> native{},reflected{};

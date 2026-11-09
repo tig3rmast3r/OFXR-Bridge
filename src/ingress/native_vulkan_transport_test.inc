@@ -785,7 +785,9 @@ struct TransportProbe {
         require_transport(raw<PFN_vkWaitForFences>("vkWaitForFences")(native_device,1,&finished,VK_TRUE,5000000000ULL),"wait exact native suffix completion");
         require_transport(device->queue->Signal(progress.Get(),2),"signal exact D3D12 work completion");wait_private(2);
         require_transport(captured->fence->GetCompletedValue()>=captured->final_value&&captured->d12_done->GetCompletedValue()>=captured->d12_value&&receipt.lifetime->disposition==RecordingDisposition::submitted,"both exact transport fences must retire");
-        require_transport(!captured->complete()&&captured->recording_leases==1,"submitted source recording still references private native capture resources");
+        require_transport(captured->complete()&&captured->recording_leases==1,"retired submitted slot remained pinned by executable command buffer");
+        require_transport(observed<PFN_vkQueueSubmit>("vkQueueSubmit")(native_queue,1,&submit,VK_NULL_HANDLE)==VK_ERROR_FEATURE_NOT_PRESENT,
+            "submitted split recording replay could overwrite a recycled transport slot");
         void* mapped{};require_transport(raw<PFN_vkMapMemory>("vkMapMemory")(native_device,readback.memory,0,byte_count,0,&mapped),"map native round-trip");
         require_transport(!std::memcmp(mapped,expected.data(),byte_count),"native round-trip changed exact typed motion/color/output bits");raw<PFN_vkUnmapMemory>("vkUnmapMemory")(native_device,readback.memory);
         D3D12_RANGE range{0,transport.footprint.Footprint.RowPitch*height};require_transport(d12_readback->Map(0,&range,&mapped),"map exact D3D12 typed capture");
@@ -998,6 +1000,8 @@ struct PublicGuideGpuProbe {
         for(unsigned role=0;role<role_count;++role)parameters.images[role]=image_receipt(&images[role].resource,hardware.native_device);
     }
     void verify_snapshots(const std::shared_ptr<const DlssMotionVectorFrame>& frame,unsigned serial) {
+        require_transport(frame && frame->raw_motion_native_span==1 && frame->raw_motion_native_span_confirmed,
+            "frozen public N-1 motion lost its observed interval before publication");
         require_transport(frame&&frame->native_production_sequence==serial&&frame->camera_frame_token==serial&&
             frame->scale_x==1&&frame->jitter_x==.125F&&frame->jitter_y==-.25F&&frame->frame_time_delta_ms==17&&!frame->reset&&
             frame->camera_position[0]==float(serial),"public guides lost original scalars/camera/actual native clock");
@@ -1115,6 +1119,7 @@ struct PublicGuideGpuProbe {
                 "abandoned original public preparation submitted/published or retained recording");
             for(unsigned r=0;r<role_count;++r)require_transport(prepared->surfaces[r].native_used==original[r],"unsubmitted original preparation did not restore exact native ownership");
             for(unsigned i=0;i<images.size();++i)images[i].layout=original_layouts[i];return;}
+        require_transport(!prepared->complete(),"unsubmitted replacement recording reused retired predecessor fences");
         barrier(images[output],hardware.command,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);VkBufferImageCopy region{};
         region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.imageExtent={ow,oh,1};
         hardware.observed<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(hardware.command,images[output].image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,readback.buffer,1,&region);
@@ -1162,6 +1167,17 @@ struct PublicGuideGpuProbe {
         for(unsigned x=0;x<ow;++x)require_transport(!std::memcmp(static_cast<unsigned char*>(bytes)+((oh-1)*ow+x)*4,composite.data(),4),"final original public color was captured before wrapper post-SR copyback");
         hardware.raw<PFN_vkUnmapMemory>("vkUnmapMemory")(hardware.native_device,readback.memory);require_transport(token!=0,"final original public output lost physical CRC marker");
         const auto frame=resolve_luke_guide_token(token,hardware.device->queue.Get(),hardware.device->owner.Get());if(serial==2||serial==5)verify_snapshots(frame,serial);
+        // Real games keep completed command buffers executable for many frames.
+        // Their recording leases must not exhaust the bounded transport pool.
+        require_transport(prepared->recording_leases!=0,"completed recording lease unexpectedly reset by test");
+        require_transport(prepared->complete(),"completed public slot pinned until application command-buffer reset");
+        ++prepared->final_value;
+        require_transport(!prepared->complete(),"native completion fence bypassed while recycling a submitted slot");
+        --prepared->final_value;++prepared->d12_value;
+        require_transport(!prepared->complete(),"D3D12 completion fence bypassed while recycling a submitted slot");
+        --prepared->d12_value;++prepared->pending_callbacks;
+        require_transport(!prepared->complete(),"pending submit callback bypassed while recycling a submitted slot");
+        --prepared->pending_callbacks;
         require_transport(hardware.observed<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(hardware.command,0),"retire exact completed public original recording");
     }
     void verify(){setup();

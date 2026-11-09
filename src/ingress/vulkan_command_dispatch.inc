@@ -10,6 +10,7 @@ VKAPI_ATTR void VKAPI_CALL hook_vkCmdBindPipeline(VkCommandBuffer commandBuffer,
     else if(pipelineBindPoint==VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
         remember_state(*command,[=](VkCommandBuffer target){function(target,pipelineBindPoint,pipeline);});
     else command_chain(*command).unsupported_state=true;
+    luke_camera::bind_pipeline(device->device,commandBuffer,pipelineBindPoint,pipeline);
     function(actual, pipelineBindPoint, pipeline);
 }
 VKAPI_ATTR void VKAPI_CALL hook_vkCmdSetViewport(VkCommandBuffer commandBuffer, uint32_t firstViewport, uint32_t viewportCount, const VkViewport* pViewports){
@@ -102,6 +103,7 @@ VKAPI_ATTR void VKAPI_CALL hook_vkCmdBindDescriptorSets(VkCommandBuffer commandB
         remember_state(*command,[=](VkCommandBuffer target){function(target,pipelineBindPoint,layout,
             firstSet,descriptorSetCount,sets.data(),dynamicOffsetCount,offsets.data());});
     }else command_chain(*command).unsupported_state=true;
+    luke_camera::bind_sets(device->device,commandBuffer,pipelineBindPoint,firstSet,descriptorSetCount,pDescriptorSets,dynamicOffsetCount,pDynamicOffsets);
     function(actual, pipelineBindPoint, layout, firstSet, descriptorSetCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets);
 }
 VKAPI_ATTR void VKAPI_CALL hook_vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset, VkIndexType indexType){
@@ -157,6 +159,7 @@ VKAPI_ATTR void VKAPI_CALL hook_vkCmdDispatch(VkCommandBuffer commandBuffer, uin
     auto* device=command->device.get();
     static SiteFunction site; auto function=site.get<PFN_vkCmdDispatch>(*device,"vkCmdDispatch"); if(!function)return;
     commandBuffer=command->original; const auto actual=command->actual;
+    luke_camera::dispatch(device->device,commandBuffer);
     function(actual, groupCountX, groupCountY, groupCountZ);
 }
 VKAPI_ATTR void VKAPI_CALL hook_vkCmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset){

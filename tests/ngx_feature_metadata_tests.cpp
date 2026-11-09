@@ -3,6 +3,7 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <limits>
 
 namespace {
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
@@ -32,6 +33,13 @@ struct EvaluationMap {
 }
 int main() {
     try {
+    for(const float legacy_value:{0.F,-1.F,std::numeric_limits<float>::quiet_NaN(),
+            std::numeric_limits<float>::infinity()})
+        require(xrfg::ngx_luke_frame_time_ms(legacy_value)==16.6667F,
+            "legacy successful-but-invalid frame time still fails depth publication bit64");
+    for(const float native_value:{8.333F,11.111F,22.222F,33.333F})
+        require(xrfg::ngx_luke_frame_time_ms(native_value)==native_value,
+            "positive native frame time replaced by nominal Luke interval");
         {
             xrfg::NgxFeatureMetadata a{}, b{};
             a.width=b.width=1280; a.height=b.height=720;

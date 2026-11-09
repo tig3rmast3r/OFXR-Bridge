@@ -2322,7 +2322,7 @@ void test_gta_origin_continuity(D3D12WarpFixture& fixture) {
     std::cout<<"GTA continuation GPU: actual new MV/depth/fence keys, reset refusal, own-epoch recovery and matching CRC return PASS\n";
 }
 
-void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_span=1, bool reset_transition=false) {
+void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_span=1, bool reset_transition=false,bool shared_source_clock=false) {
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
     xrfg::configure_dlss_motion_vector_tracking(true);
@@ -2343,6 +2343,10 @@ void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_sp
             p.protect_snapshot_lifetime=true;p.reset=reset;
             p.camera_frame_token_valid=p.camera_data_valid=p.camera_matrices_valid=true;
             p.camera_frame_token=token?token:n+100;
+            if(shared_source_clock) {
+                p.source_clock_owner=0x52524432;p.source_clock_sequence=p.camera_frame_token;
+                p.native_production_sequence=n/2+((n&1)?29:7);
+            }
             p.camera_right={1,0,0};p.camera_up={0,1,0};p.camera_forward={0,0,-1};
             p.camera_position={n*.2F+((n&1)?-.5F:.5F)*6.4F,0,0};
             p.camera_view_to_clip[0]=p.camera_view_to_clip[5]=1;p.camera_view_to_clip[11]=-1;p.camera_view_to_clip[14]=.1F;
@@ -2716,6 +2720,50 @@ void test_stereo_capture_ring(D3D12WarpFixture& fixture) {
 
     require_source_is_render_target(fixture, sources[1].Get());
     require(operation_succeeded(history.wait_for_idle()), "history wait_for_idle failed");
+}
+
+void test_ordered_history_reader(D3D12WarpFixture& fixture) {
+    auto source=create_source_texture(fixture);
+    const auto pattern=make_pattern(117);upload_pattern(fixture,source.Get(),pattern);
+    ID3D12Resource* sources[]{source.Get()};
+    xrfg::D3D12SwapchainHistory history;
+    require_hresult(history.initialize(fixture.device(),fixture.queue(),sources,D3D12_RESOURCE_STATE_RENDER_TARGET),"ordered history init");
+    xrfg::D3D12HistoryCaptureTicket ticket{};
+    require_hresult(history.capture(0,&ticket),"ordered history capture");
+    require_hresult(history.commit(ticket),"ordered history commit");
+    auto original=acquire_capture_for_inspection(history,ticket);
+    fixture.wait_for_fence(original.fence.Get(),ticket.fence_value);
+    ComPtr<ID3D12Fence> gate,done;
+    require_hresult(fixture.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"ordered predecessor fence");
+    require_hresult(fixture.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&done)),"ordered successor fence");
+    // Release a deliberately blocked dependency on every exception path.
+    struct ReleaseGate {ID3D12Fence* fence;~ReleaseGate(){fence->Signal(1);}} release{gate.Get()};
+    require_hresult(history.retire_consumer(original.lease,gate.Get(),1),"ordered predecessor retire");
+    xrfg::D3D12HistoryConsumerLease lease{};ComPtr<ID3D12Resource> image;ComPtr<ID3D12Fence> producer;
+    const auto acquire=[&](ID3D12CommandQueue* queue) {
+        image.Reset();producer.Reset();
+        return history.acquire_consumer(ticket,&lease,&image,&producer,queue);
+    };
+    require(acquire(nullptr)==HRESULT_FROM_WIN32(ERROR_BUSY),"baseline nonblocking reader must refuse incomplete predecessor");
+    const auto started=std::chrono::steady_clock::now();
+    require_hresult(acquire(fixture.queue()),"ordered reader incorrectly rejects valid retained eye");
+    require(std::chrono::steady_clock::now()-started<std::chrono::milliseconds(500),"ordered reader waited on CPU");
+    xrfg::D3D12HistoryConsumerLease other{};ComPtr<ID3D12Resource> other_image;ComPtr<ID3D12Fence> other_producer;
+    require(history.acquire_consumer(ticket,&other,&other_image,&other_producer,fixture.queue())==HRESULT_FROM_WIN32(ERROR_BUSY),
+        "ordered read must not steal an active CPU lease");
+    history.cancel_consumer(lease);
+    require(acquire(nullptr)==HRESULT_FROM_WIN32(ERROR_BUSY),"cancel discarded outstanding predecessor protection");
+    require_hresult(acquire(fixture.queue()),"ordered retry after cancel");
+    require_hresult(fixture.queue()->Signal(done.Get(),1),"ordered successor signal");
+    require_hresult(history.retire_consumer(lease,done.Get(),1),"ordered successor retirement");
+    require(done->GetCompletedValue()==0,"successor passed incomplete predecessor");
+    require(acquire(nullptr)==HRESULT_FROM_WIN32(ERROR_BUSY),"retirement lost successor protection");
+    require_hresult(gate->Signal(1),"ordered release predecessor");
+    fixture.wait_for_fence(done.Get(),1);
+    auto inspected=acquire_capture_for_inspection(history,ticket);
+    require_readback_matches(fixture,inspected.resource.Get(),pattern,"ordered retained eye pixels");
+    retire_completed_inspection(fixture,history,inspected);
+    require_hresult(history.wait_for_idle(),"ordered history drain");
 }
 
 void test_capture_is_async_and_consumer_fence_blocks_reuse(D3D12WarpFixture& fixture) {
@@ -6636,12 +6684,28 @@ int main(int argc, char** argv) {
             fixture.require_no_debug_errors();
             return 0;
         }
+        if(argc>1&&std::string_view(argv[1])=="rdr2-interleaved") {
+            D3D12WarpFixture fixture;
+            test_luke_interleaved_origins(fixture,1,false,true);
+            test_luke_interleaved_origins(fixture,2,false,true);
+            fixture.require_no_debug_errors();
+            std::cout<<"RDR2 two native eye handles: exact cross-handle history, GPU snapshots and calibration PASS\n";
+            return 0;
+        }
         if(argc>1 && std::string_view(argv[1])=="copy-deferred") {
             D3D12WarpFixture fixture;
             test_copy_only_afw_transport(fixture,xrfg::D3D12OpticalFlowBackend::fidelity_fx,true);
             test_copy_only_afw_transport(fixture,xrfg::D3D12OpticalFlowBackend::nvidia,true);
             fixture.require_no_debug_errors();
             std::cout<<"Deferred AFW copy: WARP without OFA, blocked ownership, exact stereo pixels, live fallback and monotonic upgrade fence PASS\n";return 0;
+        }
+        if (argc > 1 && std::string_view(argv[1]) == "ordered-history") {
+            D3D12WarpFixture fixture;
+            test_ordered_history_reader(fixture);
+            test_capture_is_async_and_consumer_fence_blocks_reuse(fixture);
+            fixture.require_no_debug_errors();
+            std::cout << "Ordered retained-eye reader: GPU dependency, cancellation, exclusive lease and pixels PASS\n";
+            return 0;
         }
         if (argc > 1 && std::string_view(argv[1]) == "copy-only") {
             D3D12WarpFixture fixture;
@@ -6660,6 +6724,7 @@ int main(int argc, char** argv) {
         test_fsr_generated_array_follows_color_extent(fixture);
         test_stereo_capture_ring(fixture);
         test_capture_is_async_and_consumer_fence_blocks_reuse(fixture);
+        test_ordered_history_reader(fixture);
         test_depth_capture_path(fixture);
         test_depth_private_history_allows_shader_resource_views(fixture);
         test_copy_only_afw_transport(fixture);

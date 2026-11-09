@@ -8,8 +8,10 @@
 int main(int argc,char** argv) {
     using xrfg::native_vulkan::luke_vulkan_process_name;
     if(!luke_vulkan_process_name(L"DOOMTheDarkAges.exe")||!luke_vulkan_process_name(L"TheGreatCircle.exe")||
+        !luke_vulkan_process_name(L"RDR2.exe")||!luke_vulkan_process_name(L"rdr2.EXE")||
         luke_vulkan_process_name(L"NMS.exe")||luke_vulkan_process_name(L"DOOMEternalx64vk.exe")||
-        luke_vulkan_process_name(L"TheGreatCircle.exe.other")||luke_vulkan_process_name(nullptr))return 4;
+        luke_vulkan_process_name(L"TheGreatCircle.exe.other")||luke_vulkan_process_name(L"RDR2.exe.other")||
+        luke_vulkan_process_name(nullptr))return 4;
     HMODULE loader=LoadLibraryW(L"vulkan-1.dll");
     if(!loader){std::cerr<<"Vulkan loader unavailable\n";return 1;}
     // Copy actual loader entry bytes before polling repeatedly with valid API

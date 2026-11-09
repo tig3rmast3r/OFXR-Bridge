@@ -84,11 +84,15 @@ public:
     // Acquires exclusive read access to a committed history slot. The returned
     // COM objects are AddRef'd. The consumer must either retire the lease with
     // its GPU-completion fence or cancel it before submitting any GPU access.
+    // An ordered queue may take over from a submitted reader by enqueueing its
+    // completion dependency. It never takes over an active CPU lease or stale
+    // ticket. All new reads and the retirement signal must use this queue.
     [[nodiscard]] HRESULT acquire_consumer(
         const D3D12HistoryCaptureTicket& ticket,
         D3D12HistoryConsumerLease* lease,
         ID3D12Resource** resource,
-        ID3D12Fence** producer_fence) noexcept;
+        ID3D12Fence** producer_fence,
+        ID3D12CommandQueue* ordered_queue = nullptr) noexcept;
 
     [[nodiscard]] HRESULT retire_consumer(
         const D3D12HistoryConsumerLease& lease,

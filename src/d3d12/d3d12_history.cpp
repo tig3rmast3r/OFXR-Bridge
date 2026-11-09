@@ -614,7 +614,8 @@ struct D3D12SwapchainHistory::Impl {
         const D3D12HistoryCaptureTicket& requested_ticket,
         D3D12HistoryConsumerLease* output_lease,
         ID3D12Resource** output_resource,
-        ID3D12Fence** output_producer_fence) noexcept {
+        ID3D12Fence** output_producer_fence,
+        ID3D12CommandQueue* ordered_queue) noexcept {
         if (output_lease != nullptr) {
             *output_lease = {};
         }
@@ -628,6 +629,7 @@ struct D3D12SwapchainHistory::Impl {
             output_producer_fence == nullptr) {
             return E_POINTER;
         }
+        if (ordered_queue && !same_adapter(device.Get(), ordered_queue)) return E_INVALIDARG;
         if (requested_ticket.slot >= slots.size() || requested_ticket.serial == 0 ||
             requested_ticket.fence_value == 0 ||
             next_lease_serial == 0 ||
@@ -638,19 +640,32 @@ struct D3D12SwapchainHistory::Impl {
         HistorySlot& slot = slots[requested_ticket.slot];
         if (!slot.valid || !matching_ticket(slot.ticket, requested_ticket) ||
             slot.active_lease_serial != 0 || slot.resource == nullptr || producer_fence == nullptr) {
+            if(ordered_queue)bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                (!slot.valid?1:0)|(!matching_ticket(slot.ticket,requested_ticket)?2:0)|
+                (slot.active_lease_serial?4:0)|(!slot.resource?8:0)|(!producer_fence?16:0),
+                1367,requested_ticket.serial,slot.active_lease_serial);
             return HRESULT_FROM_WIN32(ERROR_BUSY);
         }
         if (slot.consumer_fence_value != 0) {
             const HRESULT consumer_status =
                 fence_status(slot.consumer_fence.Get(), slot.consumer_fence_value);
             if (consumer_status == S_FALSE) {
-                return HRESULT_FROM_WIN32(ERROR_BUSY);
+                if (!ordered_queue) return HRESULT_FROM_WIN32(ERROR_BUSY);
+                const HRESULT ordered = ordered_queue->Wait(slot.consumer_fence.Get(), slot.consumer_fence_value);
+                if (FAILED(ordered)) return ordered;
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,0,1366,
+                    requested_ticket.serial,slot.consumer_fence_value);
             }
             if (FAILED(consumer_status)) {
                 return consumer_status;
             }
-            slot.consumer_fence.Reset();
-            slot.consumer_fence_value = 0;
+            // Keep an outstanding predecessor when the new CPU lease is
+            // cancelled. A successful retirement replaces it with a fence
+            // ordered after this dependency, protecting both GPU readers.
+            if (consumer_status == S_OK) {
+                slot.consumer_fence.Reset();
+                slot.consumer_fence_value = 0;
+            }
         }
 
         const std::uint64_t lease_serial = next_lease_serial++;
@@ -852,7 +867,8 @@ HRESULT D3D12SwapchainHistory::acquire_consumer(
     const D3D12HistoryCaptureTicket& ticket,
     D3D12HistoryConsumerLease* lease,
     ID3D12Resource** resource,
-    ID3D12Fence** producer_fence) noexcept {
+    ID3D12Fence** producer_fence,
+    ID3D12CommandQueue* ordered_queue) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -867,7 +883,7 @@ HRESULT D3D12SwapchainHistory::acquire_consumer(
             }
             return E_UNEXPECTED;
         }
-        return impl_->acquire_consumer(ticket, lease, resource, producer_fence);
+        return impl_->acquire_consumer(ticket, lease, resource, producer_fence, ordered_queue);
     } catch (...) {
         if (lease != nullptr) {
             *lease = {};

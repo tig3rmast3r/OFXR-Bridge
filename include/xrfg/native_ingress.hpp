@@ -42,6 +42,8 @@ struct Statistics {
     std::uint64_t camera_accepted{}, camera_rejected{}, submissions{};
 };
 Statistics statistics() noexcept;
+// Native API camera sources share the overlay's accepted-camera accounting.
+void record_native_camera_accepted() noexcept;
 // Read-only F9 snapshot; never establishes a producer or changes hook policy.
 struct LukeContextDiagnostics {
     bool admitted{}, execute_hook{}, create_queue_hook{};

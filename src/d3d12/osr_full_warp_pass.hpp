@@ -77,13 +77,13 @@ class OsrFullWarp {
     bool lower_active_{};
     std::array<Tracked, 2> history_color_{}, history_depth_{}, history_motion_{};
     std::array<OsrFullHistory, 2> history_{};
-    OsrFullHistory pending_{};
-    unsigned pending_eye_{2};
+    std::array<OsrFullHistory,2> pending_{};
+    std::array<bool,2> pending_valid_{};
     UINT increment_{};
     UINT depth_width_{}, depth_height_{}, color_width_{}, color_height_{};
     DXGI_FORMAT format_{DXGI_FORMAT_UNKNOWN};
     static constexpr DXGI_FORMAT kMotionFormat = DXGI_FORMAT_R16G16_FLOAT; // kLukeAfwMotionFormat
-    static constexpr UINT kSrvCount = 14, kUavCount = 8;
+    static constexpr UINT kSrvCount = 15, kUavCount = 8;
     static constexpr UINT kDescriptorsPerBlock = kSrvCount + kUavCount;
     enum Block : UINT { block_clear, block_splat_stereo, block_splat_history, block_splat_offset,
         block_resolve, block_inpaint, block_resolve_map, block_count };
@@ -206,7 +206,7 @@ class OsrFullWarp {
         const DXGI_FORMAT srv_formats[kSrvCount]{DXGI_FORMAT_R32_FLOAT, format_, DXGI_FORMAT_R32_UINT,
             DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_FLOAT, format_, DXGI_FORMAT_R32_UINT, format_,
             kMotionFormat, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT,
-            DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32_FLOAT, adjacent_format};
+            DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32_FLOAT, adjacent_format, format_};
         const DXGI_FORMAT uav_formats[kUavCount]{DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, format_,
             DXGI_FORMAT_R32_UINT, format_, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT};
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
@@ -259,10 +259,16 @@ public:
         bool use_history{};
         bool reset_history{};
         bool use_history_motion{};
+        // A composed field is reusable only when its original interval was
+        // established before composition. Current-frame classification does
+        // not retroactively validate the older composed field.
+        bool retain_history_motion{true};
         bool use_current_history_motion{}; // exact native endpoints; N1 has a separate original field
         bool native_history_motion{}; // stored original N1; camera_previous is the previous opposite eye
         float native_history_stereo[16]{};
         float native_history_previous_dejitter[2]{};
+        bool background_history_only{}; // recent real peer fills occluded holes after a missed native frame
+        bool detect_motion_interval{}; // GPU colour correspondence, exact N1/N2 histories only
         bool conservative_cabin_history{}; // GTA unlocked camera; requires confirmed original N1
         ID3D12Resource* adjacent_motion{}; // immutable original N1 field, not composed same-eye motion
         D3D12_RESOURCE_STATES adjacent_motion_state{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
@@ -292,12 +298,13 @@ public:
     ID3D12Resource* stereo_depth() const noexcept { return stereo_.resource.Get(); }
     D3D12_RESOURCE_STATES stereo_depth_state() const noexcept { return stereo_.state; }
     ID3D12Resource* resolved() const noexcept { return resolved_.resource.Get(); }
+    ID3D12Resource* history_color(unsigned eye) const noexcept { return history_color_[eye&1].resource.Get(); }
     ID3D12Resource* history_depth(unsigned eye) const noexcept { return history_depth_[eye&1].resource.Get(); }
     D3D12_RESOURCE_STATES history_depth_state(unsigned eye) const noexcept { return history_depth_[eye&1].state; }
     ID3D12Resource* scene_state() const noexcept { return scene_state_.resource.Get(); }
     D3D12_RESOURCE_STATES scene_state_state() const noexcept { return scene_state_.state; }
     D3D12_RESOURCE_STATES resolved_state() const noexcept { return resolved_.state; }
-    const OsrFullHistory& history(unsigned eye) const noexcept { return history_[eye & 1]; }
+    const OsrFullHistory& history(unsigned eye) const noexcept { return pending_valid_[eye & 1] ? pending_[eye & 1] : history_[eye & 1]; }
 
     // color_format must support typed UAV stores (the caller checks, as for the
     // provider's reduced-quality expansion). A geometry or format change drops
@@ -312,11 +319,11 @@ public:
         lower_map_.resource.Reset(); lower_map_.state=D3D12_RESOURCE_STATE_COMMON;
         history_ = {};
         scene_initialized_ = false;
-        pending_eye_ = 2;
+        pending_valid_ = {};
         // Typeless so the F8 capture, which knows R32_TYPELESS, can read them;
         // the views are R32_UINT.
         result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, stereo_);
-        if (SUCCEEDED(result)) result = create_texture(device, 5, 1, DXGI_FORMAT_R32_TYPELESS, true, scene_state_);
+        if (SUCCEEDED(result)) result = create_texture(device, 6, 1, DXGI_FORMAT_R32_TYPELESS, true, scene_state_);
         if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, history_splat_);
         if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, history_offset_);
         if (SUCCEEDED(result)) result = create_texture(device, color_width, color_height, color_format, true, warped_);
@@ -354,6 +361,7 @@ public:
         constants.depth_width = depth_width_; constants.depth_height = depth_height_;
         constants.color_width = color_width_; constants.color_height = color_height_;
         constants.flags = osr_full_flags(in.debug, in.use_history);
+        if(in.background_history_only)constants.flags|=8192u;
         constants.flags |= (source_eye << 4) | ((!scene_initialized_ || in.reset_history) ? 8u : 0u);
         if (in.warp_keeps_attached) constants.flags |= kOsrFullFlagWarpKeepsAttached;
         std::memcpy(constants.forward, in.forward_stereo, sizeof(constants.forward));
@@ -367,6 +375,8 @@ public:
         // camera reprojection; the older composed N2 field can carry a nearby
         // windshield/frame's motion through zero-depth sky pixels.
         if(current_motion && in.adjacent_motion)constants.flags|=512u;
+        const bool detect_interval=current_motion && in.adjacent_motion && in.detect_motion_interval;
+        if(detect_interval)constants.flags|=4096u;
         if(current_motion && in.adjacent_motion && in.conservative_cabin_history)constants.flags|=1024u;
         if((constants.flags&1024u)!=0 && in.native_history_motion && in.use_history_motion)constants.flags|=2048u;
         if (current_motion) {
@@ -391,12 +401,18 @@ public:
             barriers.track(history_color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             barriers.track(history_motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
+        if(detect_interval) {
+            barriers.track(history_color_[source_eye],D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            barriers.transition(in.adjacent_motion,in.adjacent_motion_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
         barriers.flush(list);
         dispatch(list, clear_.Get(), bind(device, block_clear,
             {in.source_depth, in.source_color, nullptr, nullptr,
              in.use_history ? history_depth.resource.Get() : nullptr,
-             in.use_history ? history_color.resource.Get() : nullptr},
-            {stereo_.resource.Get(), history_splat_.resource.Get(), nullptr, nullptr, nullptr, history_offset_.resource.Get()}),
+             in.use_history ? history_color.resource.Get() : nullptr,
+             nullptr,nullptr,nullptr,nullptr,nullptr,detect_interval?current_history_data_.Get():nullptr,
+             nullptr,detect_interval?in.adjacent_motion:nullptr,detect_interval?history_color_[source_eye].resource.Get():nullptr},
+            {stereo_.resource.Get(), history_splat_.resource.Get(), nullptr, nullptr, nullptr, history_offset_.resource.Get()},in.adjacent_motion_format),
             constants, depth_width_, depth_height_);
         barriers.uav(stereo_.resource.Get());
         barriers.uav(history_splat_.resource.Get());
@@ -448,7 +464,7 @@ public:
             constants.flags |= 256u;
             barriers.track(history_depth_[source_eye], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             if (!motion_readable) barriers.transition(in.source_motion, in.source_motion_state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            if(in.adjacent_motion) barriers.transition(in.adjacent_motion,in.adjacent_motion_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            if(in.adjacent_motion && !detect_interval) barriers.transition(in.adjacent_motion,in.adjacent_motion_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         barriers.track(stereo_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         barriers.track(history_splat_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -488,6 +504,7 @@ public:
             {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, resolved_.resource.Get(), warped_.resource.Get()},
             {nullptr, nullptr, nullptr, nullptr, output_.resource.Get()}),
             constants, color_width_, color_height_);
+        if(detect_interval)barriers.track(history_color_[source_eye],D3D12_RESOURCE_STATE_COMMON);
         barriers.track(stereo_, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(history_splat_, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(history_offset_, D3D12_RESOURCE_STATE_COMMON);
@@ -507,12 +524,12 @@ public:
     // composed motion and camera. The metadata takes effect with commit() once
     // the list executed; the frame it replaces becomes that eye's previous one.
     void record_history_update(ID3D12GraphicsCommandList* list, const Inputs& in,
-        const OsrFullHistory& history) {
+        const OsrFullHistory& history, UINT depth_x=0, UINT depth_y=0) {
         const unsigned source_eye = in.source_eye & 1;
         Tracked& color = history_color_[source_eye];
         Tracked& depth = history_depth_[source_eye];
         Tracked& motion = history_motion_[source_eye];
-        const auto& opposite=history_[1-source_eye];
+        const auto& opposite=this->history(1-source_eye);
         const auto adjacent_desc=in.adjacent_motion?in.adjacent_motion->GetDesc():D3D12_RESOURCE_DESC{};
         const float crop_x=in.current_history_data[60],crop_y=in.current_history_data[61];
         const bool native_motion=in.conservative_cabin_history && in.use_current_history_motion && in.adjacent_motion &&
@@ -523,7 +540,7 @@ public:
             double(crop_x)+depth_width_<=double(adjacent_desc.Width) && double(crop_y)+depth_height_<=double(adjacent_desc.Height);
         ID3D12Resource* motion_source=native_motion?in.adjacent_motion:in.source_motion;
         const auto motion_state=native_motion?in.adjacent_motion_state:in.source_motion_state;
-        const bool copy_motion=motion_source!=nullptr;
+        const bool copy_motion=motion_source!=nullptr && in.retain_history_motion;
         Barriers barriers;
         barriers.track(color, D3D12_RESOURCE_STATE_COPY_DEST);
         barriers.track(depth, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -540,7 +557,7 @@ public:
             list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
         };
         copy(color.resource.Get(), in.source_color, color_width_, color_height_);
-        copy(depth.resource.Get(), in.source_depth, depth_width_, depth_height_);
+        copy(depth.resource.Get(), in.source_depth, depth_width_, depth_height_,depth_x,depth_y);
         if (copy_motion) copy(motion.resource.Get(),motion_source,depth_width_,depth_height_,native_motion?static_cast<UINT>(crop_x):0,native_motion?static_cast<UINT>(crop_y):0);
         barriers.track(color, D3D12_RESOURCE_STATE_COMMON);
         barriers.track(depth, D3D12_RESOURCE_STATE_COMMON);
@@ -549,25 +566,26 @@ public:
         barriers.transition(in.source_depth, D3D12_RESOURCE_STATE_COPY_SOURCE, in.source_depth_state);
         if (copy_motion) barriers.transition(motion_source,D3D12_RESOURCE_STATE_COPY_SOURCE,motion_state);
         barriers.flush(list);
-        pending_ = history;
-        pending_.has_motion = copy_motion;
-        pending_.native_motion=native_motion;
-        pending_.previous_publication=native_motion?opposite.publication:history_[source_eye].publication;
-        pending_.camera_previous=native_motion?opposite.camera:history_[source_eye].camera;
+        auto& pending=pending_[source_eye];
+        pending = history;
+        pending.has_motion = copy_motion;
+        pending.native_motion=native_motion;
+        pending.previous_publication=native_motion?opposite.publication:history_[source_eye].publication;
+        pending.camera_previous=native_motion?opposite.camera:history_[source_eye].camera;
         if(native_motion) {
-            std::memcpy(pending_.native_stereo,in.forward_stereo,sizeof(pending_.native_stereo));
-            pending_.previous_dejitter[0]=opposite.dejitter[0];pending_.previous_dejitter[1]=opposite.dejitter[1];
+            std::memcpy(pending.native_stereo,in.forward_stereo,sizeof(pending.native_stereo));
+            pending.previous_dejitter[0]=opposite.dejitter[0];pending.previous_dejitter[1]=opposite.dejitter[1];
         }
-        pending_eye_ = source_eye;
+        pending_valid_[source_eye]=true;
     }
 
-    // The recorded list executed: the copied frame is that eye's history.
+    // Both verified real eyes may be retained on one command list, even when
+    // only the newer one triggers reconstruction. Publish both after submit.
     void commit() noexcept {
-        if (pending_eye_ < 2) {
-            history_[pending_eye_] = pending_;
-            scene_initialized_ = true;
+        for(unsigned eye=0;eye<2;++eye)if(pending_valid_[eye]) {
+            history_[eye]=pending_[eye];scene_initialized_=true;
         }
-        pending_eye_ = 2;
+        pending_valid_ = {};
     }
     // A recording that is closed but never executed leaves the GPU state as
     // the last executed recording ended it: COMMON, with the old history.
@@ -576,7 +594,7 @@ public:
             &history_color_[0], &history_color_[1], &history_depth_[0], &history_depth_[1],
             &history_motion_[0], &history_motion_[1]})
             t->state = D3D12_RESOURCE_STATE_COMMON;
-        pending_eye_ = 2;
+        pending_valid_ = {};
     }
 };
 }  // namespace xrfg

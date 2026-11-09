@@ -87,7 +87,14 @@ inline constexpr std::array<unsigned,2> luke_origin_inset_for_title(std::wstring
 // 1/16 stamp. Reuse full-white float samples; keep geometry/CRC unchanged.
 inline constexpr bool luke_origin_bright_primary_for_title(std::wstring_view name) {
     return origin_title_equal(name,L"DOOMTheDarkAges.exe") ||
-        origin_title_equal(name,L"GTA5_Enhanced.exe");
+        origin_title_equal(name,L"GTA5_Enhanced.exe") || origin_title_equal(name,L"RDR2.exe");
+}
+// RDR2's native HDR SR output uses scene units in the hundreds (PID35136 F8:
+// median103,90th percentile316). Its1/16 stamp becomes a near-flat black strip
+// after tonemapping/grain. Use256 for the bright marker in that native domain;
+// ordinary normalized HDR titles retain their existing unit scale.
+inline constexpr unsigned luke_origin_hdr_unit_shift_for_title(std::wstring_view name) {
+    return origin_title_equal(name,L"RDR2.exe")?8U:0U;
 }
 // Titles whose band sits at the bottom-left: Uncharted draws its night sky
 // and rain over the top of the image after DLSS, covering a top band entirely

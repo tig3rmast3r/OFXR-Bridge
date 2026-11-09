@@ -20,6 +20,12 @@ namespace xrfg {
 // Experimental Luke Ross spatial stereo completion.  Luke remains the
 // alternating-eye producer; this object consumes one final real eye plus the
 // matching DLSS depth/motion bundle and writes only the missing peer eye.
+struct LukeAfwVerifiedPeer {
+    ID3D12Resource* color{};
+    const DlssMotionVectorFrame* guide{};
+    std::uint32_t decoded_token{};
+};
+
 class LukeAfwSynthesizer final {
 public:
     LukeAfwSynthesizer() noexcept;
@@ -47,7 +53,8 @@ public:
         float xr_eye_baseline,
         const embedded::AfwSettings& settings,
         bool native_peer_camera=false,
-        std::optional<Vec3>* reconstructed_position=nullptr) noexcept;
+        std::optional<Vec3>* reconstructed_position=nullptr,
+        const LukeAfwVerifiedPeer* verified_peer=nullptr) noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
     // Prepare a fresh isolated provider while published XR pixels stay intact.

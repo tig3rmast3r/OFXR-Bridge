@@ -485,12 +485,16 @@ struct Gpu {
         return upload; // Caller retains until the submitted readback fence completes.
     }
 };
-void bright_hdr_gpu_test(bool gta=false) {
+void bright_hdr_gpu_test(bool gta=false,bool rdr2=false) {
     require(xrfg::luke_origin_bright_primary_for_title(L"DOOMTheDarkAges.exe")&&
         xrfg::luke_origin_bright_primary_for_title(L"doomthedarkages.EXE")&&
         !xrfg::luke_origin_bright_primary_for_title(L"TheGreatCircle.exe")&&
         xrfg::luke_origin_bright_primary_for_title(L"GTA5_Enhanced.exe")&&
-        !xrfg::luke_origin_bright_primary_for_title(L"Outlaws.exe"),"DOOM/GTA-only HDR contrast scope");
+        xrfg::luke_origin_bright_primary_for_title(L"RDR2.exe")&&
+        !xrfg::luke_origin_bright_primary_for_title(L"Outlaws.exe"),"HDR contrast title scope");
+    require(xrfg::luke_origin_hdr_unit_shift_for_title(L"rdr2.EXE")==8&&
+        xrfg::luke_origin_hdr_unit_shift_for_title(L"GTA5_Enhanced.exe")==0&&
+        xrfg::luke_origin_hdr_unit_shift_for_title(L"RDR2.exe.other")==0,"RDR2 native HDR unit scope");
     Gpu gpu;
     auto source=gpu.texture(1024,1024,DXGI_FORMAT_R16G16B16A16_FLOAT);
     auto eye=gpu.texture(1024,744,DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -520,10 +524,23 @@ void bright_hdr_gpu_test(bool gta=false) {
     require(token==expected,"DOOM HDR marker changed identity");
     void* mapped{};D3D12_RANGE range{0,16384};check(readback->Map(0,&range,&mapped),"DOOM HDR map");
     const auto* half=static_cast<const std::uint16_t*>(mapped);
-    const bool levels=half[0]==0x3c00&&half[1]==0x3c00&&half[2]==0x3c00&&
+    const auto expected_white=rdr2?0x5c00:0x3c00;
+    const bool levels=half[0]==expected_white&&half[1]==expected_white&&half[2]==expected_white&&
         half[8]==0&&half[9]==0&&half[10]==0;
+    if(rdr2) {
+        xrfg::LukeColorOriginPatch patch;
+        require(xrfg::luke_color_origin_patch_layout(1024,1024,{},&patch)&&patch.hdr_unit_shift==8&&patch.band_count==1,
+            "RDR2 Vulkan patch did not retain native HDR units and geometry");
+        std::vector<std::byte> upload(xrfg::kLukeOriginPatchMaximumBytes);
+        xrfg::luke_color_origin_patch_pixels(patch,DXGI_FORMAT_R16G16B16A16_FLOAT,expected,upload.data());
+        require(std::memcmp(upload.data(),half,256*8)==0,"Vulkan CPU and D3D12 GPU marker amplitudes differ");
+        std::array<float,256> row;
+        for(unsigned x=0;x<row.size();++x)row[x]=xrfg::luke_origin_luma(upload.data()+x*8,DXGI_FORMAT_R16G16B16A16_FLOAT)/256.F;
+        require(xrfg::decode_luke_origin_row(row).token==expected,"RDR2 native-HDR normalization lost CRC identity");
+    }
     const D3D12_RANGE untouched{0,0};readback->Unmap(0,&untouched);
-    require(levels,"DOOM HDR stamp is still dim 1/16 instead of full-white 1.0");
+    require(levels,"HDR marker did not use the requested native white level");
+    if(rdr2){std::cout<<"RDR2 HDR GPU+Vulkan stamp: white256/black0, crop and CRC PASS\n";return;}
     std::cout<<"DOOM HDR GPU stamp: full-white1.0/black0, exact256x8/16384bytes, crop280 and CRC identity PASS\n";
 }
 void gpu_tests() {
@@ -1169,13 +1186,13 @@ void recovery_tests() {
     gpu.reset();draw(712,120,240);recover(712);
     std::cout<<"Periodic origin recovery: "<<checks<<" checks PASS\n";
 }
-int search_capture(char** argv) {
+int search_capture(char** argv,bool rgb=true) {
     const unsigned width=std::stoul(argv[3]),height=std::stoul(argv[4]),pitch=std::stoul(argv[5]);
     std::vector<std::byte> pixels(std::size_t(pitch)*height);
     std::ifstream input(argv[2],std::ios::binary);require(bool(input),"search capture missing");
     input.read(reinterpret_cast<char*>(pixels.data()),pixels.size());
     const auto start=std::chrono::steady_clock::now();
-    const auto found=xrfg::find_luke_origin_position({pixels.data(),DXGI_FORMAT_B8G8R8A8_UNORM,width,height,pitch,true});
+    const auto found=xrfg::find_luke_origin_position({pixels.data(),DXGI_FORMAT_B8G8R8A8_UNORM,width,height,pitch,rgb});
     std::cout<<"SEARCH token="<<found.token<<" ambiguous="<<found.ambiguous<<" x="<<found.first_column
         <<".."<<found.last_column<<" y="<<found.first_row<<" ms="
         <<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<<'\n';
@@ -1198,9 +1215,10 @@ int captured_decode_benchmark(char** argv) {
  std::sort(serial_ms.begin(),serial_ms.end());std::sort(parallel_ms.begin(),parallel_ms.end());std::cout<<"CAPTURED_DECODE serial_ms="<<serial_ms[7]<<" parallel_ms="<<parallel_ms[7]<<" token0="<<expected[0].token<<" token1="<<expected[1].token<<" ambiguous="<<expected[0].ambiguous<<','<<expected[1].ambiguous<<'\n';return 0;
 }
 int main(int argc,char** argv) {
-    try { if(argc==6&&std::string_view(argv[1])=="search-capture")return search_capture(argv);
+    try { if((argc==6||argc==7)&&std::string_view(argv[1])=="search-capture")return search_capture(argv,argc==6||std::string_view(argv[6])!="luma");
         if(argc==2&&std::string_view(argv[1])=="recovery") {recovery_tests();return 0;}
         if(argc==2 && std::string_view(argv[1])=="doom-hdr") {bright_hdr_gpu_test();return 0;}
+        if(argc==2 && std::string_view(argv[1])=="rdr2-hdr") {bright_hdr_gpu_test(false,true);return 0;}
         if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="gta-protected") {gta_protected_gpu_test();return 0;}
         if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();windowed_decode_tests();rgb_windowed_decode_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }

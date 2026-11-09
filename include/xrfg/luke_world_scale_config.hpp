@@ -24,6 +24,8 @@ struct LukeGameCameraConfig {
 // directly, as proved by OptiScaler V30078 and the V700 captured clip history.
 // GTA Enhanced GTAVE has the same native view-row contract: V679 captured
 // original SL clip history matches it, while reflected native history does not.
+// RDR2's native RAGE decoder already converts forward to view Z. Preserve that
+// decoded axis in native history, just as the scene camera does.
 inline LukeGameCameraConfig luke_game_camera_config_from_ini(
     const std::filesystem::path& ini) noexcept {
     wchar_t sections[32768]{};
@@ -47,7 +49,8 @@ inline LukeGameCameraConfig luke_game_camera_config_from_ini(
             : ((_wcsicmp(section, L"HFW") == 0 || _wcsicmp(section, L"KCD2") == 0 ||
                 _wcsicmp(section, L"DS2023") == 0)
                 ? LukeProducerCameraAxes::physical_forward
-                : ((_wcsicmp(section, L"INDY") == 0 || _wcsicmp(section, L"GTAVE") == 0)
+                : ((_wcsicmp(section, L"INDY") == 0 || _wcsicmp(section, L"GTAVE") == 0 ||
+                    _wcsicmp(section, L"RDR2") == 0)
                     ? LukeProducerCameraAxes::native_view_rows
                     : LukeProducerCameraAxes::view));
         if (found && (result.world_scale != scale || result.axes != axes)) return {};
