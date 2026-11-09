@@ -8539,7 +8539,10 @@ XrResult release_swapchain_image_locked(
                 }
             }
         }
-        const bool skip_capture =
+        // Native AER resolves exact token guides AFTER the release-bound
+        // colour capture; suppressing that capture until a guide exists would
+        // prevent the token join from ever bootstrapping.
+        const bool skip_capture = !state->session->nvidia_options.ofr &&
             should_skip_luke_fsr_capture(
                 luke_split_eye,
                 state->session->frame_generation_mode,
@@ -17980,21 +17983,34 @@ XrResult layer_end_frame_impl(
     const std::span<const ProjectionResourceMapping> projection_mappings(
         resource_mappings.mappings.data(),
         resource_mappings.mappings.size());
-    // Close held virtual cycles before optional guide admission. An old guide
-    // expiring or a pending marker read must not replace the last coherent
-    // image when the application has released no new source at all.
-    if(state->nvidia_options.ofr && resource_mappings.ready() &&
-        (use_continuous_presenter || state->private_runtime)) {
+    // Source observation is independent of guide availability and generation
+    // success. A failed native join still consumes this source identity once;
+    // later held polls must not republish it as raw AER or change its camera.
+    std::optional<xrfg::ofr::Decision> aer_source_decision;
+    if(state->nvidia_options.ofr && resource_mappings.ready()) {
         record_projection_capture_order(current_snapshot,projection_mappings);
-        if(state->ofr_source_tracker.held(ofr_sources(current_snapshot,projection_mappings))) {
-            const auto held=use_continuous_presenter ? XR_SUCCESS :
-                state->private_runtime->discard_virtual_frame();
-            if(XR_FAILED(held))return held;
-            consume_application_frame(state,current_snapshot.display_time,
-                consume_in_submission_order,match_latest_by_submission);
-            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
-                9230,0,state->ofr_delivery.load(),0);
-            return XR_SUCCESS;
+        const auto sources=ofr_sources(current_snapshot,projection_mappings);
+        if(sources[0].serial && sources[1].serial) {
+            aer_source_decision=state->ofr_source_tracker.observe(sources);
+            current_snapshot.aer_fresh_mask=state->ofr_fresh_mask=aer_source_decision->fresh;
+            for(unsigned eye=0;eye<2;++eye) {
+                auto& view=current_snapshot.layers[0].views[eye];
+                if(aer_source_decision->fresh&(1U<<eye)) {
+                    state->ofr_source_poses[eye]=view.pose;state->ofr_source_fovs[eye]=view.fov;
+                } else {
+                    view.pose=state->ofr_source_poses[eye];view.fov=state->ofr_source_fovs[eye];
+                }
+            }
+            if(!aer_source_decision->fresh && (use_continuous_presenter || state->private_runtime)) {
+                const auto held=use_continuous_presenter ? XR_SUCCESS :
+                    state->private_runtime->discard_virtual_frame();
+                if(XR_FAILED(held))return held;
+                consume_application_frame(state,current_snapshot.display_time,
+                    consume_in_submission_order,match_latest_by_submission);
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                    9230,0,state->ofr_delivery.load(),0);
+                return XR_SUCCESS;
+            }
         }
     }
     if(state->luke_outlaws_preframe&&resource_mappings.ready()) {
@@ -18007,6 +18023,7 @@ XrResult layer_end_frame_impl(
         }
     }
     if(state->nvidia_options.ofr && state->luke_afw_enabled && state->dlss_motion_vectors &&
+        resource_mappings.ready() && !projection_frame_generation_pending(state,projection_mappings) &&
         (state->frame_generation_mode!=xrfg::D3D12FrameGenerationMode::ofxr || state->hybrid_requested)) {
         record_projection_capture_order(current_snapshot,projection_mappings);
         const auto guides=refresh_aer_native_guides(state,current_snapshot,projection_mappings);
@@ -18056,6 +18073,7 @@ XrResult layer_end_frame_impl(
     // missing guides before private image acquisition, priming or worker handoff.
     // Continue submitting the whole real frame through its existing XR owner.
     if (!afw_selected && state->frame_generation_mode == xrfg::D3D12FrameGenerationMode::native_dlss &&
+        (!state->nvidia_options.ofr || !generation_arming_pending) &&
         (!stereo_projection || resource_mappings.ready())) {
         const auto reason = stereo_projection ? classify_fsr_stereo_guides(current_snapshot, projection_mappings)
             : FsrStereoGuideReason::non_stereo_projection;
@@ -18209,7 +18227,7 @@ XrResult layer_end_frame_impl(
         if(!stereo_projection || current_snapshot.layers.size()!=1)
             return bypass_generation(GenerationPrepareReason::missing_capture);
         const auto sources=ofr_sources(current_snapshot,projection_mappings);
-        const auto decision=state->ofr_source_tracker.observe(sources);
+        const auto decision=aer_source_decision ? *aer_source_decision : state->ofr_source_tracker.observe(sources);
         if(!sources[0].serial || !sources[1].serial)
             return bypass_generation(GenerationPrepareReason::missing_capture);
         state->ofr_fresh_mask=decision.fresh;current_snapshot.aer_fresh_mask=decision.fresh;

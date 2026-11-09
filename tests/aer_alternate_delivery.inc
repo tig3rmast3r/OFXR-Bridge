@@ -4,11 +4,14 @@ int aer_alternate_delivery_test(std::string_view route) {
     const bool directed=route.find("director")!=std::string_view::npos;
     const bool buffered=route.find("buffer")!=std::string_view::npos;
     const bool fast=route.find("fast")!=std::string_view::npos;
+    const bool missing_guides=route.find("missing-guides")!=std::string_view::npos;
     constexpr unsigned sources=18;
     constexpr float step=.002F,ipd=.032F;
     xrfg_fixture::ControlProfile profile;
     auto desired=xrfg::autonomous::snapshot().desired;
-    xrfg::autonomous::select_generation(desired,0,0); // inexpensive real FidelityFX flow
+    // The missing-guide mode selects real FSR, with no mocked DLSS producer.
+    // It must preserve raw input and report waiting, never invent valid guides.
+    xrfg::autonomous::select_generation(desired,missing_guides?1:0,0);
     desired.enabled=true;desired.advanced_mode=true;desired.ofr_enabled=true;
     desired.afw_mode=0;desired.nr_enabled=false;desired.r19_camera=false;
     desired.pacing_mode=directed?1:0;desired.increase_buffer=buffered;
@@ -32,6 +35,7 @@ int aer_alternate_delivery_test(std::string_view route) {
     };
     auto state=std::make_shared<SessionState>(dispatch);state->handle=reinterpret_cast<XrSession>(2);
     state->graphics_binding=SessionGraphicsBinding::d3d11;
+    state->vdxr_legacy=false; // model the actual SteamVR session, not default Legacy routing
     ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),f.device12.GetAddressOf(),f.queue.GetAddressOf()),"AER D11 interop device");
     state->d3d12_device=f.device12;state->d3d12_queue=f.queue;
     state->d3d11_device=f.device11;state->d3d11_context=f.context;
@@ -98,11 +102,15 @@ int aer_alternate_delivery_test(std::string_view route) {
         f.wait_count(source+1);xr_ok(f.transport->drain(),"AER exact fresh output retirement");
         check(f.real_ends==source+1,"AER must deliver one output per fresh source, never a raw second endpoint");
         check(f.pixels.back()==40 && f.right_pixels.back()==184,"AER mixed output swapped or corrupted its eye pixels");
-        if(source>=4) {
+        if(source>=4 && !missing_guides) {
             const float time=float(source-1)*step;
             check(std::abs(poses.back()[0]-(time-ipd))<.0001F &&
                   std::abs(poses.back()[1]-(time+ipd))<.0001F,
                 "AER output must be temporally coherent; raw fallback/held-camera update is forbidden after warmup");
+        }
+        if(source>=4) {
+            if(missing_guides)check(state->generation_status==xrfg::autonomous::GenerationState::missing_motion,
+                "AER native method without real guides must report waiting for motion");
             // A Luke loop may poll several times without a released new eye.
             // Those virtual cycles must not leak raw AER into the headset or
             // discard the generator anchor needed for the next fresh eye.
@@ -114,8 +122,11 @@ int aer_alternate_delivery_test(std::string_view route) {
         }
     }
     check(poses.size()==sources && f.real_ends==sources,"AER matrix retains exact fresh output count");
-    check(state->fps_overlay->metrics().aer_eye_equivalents,"AER actual output metrics must retain mixed-eye identity");
-    check(xrfg::embedded::ofr_last_success_ms.load()!=0,"AER matrix actually generated coherent outputs");
+    if(missing_guides)check(!xrfg::embedded::ofr_last_success_ms.load(),"missing native guides must not claim successful AER generation");
+    else {
+        check(state->fps_overlay->metrics().aer_eye_equivalents,"AER actual output metrics must retain mixed-eye identity");
+        check(xrfg::embedded::ofr_last_success_ms.load()!=0,"AER matrix actually generated coherent outputs");
+    }
     stop_continuous_presenter(state);
     xr_ok(f.transport->drain(),"AER matrix final native drain");
     xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,false);
@@ -131,7 +142,8 @@ int aer_alternate_delivery_test(std::string_view route) {
         }
     }
     {std::scoped_lock lock(g_state_mutex);g_sessions.clear();g_swapchains.clear();g_instances.clear();}
-    std::printf("AER D11 %s buffer%u storedFast%u:18fresh outputs,28held polls,no raw fallback,coherent poses,exact eye pixels PASS\n",
-        directed?"Director":"Framework",unsigned(buffered),unsigned(fast));
+    std::printf("AER D11 %s buffer%u storedFast%u missingGuides%u:18fresh outputs,28held polls,exact eye pixels,%s PASS\n",
+        directed?"Director":"Framework",unsigned(buffered),unsigned(fast),unsigned(missing_guides),
+        missing_guides?"honest waiting/raw fallback,no held duplicates":"coherent poses,no raw fallback");
     return 0;
 }

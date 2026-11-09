@@ -1156,8 +1156,13 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     // opposite-eye N-1 misses by5.9px. Preserve the accepted VDXR contract.
     // Horizon SteamVR and VDXR F8s establish the same native N-2 field.
     // The advertised SL clip matrix is not the field's temporal endpoint.
-    if(luke && !invocation_camera && (crimson_desert_process()||same_eye_native_motion()))
+    if(luke && !invocation_camera && (crimson_desert_process()||same_eye_native_motion())) {
         g.raw_motion_native_span=2;
+        // This is the retained, measured title contract above, not a guessed
+        // default for unobserved integrations. Native AER consumes only an
+        // explicitly confirmed same-eye interval.
+        g.raw_motion_native_span_confirmed=true;
+    }
     else if(luke && !invocation_camera && !observed_motion_span && !outlaws_public_process()) {
         // No measured rule covers this REAL VR title: its interval follows
         // whether REAL VR replaced the public call's vectors before this one.
