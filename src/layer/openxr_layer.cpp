@@ -6139,7 +6139,8 @@ XrResult layer_create_session_impl(
         state->nvidia_options.hybrid=true;
     }
     state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1 ||
-        state->frame_generation_mode != xrfg::D3D12FrameGenerationMode::ofxr;
+        state->frame_generation_mode != xrfg::D3D12FrameGenerationMode::ofxr ||
+        (initial_control.desired.ofr && initial_control.desired.hybrid);
     const auto experimental_ini = current_layer_directory() / L"ofxr_bridge.ini";
     state->luke_afw_enabled = xrfg::native_ingress::luke_detected();
     state->luke_fresh_only=state->luke_afw_enabled && !state->nvidia_options.ofr && xrfg::luke_hfw_producer_supported();
@@ -16709,6 +16710,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     state->lower_vram = effective_reduction;
     state->dlss_motion_vectors = control.desired.motion_vectors == 1 ||
         generation_mode != xrfg::D3D12FrameGenerationMode::ofxr ||
+        (control.desired.ofr && control.desired.hybrid) ||
         (state->luke_afw_enabled && !control.desired.ofr);
     if (changed) state->generation_initialization_result = S_OK;
     std::vector<XrSwapchain> projected_sources, auxiliary_sources;
