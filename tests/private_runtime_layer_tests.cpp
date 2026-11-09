@@ -548,7 +548,7 @@ int main(int argc,char** argv) {
             if(held){produced.held_afw_pair=pair;produced.reconstructed_afw_pair.reset();}
             GeneratedFrameEndInfo terminal;ProjectionSnapshot snapshot;
             check(build_afw_terminal_submission(&end,original,produced,terminal,snapshot),"fresh/held terminal ownership");
-            check(terminal.interface_stamp.reconstruction_reference==!held &&
+            check(terminal.new_content==!held && terminal.interface_stamp.reconstruction_reference==!held &&
                 snapshot.interface_stamp.reconstruction_reference==!held,
                 "fresh OSR owns a timing reference; held reconstruction cannot become a new latency sample");
             check(snapshot.layers[0].views[1].pose.position.x==.068F && snapshot.layers[0].views[0].pose.position.x==0,

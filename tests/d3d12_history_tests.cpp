@@ -6008,6 +6008,8 @@ void test_rife_eye_queue(D3D12WarpFixture& fixture) {
         require(private_queue.Get()!=background.Get(),"asynchronous RIFE must own a private queue");
         ComPtr<ID3D12Fence> switching;
         require_hresult(fixture.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&switching)),"roundtrip gate");
+        require_hresult(histories[eye]->capture(0,&captures[eye]),"fresh roundtrip source capture");
+        require_hresult(histories[eye]->commit(captures[eye]),"fresh roundtrip source commit");
         require_hresult(private_queue->Wait(switching.Get(),1),"hold pending RIFE prime");
         std::jthread rescue_switch([switching]{std::this_thread::sleep_for(std::chrono::milliseconds(700));switching->Signal(1);});
         require_hresult(synths[eye].submit_prime(captures[eye],views,0,&tickets[eye]),"pending RIFE switch prime");
@@ -6165,6 +6167,10 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 #include "aer_guide_endpoints.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1&&std::string_view(argv[1])=="aer-native-compose") {
+        try {D3D12WarpFixture fixture;test_guide_composer(fixture);fixture.require_no_debug_errors();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1&&std::string_view(argv[1])=="aer-guide-fsr") {
         try {
             D3D12WarpFixture fixture(true);

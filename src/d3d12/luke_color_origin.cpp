@@ -543,7 +543,7 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
     std::array<Plan, 2> plans{};
     std::array<ReadReport, 2> reports{};
     for (unsigned i=0; i<count; ++i) {
-        tokens[i]=0; results[i]=E_UNEXPECTED; reports[i].token=&tokens[i];
+        tokens[i]=0; results[i]=E_UNEXPECTED; reports[i].token=colors[i]?&tokens[i]:nullptr;
         if(nonblack)nonblack[i]=false;
     }
     const auto finish = [&](HRESULT hr) {
@@ -841,9 +841,11 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             if(receipt && (result==HRESULT_FROM_WIN32(WAIT_TIMEOUT) || result==DXGI_ERROR_WAS_STILL_DRAWING)) {
                 auto pending=std::make_shared<LukeColorOriginReadResult>();
                 for(unsigned i=0;i<count;++i)pending->results[i]=results[i];
-                pending->decode=[reader,decode](std::uint32_t* tokens,HRESULT* results,bool* nonblack) {
+                pending->decode=[reader,decode,plans,count](std::uint32_t* tokens,HRESULT* results,bool* nonblack) {
                     std::scoped_lock lock(reader->mutex);
                     const auto hr=decode(tokens,results,nonblack);
+                    if(SUCCEEDED(hr))for(unsigned i=0;i<count;++i)if(plans[i].valid)
+                        report_read(results[i],tokens[i],plans[i].layout.scan.width,plans[i].layout.scan.height);
                     reader->pending.reset();return hr;
                 };
                 reader->pending=pending;receipt->pending=std::move(pending);

@@ -9040,6 +9040,7 @@ struct GeneratedFrameEndInfo {
     std::uint64_t input_release_value{};
     bool synthetic{};
     bool djules_leader{};
+    bool new_content{true};
     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
     std::vector<ProjectionLayerCopy> projections;
     std::vector<OwnedCompositionLayer> composition_layers;
@@ -9848,7 +9849,7 @@ void continuous_presenter_main(
                     if(owned && !handover_djules_outputs(state.get(),owned->pending_outputs)) return XR_ERROR_RUNTIME_FAILURE;
                 if(request) report_native_frame_content(state.get(),owned);
                 return state->fps_overlay
-                    ? state->fps_overlay->end_frame(&submitted, fresh_synthetic, request != nullptr, native_frame_results(owned),owned?owned->native_output:0, owned ? owned->interface_stamp : request ? request->interface_stamp : xrfg::InterfaceFrameStamp{})
+                    ? state->fps_overlay->end_frame(&submitted, fresh_synthetic, request != nullptr && (!owned || owned->new_content), native_frame_results(owned),owned?owned->native_output:0, owned ? owned->interface_stamp : request ? request->interface_stamp : xrfg::InterfaceFrameStamp{})
                     : content_end_frame(state->handle, &submitted);
             });
             if(request && request->owned_frame)
@@ -10694,7 +10695,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                     phase_step = sample_djules_phase_step(state, !synthetic && !repeat_held && owned,
                         selected ? selected->source_sequence : borrowed->pair_sequence);
                     if(!repeat_held) report_native_frame_content(state.get(),owned);
-                    return state->fps_overlay ? state->fps_overlay->end_frame(&end, synthetic,!repeat_held,native_frame_results(owned),owned?owned->native_output:0, owned ? owned->interface_stamp : borrowed ? borrowed->interface_stamp : xrfg::InterfaceFrameStamp{})
+                    return state->fps_overlay ? state->fps_overlay->end_frame(&end, synthetic,!repeat_held && (!owned || owned->new_content),native_frame_results(owned),owned?owned->native_output:0, owned ? owned->interface_stamp : borrowed ? borrowed->interface_stamp : xrfg::InterfaceFrameStamp{})
                         : content_end_frame(state->handle, &end);
                 });
             }
@@ -14794,6 +14795,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     terminal.interface_stamp.scene_owner=0x4146570000000001ULL;
     terminal.interface_stamp.scene_serial=produced.scene_serial;
     terminal.interface_stamp.reconstruction_reference=!produced.held_afw_pair;
+    terminal.new_content=!produced.held_afw_pair;
     const bool captured = capture_projection_snapshot(&terminal.info, &terminal_snapshot);
     terminal_snapshot.blackbar_pose=snapshot.blackbar_pose;
     terminal_snapshot.interface_stamp = terminal.interface_stamp;
@@ -16138,7 +16140,7 @@ struct InternalCycleResult {
             return XR_ERROR_RUNTIME_FAILURE;
         report_native_frame_content(state.get(),owned_output);
         return state->fps_overlay
-            ? state->fps_overlay->end_frame(&submitted, synthetic_output,true,native_frame_results(owned_output),owned_output?owned_output->native_output:0, owned_output ? owned_output->interface_stamp : stamp)
+            ? state->fps_overlay->end_frame(&submitted, synthetic_output,!owned_output || owned_output->new_content,native_frame_results(owned_output),owned_output?owned_output->native_output:0, owned_output ? owned_output->interface_stamp : stamp)
             : content_end_frame(state->handle, &submitted);
     });
     log_luke_physical_boundary(state, &submitted, frame_serial, 7, prepared, end_result);
@@ -18973,7 +18975,7 @@ XrResult layer_end_frame_impl(
                !handover_djules_outputs(state.get(),first_generated.pending_outputs)) return XR_ERROR_RUNTIME_FAILURE;
             report_native_frame_content(state.get(),&first_generated);
             return state->fps_overlay
-                ? state->fps_overlay->end_frame(physical_end, pair_ready || ofr_single,true,native_frame_results(&first_generated),first_generated.native_output, first_generated.interface_stamp)
+                ? state->fps_overlay->end_frame(physical_end, pair_ready || ofr_single,first_generated.new_content,native_frame_results(&first_generated),first_generated.native_output, first_generated.interface_stamp)
                 : content_end_frame(session, physical_end);
         });
         log_luke_physical_boundary(state, submitted_end_info, frame_serial, 5, &prepared, result);
