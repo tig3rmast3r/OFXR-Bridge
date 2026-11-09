@@ -812,13 +812,35 @@ void stale_native_clock(bool d12,bool directed=true,bool clean=false) {
         f.wait_count(n+1);
     }
     xr_ok(f.transport->drain(),"renewed native clocks drain");f.transport->stop();
-    if(clean)check(f.discarded_clocks==0,"all-off bypass must not replace valid native cycles with optional expired-clock renewals");
-    else check(f.discarded_clocks>=2,"each expired native cycle must renew through XR_FRAME_DISCARDED");
+    check(f.discarded_clocks>=2,"native cycle validity remains mandatory even in clean all-off bypass");
     check(f.pixels==expected && f.real_ends==6,"renewing native clocks cannot drop, repeat or invent a content frame");
     check(!f.cycle_waited && !f.cycle_begun,"renewed cycles remain balanced on stop");
     check(f.real_begins==f.real_ends+f.empty_ends+f.discarded_clocks,"every native Begin is ended or explicitly discarded");
     check(f.wait_thread!=f.delivery_thread,"cycle renewal preserves the independent Wait worker");
     std::puts(d12?"D12 stale native clock renewal retains all six exact FIFO images PASS":"D11 stale native clock renewal retains all six exact FIFO images PASS");
+}
+void clean_bypass_roundtrip(bool d12) {
+    Fixture f(d12,true,{},true);f.unblock();f.throttled=false;
+    auto chain=f.make_chain();std::vector<unsigned> expected;
+    for(unsigned n=0;n<9;++n) {
+        if(n==0 || n==6) {
+            f.transport->set_clean_bypass(true);
+        }
+        if(n==3)f.transport->set_clean_bypass(false);
+        if(n%3==1) {std::this_thread::sleep_for(65ms);f.stale_next_clock=true;}
+        if(n<3 || n>=6) {
+            // Simulate timing hints left by an earlier generation transaction.
+            f.transport->pair_next_end_with_previous();
+            f.transport->set_next_end_content_time(1);
+        }
+        f.write(chain,80+n);expected.push_back(80+n);
+        f.begin_virtual();xr_ok(f.submit(chain,float(n)),"clean/active/clean FIFO submission");
+        f.wait_count(n+1);
+        check(f.transport->clean_bypass_enabled()==(n<3 || n>=6),"live clean bypass follows all-off phases");
+    }
+    xr_ok(f.transport->drain(),"live clean bypass roundtrip drain");f.transport->stop();
+    check(f.pixels==expected && f.real_ends==9,"Off/On/Off retains each exact source image once");
+    check(f.real_begins==f.real_ends+f.empty_ends+f.discarded_clocks,"live clean bypass retains native call ownership");
 }
 // pattern 0: two stalled renewals in a row stop renewal. 1: a current renewal
 // between stalls resets the count. 2: stalls more than 2s apart do not latch.
@@ -1574,7 +1596,7 @@ void queue_priority_policy() {
 }
 }
 #include "private_overlay_destroy_fixture.inc"
-int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
+int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
 if(argc>1 && std::string_view(argv[1])=="stalled-renewal"){
     for(bool d12:{true,false})for(bool directed:{true,false})stalled_native_renewal(d12,directed,0);

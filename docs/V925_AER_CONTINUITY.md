@@ -43,9 +43,8 @@ separate content detector. This change does not pretend to detect that case.
 
 With FG, OSR/AFW and NR all disabled, newly accepted private-runtime packets
 use clean bypass: no optional Director/Buffer pacing, no retained paired-content
-time, no black-bar prediction shift and no preventive replacement of an already
-valid native frame cycle solely because its prediction is old. The native
-runtime decides how to present a late frame. Turning an image effect back on
+time and no black-bar prediction shift. Native-cycle validity checks and
+renewal of an expired runtime prediction are retained. Turning an image effect back on
 restores the selected policy for future packets; accepted frames keep their
 immutable ownership. This is generic, not a DOOM title exception.
 

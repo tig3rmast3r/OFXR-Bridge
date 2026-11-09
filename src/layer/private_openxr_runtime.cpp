@@ -749,7 +749,7 @@ struct PrivateOpenXrRuntime::Impl {
                 // same FIFO packet and renew only that unsubmitted XR cycle.
                 // Do not renew a CURRENT prediction to satisfy an invented
                 // CPU deadline or reserve another physical display slot.
-                while(!packet->clean_bypass && !stopping && XR_SUCCEEDED(result) && prediction.shouldRender && !renewals_stalled()) {
+                while(!stopping && XR_SUCCEEDED(result) && prediction.shouldRender && !renewals_stalled()) {
                     const auto target=prediction_qpc(prediction);
                     if(!target || *target>clock_ns())break;
                     if(tracing())options.trace(23,packet->sequence,*target,clock_ns());
@@ -951,7 +951,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // historical reserve to every already-ready output.
                     const auto deadline=(early?clock_ns():std::max(clock_ns(),last_handoff+physical))+refill;
                     unsigned renewed{};
-                    while(!packet->clean_bypass && !stopping && prediction.shouldRender && !renewals_stalled()) {
+                    while(!stopping && prediction.shouldRender && !renewals_stalled()) {
                         const auto at=prediction_qpc(prediction);
                         const auto handoff=std::max(clock_ns(),deadline);
                         // SteamVR's prediction may be several periods ahead,
@@ -1087,7 +1087,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // sole Wait caller and Begin/End stay serialized here.
                     unsigned renewed{};
                     bool renewed_window{};
-                    while(!packet->clean_bypass && !stopping && prediction.shouldRender && !renewals_stalled()) {
+                    while(!stopping && prediction.shouldRender && !renewals_stalled()) {
                         const auto at=prediction_qpc(prediction);
                         if(!at)break;
                         const auto target=std::max(clock_ns(),deadline);
@@ -1154,7 +1154,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // Renew only that expired Begin; retain the same FIFO image
                     // and never introduce the director's pacing/delay here.
                     unsigned renewed{};
-                    while(!packet->clean_bypass && !stopping && prediction.shouldRender && !renewals_stalled()) {
+                    while(!stopping && prediction.shouldRender && !renewals_stalled()) {
                         const auto at=prediction_qpc(prediction);
                         if(!at || *at>std::max(clock_ns(),deadline)+PrivateOutputSchedule::preparation_lead)break;
                         if(diagnostic)options.trace(23,packet->sequence,*at,clock_ns());
