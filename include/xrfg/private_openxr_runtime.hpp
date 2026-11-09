@@ -128,6 +128,7 @@ public:
         // Luke D11/SteamVR only. Freeze image readiness at Release, not after
         // newer game commands at End. Admission/work budget is selected separately.
         bool d11_release_readiness{};
+        bool clean_bypass{}; // all image effects off: preserve native delivery without optional retiming
     };
     explicit PrivateOpenXrRuntime(Options);
     ~PrivateOpenXrRuntime();
@@ -143,6 +144,8 @@ public:
     // Drain accepted packets and change only final delivery policy. Session,
     // native binding, private images and worker ownership remain unchanged.
     XrResult set_director_enabled(bool);
+    void set_clean_bypass(bool);
+    [[nodiscard]] bool clean_bypass_enabled() const noexcept;
     void set_ready_clock(bool) noexcept;
     [[nodiscard]] bool ready_clock_enabled() const noexcept;
     XrResult set_buffer_capacity(std::size_t,bool stabilization_active=true,bool reset_learning=false);

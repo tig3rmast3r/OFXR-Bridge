@@ -440,6 +440,13 @@ int main(int argc,char** argv) {
             effective=effective_session_settings(*session,xrfg::embedded::snapshot().desired);
             check(!effective.ofr && effective.enabled && effective.rife_multiplier==xrfg::autonomous::runtime_multiplier(xrfg::autonomous::snapshot().desired),"ordinary multiplier preference restored");
         }
+        auto disabled=xrfg::autonomous::snapshot().desired;
+        disabled.enabled=false;disabled.afw_mode=0;disabled.nr_enabled=false;disabled.r19_camera=true;
+        check(xrfg::autonomous::request(disabled),"all image effects off");xrfg::autonomous::apply_runtime_settings();
+        check(all_image_effects_off() && !blackbar_gate(*session),"all-off disables prediction correction despite stored camera preference");
+        disabled.nr_enabled=true;
+        check(xrfg::autonomous::request(disabled),"NR-only is not all-off");xrfg::autonomous::apply_runtime_settings();
+        check(!all_image_effects_off(),"NR remains a real image effect while FG is disabled");
         std::puts("OFR shipping controls, effective engine, camera endpoints and physical pacing PASS");return 0;
     }
     if(route=="reconstruction-controls") {

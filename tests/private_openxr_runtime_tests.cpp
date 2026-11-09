@@ -795,9 +795,11 @@ void late_physical_clock() {
     for(unsigned n=3;n<f.handoffs.size();++n){check((f.handoffs[n]-f.physical_origin+1'000'000)%period<300'000,"late physical clock must anchor to display phase");check(f.handoffs[n]-f.handoffs[n-1]>=period-100'000,"first anchored slot cannot burst after fallback");}
     std::puts("Late physical-clock availability transitions from fallback without a burst or lost image PASS");
 }
-void stale_native_clock(bool d12,bool directed=true) {
+void stale_native_clock(bool d12,bool directed=true,bool clean=false) {
     Fixture f(d12,true,{},true);f.unblock();f.throttled=false;
     if(!directed)xr_ok(f.transport->set_director_enabled(false),"Framework expired-cycle test");
+    f.transport->set_clean_bypass(clean);
+    check(f.transport->clean_bypass_enabled()==clean,"clean bypass policy applied");
     auto chain=f.make_chain();std::vector<unsigned> expected;
     for(unsigned n=0;n<6;++n) {
         if(n==2 || n==4) {
@@ -810,7 +812,8 @@ void stale_native_clock(bool d12,bool directed=true) {
         f.wait_count(n+1);
     }
     xr_ok(f.transport->drain(),"renewed native clocks drain");f.transport->stop();
-    check(f.discarded_clocks>=2,"each expired native cycle must renew through XR_FRAME_DISCARDED");
+    if(clean)check(f.discarded_clocks==0,"all-off bypass must not replace valid native cycles with optional expired-clock renewals");
+    else check(f.discarded_clocks>=2,"each expired native cycle must renew through XR_FRAME_DISCARDED");
     check(f.pixels==expected && f.real_ends==6,"renewing native clocks cannot drop, repeat or invent a content frame");
     check(!f.cycle_waited && !f.cycle_begun,"renewed cycles remain balanced on stop");
     check(f.real_begins==f.real_ends+f.empty_ends+f.discarded_clocks,"every native Begin is ended or explicitly discarded");
@@ -1571,7 +1574,7 @@ void queue_priority_policy() {
 }
 }
 #include "private_overlay_destroy_fixture.inc"
-int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
+int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
 if(argc>1 && std::string_view(argv[1])=="stalled-renewal"){
     for(bool d12:{true,false})for(bool directed:{true,false})stalled_native_renewal(d12,directed,0);

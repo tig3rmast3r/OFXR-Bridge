@@ -38,3 +38,19 @@ quality and performance still require the owner's V925 retest.
 Source releases remain evidence of releases, not proof of new pixels: a mod
 recopying old pixels into a newly released image needs producer metadata or a
 separate content detector. This change does not pretend to detect that case.
+
+## Generic all-effects-off delivery
+
+With FG, OSR/AFW and NR all disabled, newly accepted private-runtime packets
+use clean bypass: no optional Director/Buffer pacing, no retained paired-content
+time, no black-bar prediction shift and no preventive replacement of an already
+valid native frame cycle solely because its prediction is old. The native
+runtime decides how to present a late frame. Turning an image effect back on
+restores the selected policy for future packets; accepted frames keep their
+immutable ownership. This is generic, not a DOOM title exception.
+
+The hook, private swapchain image ownership, required copies/conversions,
+virtual-call bookkeeping and real runtime Wait/Begin/End remain in place.
+This is not equivalent to unloading the layer or a promise of zero overhead.
+Tests preserve exact FIFO images and balanced frame calls across D11/D12
+stale-clock delivery; no live all-off pacing/performance acceptance is claimed.

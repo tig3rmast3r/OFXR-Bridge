@@ -106,6 +106,7 @@ struct PrivateOpenXrRuntime::Impl {
         std::int64_t work_ns{};
         bool director{true};
         bool adaptive_buffer{};
+        bool clean_bypass{};
         std::uint64_t policy_epoch{};
         bool pair_previous{}; // submit for the previous frame's slot time (pair_next_end_with_previous)
         XrTime content_time{}; // submit for this display time (set_next_end_content_time)
@@ -120,6 +121,7 @@ struct PrivateOpenXrRuntime::Impl {
     struct WaitJob {std::int64_t target{};std::uint64_t accepted_ordinal{};};
     Options options;
     std::atomic_bool director_enabled{true};
+    std::atomic_bool clean_bypass{};
     std::atomic_bool buffered{};
     std::atomic_bool ready_clock{};
     std::atomic_bool stable_phase{};
@@ -191,7 +193,7 @@ struct PrivateOpenXrRuntime::Impl {
     int initialize_step{};
     HANDLE timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
     HANDLE wait_timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
-    explicit Impl(Options input):options(std::move(input)),director_enabled(options.director_enabled),buffered(options.adaptive_buffer && options.capacity==3),stable_phase(options.capacity>=3) {
+    explicit Impl(Options input):options(std::move(input)),director_enabled(options.director_enabled),clean_bypass(options.clean_bypass),buffered(options.adaptive_buffer && options.capacity==3),stable_phase(options.capacity>=3) {
         ready_clock=options.native_frame_contract && options.native_wait_for_prepared;
         requested_capacity=options.capacity;
         options.capacity=delivery_capacity(requested_capacity,options.director_enabled);stable_phase=options.capacity>=3;
@@ -747,7 +749,7 @@ struct PrivateOpenXrRuntime::Impl {
                 // same FIFO packet and renew only that unsubmitted XR cycle.
                 // Do not renew a CURRENT prediction to satisfy an invented
                 // CPU deadline or reserve another physical display slot.
-                while(!stopping && XR_SUCCEEDED(result) && prediction.shouldRender && !renewals_stalled()) {
+                while(!packet->clean_bypass && !stopping && XR_SUCCEEDED(result) && prediction.shouldRender && !renewals_stalled()) {
                     const auto target=prediction_qpc(prediction);
                     if(!target || *target>clock_ns())break;
                     if(tracing())options.trace(23,packet->sequence,*target,clock_ns());
@@ -949,7 +951,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // historical reserve to every already-ready output.
                     const auto deadline=(early?clock_ns():std::max(clock_ns(),last_handoff+physical))+refill;
                     unsigned renewed{};
-                    while(!stopping && prediction.shouldRender && !renewals_stalled()) {
+                    while(!packet->clean_bypass && !stopping && prediction.shouldRender && !renewals_stalled()) {
                         const auto at=prediction_qpc(prediction);
                         const auto handoff=std::max(clock_ns(),deadline);
                         // SteamVR's prediction may be several periods ahead,
@@ -1085,7 +1087,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // sole Wait caller and Begin/End stay serialized here.
                     unsigned renewed{};
                     bool renewed_window{};
-                    while(!stopping && prediction.shouldRender && !renewals_stalled()) {
+                    while(!packet->clean_bypass && !stopping && prediction.shouldRender && !renewals_stalled()) {
                         const auto at=prediction_qpc(prediction);
                         if(!at)break;
                         const auto target=std::max(clock_ns(),deadline);
@@ -1152,7 +1154,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // Renew only that expired Begin; retain the same FIFO image
                     // and never introduce the director's pacing/delay here.
                     unsigned renewed{};
-                    while(!stopping && prediction.shouldRender && !renewals_stalled()) {
+                    while(!packet->clean_bypass && !stopping && prediction.shouldRender && !renewals_stalled()) {
                         const auto at=prediction_qpc(prediction);
                         if(!at || *at>std::max(clock_ns(),deadline)+PrivateOutputSchedule::preparation_lead)break;
                         if(diagnostic)options.trace(23,packet->sequence,*at,clock_ns());
@@ -1455,6 +1457,18 @@ XrResult PrivateOpenXrRuntime::set_director_enabled(bool enabled) {
 bool PrivateOpenXrRuntime::director_enabled() const noexcept {
     return impl_->director_enabled.load(std::memory_order_relaxed);
 }
+void PrivateOpenXrRuntime::set_clean_bypass(bool enabled) {
+    auto& s=*impl_;
+    if(s.clean_bypass.load()==enabled)return;
+    std::scoped_lock accept(s.accept_mutex);
+    {std::scoped_lock lock(s.mutex);
+     if(s.clean_bypass.exchange(enabled)==enabled)return;
+     ++s.policy_epoch;
+     s.refresh_wait_policy=PrivateRefreshWaitPolicy{};
+     if(enabled && s.wait_job)s.wait_job->target=0;}
+    s.changed.notify_all();
+}
+bool PrivateOpenXrRuntime::clean_bypass_enabled() const noexcept {return impl_->clean_bypass.load();}
 XrResult PrivateOpenXrRuntime::set_buffer_capacity(std::size_t capacity,bool stabilization_active,bool reset_learning) {
     if(capacity!=2 && capacity!=3)return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::scoped_lock accept(s.accept_mutex);
@@ -1560,9 +1574,12 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
             }}s.changed.notify_all();}
     } transaction{s,packet};
     packet=std::make_shared<Impl::Packet>();packet->delivery=delivery;
-    packet->director=s.director_enabled.load();packet->adaptive_buffer=s.buffered.load();packet->policy_epoch=s.policy_epoch;XrResult result;
-    packet->pair_previous=s.pair_next.exchange(false);
-    packet->content_time=s.next_content_time.exchange(0);
+    packet->clean_bypass=s.clean_bypass.load();
+    packet->director=!packet->clean_bypass && s.director_enabled.load();
+    packet->adaptive_buffer=!packet->clean_bypass && s.buffered.load();packet->policy_epoch=s.policy_epoch;XrResult result;
+    const auto paired=s.pair_next.exchange(false);const auto content=s.next_content_time.exchange(0);
+    packet->pair_previous=!packet->clean_bypass && paired;
+    packet->content_time=packet->clean_bypass?0:content;
     {std::scoped_lock lock(s.mutex);result=s.own(*packet,*info);
      if(XR_FAILED(result)){if(result==XR_ERROR_CALL_ORDER_INVALID)s.refused_end(4,s.refused_lease,s.refused_lease_state);return result;}
      packet->sequence=++s.sequence;if(!s.options.d11_release_readiness || s.d12())packet->ready=s.ready_serial+1;}

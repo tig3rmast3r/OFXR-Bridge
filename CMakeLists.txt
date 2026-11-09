@@ -2619,3 +2619,8 @@ if(TARGET xrfg_private_runtime_layer_tests)
     add_test(NAME xrfg_aer_fidelity_delivery_gpu COMMAND xrfg_private_runtime_layer_tests aer-solo-fidelity)
     set_tests_properties(xrfg_aer_director_gpu xrfg_aer_director_swap_gpu xrfg_aer_fidelity_delivery_gpu PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
 endif()
+
+if(TARGET xrfg_private_openxr_runtime_tests)
+    add_test(NAME xrfg_clean_all_off_bypass COMMAND xrfg_private_openxr_runtime_tests clean-bypass)
+    set_tests_properties(xrfg_clean_all_off_bypass PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()

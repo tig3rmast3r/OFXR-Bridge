@@ -84,6 +84,7 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     auto original=state->dispatch;
     xrfg::PrivateOpenXrRuntime::Options options;
     options.director_enabled=state->menu_enabled && xrfg::embedded::snapshot().desired.pacing_mode!=0;
+    options.clean_bypass=all_image_effects_off();
     options.capacity=xrfg::embedded::snapshot().desired.increase_buffer?3:2;
     options.adaptive_buffer=original->steamvr_runtime;
     options.native_frame_contract=original->steamvr_runtime;

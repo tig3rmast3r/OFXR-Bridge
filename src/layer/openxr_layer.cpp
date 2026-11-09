@@ -1226,9 +1226,15 @@ struct SessionState {
 
 // R20/R21 promise fixes, gated by the owner's existing live camera checkbox.
 // OFF has no history work; each toggle/configuration epoch discards stale feedback.
+bool all_image_effects_off() {
+    return !xrfg::embedded::snapshot().desired.enabled &&
+        xrfg::embedded::afw_snapshot().desired.mode==0 &&
+        !xrfg::autonomous::snapshot().desired.nr_enabled;
+}
+
 bool blackbar_gate(SessionState& state) {
     auto& t=state.blackbar_timing;
-    const bool enabled=xrfg::autonomous::r19_camera_enabled.load(std::memory_order_acquire);
+    const bool enabled=xrfg::autonomous::r19_camera_enabled.load(std::memory_order_acquire) && !all_image_effects_off();
     if (!enabled && !t.enabled.load(std::memory_order_acquire)) return false;
     std::scoped_lock lock(t.mutex);
     const auto configuration=state.djules_configuration_epoch.load();
@@ -6844,6 +6850,7 @@ XrResult layer_wait_frame_impl(
     observe_application_frame_thread(*state, false);
     seal_outlaws_initialization(*state);
     initialize_late_luke_context(state);
+    if(state->private_runtime)state->private_runtime->set_clean_bypass(all_image_effects_off() && !state->menu_enabled);
     XrResult result = XR_SUCCESS;
     const bool use_continuous_presenter = continuous_presenter_active(state);
     const bool adaptive_nvidia_presenter = use_continuous_presenter &&
