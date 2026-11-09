@@ -16,6 +16,15 @@
 #include <functional>
 
 namespace xrfg {
+struct LukeColorOriginReadResult {
+    std::mutex mutex;
+    std::function<HRESULT(std::uint32_t*,HRESULT*,bool*)> decode;
+    std::array<std::uint32_t,2> tokens{};
+    std::array<HRESULT,2> results{};
+    std::array<bool,2> nonblack{};
+    HRESULT status{E_PENDING};
+    bool completed{};
+};
 namespace {
 bool origin_from_bottom() noexcept;
 bool gta_color_origin() noexcept;
@@ -139,6 +148,7 @@ void start_origin_search(const std::shared_ptr<OriginSearchJob>& job) noexcept {
 }
 struct Reader {
     std::mutex mutex;
+    std::weak_ptr<LukeColorOriginReadResult> pending;
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandAllocator> allocator;
@@ -303,18 +313,22 @@ HRESULT get_reader(ID3D12CommandQueue* queue, std::shared_ptr<Reader>& output) {
 HRESULT wait_reader(Reader& reader, DWORD timeout_ms) {
     if (reader.poisoned) return E_FAIL;
     if (!reader.last_fence) return S_OK;
-    const auto completed = reader.fence->GetCompletedValue();
-    if (completed == UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
-    if (completed >= reader.last_fence) return S_OK;
-    ResetEvent(reader.event);
-    HRESULT result = reader.fence->SetEventOnCompletion(reader.last_fence, reader.event);
-    if (FAILED(result)) return result;
-    const DWORD wait = WaitForSingleObject(reader.event, timeout_ms);
-    if (wait == WAIT_TIMEOUT) return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
-    if (wait != WAIT_OBJECT_0) return HRESULT_FROM_WIN32(GetLastError());
-    const auto after = reader.fence->GetCompletedValue();
-    if (after == UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
-    return after >= reader.last_fence ? S_OK : DXGI_ERROR_WAS_STILL_DRAWING;
+    const auto deadline=GetTickCount64()+timeout_ms;
+    for(;;) {
+        const auto completed = reader.fence->GetCompletedValue();
+        if (completed == UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
+        if (completed >= reader.last_fence) return S_OK;
+        const auto now=GetTickCount64();
+        if(now>=deadline)return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+        ResetEvent(reader.event);
+        HRESULT result = reader.fence->SetEventOnCompletion(reader.last_fence, reader.event);
+        if (FAILED(result)) return result;
+        const DWORD wait = WaitForSingleObject(reader.event,static_cast<DWORD>(deadline-now));
+        if (wait == WAIT_TIMEOUT) return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+        if (wait != WAIT_OBJECT_0) return HRESULT_FROM_WIN32(GetLastError());
+        // A registration from an earlier timeout can wake this auto-reset
+        // event. Only the requested fence is proof; keep the original deadline.
+    }
 }
 
 
@@ -538,13 +552,13 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
     std::array<Plan, 2> plans{};
     std::array<ReadReport, 2> reports{};
     for (unsigned i=0; i<count; ++i) {
-        tokens[i]=0; results[i]=E_UNEXPECTED; reports[i].token=&tokens[i];
+        tokens[i]=0; results[i]=E_UNEXPECTED; reports[i].token=colors[i]?&tokens[i]:nullptr;
         if(nonblack)nonblack[i]=false;
     }
     const auto finish = [&](HRESULT hr) {
         for (unsigned i=0; i<count; ++i) {
             if (results[i]==E_UNEXPECTED) results[i]=hr;
-            reports[i].finish(results[i]);
+            if(colors[i])reports[i].finish(results[i]);
         }
         return hr;
     };
@@ -554,6 +568,7 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
         HRESULT result=get_reader(queue,reader);
         if(FAILED(result))return finish(result);
         std::scoped_lock lock(reader->mutex);
+        if(!reader->pending.expired())return finish(DXGI_ERROR_WAS_STILL_DRAWING);
         if(reader->search) {
             start_origin_search(reader->search);
             if(reader->search->ready.load(std::memory_order_acquire)) {
@@ -731,19 +746,17 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
         reader->last_fence=value;
         phase(126,static_cast<HRESULT>(valid_count)); // Number of colors in this submission.
         phase(123,result);
-        result=wait_reader(*reader,timeout_ms); phase(124,result);
-        if (FAILED(result)) {
-            bridge_flight_logger().event(BridgeFlightOperation::gpu_fence_snapshot,49305,
-                reinterpret_cast<std::uintptr_t>(reader->fence.Get()),value,reader->fence->GetCompletedValue());
-            bridge_flight_logger().event(BridgeFlightOperation::gpu_device_status,
-                reader->device->GetDeviceRemovedReason(),reinterpret_cast<std::uintptr_t>(queue),
-                reinterpret_cast<std::uintptr_t>(reader->device.Get()),49305);
-            return finish(result);
-        }
+        const auto decode=[reader,plans,count,bytes,bars_from,column_footprint,row_footprint](
+            std::uint32_t* tokens,HRESULT* results,bool* nonblack) -> HRESULT {
+            HRESULT result{};
+            const auto phase=[&](unsigned stage,HRESULT hr) {
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                    hr,stage,reinterpret_cast<std::uint64_t>(reader.get()),reader->last_fence);
+            };
         start_origin_search(reader->search);
         void* mapped{}; const D3D12_RANGE range{0,static_cast<SIZE_T>(bytes)};
         result=reader->readback->Map(0,&range,&mapped);
-        if (FAILED(result)) return finish(result);
+        if (FAILED(result)) return result;
         if (bars_from>=0) {
             const auto& original=plans[bars_from].original;
             const auto bpp=luke_origin_pixel_bytes(original.Format);
@@ -830,11 +843,64 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
         }
         const D3D12_RANGE no_write{0,0}; reader->readback->Unmap(0,&no_write);
         phase(125,decode_status);
-        return finish(S_OK);
+        return S_OK;
+        };
+        result=wait_reader(*reader,timeout_ms); phase(124,result);
+        if (FAILED(result)) {
+            if(receipt && (result==HRESULT_FROM_WIN32(WAIT_TIMEOUT) || result==DXGI_ERROR_WAS_STILL_DRAWING)) {
+                auto pending=std::make_shared<LukeColorOriginReadResult>();
+                for(unsigned i=0;i<count;++i)pending->results[i]=results[i];
+                pending->decode=[reader,decode,plans,count](std::uint32_t* tokens,HRESULT* results,bool* nonblack) {
+                    std::scoped_lock lock(reader->mutex);
+                    const auto hr=decode(tokens,results,nonblack);
+                    if(SUCCEEDED(hr))for(unsigned i=0;i<count;++i)if(plans[i].valid)
+                        report_read(results[i],tokens[i],plans[i].layout.scan.width,plans[i].layout.scan.height);
+                    reader->pending.reset();return hr;
+                };
+                reader->pending=pending;receipt->pending=std::move(pending);
+            }
+            bridge_flight_logger().event(BridgeFlightOperation::gpu_fence_snapshot,49305,
+                reinterpret_cast<std::uintptr_t>(reader->fence.Get()),value,reader->fence->GetCompletedValue());
+            bridge_flight_logger().event(BridgeFlightOperation::gpu_device_status,
+                reader->device->GetDeviceRemovedReason(),reinterpret_cast<std::uintptr_t>(queue),
+                reinterpret_cast<std::uintptr_t>(reader->device.Get()),49305);
+            return finish(result);
+        }
+        return finish(decode(tokens,results,nonblack));
     } catch (const std::bad_alloc&) { return finish(E_OUTOFMEMORY); }
       catch (...) { return finish(E_FAIL); }
 }
 } // namespace
+
+void retire_luke_color_origin_reader(ID3D12CommandQueue* queue) noexcept {
+    try {
+        auto& c=cache();std::scoped_lock lock(c.mutex);
+        std::erase_if(c.readers,[&](const auto& reader) {
+            if(reader->queue.Get()!=queue || reader.use_count()!=1)return false;
+            const auto completed=reader->fence->GetCompletedValue();
+            return completed==UINT64_MAX || completed>=reader->last_fence;
+        });
+    }catch(...) {}
+}
+
+HRESULT poll_luke_color_origin_pair(const LukeColorOriginReadReceipt& receipt,
+    std::array<std::uint32_t,2>& tokens,std::array<HRESULT,2>& results,
+    std::array<bool,2>* nonblack) noexcept {
+    tokens={};results={E_PENDING,E_PENDING};
+    if(!receipt.pending || !receipt.fence || !receipt.value)return E_INVALIDARG;
+    const auto completed=receipt.fence->GetCompletedValue();
+    if(completed==UINT64_MAX)return DXGI_ERROR_DEVICE_REMOVED;
+    if(completed<receipt.value)return E_PENDING;
+    try {
+        auto& read=*receipt.pending;std::scoped_lock lock(read.mutex);
+        if(!read.completed) {
+            read.status=read.decode(read.tokens.data(),read.results.data(),read.nonblack.data());
+            read.decode={};read.completed=true;
+        }
+        tokens=read.tokens;results=read.results;if(nonblack)*nonblack=read.nonblack;
+        return read.status;
+    }catch(...){return E_FAIL;}
+}
 
 LukeColorOriginDecode find_luke_origin_position(const LukeColorOriginImage& image) noexcept {
     // One row cannot enter the parallel decoder pool. A slow recovery search

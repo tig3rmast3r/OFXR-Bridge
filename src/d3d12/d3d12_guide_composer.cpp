@@ -30,8 +30,9 @@ struct Params {
     float tangents_b[4];
     float tangents_r[4];
     float minimum_offset;
+    UINT force_compose;
 };
-static_assert(sizeof(Params) == 25 * 4);
+static_assert(sizeof(Params) == 26 * 4);
 
 DXGI_FORMAT readable(DXGI_FORMAT format) noexcept {
     return format == DXGI_FORMAT_R16G16_TYPELESS   ? DXGI_FORMAT_R16G16_FLOAT
@@ -216,6 +217,7 @@ std::shared_ptr<const DlssMotionVectorSet> D3D12GuideComposer::compose(
             p.tangents_b[0] = t[0]; p.tangents_b[1] = t[1]; p.tangents_b[2] = t[2]; p.tangents_b[3] = t[3];
             p.tangents_r[0] = -t[1]; p.tangents_r[1] = -t[0]; p.tangents_r[2] = t[2]; p.tangents_r[3] = t[3];
             p.minimum_offset = 16.0F;
+            p.force_compose = b->raw_motion_native_span_confirmed && b->raw_motion_native_span==1;
             if (p.scale_b[0] == 0.0F || p.scale_b[1] == 0.0F) continue;
 
             auto gpu = heaps_[slot]->GetGPUDescriptorHandleForHeapStart();
@@ -250,6 +252,10 @@ std::shared_ptr<const DlssMotionVectorSet> D3D12GuideComposer::compose(
             composed->previous_jitter_x = r.previous_jitter_x;
             composed->previous_jitter_y = r.previous_jitter_y;
             composed->bridge.reset();
+            if(p.force_compose) {
+                composed->raw_motion_native_span=2;
+                composed->raw_motion_native_span_confirmed=true;
+            }
             result->eyes[eye] = std::move(composed);
             ++composed_;
         }

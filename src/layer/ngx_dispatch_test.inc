@@ -1155,6 +1155,9 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                  context.frame->output.Get()==color.Get())),
                 "Cyberpunk OSR lost exact original N1/cabin/final-output receipt or changed legacy AFW");
             }
+            if(context.frame && (test_ghost_native_motion || test_crimson_native_motion || test_horizon_native_motion))
+                require(context.frame->raw_motion_native_span_confirmed,
+                    "measured Ghost/Crimson/Horizon native motion interval lost its producer confirmation");
             const unsigned successful=n>=recycle_production?n-recycle_production+1:
                 n-(logical_family&&n>=12?1:0);
             if(logical_family&&n!=12&&n>=2&&n<recycle_production)

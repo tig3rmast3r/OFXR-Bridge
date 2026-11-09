@@ -636,9 +636,18 @@ bool generation(Panel& p) {
         if(state.connected) {
             const char* delivery=state.runtime.ofr_delivery==1?"Alternating eye releases":state.runtime.ofr_delivery==2?"Paired releases (phase assumed)":"Learning release cadence";
             reason(p,delivery);
+            // Passive SR/RR observations are sufficient to offer a method, not
+            // proof that this eye's released colour owns compatible guides.
+            // In particular, cumulative publication/use counters can be stale.
+            const bool native_inputs=interface_vectors_text(state,GetTickCount64())=="DLSS" && state.runtime.upscaler_depth;
+            if(native_inputs)
+                reason(p,"Native DLSS motion vectors and depth observed. AER checks guides against each eye's own released frame.");
+            else if(draft.frame_generation==1 || draft.frame_generation==2)
+                notice(p,Tone::warn,"Waiting for native DLSS motion vectors and depth. AER keeps real images until matching per-eye guides are available.");
         }
     }
-    const bool no_vectors=state.connected && interface_vectors_text(state,GetTickCount64())=="None";
+    const bool no_vectors=state.connected && (interface_vectors_text(state,GetTickCount64())=="None" ||
+        (draft.ofr_enabled && !state.runtime.upscaler_depth));
     auto routes=kRoutes;
     for(int i=1;i<4;++i)if(no_vectors) {routes[i].tag="No DLSS";routes[i].warn=true;}
     int selected_generation=generation_ui_index(draft.frame_generation);
@@ -692,7 +701,7 @@ bool generation(Panel& p) {
         }
         if(draft.advanced_mode)
             changed|=segmented(p,"Motion source","Motion source",draft.motion_vectors,{{"Optical flow"},{"Game motion vectors"}},kHelpMotion);
-        if(draft.motion_vectors==0 || (state.runtime.luke_detected && draft.afw_mode!=0)) {
+        if(draft.motion_vectors==0 || (state.runtime.luke_detected && draft.afw_mode!=0 && !(draft.ofr_enabled && draft.enabled))) {
             // FidelityFX has no quality preset or second direction, only a resolution.
             show_flow=true;nvidia_flow=draft.backend!=0;
         }
@@ -738,7 +747,7 @@ bool generation(Panel& p) {
         changed|=toggle_row(p,"HUD fix","HUD fix",draft.hybrid_hud_fix,kHelpHud);
     }
 
-    if(state.runtime.luke_detected && draft.afw_mode!=0 &&
+    if(state.runtime.luke_detected && draft.afw_mode!=0 && !(draft.ofr_enabled && draft.enabled) &&
         (draft.motion_vectors!=0 || (draft.frame_generation>0 && draft.frame_generation<4)))
         notice(p,Tone::warn,"AFW reconstructs one eye without native guides for that eye. Post-AFW OFXR/Hybrid uses optical flow; FSR/DLSS-G requires a complete stereo guide pair.");
     if(dlssg) {
@@ -1257,7 +1266,7 @@ void status_pane(Panel& p) {
         format(ofxr,sizeof(ofxr),current && m.ofxr_time_valid,m.ofxr_time_ms);
         format(cycle,sizeof(cycle),current && m.cycle_valid,m.cycle_length_ms);
         std::snprintf(ui.help_buffer,sizeof(ui.help_buffer),
-            "WaitFrame entry through observed real runtime End completion, bounded below by one physical refresh per confirmed generated output. OFXR time %s (CPU wall time inside the intercepted OpenXR calls). Cycle length %s (WaitFrame entry through completion of the same real frame).",ofxr,cycle);
+            "Observed source cycle through real runtime End completion, bounded below by one refresh per confirmed generated output. AER framegen includes the earlier same-eye input needed for interpolation; no fixed refresh penalty is added. OFXR time %s (CPU wall time inside intercepted OpenXR calls). Source cycle %s. This is not measured headset scanout or motion-to-photon latency.",ofxr,cycle);
         cell_help(left+cell,y,{"Cycle minimum",ui.help_buffer});
     }
     y+=row_height;

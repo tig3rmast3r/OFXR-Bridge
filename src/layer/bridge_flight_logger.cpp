@@ -412,7 +412,7 @@ struct BridgeFlightLogger::Impl {
         const bool pacing_receipt=record.operation==BridgeFlightOperation::presenter_transition &&
             (record.result==5711 || record.result==5712 || record.result==5715 ||
              record.result==5716 || record.result==5717 || record.result==5733 ||
-             record.result==5734 || record.result==5741 || record.result==5750 || record.result==5751);
+             record.result==5734 || record.result==5741 || record.result==5750 || record.result==5751 || record.result==5718 || record.result==5743 || record.result==9230);
         const bool rife_timing=record.phase=='E' &&
             (record.operation==BridgeFlightOperation::rife_pack_wait ||
              record.operation==BridgeFlightOperation::rife_infer ||
@@ -426,6 +426,8 @@ struct BridgeFlightLogger::Impl {
         const bool control_transition=record.operation==BridgeFlightOperation::embedded_configuration && (record.result==89830 || record.result==89910 || record.result<0);
         const bool allocation_failure=record.operation==BridgeFlightOperation::swapchain_eligibility && record.result==13;
         const bool benchmark = record.operation==BridgeFlightOperation::vram_usage || allocation_failure || ui_progress || control_transition || rife_dependency || pacing_receipt || rife_timing || eye_changed || fsr_description ||
+            record.operation==BridgeFlightOperation::generation_prepare ||
+            record.operation==BridgeFlightOperation::continuity_reset ||
             record.operation==BridgeFlightOperation::fsr_recovery ||
             record.operation==BridgeFlightOperation::fsr_context_lifecycle ||
             record.operation == BridgeFlightOperation::benchmark_configuration ||

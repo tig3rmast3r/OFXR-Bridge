@@ -34,6 +34,7 @@ cbuffer Params : register(b0) {
     // Smaller projection differences, in output pixels, cannot be told from
     // motion, and leave the vectors as they are.
     float MinimumOffset;
+    uint ForceCompose;
 };
 
 static const uint kGrid = 8;
@@ -74,7 +75,7 @@ void Compose(uint3 id : SV_DispatchThreadID) {
     float2 raw = MotionB.Load(int4(OriginB + id.xy, SliceB, 0));
     uint2 votes = Decision.Load2(0);
     // Seven points in ten: the rest may be near objects, sky or particles.
-    if (votes.x * 10 < votes.y * 7) {
+    if (!ForceCompose && votes.x * 10 < votes.y * 7) {
         Composed[id.xy] = raw;
         return;
     }

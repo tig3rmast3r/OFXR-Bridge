@@ -251,11 +251,16 @@ static int panel_metadata_contract() {
 }
 
 #include "rife_output_banks_tests.inc"
+#include "aer_alternate_delivery.inc"
+#include "aer_native_guide_cache_fixture.inc"
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route.starts_with("aer-alternate-"))return aer_alternate_delivery_test(route);
     const bool aer_path=route.starts_with("aer-");if(aer_path)route.erase(0,4);
     const bool aer_swap=aer_path&&route.starts_with("swap-");if(aer_swap)route.erase(0,5);
+    if(route=="native-guide-cache")return aer_native_guide_cache_test();
+    if(route=="native-guide-join")return aer_native_guide_join_test();
     if(route=="rife-memory-recovery") {
         xrfg_fixture::ControlProfile profile;Fixture f(true);f.unblock();
         auto dispatch=std::make_shared<Dispatch>();auto state=std::make_shared<SessionState>(dispatch);
@@ -348,6 +353,22 @@ int main(int argc,char** argv) {
         auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
         XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         auto left=std::make_shared<SwapchainState>(state,info),right=std::make_shared<SwapchainState>(state,info);
+        // The production admission predicate must include leased raw Luke AER,
+        // while rejecting shared ingress, reconstructed inputs and auxiliaries.
+        state->nvidia_options.rife_model=0;state->nvidia_options.ofr=true;
+        state->graphics_binding=SessionGraphicsBinding::d3d11;state->luke_afw_enabled=true;
+        left->d3d12_history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+        left->frame_generation=std::make_shared<FrameGenerationSwapchainState>();
+        auto& generation=*left->frame_generation;
+        generation.d3d11_interop=std::make_shared<xrfg::D3D11D3D12SwapchainInterop>();
+        check(!early_source_capture(*left),"shared Luke interop retains strict completion");
+        generation.isolated_luke_synthesis=true;
+        check(early_source_capture(*left),"isolated raw Luke AER can capture after owned-input signal");
+        state->nvidia_options.ofr=false;
+        check(!early_source_capture(*left),"ordinary Luke/post-AFW path retains strict completion");
+        state->nvidia_options.ofr=true;left->composition_referenced=true;
+        check(!early_source_capture(*left),"shared auxiliary layer cannot consume early source credit");
+        left->composition_referenced=false;
         state->three_slot_director=true;state->synthesis_busy=true;state->synthesis_capture_sequence=1;
         auto a=std::async(std::launch::async,[&]{return wait_for_synthesis_handoff(state,left.get());});
         check(a.wait_for(30ms)==std::future_status::timeout,"capture cannot race source snapshot/lease acquisition");
@@ -374,6 +395,26 @@ int main(int argc,char** argv) {
         {std::scoped_lock lock(state->presenter_mutex);state->presenter_failure=XR_ERROR_RUNTIME_FAILURE;}
         state->presenter_condition.notify_all();check(failure.get()==XR_ERROR_RUNTIME_FAILURE,"worker failure wakes a pending capture with its error");
         std::puts("RIFE source snapshot ownership, per-eye capture credit, strict paths, restart and failure PASS");return 0;
+    }
+    if(route=="consumer-status") {
+        xrfg_fixture::ControlProfile profile;
+        auto desired=xrfg::autonomous::snapshot().desired;
+        xrfg::autonomous::select_generation(desired,1,0);
+        desired.enabled=true;desired.advanced_mode=true;desired.ofr_enabled=true;
+        check(xrfg::autonomous::request(desired),"native consumer status setup");
+        xrfg::autonomous::apply_runtime_settings();
+        xrfg::report_dlss_motion_vector_status(xrfg::DlssMotionVectorStatus::temporal_mismatch);
+        const auto publish=[&](xrfg::autonomous::GenerationState state,std::uint64_t proof) {
+            xrfg::autonomous::publish_runtime_status(0,state,S_OK,false,0,nullptr,-1,false,false,
+                false,false,false,true,0,false,0,2,0,proof);
+            return xrfg::autonomous::snapshot().runtime.generation_state;
+        };
+        using S=xrfg::autonomous::GenerationState;
+        check(publish(S::ready,GetTickCount64())==S::ready,"actual native consumer success outranks unrelated global pair mismatch");
+        check(publish(S::ready,0)!=S::ready,"without consumer proof a genuine missing/mismatched pair remains visible");
+        check(publish(S::dispatch_failed,GetTickCount64())==S::dispatch_failed,"fresh success cannot hide current provider failure");
+        check(publish(S::ready,GetTickCount64()-3000)!=S::ready,"old native success cannot mask later guide loss");
+        std::puts("Native consumer status: exact success, missing proof, provider failure and expiry PASS");return 0;
     }
     if(route=="ofr-controls") {
         xrfg_fixture::ControlProfile profile;
@@ -527,6 +568,8 @@ int main(int argc,char** argv) {
             if(held){produced.held_afw_pair=pair;produced.reconstructed_afw_pair.reset();}
             GeneratedFrameEndInfo terminal;ProjectionSnapshot snapshot;
             check(build_afw_terminal_submission(&end,original,produced,terminal,snapshot),"fresh/held terminal ownership");
+            check(terminal.new_content==!held,
+                "fresh OSR owns a timing reference; held reconstruction cannot become a new latency sample");
             check(snapshot.layers[0].views[1].pose.position.x==.068F && snapshot.layers[0].views[0].pose.position.x==0,
                 "terminal and downstream snapshot preserve the exact corrected position");
             check(terminal.info.displayTime==123,"metadata correction does not reschedule displayTime");
@@ -1052,7 +1095,10 @@ int main(int argc,char** argv) {
         check(state->native_dlss_generated_frames>=1,"DLSS-G benchmark requires actual SDK frame-generation support");
     }
     if(hfw) {
-        if(!(rife_luke && rife_switch && !rife_pacing))
+        if(state->private_runtime)
+            check(!state->luke_fresh_only && !presenter_forbidden(*state),
+                "private endpoint must replace the old HFW inline admission filter");
+        else if(!(rife_luke && rife_switch && !rife_pacing))
             check(fresh_luke_director_worker(*state) && !presenter_forbidden(*state),"HFW source filter incorrectly forces inline synthesis");
         state->single_threaded_d3d11=true;check(presenter_forbidden(*state),"single-threaded guard lost");state->single_threaded_d3d11=false;
         state->split_frame_loop=true;check(presenter_forbidden(*state),"split-loop guard lost");state->split_frame_loop=false;
@@ -1870,12 +1916,16 @@ int main(int argc,char** argv) {
             xr_ok(f.transport->drain(),"RIFE phase physical output drained");
             if(rife_luke) {
                 const auto generation=find_swapchain(chain)->frame_generation;
+                const bool post_afw=selected_afw_mode()!=0;
+                const auto active=generation ? (post_afw ? generation->afw_temporal_synthesizer : generation->synthesizer) : nullptr;
                 check(generation && generation->asynchronous_luke_rife &&
-                    generation->afw_temporal_synthesizer->asynchronous_rife_enabled(),
+                    active && active->asynchronous_rife_enabled(),
                     "Luke reconfiguration silently replaced the actual RIFE worker with synchronous execution");
-                check(generation->afw_temporal_synthesizer->submission_queue().Get()!=state->luke_synthesis_queue.Get() &&
+                check(active->submission_queue().Get()!=state->luke_synthesis_queue.Get() &&
                     !generation->afw_source_synthesizer->asynchronous_rife_enabled(),
                     "Luke temporal worker must own its queue while copy-only ingress stays synchronous");
+                if(!post_afw)check(!generation->afw_temporal_synthesizer->asynchronous_rife_enabled(),
+                    "raw Luke route retained an unused post-AFW RIFE worker");
                 std::puts("LUKE_RIFE_RECONFIGURE actual asynchronous worker + independent queue + physical outputs PASS");
             }
             const auto delivered=f.real_ends.load()-rife_phase_start;

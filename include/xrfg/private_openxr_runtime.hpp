@@ -154,6 +154,10 @@ public:
     XrResult wait_frame(const XrFrameWaitInfo*, XrFrameState*);
     XrResult predict_frame(XrFrameState*); // upper virtual application clock
     XrResult begin_frame(const XrFrameBeginInfo*);
+    // Close a virtual application cycle without accepting new image content.
+    // No native frame is owned by that virtual Begin; the physical consumer
+    // retains its last coherent image until another fresh packet arrives.
+    XrResult discard_virtual_frame();
     XrResult end_frame(const XrFrameEndInfo*,
         const std::shared_ptr<InterfaceDeliveryReceipt>& delivery={});
     // Same-thread RAII admission. Reserve before taking an optional overlay's

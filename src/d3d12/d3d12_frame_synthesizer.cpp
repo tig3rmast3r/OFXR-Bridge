@@ -1072,6 +1072,9 @@ struct D3D12FrameSynthesizer::Impl {
     std::atomic<HRESULT> rife_error{S_OK};
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
+    // Session transport queue survives method changes. An asynchronous RIFE
+    // eye owns a private submission queue, never the next method's transport.
+    ComPtr<ID3D12CommandQueue> input_queue;
     std::shared_ptr<D3D12SwapchainHistory> history;
     std::vector<Destination> current_destinations;
     std::vector<Destination> synthetic_destinations;
@@ -2802,8 +2805,9 @@ struct D3D12FrameSynthesizer::Impl {
         packed_eye_stride = static_cast<UINT>(stride);
 
         device = input_device;
+        this->input_queue = input_queue;
         queue = input_queue;
-        if (input_nvidia_options.rife_model >= 0 && input_nvidia_options.rife_async) {
+        if (input_nvidia_options.rife_model >= 0 && input_nvidia_options.rife_async && !defer_flow_resources) {
             // Each asynchronous eye owns its GPU submission order. Sharing the
             // session queue lets another eye enqueue a future acquire/history
             // wait ahead of this eye's completion signal, while the runtime
@@ -2827,7 +2831,7 @@ struct D3D12FrameSynthesizer::Impl {
         // both backends, and FidelityFX is the one that had no measurement.
         allow_luke_guide_device_alias =
             input_allow_luke_guide_device_alias;
-        flow_resources_deferred = defer_flow_resources && input_generation_mode == D3D12FrameGenerationMode::ofxr && input_nvidia_options.rife_model<0;
+        flow_resources_deferred = defer_flow_resources && input_generation_mode == D3D12FrameGenerationMode::ofxr;
         requested_gpu_timing = enable_nvidia_gpu_timing;
         nvidia_gpu_timing_enabled = enable_nvidia_gpu_timing && !flow_resources_deferred;
         const UINT node_mask = queue->GetDesc().NodeMask;
@@ -2894,7 +2898,7 @@ struct D3D12FrameSynthesizer::Impl {
                 if (FAILED(result)) return result;
             }
         }
-        if(nvidia_options.rife_model>=0){
+        if(nvidia_options.rife_model>=0 && !flow_resources_deferred){
             if(generation_mode!=D3D12FrameGenerationMode::ofxr)return E_INVALIDARG;
             rife=std::make_unique<D3D12Rife>();
             constexpr float scales[]{1.F,.75F,.5F,.25F,.20F,1.F/6.F,1.F/3.F};
@@ -4116,6 +4120,41 @@ struct D3D12FrameSynthesizer::Impl {
             }
         }
         return true;
+    }
+
+    [[nodiscard]] HRESULT wait_aer_guide_dependencies(
+        const RollingSource& first,const RollingSource& second,
+        const DlssMotionVectorSet* composer=nullptr,bool validate_only=false) noexcept {
+        if(!nvidia_options.ofr ||
+            (generation_mode==D3D12FrameGenerationMode::ofxr && !nvidia_options.hybrid))return S_OK;
+        // Resolving a token may enqueue guide readiness on the ingress queue
+        // AFTER its colour capture was signalled. The isolated synthesis lane
+        // must consume the guide receipts directly; the earlier colour fence
+        // alone does not cover those later waits. No CPU wait or queue-tail
+        // fence is introduced. Composer bridge vectors own their receipts too.
+        std::array<std::pair<ID3D12Fence*,std::uint64_t>,12> waits{};
+        UINT count=0;
+        for(const auto* set:{first.motion_vectors.get(),second.motion_vectors.get(),composer}) {
+            if(!set)continue;
+            for(UINT eye=0;eye<std::min(set->eye_count,kDlssMotionVectorEyeCount);++eye) {
+                const auto& frame=set->eyes[eye];if(!frame)continue;
+                for(const auto* input:{frame.get(),frame->bridge.get()}) {
+                    if(!input || input->producer_queue.Get()==queue.Get())continue;
+                    if(!input->producer_fence || !input->producer_fence_value)return DXGI_ERROR_WAS_STILL_DRAWING;
+                    auto found=std::find_if(waits.begin(),waits.begin()+count,[&](const auto& entry) {
+                        return entry.first==input->producer_fence.Get();
+                    });
+                    if(found!=waits.begin()+count)found->second=std::max(found->second,input->producer_fence_value);
+                    else waits[count++]={input->producer_fence.Get(),input->producer_fence_value};
+                }
+            }
+        }
+        if(validate_only)return S_OK;
+        for(UINT i=0;i<count;++i) {
+            const HRESULT result=queue->Wait(waits[i].first,waits[i].second);
+            if(FAILED(result))return result;
+        }
+        return S_OK;
     }
 
     void synthetic_target_state(ID3D12GraphicsCommandList* list,
@@ -7655,6 +7694,11 @@ struct D3D12FrameSynthesizer::Impl {
             return E_INVALIDARG;
         }
 
+        // Reject an incomplete AER receipt before recording any provider work.
+        // A later complete frame may prime again; missing guides do not burn
+        // the persistent provider or leave its command list recording open.
+        result=wait_aer_guide_dependencies(previous,next,nullptr,true);
+        if(FAILED(result)) {cancel_next();return result;}
         WorkSlot& slot = work_slots[work_slot_index];
         result = reset_work_slot(slot);
         if (FAILED(result)) {
@@ -7663,7 +7707,7 @@ struct D3D12FrameSynthesizer::Impl {
         }
         // R22 applies to OFXR vectors, Hybrid and native DLSS-G only.
         // FSR consumes its unchanged release-bound guides; no extra pass there.
-        if (generation_mode != D3D12FrameGenerationMode::fsr3 && next.motion_vectors) {
+        if ((generation_mode != D3D12FrameGenerationMode::fsr3 || nvidia_options.ofr) && next.motion_vectors) {
             bool bridged = false;
             for (const auto& eye : next.motion_vectors->eyes)
                 bridged |= eye && eye->bridge != nullptr;
@@ -7678,6 +7722,11 @@ struct D3D12FrameSynthesizer::Impl {
                         static_cast<UINT>(work_slot_index), next.motion_vectors,
                         {next.views.data(), next.view_count});
                 }
+                // AER N1 is admitted only for composition. Allocation/shader
+                // failure must not silently fall through with opposite-eye MV.
+                if(nvidia_options.ofr)for(const auto& eye:next.motion_vectors->eyes)
+                    if(eye && eye->bridge && eye->raw_motion_native_span_confirmed &&
+                        eye->raw_motion_native_span==1)return kD3D12FrameSynthesisStaleGuides;
             }
         }
         bool used_game_motion = false;
@@ -7745,6 +7794,12 @@ struct D3D12FrameSynthesizer::Impl {
                 {next.views.data(),next.view_count});
             barrier=transition_barrier(current_destination,D3D12_RESOURCE_STATE_COPY_DEST,release_state);
             list->ResourceBarrier(1,&barrier);
+        }
+        result = wait_aer_guide_dependencies(previous,next,slot.guide_composer_inputs.get());
+        if(FAILED(result)) {
+            synthesis_enabled=false;
+            cancel_next();
+            return result;
         }
         result = rife && nvidia_options.rife_async ? S_OK : queue->Wait(
             previous.producer_fence.Get(),
@@ -7824,6 +7879,8 @@ struct D3D12FrameSynthesizer::Impl {
         if (native_dlss) output_ticket->native_result = native_dlss->last_result();
         if(rife && nvidia_options.rife_async)output_ticket->native_result=slot.rife_result;
         output_ticket->aer_retimed=aer_retimed;
+        output_ticket->used_game_motion=!rife && (used_game_motion || hybrid_guides_used) &&
+            (!native_dlss || native_pair_generated);
         output_ticket->previous_serial = previous_serial;
         output_ticket->current_serial = current.serial;
         output_ticket->fence_value = fence_value;
@@ -7986,6 +8043,14 @@ HRESULT D3D12FrameSynthesizer::suspend_flow_resources() noexcept {
       catch (...) { return E_FAIL; }
 }
 
+HRESULT D3D12FrameSynthesizer::resume_flow_resources() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return ensure_flow_resources_locked();
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+      catch (...) { return E_FAIL; }
+}
+
 HRESULT D3D12FrameSynthesizer::replace_resources_locked(D3D12OpticalFlowBackend backend,
     D3D12NvidiaOpticalFlowOptions options,D3D12FrameGenerationMode generation_mode,
     bool defer_flow,bool preserve_completed_tickets) {
@@ -7998,7 +8063,7 @@ HRESULT D3D12FrameSynthesizer::replace_resources_locked(D3D12OpticalFlowBackend 
         // doubles the transient VRAM cost and can make an otherwise valid
         // switch fail. No submitted GPU work survives the idle proof above.
         auto device=impl_->device;
-        auto queue=impl_->queue;
+        auto queue=impl_->input_queue;
         auto history=impl_->history;
         const auto view_format=impl_->view_format;
         const auto release_state=impl_->release_state;
@@ -8333,6 +8398,13 @@ HRESULT D3D12FrameSynthesizer::synchronize_producer_queue(
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr || queue == nullptr) {
             return E_INVALIDARG;
+        }
+        // A suspended RIFE provider acquires its private queue lazily. Create
+        // it before recording the producer receipt, otherwise that receipt
+        // would apply only to the old transport queue.
+        if(impl_->flow_resources_deferred && impl_->nvidia_options.rife_model>=0) {
+            const auto ready=ensure_flow_resources_locked();
+            if(FAILED(ready))return ready;
         }
         if (impl_->queue == nullptr || impl_->acquire_fence == nullptr) {
             return E_UNEXPECTED;

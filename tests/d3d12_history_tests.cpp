@@ -4482,7 +4482,7 @@ void test_guide_composer(D3D12WarpFixture& fixture) {
     // Where a distant point of this (left) eye's image is in the other's, less
     // where it is in this one: the other eye's field of view is the mirror.
     const float shift = (left + right) / (right - left) * float(width);
-    const auto run = [&](float b_motion, float r_motion, bool bridged) {
+    const auto run = [&](float b_motion, float r_motion, bool bridged,bool force=false) {
         auto motion = create_and_upload_game_motion(fixture, width, height, {b_motion, r_motion});
         auto r = std::make_shared<xrfg::DlssMotionVectorFrame>();
         r->stream = 1;
@@ -4495,6 +4495,7 @@ void test_guide_composer(D3D12WarpFixture& fixture) {
         r->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         auto b = std::make_shared<xrfg::DlssMotionVectorFrame>(*r);
         b->serial = 2;
+        b->raw_motion_native_span=1;b->raw_motion_native_span_confirmed=force;
         b->motion_slice = 0;
         if (bridged) b->bridge = r;
         auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
@@ -4574,7 +4575,15 @@ void test_guide_composer(D3D12WarpFixture& fixture) {
     // Without a bridge nothing is recorded.
     const auto [plain_set, plain] = run(motion, motion, false);
     require(plain == plain_set, "an eye without a bridge was composed");
-    require(composer.composed() == 2, "the composer's count did not follow the bridged eyes");
+    // Confirmed native N1 can contain only object motion and no projection
+    // shift. Chronology still requires B->R->A; the stereo heuristic must not
+    // copy it just because the eye projections no longer appear in the field.
+    const auto [native_set,native] = run(3.F,5.F,true,true);
+    require(native->eyes[0]->raw_motion_native_span==2 && native->eyes[0]->raw_motion_native_span_confirmed,
+        "composed native N1 did not advertise its actual same-eye span");
+    for(const float x:read(*native->eyes[0]))require(std::abs(x-8.F)<.1F,
+        "confirmed N1 was copied instead of following the exact intermediate motion field");
+    require(composer.composed() == 3, "the composer's count did not follow the bridged eyes");
 }
 
 void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
@@ -6039,6 +6048,31 @@ void test_rife_eye_queue(D3D12WarpFixture& fixture) {
     require_hresult(second,"RIFE second eye did not follow first eye completion");
     for(unsigned eye=0;eye<2;++eye)
         require(readback_pattern(fixture,real[eye].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==expected[eye],"eye queue changed real pixels");
+    // Switch while a private RIFE eye still owns submitted work. The new
+    // method must drain it, then restore the original transport queue whose
+    // interop reuse fences the session continues to signal.
+    for(unsigned eye=0;eye<2;++eye) {
+        const auto private_queue=synths[eye].submission_queue();
+        require(private_queue.Get()!=background.Get(),"asynchronous RIFE must own a private queue");
+        ComPtr<ID3D12Fence> switching;
+        require_hresult(fixture.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&switching)),"roundtrip gate");
+        require_hresult(synths[eye].retire_previous(),"retire completed anchor before new roundtrip prime");
+        require_hresult(histories[eye]->capture(0,&captures[eye]),"fresh roundtrip source capture");
+        require_hresult(histories[eye]->commit(captures[eye]),"fresh roundtrip source commit");
+        require_hresult(private_queue->Wait(switching.Get(),1),"hold pending RIFE prime");
+        std::jthread rescue_switch([switching]{std::this_thread::sleep_for(std::chrono::milliseconds(700));switching->Signal(1);});
+        require_hresult(synths[eye].submit_prime(captures[eye],views,0,&tickets[eye]),"pending RIFE switch prime");
+        auto changing=std::async(std::launch::async,[&]{return synths[eye].reconfigure(xrfg::D3D12OpticalFlowBackend::fidelity_fx,{});});
+        const auto blocked=changing.wait_for(std::chrono::milliseconds(40))==std::future_status::timeout;
+        require_hresult(switching->Signal(1),"release roundtrip gate");
+        require_hresult(changing.get(),"RIFE to optical roundtrip");
+        require(blocked,"method switch destroyed resources before pending RIFE work retired");
+        require(synths[eye].submission_queue().Get()==background.Get(),"leaving RIFE retained the private eye queue instead of session transport");
+        require_hresult(synths[eye].reconfigure(xrfg::D3D12OpticalFlowBackend::nvidia,options),"optical to RIFE roundtrip");
+        require(synths[eye].submission_queue().Get()!=background.Get(),"returning to RIFE reused transport as its eye queue");
+        require_hresult(synths[eye].reconfigure(xrfg::D3D12OpticalFlowBackend::fidelity_fx,{}),"second RIFE to optical roundtrip");
+        require(synths[eye].submission_queue().Get()==background.Get(),"repeated method switch lost original session transport");
+    }
     fixture.require_no_debug_errors();
     std::cout<<"RIFE independent eye queues: startup copies and consumer joins PASS\n";
 }
@@ -6179,8 +6213,36 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 
 #include "history_v474_wait_tests.inc"
 #include "synthesis_memory_lifecycle_tests.inc"
+#include "aer_guide_endpoints.inc"
+#include "rife_switch_lifecycle.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1&&std::string_view(argv[1])=="rife-switch-lifecycle") {
+        try {D3D12WarpFixture fixture(true);test_rife_switch_lifecycle(fixture);fixture.require_no_debug_errors();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+    if(argc>1&&std::string_view(argv[1])=="aer-native-compose") {
+        try {D3D12WarpFixture fixture;test_guide_composer(fixture);fixture.require_no_debug_errors();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+    if(argc>1&&std::string_view(argv[1])=="aer-guide-fsr") {
+        try {
+            D3D12WarpFixture fixture(true);
+            for(bool n1:{false,true})test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::fsr3,n1);
+            fixture.require_no_debug_errors();return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+#ifdef XRFG_NATIVE_DLSSG
+    if(argc>1&&std::string_view(argv[1])=="aer-guide-native") {
+        try {
+            if(!native_test_has_supported_nvidia_adapter())return 77;
+            D3D12WarpFixture fixture(true);
+            if(!xrfg::native_dlssg_max_generated_frames(fixture.device()))return 77;
+            for(bool n1:{false,true})test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::native_dlss,n1);
+            fixture.require_no_debug_errors();return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+#endif
     if(argc>1&&std::string_view(argv[1])=="ofr-rife") {
         try {
             D3D12WarpFixture fixture(true);

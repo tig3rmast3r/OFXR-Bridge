@@ -109,6 +109,7 @@ struct D3D12FrameSynthesisTicket {
     bool synthetics_in_target_camera{};
     bool aer_retimed{}; // accepted AER output transaction, distinct from provider bypass
     bool held_capture{}; // repeated history sample; valid unchanged peer in AER
+    bool used_game_motion{}; // this submitted consumer transaction used exact game guides
 };
 
 // Completed direct-queue GPU intervals for one NVIDIA Optical Flow pair.
@@ -384,6 +385,10 @@ public:
     // Returns S_FALSE for another generation mode; an already-cold OFXR
     // transport is unchanged. Caller excludes new captures/presenter use.
     [[nodiscard]] HRESULT suspend_flow_resources() noexcept;
+
+    // Resume a suspended provider at the drained configuration boundary,
+    // before capture/GPU submission locks are acquired for a new frame.
+    [[nodiscard]] HRESULT resume_flow_resources() noexcept;
 
     // Returns S_OK and consumes one completed NVIDIA timing record, S_FALSE
     // when none is ready, or an error for an invalid output pointer/readback.

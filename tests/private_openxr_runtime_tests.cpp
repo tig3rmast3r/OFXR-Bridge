@@ -819,6 +819,44 @@ void stale_native_clock(bool d12,bool directed=true,bool clean=false) {
     check(f.wait_thread!=f.delivery_thread,"cycle renewal preserves the independent Wait worker");
     std::puts(d12?"D12 stale native clock renewal retains all six exact FIFO images PASS":"D11 stale native clock renewal retains all six exact FIFO images PASS");
 }
+void held_aer_virtual_cycles(bool d12) {
+    Fixture f(d12,true,{},true);f.unblock();f.throttled=false;
+    auto chain=f.make_chain();f.write(chain,80);f.begin_virtual();
+    xr_ok(f.submit(chain,1),"initial coherent AER content");f.wait_count(1);
+    for(unsigned poll=0;poll<12;++poll) {
+        f.begin_virtual();
+        f.transport->pair_next_end_with_previous();f.transport->set_next_end_content_time(1);
+        xr_ok(f.transport->discard_virtual_frame(),"held poll closes only virtual Begin");
+        check(f.transport->discard_virtual_frame()==XR_ERROR_CALL_ORDER_INVALID,"held poll cannot close Begin twice");
+    }
+    check(f.real_ends==1,"held AER polls must not accept raw or duplicated native content");
+    f.write(chain,120);f.begin_virtual();xr_ok(f.submit(chain,2),"fresh source follows held polls");f.wait_count(2);
+    xr_ok(f.transport->drain(),"held poll drain");f.transport->stop();
+    check(f.pixels==std::vector<unsigned>({80,120}),"fresh coherent images retain exact FIFO order across held polls");
+    check(!f.cycle_waited && !f.cycle_begun,"held polls preserve native call ownership");
+}
+void clean_bypass_admission(bool d12,bool reenable=false) {
+    Fixture f(d12,true,{},true);f.throttled=false;
+    auto chain=f.make_chain();f.transport->set_clean_bypass(true);
+    f.write(chain,91);f.begin_virtual();xr_ok(f.submit(chain,1),"clean first input");f.wait_entered();
+    auto next=std::async(std::launch::async,[&]{XrFrameState prediction{XR_TYPE_FRAME_STATE};
+        return f.transport->wait_frame(nullptr,&prediction);});
+    const bool blocked=next.wait_for(40ms)==std::future_status::timeout;
+    bool resumed=true;
+    if(reenable) {
+        f.transport->set_clean_bypass(false);
+        resumed=next.wait_for(1s)==std::future_status::ready;
+    }
+    f.unblock();check(next.wait_for(2s)==std::future_status::ready,"native delivery releases next clean Wait");
+    check(resumed,"live reenable wakes clean admission before the held native End returns");
+    xr_ok(next.get(),"clean Wait after previous native output");
+    xr_ok(f.transport->begin_frame(nullptr),"clean second Begin");f.write(chain,92);
+    xr_ok(f.submit(chain,2),"clean second input");f.wait_count(2);
+    xr_ok(f.transport->drain(),"clean admission drain");f.transport->stop();
+    check(blocked,"all-off backpressure belongs before next game render, not a full End FIFO");
+    check(f.pixels==std::vector<unsigned>({91,92}),"clean admission keeps exact FIFO images");
+    check(!f.cycle_waited && !f.cycle_begun,"clean admission balances native cycles");
+}
 void clean_bypass_roundtrip(bool d12) {
     Fixture f(d12,true,{},true);f.unblock();f.throttled=false;
     auto chain=f.make_chain();std::vector<unsigned> expected;
@@ -1596,7 +1634,7 @@ void queue_priority_policy() {
 }
 }
 #include "private_overlay_destroy_fixture.inc"
-int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
+int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
 if(argc>1 && std::string_view(argv[1])=="stalled-renewal"){
     for(bool d12:{true,false})for(bool directed:{true,false})stalled_native_renewal(d12,directed,0);

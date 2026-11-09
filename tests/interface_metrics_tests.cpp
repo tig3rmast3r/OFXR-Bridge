@@ -366,6 +366,17 @@ int main() {
             float game{},generation{},delivery{};
             check(mixed->stages(104'000'000,115'000'000,minimum,game,generation,delivery),
                 "mixed readiness receipt supplies generation/delivery stages");
+            InterfaceFrameStamp stamp{1,104'000'000,0,mixed};
+            stamp.aer_history_started_ns=78'000'000;stamp.mark_aer_mixed();
+            check(mixed->read(115'000'000,held,length) && held==4 && length==37,
+                "AER source cycle includes the measured 22ms dependency without changing CPU call time");
+            check(mixed->read_minimum_cycle(115'000'000,minimum) && minimum==37,
+                "lookahead is an observed source age, not a second physical output");
+            check(mixed->stages(104'000'000,115'000'000,minimum,game,generation,delivery) && generation==28 && delivery==5,
+                "AER generation partition includes dependency wait and preserves delivery time");
+            mixed->source_dependency(0);mixed->source_dependency(200'000'000);
+            check(mixed->read_minimum_cycle(115'000'000,minimum) && minimum==37,
+                "missing/future clocks cannot shrink or invent dependency history");
         }
         timing_sample_cohorts();
         buffer_preferences();minimum_spacing_rules();production_boundaries();timing();complete_cycle();estimated_cycle();native_delivery_cycle();stage_partition_and_baseline();wording();

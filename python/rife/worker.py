@@ -70,16 +70,20 @@ class SharedBuffer:
             self.memory = cuda(cu.cuImportExternalMemory(desc))
         finally:
             C.windll.kernel32.CloseHandle(C.c_void_p(handle))
-        mapping = cu.CUDA_EXTERNAL_MEMORY_BUFFER_DESC()
-        mapping.size = 2
-        for dimension in shape:
-            mapping.size *= dimension
-        self.ptr = cuda(cu.cuExternalMemoryGetMappedBuffer(self.memory, mapping))
-        self.shape = (C.c_int64 * len(shape))(*shape)
-        self.managed = ManagedTensor(Tensor(int(self.ptr), Device(2, device), len(shape),
-                                             DataType(2, 16, 1), self.shape, None, 0), None, NO_DELETE)
-        capsule = capsule_new(C.addressof(self.managed), b"dltensor", None)
-        self.tensor = torch.utils.dlpack.from_dlpack(capsule)
+        try:
+            mapping = cu.CUDA_EXTERNAL_MEMORY_BUFFER_DESC()
+            mapping.size = 2
+            for dimension in shape:
+                mapping.size *= dimension
+            self.ptr = cuda(cu.cuExternalMemoryGetMappedBuffer(self.memory, mapping))
+            self.shape = (C.c_int64 * len(shape))(*shape)
+            self.managed = ManagedTensor(Tensor(int(self.ptr), Device(2, device), len(shape),
+                                                 DataType(2, 16, 1), self.shape, None, 0), None, NO_DELETE)
+            capsule = capsule_new(C.addressof(self.managed), b"dltensor", None)
+            self.tensor = torch.utils.dlpack.from_dlpack(capsule)
+        except Exception:
+            self.close()
+            raise
 
     def close(self):
         self.tensor = None
@@ -240,16 +244,25 @@ class Runner:
             self.release(ident)
             buffers = []
             before = self.memory.usage() if self.memory else None
+            consumed = 0
             try:
                 for index, desc in enumerate(request["buffers"]):
+                    consumed = index + 1
                     shape = (request["eyes"], 5 if index == 2 else 3, request["height"], request["width"])
                     buffers.append(SharedBuffer(desc[0], desc[1], shape, self.device))
-                self.configs[ident] = buffers
                 after = self.memory.usage() if self.memory else None
+                self.configs[ident] = buffers
                 self.import_charges[ident] = max(0, after-before) if before is not None and after is not None else 0
             except Exception:
+                self.configs.pop(ident, None)
+                self.import_charges.pop(ident, None)
                 for buffer in buffers:
-                    buffer.close()
+                    try:
+                        buffer.close()
+                    except Exception:
+                        pass  # Still close the remaining imports/handles.
+                for desc in request["buffers"][consumed:]:
+                    C.windll.kernel32.CloseHandle(C.c_void_p(desc[0]))
                 raise
             return {}
         if op == "release":
