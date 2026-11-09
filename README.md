@@ -19,9 +19,10 @@ Download it from [GitHub Releases](https://github.com/tig3rmast3r/OFXR-Bridge/re
 
 What changed in this version: see the [release notes](https://github.com/tig3rmast3r/OFXR-Bridge/releases).
 
-**On nightly:** experimental NVIDIA **RIFE** frame generation is also available,
-with models 4.6, 4.4 and 4.3, a Quality selector and optional TensorRT acceleration
-for 4.4. Use **Check RIFE...** in the tray to set up its pinned per-user runtime.
+**RIFE:** the complete ZIP includes NVIDIA CUDA/TensorRT and experimental
+Radeon Vulkan installation choices. Open **RIFE -> Reinstall RIFE...** in the
+tray, select your backend and install. Radeon starts with model 4.4. No separate
+installer or folder setting is needed; see [Radeon quick start](LEGGIMI-RADEON.txt).
 RIFE is installed in `%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`; no package or parent folders are searched.
 See the [RIFE guide](docs/RIFE.md). The stable release remains a separate download;
 a nightly or self-compiled build must be signed separately for anti-cheat use.
@@ -47,8 +48,9 @@ Not working, or not feeling smoother? See the [troubleshooting guide](https://gi
 > - **Hybrid, FSR 3.1, DLSS-G and Luke Ross OSR/AFW:** the game must run
 >   **DLSS** Super Resolution or Ray Reconstruction (OFXR takes its guides from it).
 > - **DLSS-G:** an RTX 40 or 50-series card.
-> - **RIFE (nightly):** an NVIDIA CUDA-compatible GPU and driver, plus its
->   separate runtime. RIFE itself does not need game motion vectors or depth.
+> - **RIFE (nightly):** the separate NVIDIA CUDA/TensorRT runtime, or the optional
+>   experimental Radeon Vulkan runtime. Radeon hardware validation is pending.
+>   RIFE itself does not need game motion vectors or depth.
 > - The [Microsoft Visual C++ Redistributable x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
 
 ## Features
@@ -57,8 +59,8 @@ Not working, or not feeling smoother? See the [troubleshooting guide](https://gi
 
 - Optical flow: **NVIDIA** (Fast, Medium, Slow) at 100%, 75%, 50% or 25%
   resolution, or **AMD FidelityFX**.
-- **RIFE (nightly)**: neural frame interpolation on NVIDIA CUDA, with optional
-  TensorRT acceleration for model 4.4.
+- **RIFE (nightly)**: NVIDIA CUDA/TensorRT neural interpolation, plus an optional
+  experimental Radeon Vulkan backend with device-specific preparation for 4.4.
 - **Hybrid**: FidelityFX flow combined with the game's own motion vectors.
 - **FSR 3.1** and **DLSS** Frame Generation, fed with the game's DLSS guides.
 - **3X** frame generation on the OFXR 0.2.14 route.
@@ -111,7 +113,8 @@ confirm the NVIDIA installation; a PowerShell window shows progress without
 requiring further input. It installs under
 **`%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`**, using about **8 GB** installed
 and requiring at least **14 GB free** for download and staging. GPU optimization
-caches need additional space. AMD Radeon (RDNA) is shown disabled for future support.
+caches need additional space. Packages with the optional Radeon Vulkan payload
+offer a second experimental installation choice; see [Radeon RIFE](docs/RIFE_VULKAN.md).
 
 Start with **RIFE 4.4**, **Medium** Quality and **2X**. Experimental 3X/4X are
 available on the native D3D12 route and compatible Luke Ross routes after
@@ -329,7 +332,7 @@ first**: it is often the setting that makes the biggest difference.
 | OFXR 0.2.1 | Latency-oriented route; performance can vary substantially by configuration. |
 | OFXR 0.2.14 | Djules-based route, including a 3X option. |
 | OFXR 0.3.0 | Default NVIDIA route; compare its performance and latency in each game. |
-| RIFE (nightly) | NVIDIA CUDA neural interpolation; model 4.4 has optional TensorRT acceleration. |
+| RIFE (nightly) | NVIDIA CUDA/TensorRT, or experimental Radeon Vulkan with prepared RIFE 4.4. |
 | Hybrid | Combines FidelityFX with captured motion vectors. |
 | FSR 3.1 | FSR frame generation using the captured guides. |
 | DLSS-G | NVIDIA frame generation; requires compatible hardware and can have a higher cost. |

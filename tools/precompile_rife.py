@@ -135,6 +135,9 @@ def publish_json(path, value):
 
 
 def run(args):
+    if (args.root / "vulkan/backend.json").is_file():
+        from precompile_rife_vulkan import run as run_vulkan
+        return run_vulkan(args)
     from trt_cache import cache_directory
     from runtime_lease import RuntimeBusy, RuntimeLease
     from update_rife_overlay import sync_locked, OverlayRepairRequired

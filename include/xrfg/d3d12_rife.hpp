@@ -14,6 +14,7 @@ struct RifeExecutionStatus {
     std::uint64_t updated_ms{};
     bool active{}, optimizing{}, tensorrt{};
     unsigned error{}; // 0 none, 1 timeout, 2 unavailable, 3 other optimization failure
+    bool vulkan{};
 };
 // CPU-only cached worker receipts, independent of logging and memory sampling.
 RifeExecutionStatus rife_execution_status() noexcept;

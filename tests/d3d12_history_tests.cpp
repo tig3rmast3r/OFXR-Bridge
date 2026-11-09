@@ -5809,6 +5809,31 @@ void test_srgb_synthesis_preserves_brightness(
 }
 
 
+static void await_rife_model(xrfg::D3D12FrameSynthesizer& synth,xrfg::D3D12SwapchainHistory& history,
+    const ReprojectionViews& views,xrfg::D3D12HistoryCaptureTicket& ca,xrfg::D3D12HistoryCaptureTicket& cb,
+    xrfg::D3D12FrameSynthesisTicket& pair,float fraction=.5F,std::optional<xrfg::D3D12ExtraSynthetic> extra={}) {
+    const auto deadline=GetTickCount64()+15000;bool warming=false;
+    while(pair.native_result&&pair.native_result->resolve()==0&&pair.native_result->skip==6&&GetTickCount64()<deadline){
+        warming=true;Sleep(20);require_frame_start_gate(synth,"model warm-up gate");
+        require_hresult(history.capture(1,&cb),"model warm-up capture");require_hresult(history.commit(cb),"model warm-up commit");
+        require_hresult(synth.submit_pair(cb,views,views,0,1,&pair,{}, {},false,fraction,{},extra),"model warm-up submit");
+        require_hresult(synth.wait_for_previous_submission(1000),"model warm-up receipt");
+    }
+    require(!pair.native_result||pair.native_result->resolve()!=0,"prepared model did not become resident");
+    if(!warming)return;
+    const auto discard_timing=[&]{xrfg::D3D12NvidiaGpuTiming unused{};while(synth.consume_nvidia_gpu_timing(&unused)==S_OK){}};
+    discard_timing();
+    // Re-establish the controlled A->B interval after warm-up repetitions, so
+    // real timing, fractional ordering and temporal-image checks remain valid.
+    require_frame_start_gate(synth,"warm A gate");require_hresult(history.capture(0,&ca),"warm A capture");require_hresult(history.commit(ca),"warm A commit");
+    require_hresult(synth.submit_pair(ca,views,views,0,0,&pair,{}, {},false,fraction,{},extra),"warm A interval");
+    require_hresult(synth.wait_for_previous_submission(1000),"warm A done");
+    discard_timing();
+    require_frame_start_gate(synth,"warm B gate");require_hresult(history.capture(1,&cb),"warm B capture");require_hresult(history.commit(cb),"warm B commit");
+    require_hresult(synth.submit_pair(cb,views,views,0,1,&pair,{}, {},false,fraction,{},extra),"warm measured interval");
+    require_hresult(synth.wait_for_previous_submission(1000),"warm measured done");
+}
+
 void test_rife_stereo(D3D12WarpFixture& fixture,int model,UINT width=256,UINT height=128,
     xrfg::D3D12NvidiaInputScale scale=xrfg::D3D12NvidiaInputScale::full,bool detail=false,bool asynchronous=false) {
     auto a=create_source_texture(fixture,width,height),b=create_source_texture(fixture,width,height);
@@ -5859,10 +5884,12 @@ void test_rife_stereo(D3D12WarpFixture& fixture,int model,UINT width=256,UINT he
         require(elapsed<150 && pending,"RIFE submit waited for its delayed input or advertised unfinished GPU work as complete");
     }
     require_hresult(synth.wait_for_previous_submission(30000),"RIFE exact completion");
+    await_rife_model(synth,*history,views,ca,cb,pair);
     if(asynchronous){
         require(pair.native_result && pair.native_result->resolve()==1,"RIFE immutable async content receipt");
         const auto memory=xrfg::rife_memory_for_adapter(fixture.device()->GetAdapterLuid(),false);
-        require(memory.active && memory.valid && memory.process_id && memory.private_bytes>=memory.reserved_bytes && memory.reserved_bytes>0,"RIFE private CUDA memory includes Torch exactly once");
+        if(xrfg::rife_execution_status().vulkan)require(memory.active&&!memory.valid,"Vulkan must not fabricate CUDA/Torch memory telemetry");
+        else require(memory.active && memory.valid && memory.process_id && memory.private_bytes>=memory.reserved_bytes && memory.reserved_bytes>0,"RIFE private CUDA memory includes Torch exactly once");
         std::cout<<"RIFE worker VRAM="<<memory.private_bytes<<" Torch subset="<<memory.reserved_bytes<<std::endl;
     }
     auto actual=readback_pattern(fixture,synthetic.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -5969,6 +5996,7 @@ void test_rife_multiframe(D3D12WarpFixture& fixture,int model,unsigned factor,bo
     require(synth.submit_pair(cb,views,views,0,1,&pair,{}, {},false,1.F/factor,{},aliased)==E_INVALIDARG,"RIFE aliased third output accepted");
     require_hresult(synth.submit_pair(cb,views,views,0,1,&pair,{}, {},false,1.F/factor,{},extra),"RIFE multi pair");
     require_hresult(synth.wait_for_previous_submission(30000),"RIFE multi completion");
+    await_rife_model(synth,*history,views,ca,cb,pair,1.F/factor,extra);
     require(readback_pattern(fixture,reals[1],D3D12_RESOURCE_STATE_RENDER_TARGET)==pb,"RIFE multi real B changed");
     std::vector<StereoPattern> generated;
     for(unsigned i=0;i<factor-1;++i){
@@ -5992,6 +6020,8 @@ void test_rife_multiframe(D3D12WarpFixture& fixture,int model,unsigned factor,bo
     require_hresult(synth.reconfigure(xrfg::D3D12OpticalFlowBackend::nvidia,options,xrfg::D3D12FrameGenerationMode::ofxr),"RIFE multi reconfigure");
     fixture.require_no_debug_errors();
 }
+
+#include "rife_vulkan_cold_tests.inc"
 
 // Reproduce a foreign eye's future-acquire wait on the session synthesis queue.
 // Its acquire becomes ready only after this eye's output reaches the runtime.
@@ -6298,6 +6328,32 @@ int main(int argc, char** argv) {
             D3D12WarpFixture fixture(true);
             test_fsr_temporal_continuity(fixture);
             fixture.require_no_debug_errors(); return 0;
+        }
+        if(argc>1 && std::string_view(argv[1])=="rife-vulkan-load-cancel") {
+            D3D12WarpFixture fixture(true);
+            test_rife_vulkan_cold(fixture,true,4,384,false,true);
+            fixture.require_no_debug_errors();return 0;
+        }
+        if(argc>1 && std::string_view(argv[1])=="rife-vulkan-mixed") {
+            D3D12WarpFixture fixture(true);
+            test_rife_stereo(fixture,3,608,544,xrfg::D3D12NvidiaInputScale::full,false,true);
+            fixture.require_no_debug_errors();return 0;
+        }
+        if(argc>1 && std::string_view(argv[1])=="rife-vulkan-cold") {
+            D3D12WarpFixture fixture(true);
+            test_rife_vulkan_cold(fixture,true,4,384,true);
+            test_rife_vulkan_cold(fixture,false,2,256,true);
+            test_rife_vulkan_cold(fixture,true,3,384,false);
+            test_rife_vulkan_cold(fixture,true,4,512,true,true);
+            test_rife_vulkan_cold(fixture,true,4,512,true);
+            fixture.require_no_debug_errors();return 0;
+        }
+        if(argc>1 && std::string_view(argv[1])=="rife-vulkan") {
+            D3D12WarpFixture fixture(true);
+            test_rife_stereo(fixture,3,256,128);
+            test_rife_stereo(fixture,3,256,128,xrfg::D3D12NvidiaInputScale::fifth,false,true);
+            for(unsigned factor:{3U,4U})test_rife_multiframe(fixture,3,factor,true);
+            fixture.require_no_debug_errors();return 0;
         }
         if(argc>1 && std::string_view(argv[1])=="rife-headset") {
             D3D12WarpFixture fixture(true);

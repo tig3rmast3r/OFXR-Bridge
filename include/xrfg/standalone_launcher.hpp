@@ -126,7 +126,7 @@ struct StatusSession {
     float latency_ms{};
     bool rates_valid{true}, output_valid{true}, latency_valid{};
     // Populated only for a fresh, applied RIFE route. False is not proof of Torch.
-    bool rife_execution_active{}, rife_optimizing{}, rife_tensorrt{};
+    bool rife_execution_active{}, rife_optimizing{}, rife_tensorrt{}, rife_vulkan{};
 };
 struct StatusInputs {
     bool armed{};

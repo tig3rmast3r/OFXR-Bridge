@@ -47,7 +47,7 @@ Building the tray alone does **not** supply the installer overlay, scripts or CR
 After building matching binaries and source, run:
 
 ```powershell
-.\tools\Package-RifeBuild.ps1 -BuildDir .\build-rife -OutDir .\packages -Version 848
+.\tools\Package-RifeBuild.ps1 -BuildDir .\build-rife -OutDir .\packages -Version 951
 ```
 
 The script discovers the pinned Microsoft.VC143.CRT **14.44.35112** folder in the
@@ -55,7 +55,7 @@ installed Visual Studio redist directory, or accepts it explicitly:
 
 ```powershell
 .\tools\Package-RifeBuild.ps1 -BuildDir .\build-rife -OutDir .\packages `
-  -Version 848 -CrtSource "C:/pinned-redist/x64/Microsoft.VC143.CRT"
+  -Version 951 -CrtSource "C:/pinned-redist/x64/Microsoft.VC143.CRT"
 ```
 
 Every CRT DLL is checked against the existing runtime lock. A missing pinned
@@ -80,3 +80,16 @@ that manifest and never downloads a newer patch overlay.
 The packaging helper does not sign binaries. If signing is required, the matching
 build must be signed by the certificate holder before packaging. Preserve those
 exact executable bytes and the release tag identifying their source.
+
+## Integrated Radeon Vulkan installer
+
+See [Radeon build and preparation](RIFE_VULKAN.md) for the separately pinned native
+worker and CPU-only compiler. From V951, `Package-RifeBuild.ps1` requires a sealed
+`rife-vulkan/manifest.json` beside the source. It verifies the payload, its recorded
+source hashes and dependency pins before packaging, so changed backend sources
+require rebuilding/resealing first. The complete package enables **AMD Radeon -
+Vulkan (experimental)** beside NVIDIA in the normal RIFE installation dialog.
+The same command also creates `RIFE-Vulkan-Installer-V951.zip` (using the requested
+version) from exactly the same sealed stage, keeping both installers synchronized.
+Model/Python runtimes and prepared GPU caches remain separate downloads; the
+payload contains the native worker, pnnx and licenses.

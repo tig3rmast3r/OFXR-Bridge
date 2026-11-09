@@ -54,6 +54,7 @@ class Worker {
     std::string line_;
     std::atomic<bool> live_{};
     bool fraction_batch_{};
+    bool vulkan_{};
     bool memory_after_inference_{}; // protected by the transaction mutex
     std::atomic<bool> optimizing_{}, tensorrt_{};
     std::atomic<unsigned> optimization_error_{};
@@ -129,6 +130,7 @@ class Worker {
 public:
     Worker(){
         auto root=runtime_path();
+        vulkan_=std::filesystem::is_regular_file(root/L"vulkan/backend.json");
         if(!runtime_lease_.acquire(root))throw HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION);
         SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};
         Handle child_input,child_output;
@@ -178,8 +180,9 @@ public:
         if(GetEnvironmentVariableW(L"LOCALAPPDATA",local_appdata,32768))
             vars.push_back(L"LOCALAPPDATA="+std::wstring(local_appdata));
         std::sort(vars.begin(),vars.end());std::wstring environment;for(auto& var:vars){environment+=var;environment+=L'\0';}environment+=L'\0';
-        auto python=root/L"python/python.exe";
-        std::wstring command=L"\""+python.wstring()+L"\" -I -u \""+(root/L"app/worker.py").wstring()+L"\"";
+        auto python=root/(vulkan_?L"vulkan/ofxr_rife_vulkan.exe":L"python/python.exe");
+        std::wstring command=vulkan_?L"\""+python.wstring()+L"\" --worker \""+root.wstring()+L"\"":
+            L"\""+python.wstring()+L"\" -I -u \""+(root/L"app/worker.py").wstring()+L"\"";
         PROCESS_INFORMATION info{};
         auto created=CreateProcessW(python.c_str(),command.data(),nullptr,nullptr,TRUE,
             CREATE_NO_WINDOW|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT|CREATE_SUSPENDED,
@@ -193,7 +196,7 @@ public:
             TerminateProcess(process_.value,1);throw E_FAIL;
         }
         ResumeThread(thread.value);child_input.reset();child_output.reset();
-        try{const auto hello=read(60000);if(hello.find("\"protocol\": 2")==std::string::npos)throw E_FAIL;fraction_batch_=boolean(hello,"\"fraction_batch\"");live_=true;
+        try{const auto hello=read(60000);std::uint64_t protocol{};if(!number(hello,"\"protocol\"",protocol)||protocol!=2||!boolean(hello,"\"ok\""))throw E_FAIL;fraction_batch_=boolean(hello,"\"fraction_batch\"");live_=true;
             memory_sampler_=std::jthread([this](std::stop_token token){sample_memory(token);});
         }catch(...){stop();throw;}
     }
@@ -203,13 +206,14 @@ public:
     }
     bool alive() const noexcept {return live_.load(std::memory_order_acquire);}
     bool fraction_batch() const noexcept {return fraction_batch_;}
+    bool vulkan() const noexcept {return vulkan_;}
     RifeExecutionStatus execution() const noexcept {
         const auto updated=execution_updated_ms_.load(std::memory_order_acquire);
         const auto now=GetTickCount64();
         const bool active=alive() && updated && now>=updated && now-updated<5000;
         return {updated,active,active && optimizing_.load(std::memory_order_relaxed),
             active && tensorrt_.load(std::memory_order_relaxed),
-            active?optimization_error_.load(std::memory_order_relaxed):0U};
+            active?optimization_error_.load(std::memory_order_relaxed):0U,active&&vulkan_};
     }
     RifeMemoryStatus memory(bool request) noexcept {
         const auto now=GetTickCount64();
@@ -242,8 +246,12 @@ private:
             }
             text+="\n";DWORD written{};
             if(!WriteFile(input_.value,text.data(),static_cast<DWORD>(text.size()),&written,nullptr)||written!=text.size())throw E_FAIL;
-            const auto reply=read(30000); // first model graph warm-up may take seconds
-            if(reply.find("\"ok\": true")==std::string::npos){
+            const auto reply=read(vulkan_ && text.find("\"op\":\"configure\"")!=std::string::npos?300000:30000);
+            if(vulkan_ && boolean(reply,"\"ok\"") && boolean(reply,"\"preparing\"")){
+                optimizing_.store(true,std::memory_order_relaxed);execution_updated_ms_=GetTickCount64();
+                return E_PENDING; // Owned compiler is running; keep this worker alive.
+            }
+            if(!boolean(reply,"\"ok\"")){
                 // An older/custom worker may lack this diagnostic command.
                 // An explicit refusal leaves memory unavailable, never kills
                 // a functioning inference worker or changes its execution state.
@@ -267,8 +275,11 @@ private:
                 optimization_error_.store(error,std::memory_order_relaxed);
                 const auto updated=GetTickCount64();
                 execution_updated_ms_.store(updated,std::memory_order_release);
-                if(backend_flags)*backend_flags=(tensorrt?1:0)|(optimizing?2:0)|4|
-                    (error?8:0);
+                if(backend_flags){
+                    std::uint64_t profile{};if(vulkan_)number(reply,"\"precision_profile\"",profile);
+                    *backend_flags=(tensorrt?1:0)|(optimizing?2:0)|4|(error?8:0)|(vulkan_?16:0)|
+                        (profile<=255?static_cast<std::int32_t>(profile<<8):0);
+                }
             }
             std::uint64_t usage{},reserved{};
             if(number(reply,"\"vram_private\"",usage) && number(reply,"\"torch_reserved\"",reserved)){
@@ -323,6 +334,7 @@ RifeExecutionStatus rife_execution_status() noexcept {
                 if(!value.active)continue;
                 result.updated_ms=std::max(result.updated_ms,value.updated_ms);
                 result.active=true;result.optimizing|=value.optimizing;result.tensorrt|=value.tensorrt;
+                result.vulkan|=value.vulkan;
                 result.error=std::max(result.error,value.error);
             }
         }
@@ -385,7 +397,11 @@ struct D3D12Rife::Impl{
             });
     }
     void size(UINT w,UINT h,UINT count){
-        if(w==width&&h==height&&count==eyes)return;
+        if(w==width&&h==height&&count==eyes&&configured)return;
+        if(worker->vulkan()){
+            std::ostringstream prepare;prepare<<"{\"op\":\"prepare\",\"luid\":"<<luid<<",\"width\":"<<w<<",\"height\":"<<h<<",\"eyes\":"<<count<<'}';
+            check(worker->request(prepare.str()));
+        }
         // Reconfiguration must not release CUDA buffers/descriptors still read
         // by the last queued composition.
         wait_submitted();inflight_images.clear();
@@ -431,6 +447,7 @@ HRESULT D3D12Rife::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,DXG
         if(!device||!queue||model<0||model>4||scale<=0||scale>1)return E_INVALIDARG;
         auto p=std::make_unique<Impl>();p->device=device;p->queue=queue;p->format=format;p->model=model;p->scale=scale;
         auto luid=device->GetAdapterLuid();std::memcpy(&p->luid,&luid,sizeof(luid));p->worker=worker_for(p->luid);
+        if(p->worker->vulkan() && model!=3)return E_NOTIMPL; // Radeon starts with validated RIFE4.4 only.
         p->proxy=format==DXGI_FORMAT_R16G16B16A16_FLOAT||format==DXGI_FORMAT_R32G32B32A32_FLOAT?1:
             format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB||format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB?2:0;
         D3D12_DESCRIPTOR_RANGE ranges[2]{};
@@ -475,7 +492,10 @@ HRESULT D3D12Rife::generate_impl(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resou
     try{
         if(!impl_||!a||!b||!out||av.empty()||av.size()>2||av.size()!=bv.size()||av.size()!=tv.size()||ar.size()!=tv.size()||br.size()!=tv.size())return E_INVALIDARG;
         auto& p=*impl_;if(FAILED(p.failure))return p.failure;const auto desc=b->GetDesc();const auto roi=rect_of(bv[0],desc);
-        const UINT w=std::max(32U,static_cast<UINT>(std::ceil(roi.width*p.scale))),h=std::max(32U,static_cast<UINT>(std::ceil(roi.height*p.scale)));
+        const UINT raw_w=std::max(32U,static_cast<UINT>(std::ceil(roi.width*p.scale))),raw_h=std::max(32U,static_cast<UINT>(std::ceil(roi.height*p.scale)));
+        // Vulkan tensors have aligned planar channel strides. Use the same
+        // 32-pixel graph alignment in the offline compiler and shared buffers.
+        const UINT w=p.worker->vulkan()?(raw_w+31)/32*32:raw_w,h=p.worker->vulkan()?(raw_h+31)/32*32:raw_h;
         p.size(w,h,static_cast<UINT>(av.size()));
         // Keep the preceding deferred output and the current transaction alive
         // until pack's receipt proves the preceding compose has retired.
@@ -572,7 +592,7 @@ HRESULT D3D12Rife::generate_impl(ID3D12Resource* a,ID3D12Resource* b,ID3D12Resou
         p.execute(diagnostic,fraction_eyes,true,wait);
         if(wait)p.inflight_images.clear();
         return S_OK;
-    }catch(HRESULT hr){if(impl_)impl_->failure=hr;return hr;}
+    }catch(HRESULT hr){if(impl_&&hr!=E_PENDING)impl_->failure=hr;return hr;}
     catch(...){if(impl_)impl_->failure=E_FAIL;return E_FAIL;}
 }
 HRESULT D3D12Rife::generate_batch(ID3D12Resource* a,ID3D12Resource* b,
@@ -585,7 +605,7 @@ HRESULT D3D12Rife::generate_batch(ID3D12Resource* a,ID3D12Resource* b,
     }
     if(outputs.size()==1){const auto& o=outputs[0];return generate(a,b,o.image,av,bv,o.views,o.a_rotations,o.b_rotations,state,o.fraction,o.timing,completion);}
     std::array<D3D12Rife*,3> generators{this};
-    auto poison=[&](HRESULT hr){for(auto* g:generators)if(g&&g->impl_)g->impl_->failure=hr;return hr;};
+    auto poison=[&](HRESULT hr){if(hr!=E_PENDING)for(auto* g:generators)if(g&&g->impl_)g->impl_->failure=hr;return hr;};
     try{
         if(FAILED(impl_->failure))return impl_->failure;
         // Validate the entire request before queuing any part of a batch.

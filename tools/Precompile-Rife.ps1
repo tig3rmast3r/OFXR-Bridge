@@ -1,6 +1,7 @@
 param(
  [string]$Root=(Join-Path $env:LOCALAPPDATA 'ofxr-bridge/RIFE/runtime'),
- [Parameter(Mandatory=$true)][string]$ResultJson
+ [Parameter(Mandatory=$true)][string]$ResultJson,
+ [string]$Games
 )
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -12,7 +13,7 @@ $progressPath=$ResultJson+'.progress.json'
 $cancelPath=$ResultJson+'.cancel'
 $logPath=$ResultJson+'.log'
 $form=New-Object Windows.Forms.Form
-$form.Text='OFXR 0.3.3 - Pre-compile TensorRT for found games'
+$form.Text=if(Test-Path -LiteralPath (Join-Path $Root 'vulkan/backend.json')){'OFXR - Prepare Vulkan for found games'}else{'OFXR 0.3.3 - Pre-compile TensorRT for found games'}
 $form.ClientSize=New-Object Drawing.Size(560,164)
 $form.StartPosition='CenterScreen';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false;$form.MinimizeBox=$true
 $label=New-Object Windows.Forms.Label
@@ -58,6 +59,7 @@ try {
  $start=New-Object Diagnostics.ProcessStartInfo
  $start.FileName=$python
  $arguments=@('-I','-B',$script,'--root',$Root,'--result',$ResultJson,'--progress',$progressPath,'--cancel',$cancelPath,'--log',$logPath,'--parent-watchdog')
+ if($Games){$arguments+=@('--games',[IO.Path]::GetFullPath($Games))}
  $start.Arguments=(($arguments|ForEach-Object{Quote-Argument $_}) -join ' ')
  $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardError=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardInput=$true
  $start.EnvironmentVariables.Clear()

@@ -288,14 +288,21 @@ def main():
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--skip-tensorrt", action="store_true")
     parser.add_argument("--reinstall", action="store_true")
+    parser.add_argument("--backend", choices=("nvidia", "vulkan"), default="nvidia")
     args = parser.parse_args()
     logs = args.root.parent / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     LOG = logs / ("install-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()) + ".log")
     result = {"schema": 1, "status": "error", "message": "", "root": str(args.root), "backend": "",
               "installed_bytes": INSTALLED_BYTES, "required_free_bytes": REQUIRED_FREE, "log_path": str(LOG)}
+    if args.backend == "vulkan":
+        result.update(backend="AMD Radeon / Vulkan (experimental)", installed_bytes=0, required_free_bytes=2_000_000_000)
     try:
-        result.update(install(args.root, args.cache, args.crt_source, skip_tensorrt=args.skip_tensorrt, reinstall=args.reinstall))
+        if args.backend == "vulkan":
+            from install_rife_vulkan import install as install_vulkan
+            result.update(install_vulkan(args.root, args.cache, args.crt_source))
+        else:
+            result.update(install(args.root, args.cache, args.crt_source, skip_tensorrt=args.skip_tensorrt, reinstall=args.reinstall))
     except RuntimeBusy as error:
         result.update(status="busy", message=str(error))
     except Exception as error:

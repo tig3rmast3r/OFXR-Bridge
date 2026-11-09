@@ -152,6 +152,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
         out.rife_execution_active=rife.active && rife.updated_ms>=rife_after_ms;
         out.rife_optimizing=rife.active && rife.optimizing;
         out.rife_tensorrt=rife.active && rife.tensorrt;
+        out.rife_vulkan=rife.active && rife.vulkan;
         out.rife_error=rife.active?rife.error:0U;
     }
     const auto observed=native_ingress::upscaler_observation();

@@ -6,7 +6,7 @@ IDI_OFXR_ARMED ICON "../../OFXR_armed.ico"
 
 IDD_KEYBINDS DIALOGEX 0, 0, 364, 264
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "OFXR-BRIDGE 0.3.3 (v961) - Configure keybinds"
+CAPTION "OFXR-BRIDGE 0.3.3 (v962) - Configure keybinds"
 FONT 9, "Segoe UI"
 BEGIN
     LTEXT "Click Change, then press a key or combination.", -1, 12, 12, 340, 14
@@ -55,7 +55,7 @@ BEGIN
     LTEXT "", IDC_RIFE_REASON, 12, 12, 364, 28
     GROUPBOX "Graphics card", -1, 12, 44, 364, 58
     CONTROL "NVIDIA (CUDA / TensorRT)", IDC_RIFE_NVIDIA, "Button", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 24, 59, 338, 16
-    CONTROL "AMD Radeon (RDNA) - coming later", IDC_RIFE_AMD, "Button", BS_AUTORADIOBUTTON | WS_DISABLED, 24, 79, 338, 16
+    CONTROL "AMD Radeon - Vulkan (experimental)", IDC_RIFE_AMD, "Button", BS_AUTORADIOBUTTON | WS_DISABLED, 24, 79, 338, 16
     LTEXT "Install location (AppData, shared by all OFXR versions):", -1, 12, 112, 364, 13
     EDITTEXT IDC_RIFE_DESTINATION, 12, 128, 364, 28, ES_READONLY | ES_MULTILINE | ES_AUTOHSCROLL
     LTEXT "About 8 GB installed. Keep at least 14 GB free during installation. TensorRT caches can grow afterwards.", IDC_RIFE_SPACE, 12, 166, 364, 27
@@ -65,8 +65,8 @@ BEGIN
 END
 
 1 VERSIONINFO
-FILEVERSION 0,3,3,961
-PRODUCTVERSION 0,3,3,961
+FILEVERSION 0,3,3,962
+PRODUCTVERSION 0,3,3,962
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -77,10 +77,10 @@ BEGIN
  BEGIN
   BLOCK "040904b0"
   BEGIN
-   VALUE "FileDescription", "OFXR-BRIDGE 0.3.3 (v961)\0"
+   VALUE "FileDescription", "OFXR-BRIDGE 0.3.3 (v962)\0"
    VALUE "ProductName", "OFXR-BRIDGE\0"
-   VALUE "FileVersion", "0.3.3 (v961)\0"
-   VALUE "ProductVersion", "0.3.3 (v961)\0"
+   VALUE "FileVersion", "0.3.3 (v962)\0"
+   VALUE "ProductVersion", "0.3.3 (v962)\0"
    VALUE "OriginalFilename", "OFXRBridgeTray.exe\0"
   END
  END

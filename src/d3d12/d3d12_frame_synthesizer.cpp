@@ -2291,7 +2291,7 @@ struct D3D12FrameSynthesizer::Impl {
             if (FAILED(result)) {
                 return result;
             }
-            if(nvidia_options.rife_model>=0 && nvidia_options.rife_async){
+            if(nvidia_options.rife_model>=0){
                 result=device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(slot.rife_fallback_allocator.GetAddressOf()));
                 if(FAILED(result))return result;
                 result=device->CreateCommandList(node_mask,D3D12_COMMAND_LIST_TYPE_DIRECT,slot.rife_fallback_allocator.Get(),nullptr,IID_PPV_ARGS(slot.rife_fallback_list.GetAddressOf()));
@@ -5157,6 +5157,7 @@ struct D3D12FrameSynthesizer::Impl {
             synthesis_enabled = false;
             return result;
         }
+        slot.rife_result.reset();
         result = slot.current_copy_allocator->Reset();
         if (FAILED(result)) {
             synthesis_enabled = false;
@@ -5953,7 +5954,7 @@ struct D3D12FrameSynthesizer::Impl {
             slot.current_copy_command_list->ResourceBarrier(2,before.data());slot.current_copy_command_list->CopyResource(destination,source);
             const std::array after{transition_barrier(source,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON),transition_barrier(destination,D3D12_RESOURCE_STATE_COPY_DEST,release_state)};
             slot.current_copy_command_list->ResourceBarrier(2,after.data());
-            if(nvidia_options.rife_async){
+            if(slot.rife_fallback_list){
                 auto status=slot.rife_fallback_list->Reset(slot.rife_fallback_allocator.Get(),nullptr);
                 if(FAILED(status))return status;
                 std::swap(slot.command_list,slot.rife_fallback_list);
@@ -6678,8 +6679,8 @@ struct D3D12FrameSynthesizer::Impl {
             if(diagnostic)diagnostic->finish(queue.Get(),job.value,SUCCEEDED(result));
             const auto generated=result;
             if(FAILED(result)){
-                rife_error.store(result,std::memory_order_release);
-                job.result->skip=5;job.result->detail=static_cast<UINT>(result);
+                if(result!=E_PENDING)rife_error.store(result,std::memory_order_release);
+                job.result->skip=result==E_PENDING?6:5;job.result->detail=static_cast<UINT>(result);
             }
             // A healthy-queue worker refusal still transports a correct real
             // image. Its pre-recorded fallback reprojects B into S's camera;
@@ -6751,12 +6752,18 @@ struct D3D12FrameSynthesizer::Impl {
             return E_FAIL;
         }
 
-        const bool rife_generated=rife_pair.pending;
+        bool rife_generated=rife_pair.pending;
+        bool rife_preparing=false;
         if(rife && !nvidia_options.rife_async && rife_pair.pending){
             rife_pair.pending=false;
             auto& p=rife_pair;const auto generated=generate_rife_batch(p,slot.timing_query_base);
             p={};
-            if(FAILED(generated)){
+            if(generated==E_PENDING){
+                rife_preparing=true;rife_generated=false;
+                slot.rife_result=std::make_shared<D3D12NativeFrameResult>();
+                slot.rife_result->outputs=synthetic_output_count();slot.rife_result->skip=6;
+                slot.rife_result->detail=static_cast<UINT>(E_PENDING);slot.rife_result->mask.store(0,std::memory_order_release);
+            }else if(FAILED(generated)){
                 // A failed native signal is not proof that the pack stopped
                 // reading the history. Keep both leases until queue drain.
                 synthesis_enabled=false;untracked_source=std::move(*newly_acquired);return generated;
@@ -6811,7 +6818,7 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
         if(rife && nvidia_options.rife_async)return queue_rife_work(slot,newly_acquired,true,output_fence_value);
-        ID3D12CommandList* lists[] = {slot.command_list.Get()};
+        ID3D12CommandList* lists[] = {rife_preparing?slot.rife_fallback_list.Get():slot.command_list.Get()};
         queue->ExecuteCommandLists(1, lists);
         two_frame_capture_submission(queue.Get(), 1, lists);
         completion_unknown = true;
@@ -7654,7 +7661,7 @@ struct D3D12FrameSynthesizer::Impl {
                 output_ticket->native_result=std::move(receipt);
                 bridge_flight_logger().event(BridgeFlightOperation::native_dlssg_record,1,0,20,0);
             }
-            if(rife && nvidia_options.rife_async)output_ticket->native_result=slot.rife_result;
+            if(rife)output_ticket->native_result=slot.rife_result;
             output_ticket->previous_serial = current.serial;
             output_ticket->current_serial = current.serial;
             output_ticket->fence_value = fence_value;
@@ -7877,7 +7884,7 @@ struct D3D12FrameSynthesizer::Impl {
             static_cast<std::uint32_t>(work_slots.size());
 
         if (native_dlss) output_ticket->native_result = native_dlss->last_result();
-        if(rife && nvidia_options.rife_async)output_ticket->native_result=slot.rife_result;
+        if(rife)output_ticket->native_result=slot.rife_result;
         output_ticket->aer_retimed=aer_retimed;
         output_ticket->used_game_motion=!rife && (used_game_motion || hybrid_guides_used) &&
             (!native_dlss || native_pair_generated);

@@ -35,6 +35,14 @@ void rife_setup_ui_tests() {
         SendMessageW(window,WM_COMMAND,IDOK,0);
     });
     require(answer==IDOK,"actual NVIDIA confirmation accepts Install");
+    dialog.vulkan_available=true;
+    answer=run_rife_dialog(dialog,[](HWND window){
+        require(IsWindowEnabled(GetDlgItem(window,IDC_RIFE_AMD))!=FALSE,"Radeon becomes available with its optional payload");
+        CheckRadioButton(window,IDC_RIFE_NVIDIA,IDC_RIFE_AMD,IDC_RIFE_AMD);
+        SendMessageW(window,WM_COMMAND,IDOK,0);
+    });
+    require(answer==IDOK&&dialog.vulkan_selected,"actual Radeon confirmation selects the Vulkan installer");
+    dialog.vulkan_available=false;
     answer=run_rife_dialog(dialog,[](HWND window){SendMessageW(window,WM_COMMAND,IDCANCEL,0);});
     require(answer==IDCANCEL,"Cancel does not accept an installation");
     const std::filesystem::path powershell=L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
@@ -130,5 +138,15 @@ exit 0
     while(!completion&&GetTickCount64()<overlay_deadline){completion=collect_rife_completion(app);if(!completion)Sleep(10);}
     require(completion&&completion->updating_overlay&&completion->result&&completion->result->status==r::Status::ready,
         "startup overlay-only mode reaches the helper and returns its own completion kind");
+    std::ofstream(app.executable_directory/L"tools/Setup-RifeRuntime.ps1")<<R"PS(param([switch]$Check,[string]$Root,[string]$ResultJson,[string]$Backend='nvidia')
+$r=[ordered]@{schema=1;status='ready';message='backend routing fixture';root=$Root;backend=$Backend;installed_bytes=0;required_free_bytes=0;log_path=''}
+[IO.File]::WriteAllText($ResultJson,($r|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+exit 0
+)PS";
+    require(begin_rife_operation(app,false,&error,false,false,false,true),"selected Radeon backend starts the owned helper");
+    completion.reset();const auto backend_deadline=GetTickCount64()+15000;
+    while(!completion&&GetTickCount64()<backend_deadline){completion=collect_rife_completion(app);if(!completion)Sleep(10);}
+    require(completion&&completion->result&&completion->result->backend==L"vulkan",
+        "actual PowerShell process receives the Vulkan backend selected by the dialog");
     std::cout<<"Check RIFE: controls, routing, quoting, async health and startup code alignment PASS\n";
 }

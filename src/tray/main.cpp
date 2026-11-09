@@ -860,6 +860,7 @@ void change_keybinds(AppState& state) {
 struct RifeInstallDialog {
     std::filesystem::path destination;
     std::wstring reason;
+    bool vulkan_available{},vulkan_selected{};
 };
 INT_PTR CALLBACK rife_install_dialog_procedure(HWND dialog,UINT message,WPARAM wparam,LPARAM lparam) {
     if(message==WM_INITDIALOG) {
@@ -868,13 +869,17 @@ INT_PTR CALLBACK rife_install_dialog_procedure(HWND dialog,UINT message,WPARAM w
         SetDlgItemTextW(dialog,IDC_RIFE_REASON,state->reason.c_str());
         SetDlgItemTextW(dialog,IDC_RIFE_DESTINATION,state->destination.c_str());
         CheckRadioButton(dialog,IDC_RIFE_NVIDIA,IDC_RIFE_AMD,IDC_RIFE_NVIDIA);
-        EnableWindow(GetDlgItem(dialog,IDC_RIFE_AMD),FALSE);
+        EnableWindow(GetDlgItem(dialog,IDC_RIFE_AMD),state->vulkan_available);
+        state->vulkan_selected=false;
+        SetDlgItemTextW(dialog,IDC_RIFE_SPACE,L"NVIDIA: about 8 GB installed, 14 GB free for setup. Radeon Vulkan: keep 2 GB free for setup. Per-game caches need additional space.");
         return TRUE;
     }
     if(message==WM_COMMAND) {
         const auto id=LOWORD(wparam);
         if(id==IDOK) {
-            if(IsDlgButtonChecked(dialog,IDC_RIFE_NVIDIA)!=BST_CHECKED)return TRUE;
+            auto* state=reinterpret_cast<RifeInstallDialog*>(GetWindowLongPtrW(dialog,DWLP_USER));
+            if(IsDlgButtonChecked(dialog,IDC_RIFE_AMD)==BST_CHECKED&&!state->vulkan_available)return TRUE;
+            state->vulkan_selected=state->vulkan_available && IsDlgButtonChecked(dialog,IDC_RIFE_AMD)==BST_CHECKED;
             EndDialog(dialog,IDOK);return TRUE;
         }
         if(id==IDCANCEL){EndDialog(dialog,IDCANCEL);return TRUE;}
@@ -892,7 +897,7 @@ void close_rife_process(AppState& state) {
 // Desktop subprocess only: the window thread never waits for Python, CUDA,
 // downloads or installation. Check output is retained even on helper startup
 // errors; the install has its own visible console and backend log.
-bool begin_rife_operation(AppState& state,bool installing,std::wstring* error,bool reinstalling=false,bool precompiling=false,bool updating_overlay=false) {
+bool begin_rife_operation(AppState& state,bool installing,std::wstring* error,bool reinstalling=false,bool precompiling=false,bool updating_overlay=false,bool vulkan_install=false) {
     const bool visible=installing||precompiling;
     if(state.rife.process){if(error)*error=L"A RIFE operation is already running.";return false;}
     HANDLE output{},input{};
@@ -924,6 +929,7 @@ bool begin_rife_operation(AppState& state,bool installing,std::wstring* error,bo
         auto command=xrfg::rife_setup::command_line(powershell,script,root,result,!visible);
         if(reinstalling)command+=L" -Reinstall";
         if(updating_overlay)command+=L" -UpdateOverlay";
+        if(vulkan_install)command+=L" -Backend vulkan";
         DWORD flags=xrfg::rife_setup::process_flags(installing);
         startup.StartupInfo.dwFlags=STARTF_USESHOWWINDOW;startup.StartupInfo.wShowWindow=visible?SW_SHOWNORMAL:SW_HIDE;
         if(!visible) {
@@ -1001,10 +1007,11 @@ void report_rife_completion(AppState& state,const RifeCompletion& completion) {
     }
     if(!completion.installing&&!completion.updating_overlay&&xrfg::rife_setup::offers_install(result.status)) {
         RifeInstallDialog dialog{xrfg::managed_rife_runtime(),result.message};
+        dialog.vulkan_available=std::filesystem::is_regular_file(state.executable_directory/L"rife-vulkan/manifest.json");
         const auto answer=DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_RIFE_INSTALL),state.window,
             rife_install_dialog_procedure,reinterpret_cast<LPARAM>(&dialog));
         if(answer==IDOK) {
-            std::wstring error;if(!begin_rife_operation(state,true,&error))show_error(state.window,error);
+            std::wstring error;if(!begin_rife_operation(state,true,&error,false,false,false,dialog.vulkan_selected))show_error(state.window,error);
         }
         return;
     }
@@ -1028,7 +1035,8 @@ HMENU append_rife_menu(HMENU menu,const AppState& state) {
     const auto flags=MF_STRING|(state.rife.process?MF_GRAYED:0);
     AppendMenuW(child,flags,check_rife,L"Check RIFE...");
     AppendMenuW(child,flags,reinstall_rife,L"Reinstall RIFE...");
-    AppendMenuW(child,flags,precompile_rife,L"Pre-compile TensorRT for found games...");
+    const bool vulkan=std::filesystem::is_regular_file(xrfg::managed_rife_runtime()/L"vulkan/backend.json");
+    AppendMenuW(child,flags,precompile_rife,vulkan?L"Prepare Vulkan for found games...":L"Pre-compile TensorRT for found games...");
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(child),L"RIFE");return child;
 }
 
@@ -1211,6 +1219,7 @@ void write_status(const AppState& state, bool final = false) {
                 runtime.rife_execution_active;
             session.rife_optimizing = session.rife_execution_active && runtime.rife_optimizing;
             session.rife_tensorrt = session.rife_execution_active && runtime.rife_tensorrt;
+            session.rife_vulkan = session.rife_execution_active && runtime.rife_vulkan;
             // Frames generated in the last second, by OFXR or by AFW alone.
             session.generating = (fresh && m.generating) ||
                 xrfg::autonomous::interface_afw_only_active(current, tick);
@@ -1291,17 +1300,18 @@ void handle_command(AppState& state, UINT command) {
     }
     case reinstall_rife: {
         RifeInstallDialog dialog{xrfg::managed_rife_runtime(),
-            L"Clean reinstall: download pinned packages again, replace the runtime and clear TensorRT engines. Recorded games are preserved."};
+            L"Choose the RIFE backend to reinstall. Recorded games are preserved. Radeon Vulkan retains the previous runtime."};
+        dialog.vulkan_available=std::filesystem::is_regular_file(state.executable_directory/L"rife-vulkan/manifest.json");
         if(DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_RIFE_INSTALL),state.window,
             rife_install_dialog_procedure,reinterpret_cast<LPARAM>(&dialog))==IDOK) {
-            std::wstring error;if(!begin_rife_operation(state,true,&error,true))show_error(state.window,error);
+            std::wstring error;if(!begin_rife_operation(state,true,&error,true,false,false,dialog.vulkan_selected))show_error(state.window,error);
         }
         break;
     }
     case precompile_rife: {
         const auto snapshot=xrfg::autonomous::snapshot();const auto now=GetTickCount64();
         if(snapshot.connected && snapshot.runtime.heartbeat_ms && now>=snapshot.runtime.heartbeat_ms && now-snapshot.runtime.heartbeat_ms<2000) {
-            show_error(state.window,L"Close the VR game before pre-compiling TensorRT.");break;
+            show_error(state.window,L"Close the VR game before preparing RIFE engines.");break;
         }
         std::wstring error;if(!begin_rife_operation(state,false,&error,false,true))show_error(state.window,error);
         break;

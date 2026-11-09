@@ -23,3 +23,5 @@ CTestTestfile.cmake
 *.user
 *.log
 *.zip
+/rife-vulkan/
+**/__pycache__/

@@ -1,6 +1,7 @@
 ﻿param(
  [string]$Root=(Join-Path $env:LOCALAPPDATA 'ofxr-bridge/RIFE/runtime'),
- [switch]$Check,[string]$ResultJson,[string]$CrtSource,[string]$CacheRoot,[switch]$SkipTensorRT,[switch]$Reinstall,[switch]$UpdateOverlay
+ [switch]$Check,[string]$ResultJson,[string]$CrtSource,[string]$CacheRoot,[switch]$SkipTensorRT,[switch]$Reinstall,[switch]$UpdateOverlay,
+ [ValidateSet('nvidia','vulkan')][string]$Backend='nvidia'
 )
 $ErrorActionPreference='Stop'
 $runtimeRoot=[IO.Path]::GetFullPath($Root)
@@ -80,10 +81,16 @@ function Invoke-OwnedPython([string]$Python,[string[]]$Arguments,[int]$TimeoutMi
 try{
  $lock=Get-Content -LiteralPath (Join-Path $sourceRoot 'python/rife/runtime-lock.json') -Raw|ConvertFrom-Json
  Recover-Runtime
+ if(($Check -or $UpdateOverlay) -and (Test-Path -LiteralPath (Join-Path $runtimeRoot 'vulkan/backend.json'))){
+  $arguments=@('-I','-B',(Join-Path $PSScriptRoot 'install_rife_vulkan.py'),'--root',$runtimeRoot,'--package',$sourceRoot,'--result',$ResultJson,'--check')
+  if($UpdateOverlay){$arguments+='--update'}
+  $code=Invoke-OwnedPython (Join-Path $runtimeRoot 'python/python.exe') $arguments 180000 $false
+  exit $code
+ }
  if($Check -or $UpdateOverlay){
   $python=Join-Path $runtimeRoot 'python/python.exe'
   if(-not (Test-Path -LiteralPath $python)){
-   if(-not $UpdateOverlay -and -not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32/nvcuda.dll'))){Write-Result 'unsupported' 'No NVIDIA CUDA driver was found. This release supports NVIDIA only.';exit 12}
+   if(-not $UpdateOverlay -and -not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32/nvcuda.dll')) -and -not (Test-Path -LiteralPath (Join-Path $sourceRoot 'rife-vulkan/manifest.json'))){Write-Result 'unsupported' 'No NVIDIA CUDA driver was found and this package has no Radeon Vulkan backend.';exit 12}
    Write-Result 'missing' 'The portable RIFE runtime is not installed.';exit 10
   }
   $arguments=@('-I','-B',(Join-Path $sourceRoot 'tools/update_rife_overlay.py'),'--root',$runtimeRoot,'--package',$sourceRoot,'--result',$ResultJson)
@@ -94,7 +101,8 @@ try{
   if(-not (Test-Path -LiteralPath $ResultJson)){Write-Result 'repair' 'Portable Python could not start. RIFE needs repair.';exit 11}
   exit $code
  }
- if(-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32/nvcuda.dll'))){Write-Result 'unsupported' 'No NVIDIA CUDA driver was found. This release supports NVIDIA only.';exit 12}
+ if($Backend -eq 'nvidia' -and -not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32/nvcuda.dll'))){Write-Result 'unsupported' 'No NVIDIA CUDA driver was found. Choose Radeon Vulkan if available.';exit 12}
+ if($Backend -eq 'vulkan' -and -not (Test-Path -LiteralPath (Join-Path $sourceRoot 'rife-vulkan/manifest.json'))){throw 'This package has no Radeon Vulkan payload.'}
  $ownedCache=(-not $CacheRoot)
  if($Reinstall){
   if($Check){throw 'Reinstall and Check cannot be combined.'}
@@ -129,6 +137,7 @@ try{
   Expand-Archive -LiteralPath $cachePath -DestinationPath $bootstrap
   foreach($item in $lock.msvc_crt.files){Copy-Item -LiteralPath (Join-Path $CrtSource $item.name) -Destination (Join-Path $bootstrap $item.name)}
   $arguments=@('-I','-B',(Join-Path $PSScriptRoot 'install_rife_runtime.py'),'--root',$runtimeRoot,'--cache',$CacheRoot,'--crt-source',$CrtSource,'--result',$ResultJson)
+  $arguments+=@('--backend',$Backend)
   if($SkipTensorRT){$arguments+='--skip-tensorrt'}
   if($Reinstall){$arguments+='--reinstall'}
   $code=Invoke-OwnedPython (Join-Path $bootstrap 'python.exe') $arguments 7200000 $true

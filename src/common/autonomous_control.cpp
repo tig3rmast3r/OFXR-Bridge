@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 92501;
+constexpr std::uint32_t kAbi = 96201;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1298,7 +1298,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 }
                 const bool optimizing=rife && s.runtime.rife_optimizing;
                 if(optimizing){b.requested_ms=now;return;} // wait until completion, Stop/disconnect remain available
-                const bool rife_pending=rife && (!s.runtime.rife_execution_active || !s.runtime.rife_tensorrt ||
+                const bool rife_pending=rife && (!s.runtime.rife_execution_active || !(s.runtime.rife_tensorrt||s.runtime.rife_vulkan) ||
                     s.runtime.generation_state!=GenerationState::ready);
                 if(s.runtime.applied_revision!=b.revision || s.runtime.pending || quality_pending || pacing_pending || buffer_pending || rife_pending) {
                     if(rife_pending)std::snprintf(b.message,sizeof(b.message),"Waiting for current RIFE configuration and optimized output.");
@@ -1585,6 +1585,7 @@ std::string interface_status_text(const Snapshot& s,bool include_reconstruction)
         else if(r.rife_error==2)add("TensorRT unavailable; PyTorch fallback");
         else if(r.rife_error)add("TensorRT optimization failed; PyTorch fallback (see RIFECache build log)");
         else if(r.rife_optimizing)add("Optimizing, please wait");
+        else if(r.rife_vulkan)add("Vulkan RIFE (experimental)");
         else if(r.rife_tensorrt)add("TensorRT FP16");
     }
     if (r.shared_queue) add("Shared queue");

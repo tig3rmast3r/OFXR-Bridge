@@ -1,6 +1,8 @@
 # RIFE frame generation (nightly)
 
-RIFE is an experimental NVIDIA CUDA frame-generation route. Select **RIFE** in
+RIFE is an experimental frame-generation route with NVIDIA CUDA/TensorRT and
+an optional Radeon Vulkan backend. See [Radeon preparation and testing](RIFE_VULKAN.md).
+Select **RIFE** in
 the Frame generation menu, between OFXR and Hybrid. The existing OFXR default
 does not change when RIFE is installed.
 
@@ -8,8 +10,8 @@ RIFE estimates motion from colour images; it does not require the game's DLSS
 motion vectors or depth. Luke Ross **OSR/AFW** and **Neural Rendering** retain
 their own capture and model requirements when used alongside RIFE.
 
-The tray also offers **RIFE → Reinstall RIFE...** for a clean runtime/cache reset
-and **RIFE → Pre-compile TensorRT for found games...** to prepare the seven Quality
+The tray also offers **RIFE ⡂†’ Reinstall RIFE...** for a clean runtime/cache reset
+and **RIFE ⡂†’ Pre-compile TensorRT for found games...** to prepare the seven Quality
 presets using each game's last recorded resolution and eye layout. Open games
 once with V863 or newer to populate the list; diagnostics need not be enabled.
 See [offline preparation and progress](V863_RIFE_PRECOMPILE.md).
@@ -20,28 +22,36 @@ compatible engine caches. See [source updates](V864_RIFE_OVERLAY_UPDATE.md).
 
 ## Install or check RIFE
 
+The complete OFXR ZIP includes both installation choices in the tray dialog.
+No separate installer, runtime selector or edited folder setting is needed.
+The Radeon choice installs the Vulkan worker and its preparation tools in the
+same managed AppData location used by the tray and games.
+
 1. Extract the **complete** OFXR archive. Keep its `tools` and `python` folders
    beside `OFXRBridgeTray.exe`.
-2. Open the tray menu and choose **RIFE → Check RIFE...**. The tray remains responsive
+2. Open the tray menu and choose **RIFE ⡂†’ Check RIFE...**. The tray remains responsive
    while the check runs.
 3. If RIFE is missing or needs repair, confirm the installation. **NVIDIA** is
-   selected; **AMD Radeon (RDNA)** is disabled because that backend is not yet
-   available.
+   selected; **AMD Radeon - Vulkan (experimental)** is available when the package
+   includes its payload. Select it for Radeon; the complete V962 ZIP includes it.
+   Radeon starts with model 4.4 and prepares
+   device-specific Vulkan plans instead of TensorRT engines.
 4. A PowerShell window shows the installation progress. It needs no further
    keyboard input. Wait for the tray to report the result.
 5. Select **RIFE** in the settings and start with the default **4.4** model,
    **Medium** Quality and **2X** multiplier.
 
 The managed runtime is shared between OFXR builds and installed under
-**`%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`**. It uses about **8 GB** after
-installation and requires at least **14 GB free** for downloads and staging.
+**`%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`**. NVIDIA uses about **8 GB** after
+installation and requires **14 GB free** during setup. Radeon Vulkan requires
+at least **2 GB free** for setup.
 Optimization caches use additional space and can grow as you change settings.
 An Internet connection is needed for the initial installation. No administrator
 elevation, global Python/pip installation, PATH change or driver installation
 is performed.
 
 **Check RIFE** verifies the pinned dependencies, model and adapter files, and
-runs a small actual RIFE 4.4 CUDA inference. A ready result reports the GPU and
+runs a small actual RIFE 4.4 inference on the installed CUDA or Vulkan backend. A ready result reports the GPU and
 available backend. No package, development or ancestor directories are searched. If the AppData
 runtime is absent, the check offers installation even if another copy exists.
 
@@ -49,23 +59,6 @@ If the GPU is unsupported, busy or out of memory, or the check times out, the
 tray reports the problem without offering automatic reinstallation. Close GPU
 applications and retry a busy check. A repair offer is reserved for a missing
 or damaged runtime. The result includes the log path for diagnosing failures.
-
-## Explicit developer override
-
-Normal installations use AppData only. For development, a runtime may be selected
-by manually adding an absolute path to the global `%LOCALAPPDATA%\ofxr-bridge\ofxr-bridge.ini`:
-
-```ini
-[tray]
-rife_runtime_dir=D:/RifeDevelopment/runtime
-```
-
-The tray preserves this manual value and copies it into the generated runtime
-INI's `[ofxr]` section. Remove or clear the key to restore AppData. An invalid
-explicit path fails instead of looking elsewhere. Restart the tray and game
-after changing it. This has no menu control and is not saved in game profiles.
-**Check RIFE** always checks/installs the AppData runtime, including when this
-developer override is present. No automatic runtime lookup is performed.
 
 ## Models, Quality and multipliers
 

@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "ncnn": "00357e2f20ea2f8245276c2fa1e443e15a4f6bfa",
+  "glslang": "780b6a209132dc74e99458f62ebe5fa7e57c41cf",
+  "cpu_torch": {
+    "path": "downloads/torch-2.9.1+cpu-cp312-cp312-win_amd64.whl",
+    "url": "https://download-r2.pytorch.org/whl/cpu/torch-2.9.1%2Bcpu-cp312-cp312-win_amd64.whl",
+    "sha256": "a4e06b4f441675d26b462123c8a83e77c55f1ec8ebc081203be2db1ea8054add",
+    "bytes": 110856378
+  },
+  "pnnx": {
+    "url": "https://github.com/pnnx/pnnx/releases/download/20261020/pnnx-20261020-windows.zip",
+    "sha256": "e4f91348a399a0060a6e7dd323d40427e1cbdcab67469cf1904b5d09b23606c5",
+    "bytes": 18244293
+  }
+}

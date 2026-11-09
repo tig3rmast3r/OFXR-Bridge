@@ -483,7 +483,7 @@ constexpr std::array<Card,5> kRoutes{{
     {"Hybrid","Needs DLSS",false,{"Hybrid","Game motion vectors plus optical flow. If game guides are unavailable or rejected, it uses optical flow alone."}},
     {"FSR 3.1","Needs DLSS",false,{"FSR 3.1","Uses game motion vectors and depth, so the game must run DLSS. Slow."}},
     {"DLSS-G","Needs DLSS",false,{"DLSS-G","The slowest route. Uses game motion vectors and depth, and needs compatible NVIDIA hardware and runtime."}},
-    {"RIFE","Experimental",false,{"RIFE","Experimental portable Python/CUDA, NVIDIA only. RIFE 4.4 processes both eyes together, with automatic TensorRT optimization. Requires the RIFE runtime installed in AppData."}}}};
+    {"RIFE","Experimental",false,{"RIFE","NVIDIA uses CUDA/TensorRT. Radeon Vulkan uses RIFE 4.4 with device-specific preparation. Requires the matching RIFE runtime installed in AppData. Radeon hardware validation is pending."}}}};
 constexpr Card kEngineFidelity{"FidelityFX","Low latency, medium compat",false,{"FidelityFX","Low latency, medium compatibility. Offers Flow resolution only."}};
 constexpr Card kEngine021{"Nvidia 0.2.1","Low latency, low compat",false,{"Nvidia 0.2.1","Low latency, low compatibility."}};
 constexpr Card kEngine0213{"Nvidia 0.2.13","Medium latency, high compat",false,{"Nvidia 0.2.13","Medium latency, high compatibility. Stops at 3X."}};

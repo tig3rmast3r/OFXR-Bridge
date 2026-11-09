@@ -1,9 +1,10 @@
 param(
     [Parameter(Mandatory=$true)][string]$BuildDir,
     [Parameter(Mandatory=$true)][string]$OutDir,
-    [int]$Version=961,
+    [int]$Version=962,
     [string]$SourceDir,
-    [string]$CrtSource
+    [string]$CrtSource,
+    [switch]$StandaloneInstaller
 )
 $ErrorActionPreference='Stop'
 if(-not $SourceDir){$SourceDir=Split-Path -Parent $PSScriptRoot}
@@ -13,6 +14,30 @@ $OutDir=[IO.Path]::GetFullPath($OutDir)
 $release=Join-Path $BuildDir 'Release'
 if(-not (Test-Path -LiteralPath (Join-Path $release 'OFXRBridgeTray.exe'))){$release=$BuildDir}
 function Hash([string]$Path){return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()}
+function Assert-RifeVulkanPayload([string]$Root){
+    $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd('\','/')
+    $payload=Join-Path $rootPath 'rife-vulkan'
+    $manifest=Join-Path $payload 'manifest.json'
+    if(-not (Test-Path -LiteralPath $manifest)){throw 'The integrated Radeon installer requires a sealed rife-vulkan payload. Build it before packaging.'}
+    $data=Get-Content -LiteralPath $manifest -Raw|ConvertFrom-Json
+    if($data.schema -ne 1 -or $data.backend -ne 'vulkan' -or @($data.source.PSObject.Properties).Count -eq 0){throw 'Invalid Radeon payload/source manifest.'}
+    foreach($required in @('native/rife_vulkan/worker.cpp','native/rife_vulkan/fused_warp.hpp','native/rife_vulkan/CMakeLists.txt','tools/prepare_rife_vulkan_deps.py','tools/vulkan_compile.py','tools/install_rife_vulkan.py')){
+        if($null -eq $data.source.PSObject.Properties[$required]){throw ('Missing Radeon source pin: '+$required)}
+    }
+    foreach($required in @('dependencies.json','ofxr_rife_vulkan.exe','pnnx.exe')){
+        if($null -eq $data.files.PSObject.Properties[$required]){throw ('Missing Radeon payload pin: '+$required)}
+    }
+    foreach($item in $data.files.PSObject.Properties){
+        $path=[IO.Path]::GetFullPath((Join-Path $payload $item.Name))
+        if(-not $path.StartsWith($payload+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $path) -or (Hash $path) -ne $item.Value){throw ('Radeon payload integrity mismatch: '+$item.Name)}
+    }
+    foreach($item in $data.source.PSObject.Properties){
+        $path=[IO.Path]::GetFullPath((Join-Path $rootPath $item.Name))
+        if(-not $path.StartsWith($rootPath+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $path) -or (Hash $path) -ne $item.Value){throw ('Radeon source changed; rebuild/reseal its payload before packaging: '+$item.Name)}
+    }
+    if((Hash (Join-Path $rootPath 'native/rife_vulkan/dependencies.json')) -ne $data.files.'dependencies.json'){throw 'Radeon dependency pins changed; reseal the payload before packaging.'}
+    return $data
+}
 function NormalizedHash([string]$Path){
     $text=[Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($Path)).Replace("`r`n","`n")
     $algorithm=[Security.Cryptography.SHA256]::Create()
@@ -30,6 +55,7 @@ function Require-X64([string]$Path){
     $offset=[BitConverter]::ToInt32($bytes,60)
     if($offset -lt 0 -or $offset+6 -gt $bytes.Length -or [BitConverter]::ToUInt32($bytes,$offset) -ne 0x4550 -or [BitConverter]::ToUInt16($bytes,$offset+4) -ne 0x8664){throw "Not a Windows x64 binary: $Path"}
 }
+$vulkanManifest=Assert-RifeVulkanPayload $SourceDir
 $lockPath=Join-Path $SourceDir 'python/rife/runtime-lock.json'
 $manifestPath=Join-Path $SourceDir 'python/rife/overlay-manifest.json'
 $lock=Get-Content -LiteralPath $lockPath -Raw|ConvertFrom-Json
@@ -94,17 +120,28 @@ foreach($item in $lock.msvc_crt.files){
 }
 $crtLicense=Join-Path $SourceDir 'licenses/MSVC_CRT_LICENSE.rtf'
 if((NormalizedHash $crtLicense) -ne '8facd2af82a812f1107b5ef0362b28ff0648ff8d8eb237e888a9b1a0ed21847c'){throw 'The pinned Microsoft redistributable license is missing or modified.'}
-$documents=@('README.md','LICENSE','licenses/ATTRIBUTION.md','licenses/MSVC_CRT_LICENSE.rtf','docs/RIFE.md','docs/BUILDING_RIFE.md','docs/V849_NR_CAPTURE.md','docs/V850_MSFS_NR.md','docs/V851_NR_STARTUP.md','docs/V852_NR_COLOUR.md','docs/V862_RIFE_TIMEOUT.md','docs/V863_RIFE_PRECOMPILE.md','docs/V864_RIFE_OVERLAY_UPDATE.md','docs/V865_RIFE_PIPELINE.md','docs/V866_RIFE_OUTPUT_BANKS.md','docs/V867_RIFE_INPUT_TIMING.md','docs/V868_RIFE_FRACTION_BATCH.md','docs/V886_D11_FG_CAPTURE.md','docs/V890_OSR_VISIBLE_WARP.md','docs/V891_OSR_DISOCCLUSION_DEPTH.md','docs/OSR_HISTORY.md','docs/V892_BENCHMARK_MEMORY.md','docs/V893_UI_AND_INVENTORY.md','docs/V894_UEVR_PANEL_LIFETIME.md','docs/V895_UEVR_AUXILIARY_BUDGET.md','docs/V896_SHARED_UI_ATLAS.md','docs/V897_AUTOMATIC_UI_BUDGET.md','docs/V898_BENCHMARK_RECONFIGURE.md','docs/V899_RIFE_READINESS_RECOVERY.md','docs/V900_CPU_METER.md','docs/V901_PROJECTION_CONTINUITY.md','docs/V902_OSR_PREVIOUS_BASE.md','docs/V903_OSR_V889_ONLY.md','docs/V904_OSR_CURRENT_MOTION.md','docs/V905_OSR_INTERLEAVED_GATE.md','docs/V906_OSR_CURRENT_SCREEN_MOTION.md','docs/V907_OSR_TRUSTED_EDGE_MOTION.md','docs/V908_LUKE_RIFE_ASYNC.md','docs/V909_GTA_LUKE_LAYOUT.md','docs/V910_OSR_NATIVE_ADJACENT.md','docs/V911_OSR_ADJACENT_HEAD_MOTION.md','docs/V912_GTA_OSR.md','docs/V913_GTA_ORIGIN_RGB_COST.md','docs/V914_BASIC_DEFAULTS.md','docs/V915_HFW_LUKE_LAYOUT.md','docs/V916_RIFE_PRECOMPILE_PROGRESS.md','docs/V917_HFW_PRIVATE_CLOCK.md','docs/V918_LUKE_MARKER_RECOVERY.md','docs/V919_GTA_CABIN_HISTORY.md','docs/V920_OSR_EYE_CANVAS.md','docs/V921_BENCHMARK_STABILITY.md','docs/V922_BASIC_FLOW_TESTS.md','docs/V923_OFR_TRIAL.md','docs/V924_AER_FRAMEGEN.md','docs/V925_AER_CONTINUITY.md','docs/V926_RDR2_LUKE_VULKAN.md','docs/V927_GTA_RUNTIME_DISCOVERY.md','docs/V928_CYBERPUNK_OSR_MOTION.md','docs/V929_RDR2_OSR_MOTION.md','docs/RDR2_MOTION_TIMING_TRIAL.md','docs/RDR2_EDGE_CAMERA_PHASE_TRIAL.md','scripts/Set-CrashDebug.ps1','docs/V927_AER_COST.md','docs/V928_AER_GUIDES.md','docs/V929_AER_NATIVE_TIMING.md','docs/V930_SWITCH_RECOVERY.md','docs/V960_NIGHTLY_ALIGNMENT.md','docs/V961_RIFE_NATIVE_PACING.md')
+$documents=@('README.md','LICENSE','licenses/ATTRIBUTION.md','licenses/MSVC_CRT_LICENSE.rtf','docs/RIFE.md','docs/BUILDING_RIFE.md','docs/V849_NR_CAPTURE.md','docs/V850_MSFS_NR.md','docs/V851_NR_STARTUP.md','docs/V852_NR_COLOUR.md','docs/V862_RIFE_TIMEOUT.md','docs/V863_RIFE_PRECOMPILE.md','docs/V864_RIFE_OVERLAY_UPDATE.md','docs/V865_RIFE_PIPELINE.md','docs/V866_RIFE_OUTPUT_BANKS.md','docs/V867_RIFE_INPUT_TIMING.md','docs/V868_RIFE_FRACTION_BATCH.md','docs/V886_D11_FG_CAPTURE.md','docs/V890_OSR_VISIBLE_WARP.md','docs/V891_OSR_DISOCCLUSION_DEPTH.md','docs/OSR_HISTORY.md','docs/V892_BENCHMARK_MEMORY.md','docs/V893_UI_AND_INVENTORY.md','docs/V894_UEVR_PANEL_LIFETIME.md','docs/V895_UEVR_AUXILIARY_BUDGET.md','docs/V896_SHARED_UI_ATLAS.md','docs/V897_AUTOMATIC_UI_BUDGET.md','docs/V898_BENCHMARK_RECONFIGURE.md','docs/V899_RIFE_READINESS_RECOVERY.md','docs/V900_CPU_METER.md','docs/V901_PROJECTION_CONTINUITY.md','docs/V902_OSR_PREVIOUS_BASE.md','docs/V903_OSR_V889_ONLY.md','docs/V904_OSR_CURRENT_MOTION.md','docs/V905_OSR_INTERLEAVED_GATE.md','docs/V906_OSR_CURRENT_SCREEN_MOTION.md','docs/V907_OSR_TRUSTED_EDGE_MOTION.md','docs/V908_LUKE_RIFE_ASYNC.md','docs/V909_GTA_LUKE_LAYOUT.md','docs/V910_OSR_NATIVE_ADJACENT.md','docs/V911_OSR_ADJACENT_HEAD_MOTION.md','docs/V912_GTA_OSR.md','docs/V913_GTA_ORIGIN_RGB_COST.md','docs/V914_BASIC_DEFAULTS.md','docs/V915_HFW_LUKE_LAYOUT.md','docs/V916_RIFE_PRECOMPILE_PROGRESS.md','docs/V917_HFW_PRIVATE_CLOCK.md','docs/V918_LUKE_MARKER_RECOVERY.md','docs/V919_GTA_CABIN_HISTORY.md','docs/V920_OSR_EYE_CANVAS.md','docs/V921_BENCHMARK_STABILITY.md','docs/V922_BASIC_FLOW_TESTS.md','docs/V923_OFR_TRIAL.md','docs/V924_AER_FRAMEGEN.md','docs/V925_AER_CONTINUITY.md','docs/V926_RDR2_LUKE_VULKAN.md','docs/V927_GTA_RUNTIME_DISCOVERY.md','docs/V928_CYBERPUNK_OSR_MOTION.md','docs/V929_RDR2_OSR_MOTION.md','docs/RDR2_MOTION_TIMING_TRIAL.md','docs/RDR2_EDGE_CAMERA_PHASE_TRIAL.md','scripts/Set-CrashDebug.ps1','docs/V927_AER_COST.md','docs/V928_AER_GUIDES.md','docs/V929_AER_NATIVE_TIMING.md','docs/V930_SWITCH_RECOVERY.md','docs/V960_NIGHTLY_ALIGNMENT.md','docs/V961_RIFE_NATIVE_PACING.md','docs/V962_RADEON_INTEGRATION.md')
 foreach($optional in @('CREDITS.md','THIRD_PARTY.md')){if(Test-Path -LiteralPath (Join-Path $SourceDir $optional)){$documents+=$optional}}
 $licenseRoot=Join-Path $SourceDir 'licenses'
 foreach($file in Get-ChildItem -LiteralPath $licenseRoot -Recurse -File){$documents+='licenses/'+$file.FullName.Substring($licenseRoot.Length+1).Replace('\','/')}
 $documents=@($documents|Sort-Object -Unique)
 $tools=@('tools/update_rife_overlay.py','tools/Precompile-Rife.ps1','tools/precompile_rife.py','tools/Inspect-NrCapture.py','tools/Setup-RifeRuntime.ps1','tools/prepare_rife_runtime.py','tools/install_rife_runtime.py','tools/build_rife_overlay_manifest.py')
+$tools+=@('tools/install_rife_vulkan.py','tools/vulkan_compile.py','tools/precompile_rife_vulkan.py','tools/Test-RifeVulkan.ps1','tools/test_rife_vulkan.py')
+$documents+='LEGGIMI-RADEON.txt'
+if($StandaloneInstaller){$tools+=@('tools/Install-RifeVulkan.ps1','Install-RIFE-Vulkan.cmd')}
+$documents+='docs/RIFE_VULKAN.md'
 foreach($relative in $documents+$tools){if(-not (Test-Path -LiteralPath (Join-Path $SourceDir $relative))){throw "Missing distribution source file: $relative"}}
 $name='OFXR-BRIDGE-0.3.3-v'+$Version
 $stage=Join-Path $OutDir $name
 $archive=Join-Path $OutDir ($name+'.zip')
 if((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $archive)){throw 'Existing package is preserved. Choose another empty output directory.'}
+$installerOutput=Join-Path $OutDir ('RIFE-Vulkan-Installer-V'+$Version)
+if($StandaloneInstaller -and ((Test-Path -LiteralPath $installerOutput) -or (Test-Path -LiteralPath ($installerOutput+'.zip')))){throw 'Existing standalone installer is preserved. Choose another empty output directory.'}
+$installerBuilder=Join-Path $SourceDir 'tools/package_rife_installer.py'
+if($StandaloneInstaller){
+    if(-not (Test-Path -LiteralPath $installerBuilder)){throw 'Missing shared standalone installer builder.'}
+    $buildPython=(Get-Command python -ErrorAction Stop).Source
+}
 [IO.Directory]::CreateDirectory($stage)|Out-Null
 foreach($relative in $binaries.Keys){Copy-Relative (Join-Path $release $binaries[$relative]) $relative $stage}
 foreach($provider in $providers.Keys){Copy-Relative (Join-Path (Join-Path $release 'ofxr') $provider) ('ofxr/'+$provider) $stage}
@@ -112,12 +149,27 @@ foreach($relative in $documents+$tools){Copy-Relative (Join-Path $SourceDir $rel
 Copy-Relative $manifestPath 'python/rife/overlay-manifest.json' $stage
 foreach($item in $overlayFiles){Copy-Relative (Join-Path $appRoot $item.Name) ('python/rife/'+$item.Name) $stage}
 foreach($item in $lock.msvc_crt.files){Copy-Relative (Join-Path $CrtSource $item.name) ('tools/rife-msvc-crt/'+$item.name) $stage}
+$vulkanPayload=Join-Path $SourceDir 'rife-vulkan'
+if(Test-Path -LiteralPath (Join-Path $vulkanPayload 'manifest.json')){
+    foreach($item in $vulkanManifest.files.PSObject.Properties){
+        $path=[IO.Path]::GetFullPath((Join-Path $vulkanPayload $item.Name))
+        if(-not $path.StartsWith($vulkanPayload+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Hash $path) -ne $item.Value){throw 'Radeon payload integrity mismatch.'}
+        Copy-Relative $path ('rife-vulkan/'+$item.Name) $stage
+    }
+    Copy-Relative (Join-Path $vulkanPayload 'manifest.json') 'rife-vulkan/manifest.json' $stage
+}
 $sourceCommit='unavailable (source archive)'
 if(Test-Path -LiteralPath (Join-Path $SourceDir '.git')){
     $sourceCommit=(& git -C $SourceDir rev-parse HEAD).Trim()
     if($LASTEXITCODE){throw 'Unable to identify the source commit.'}
 }
 $proof=[ordered]@{schema=1;version=$Version;source_commit=$sourceCommit;runtime_lock_sha256=(NormalizedHash $lockPath);overlay_sha256=(NormalizedHash $manifestPath);overlay_files=$overlayFiles.Count;crt_version=$lock.msvc_crt.version;crt_files=@($lock.msvc_crt.files).Count;crt_license_sha256=(Hash $crtLicense);crt_license_normalized_sha256=(NormalizedHash $crtLicense);providers=$providers;runtime_or_model_weights_bundled=$false;authenticode_signing='Package only already-built/signed binaries; this helper never signs or modifies executable bytes.'}
+$proof['integrated_vulkan_installer']=$true
+$proof['vulkan_source_verified']=$true
+$proof['vulkan_manifest_sha256']=Hash (Join-Path $vulkanPayload 'manifest.json')
+$proof['standalone_installer_from_same_stage']=[bool]$StandaloneInstaller
+$proof['managed_rife_destination']='%LOCALAPPDATA%/ofxr-bridge/RIFE/runtime'
+$proof['development_switch_tools_bundled']=$false
 [IO.File]::WriteAllText((Join-Path $stage 'BUILD_PROVENANCE.json'),($proof|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
 $files=@(Get-ChildItem -LiteralPath $stage -Recurse -File|Sort-Object FullName)
 $hashes=[ordered]@{}
@@ -155,3 +207,8 @@ $archiveHash=Hash $archive
 [IO.File]::WriteAllText(($archive+'.sha256'),($archiveHash+'  '+[IO.Path]::GetFileName($archive)+"`n"),[Text.Encoding]::ASCII)
 Write-Host ('Package verified: '+$archive)
 Write-Host ('SHA256: '+$archiveHash)
+if($StandaloneInstaller){
+    & $buildPython $installerBuilder --package $stage --output $installerOutput
+    if($LASTEXITCODE -ne 0){throw 'Standalone installer build failed; the sealed main package was preserved.'}
+    Write-Host 'Integrated and standalone Radeon installers were built from the same staged payload.'
+}else{Write-Host 'One complete OFXR ZIP; install NVIDIA or Radeon Vulkan from the tray dialog into managed AppData.'}

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.961.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.962.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1836,6 +1836,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             target_link_libraries(xrfg_rife_tensorrt_status_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
             set(XRFG_TEST_RIFE_RUNTIME "" CACHE PATH "Isolated portable RIFE runtime for integration tests")
             if(XRFG_TEST_RIFE_RUNTIME)
+                add_test(NAME xrfg_rife_vulkan_installer_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
+                    -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_vulkan_installer_tests.py")
+                add_test(NAME xrfg_rife_vulkan_precision_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
+                    -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_vulkan_precision_tests.py")
+                add_test(NAME xrfg_rife_vulkan_packaging_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
+                    -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_packaging_tests.py")
+                add_test(NAME xrfg_rife_runtime_switch_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
+                    -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_switch_tests.py")
                 add_test(NAME xrfg_rife_worker_lifetime_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"
                     -I -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/rife_worker_lifetime_tests.py")
                 add_test(NAME xrfg_rife_worker_memory_python COMMAND "${XRFG_TEST_RIFE_RUNTIME}/python/python.exe"

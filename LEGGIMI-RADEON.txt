@@ -1,0 +1,33 @@
+OFXR-BRIDGE V962 - TEST RIFE RADEON
+
+Inviare ed estrarre questa ZIP completa. Non occorre un secondo installer.
+
+1. Chiudere il gioco e le altre tray OFXR, poi avviare OFXRBridgeTray.exe.
+2. Dal menu della tray: RIFE -> Reinstall RIFE...
+   Se Check RIFE... propone gia' l'installazione, va bene anche quella finestra.
+3. Selezionare AMD Radeon - Vulkan (experimental), poi Install.
+4. Attendere il completamento nella finestra PowerShell e il risultato della tray.
+5. Selezionare RIFE come generatore; iniziare con modello 4.4, Medium e 2X.
+
+La destinazione e' automatica, per l'utente Windows corrente:
+%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime
+Non modificare INI o percorsi e non rinominare cartelle. Un eventuale runtime
+precedente viene conservato dall'installer Vulkan. Servono Internet per i download
+verificati e almeno 2 GB liberi per l'installazione, oltre allo spazio delle cache.
+Non servono Python globale, CUDA, TensorRT o strumenti di sviluppo per Radeon.
+
+Alla prima risoluzione/qualita' la preparazione puo' richiedere tempo: il gioco
+continua con immagini reali e RIFE riprende quando il profilo e' pronto.
+Dopo aver avviato una volta il gioco, RIFE -> Prepare Vulkan for found games...
+permette di prepararlo anche a gioco chiuso.
+
+Per riportare il test: attivare F9 prima di RIFE, attendere la preparazione,
+annotare GPU/driver, gioco, qualita'/moltiplicatore, FPS reali/generati e output.
+Inviare i log Nobody o del gioco provato da:
+%LOCALAPPDATA%\ofxr-bridge\RuntimeLayer\v962
+In caso di installazione fallita, inviare anche il risultato/log indicato dalla
+tray, sotto %LOCALAPPDATA%\ofxr-bridge\RIFE\status. Non ripetere rinominando cartelle.
+
+Questa build mantiene il pacing della V955 verificato su Nobody. La prova su
+Radeon serve a verificare installazione, compatibilita', immagini e prestazioni
+sulla GPU e sul driver del tester.

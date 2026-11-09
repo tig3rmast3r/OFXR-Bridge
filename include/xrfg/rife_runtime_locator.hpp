@@ -18,6 +18,9 @@ inline std::filesystem::path managed_rife_runtime() {
 }
 inline bool valid_rife_runtime(const std::filesystem::path& path) {
     std::error_code error;
+    if(path.is_absolute() &&
+        std::filesystem::is_regular_file(path/L"vulkan/backend.json",error) &&
+        std::filesystem::is_regular_file(path/L"vulkan/ofxr_rife_vulkan.exe",error))return true;
     return path.is_absolute() &&
         std::filesystem::is_regular_file(path/L"python/python.exe",error) &&
         std::filesystem::is_regular_file(path/L"app/worker.py",error);

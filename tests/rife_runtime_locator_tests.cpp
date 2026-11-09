@@ -27,6 +27,14 @@ int main(){
         seed(managed);
         {std::ofstream f(package/"ofxr_bridge.ini");f<<"[ofxr]\nrife_runtime_dir="<<shared.generic_string()<<"\n";}
         check(xrfg::staged_rife_runtime(package)==shared,"manual absolute developer override");
+        const auto native=root/"radeon runtime";
+        fs::create_directories(native/"vulkan");
+        std::ofstream(native/"vulkan/backend.json")<<"{}";
+        check(!xrfg::valid_rife_runtime(native),"a Radeon marker without its native worker is incomplete");
+        std::ofstream(native/"vulkan/ofxr_rife_vulkan.exe").put('x');
+        check(xrfg::valid_rife_runtime(native),"native Radeon worker is a valid runtime without CUDA Python");
+        {std::ofstream f(package/"ofxr_bridge.ini");f<<"[ofxr]\nrife_runtime_dir="<<native.generic_string()<<"\n";}
+        check(xrfg::staged_rife_runtime(package)==native,"explicit native Radeon runtime selection");
         {std::ofstream f(package/"ofxr_bridge.ini");f<<"[ofxr]\nrife_runtime_dir=../runtime/rife\n";}
         check(xrfg::staged_rife_runtime(package).empty(),"relative manual override must fail, never trigger search");
         {std::ofstream f(package/"ofxr_bridge.ini");f<<"[ofxr]\nrife_runtime_dir="<<(root/"missing").generic_string()<<"\n";}
