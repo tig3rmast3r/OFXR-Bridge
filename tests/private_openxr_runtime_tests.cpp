@@ -819,6 +819,22 @@ void stale_native_clock(bool d12,bool directed=true,bool clean=false) {
     check(f.wait_thread!=f.delivery_thread,"cycle renewal preserves the independent Wait worker");
     std::puts(d12?"D12 stale native clock renewal retains all six exact FIFO images PASS":"D11 stale native clock renewal retains all six exact FIFO images PASS");
 }
+void clean_bypass_admission(bool d12) {
+    Fixture f(d12,true,{},true);f.throttled=false;
+    auto chain=f.make_chain();f.transport->set_clean_bypass(true);
+    f.write(chain,91);f.begin_virtual();xr_ok(f.submit(chain,1),"clean first input");f.wait_entered();
+    auto next=std::async(std::launch::async,[&]{XrFrameState prediction{XR_TYPE_FRAME_STATE};
+        return f.transport->wait_frame(nullptr,&prediction);});
+    const bool blocked=next.wait_for(40ms)==std::future_status::timeout;
+    f.unblock();check(next.wait_for(2s)==std::future_status::ready,"native delivery releases next clean Wait");
+    xr_ok(next.get(),"clean Wait after previous native output");
+    xr_ok(f.transport->begin_frame(nullptr),"clean second Begin");f.write(chain,92);
+    xr_ok(f.submit(chain,2),"clean second input");f.wait_count(2);
+    xr_ok(f.transport->drain(),"clean admission drain");f.transport->stop();
+    check(blocked,"all-off backpressure belongs before next game render, not a full End FIFO");
+    check(f.pixels==std::vector<unsigned>({91,92}),"clean admission keeps exact FIFO images");
+    check(!f.cycle_waited && !f.cycle_begun,"clean admission balances native cycles");
+}
 void clean_bypass_roundtrip(bool d12) {
     Fixture f(d12,true,{},true);f.unblock();f.throttled=false;
     auto chain=f.make_chain();std::vector<unsigned> expected;
@@ -1596,7 +1612,7 @@ void queue_priority_policy() {
 }
 }
 #include "private_overlay_destroy_fixture.inc"
-int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
+int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
 if(argc>1 && std::string_view(argv[1])=="stalled-renewal"){
     for(bool d12:{true,false})for(bool directed:{true,false})stalled_native_renewal(d12,directed,0);

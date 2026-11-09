@@ -2039,6 +2039,8 @@ void log_benchmark_configuration(SessionState& state) noexcept {
         (s.pacing_mode==1 ? 1ULL << 40 : 0ULL) | (std::uint64_t(s.pacing_mode)<<42) | (single_director_pacing(state) ? 1ULL << 41 : 0ULL) |
         (state.private_runtime ? (1ULL<<45) | (state.private_runtime->buffer_capacity()>=3 ? 1ULL<<44:0ULL):0ULL) |
         (s.increase_buffer ? 1ULL<<46:0ULL) |
+        (s.ofr && s.enabled ? 1ULL<<48:0ULL) | (s.ofr_swap ? 1ULL<<49:0ULL) |
+        (state.private_runtime && state.private_runtime->clean_bypass_enabled() ? 1ULL<<50:0ULL) |
         (xrfg::autonomous::benchmark_active(control.benchmark) ? (1ULL<<24) | (std::uint64_t(control.benchmark.index)<<25) : 0ULL);
     logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, control.revision, bits,
         std::uint64_t(s.preset) | (std::uint64_t(s.scale) << 8) | (std::uint64_t(s.native_scale) << 16));
@@ -2755,6 +2757,22 @@ template <typename Function>
 #include "private_runtime_endpoint.inc"
 
 // HFW has more application XR cycles than original AER source productions.
+bool early_source_capture(const SwapchainState& chain) noexcept {
+    const auto& state=*chain.session;
+    if(state.nvidia_options.rife_model<0 || chain.composition_referenced || !chain.d3d12_history ||
+        chain.bridge || chain.vulkan_bridge || !chain.frame_generation)return false;
+    const auto& generation=*chain.frame_generation;
+    const bool native=state.graphics_binding==SessionGraphicsBinding::d3d12 &&
+        !state.luke_afw_enabled && !generation.d3d11_interop;
+    // Raw Luke AER uses the same three-slot, leased D12 colour history. Its
+    // isolated interop lane protects ingress/output reuse with GPU fences.
+    // Post-AFW inputs and shared interop queues retain their strict handoff.
+    const bool luke=state.nvidia_options.ofr && state.luke_afw_enabled &&
+        state.graphics_binding==SessionGraphicsBinding::d3d11 &&
+        generation.d3d11_interop && generation.isolated_luke_synthesis;
+    return native || luke;
+}
+
 void configure_session_guide_capture(const SessionState& state) {
     // Plain Luke OFXR consumes the released XR colour. With AFW off it must
     // not depend on a successful SR capture, colour barcode or native camera.
@@ -8802,16 +8820,10 @@ XrResult release_swapchain_with_identity(
     }
     if (worker_source && !afw_producer &&
         (!state->session->luke_fresh_only || (state->session->luke_source_filter_armed && !state->session->afw_only && temporal_generation_requested()))) {
-        // Only ordinary native D12 color captures use this early handoff.
-        // Bridges, OSR/AFW, shared composition inputs and other backends retain
-        // their existing ownership gates.
+        // One capture per source and owned worker epoch, never an extra job.
         bool overlap=false;
         {std::scoped_lock lock(state->mutex);
-            overlap=state->session->nvidia_options.rife_model>=0 &&
-                state->session->graphics_binding==SessionGraphicsBinding::d3d12 &&
-                !state->session->luke_afw_enabled && !state->composition_referenced &&
-                state->d3d12_history && !state->bridge && !state->vulkan_bridge &&
-                state->frame_generation && !state->frame_generation->d3d11_interop;}
+            overlap=early_source_capture(*state);}
         const XrResult worker_ready = wait_for_synthesis_handoff(state->session,overlap?state.get():nullptr);
         if (XR_FAILED(worker_ready)) return worker_ready;
     }
@@ -13899,13 +13911,17 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
             // Their consumer leases/fences protect the old history; the third
             // history slot can capture C while the worker finishes A/B. Keep
             // synthesis_busy set: EndFrame still admits only one complete job.
+            const bool luke_aer=state->nvidia_options.ofr && state->luke_afw_enabled &&
+                state->graphics_binding==SessionGraphicsBinding::d3d11;
             if(state->nvidia_options.rife_model>=0 &&
-                state->graphics_binding==SessionGraphicsBinding::d3d12 && !state->luke_afw_enabled &&
+                ((state->graphics_binding==SessionGraphicsBinding::d3d12 && !state->luke_afw_enabled) || luke_aer) &&
                 !job->post_afw_frame && prepared.kind!=PreparedGenerationKind::none && !prepared.resources.empty()) {
-                const bool owned=std::all_of(prepared.resources.begin(),prepared.resources.end(),[](const auto& resource){
+                const bool owned=std::all_of(prepared.resources.begin(),prepared.resources.end(),[&](const auto& resource){
                     const auto& g=resource.generation;
                     return g.worker_generation && g.worker_generation->synthesizer &&
-                        !g.worker_generation->d3d11_interop && g.worker_fence && g.worker_fence_value;
+                        (!g.worker_generation->d3d11_interop ||
+                         (luke_aer && g.worker_generation->isolated_luke_synthesis)) &&
+                        g.worker_fence && g.worker_fence_value;
                 });
                 if(owned){
                     {std::scoped_lock lock(state->presenter_mutex);state->synthesis_capture_ready=true;}

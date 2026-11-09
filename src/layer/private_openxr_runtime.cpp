@@ -1506,6 +1506,16 @@ std::size_t PrivateOpenXrRuntime::buffer_capacity() const noexcept {
 }
 XrResult PrivateOpenXrRuntime::wait_frame(const XrFrameWaitInfo* info,XrFrameState* output) {
     if(!valid(info,XR_TYPE_FRAME_WAIT_INFO) || !output || output->type!=XR_TYPE_FRAME_STATE || output->next)return XR_ERROR_VALIDATION_FAILURE;
+    // With no image effects, apply backpressure before the next game render,
+    // rather than letting virtual Wait run ahead until End fills the FIFO.
+    // An accepted packet keeps its native owner and is never cancelled here.
+    {
+        auto& s=*impl_;std::unique_lock lock(s.mutex);
+        s.changed.wait(lock,[&]{return s.stopping || XR_FAILED(s.failure) ||
+            !s.running || !s.clean_bypass.load() || s.pending==0;});
+        if(XR_FAILED(s.failure))return s.failure;
+        if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
+    }
     auto result=predict_frame(output);if(XR_FAILED(result))return result;
     std::scoped_lock lock(impl_->mutex);++impl_->waits;return result;
 }

@@ -348,6 +348,22 @@ int main(int argc,char** argv) {
         auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
         XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         auto left=std::make_shared<SwapchainState>(state,info),right=std::make_shared<SwapchainState>(state,info);
+        // The production admission predicate must include leased raw Luke AER,
+        // while rejecting shared ingress, reconstructed inputs and auxiliaries.
+        state->nvidia_options.rife_model=0;state->nvidia_options.ofr=true;
+        state->graphics_binding=SessionGraphicsBinding::d3d11;state->luke_afw_enabled=true;
+        left->d3d12_history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+        left->frame_generation=std::make_shared<FrameGenerationSwapchainState>();
+        auto& generation=*left->frame_generation;
+        generation.d3d11_interop=std::make_shared<xrfg::D3D11D3D12SwapchainInterop>();
+        check(!early_source_capture(*left),"shared Luke interop retains strict completion");
+        generation.isolated_luke_synthesis=true;
+        check(early_source_capture(*left),"isolated raw Luke AER can capture after owned-input signal");
+        state->nvidia_options.ofr=false;
+        check(!early_source_capture(*left),"ordinary Luke/post-AFW path retains strict completion");
+        state->nvidia_options.ofr=true;left->composition_referenced=true;
+        check(!early_source_capture(*left),"shared auxiliary layer cannot consume early source credit");
+        left->composition_referenced=false;
         state->three_slot_director=true;state->synthesis_busy=true;state->synthesis_capture_sequence=1;
         auto a=std::async(std::launch::async,[&]{return wait_for_synthesis_handoff(state,left.get());});
         check(a.wait_for(30ms)==std::future_status::timeout,"capture cannot race source snapshot/lease acquisition");
