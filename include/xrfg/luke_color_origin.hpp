@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -478,11 +479,18 @@ HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
     DWORD timeout_ms = 250) noexcept;
 // Two independently decoded colors in one submission/fence/map. The return
 // value covers shared transport; per-eye results retain missing/ambiguous errors.
+struct LukeColorOriginReadResult;
 struct LukeColorOriginReadReceipt {
     Microsoft::WRL::ComPtr<ID3D12Fence> fence;
     std::uint64_t value{};
     bool submitted{};
+    std::shared_ptr<LukeColorOriginReadResult> pending;
 };
+// A timed-out submission retains its exact ROI. Polling never submits a new
+// copy or attributes an older readback to newer colour resources.
+HRESULT poll_luke_color_origin_pair(const LukeColorOriginReadReceipt& receipt,
+    std::array<std::uint32_t,2>& tokens,std::array<HRESULT,2>& results,
+    std::array<bool,2>* nonblack=nullptr) noexcept;
 HRESULT read_luke_color_origin_pair(ID3D12CommandQueue* queue,
     const std::array<ID3D12Resource*, 2>& colors,
     std::array<std::uint32_t, 2>& tokens, std::array<HRESULT, 2>& results,

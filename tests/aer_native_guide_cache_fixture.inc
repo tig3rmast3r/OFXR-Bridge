@@ -55,6 +55,19 @@ int aer_native_guide_cache_test() {
     check(!aer_native_same_eye_history(current),"adjacent-eye N1 vectors cannot enter raw same-eye native FG");
     current.raw_motion_native_span=2;
     check(aer_native_same_eye_history(current),"exact producer-owned same-eye history retained");
+    current.raw_motion_native_span=1;current.publication=21;previous->publication=19;
+    auto middle=std::make_shared<xrfg::DlssMotionVectorFrame>();
+    middle->stream=4;middle->epoch=3;middle->serial=middle->publication=20;
+    middle->raw_motion_native_span=1;middle->raw_motion_native_span_confirmed=true;
+    current.previous_opposite_guide=middle;
+    check(aer_native_same_eye_history(current),"confirmed N1 traverses exact middle publication before same-eye FG");
+    ++middle->publication;
+    check(!aer_native_same_eye_history(current),"N1 composition rejects a missing middle publication");
+    --middle->publication;middle->epoch=4;
+    check(!aer_native_same_eye_history(current),"N1 composition cannot cross a producer reset");
+    middle->epoch=3;middle->raw_motion_native_span_confirmed=false;
+    check(!aer_native_same_eye_history(current),"unobserved N1 span cannot authorize forced composition");
+    current.previous_opposite_guide.reset();current.raw_motion_native_span=2;
     previous->stream=5;
     check(!aer_native_same_eye_history(current),"opposite/other-stream history cannot authorize native AER");
     previous->stream=4;previous->epoch=4;
@@ -77,5 +90,96 @@ int aer_native_guide_cache_test() {
     session->menu_enabled=false;
     check(!aer_native_guides_requested(*session),"all-off path performs no native AER marker work");
     std::puts("AER native source cache, held reuse, exact same-eye history and route gating PASS");
+    return 0;
+}
+
+
+int aer_native_guide_join_test() {
+    Fixture f(true);f.transport->stop();f.transport.reset();
+    constexpr UINT width=800,height=128;
+    const auto texture=[&](DXGI_FORMAT format) {
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        d.Width=width;d.Height=height;d.DepthOrArraySize=d.MipLevels=d.SampleDesc.Count=1;d.Format=format;
+        ComPtr<ID3D12Resource> out;
+        ok(f.device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,
+            D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&out)),"join texture");return out;
+    };
+    auto motion=texture(DXGI_FORMAT_R32G32_FLOAT),depth=texture(DXGI_FORMAT_R32_FLOAT);
+    std::array<ComPtr<ID3D12Resource>,2> colors{texture(DXGI_FORMAT_R8G8B8A8_UNORM),texture(DXGI_FORMAT_R8G8B8A8_UNORM)};
+    auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
+    state->d3d12_device=f.device12;state->d3d12_queue=f.queue;
+    state->menu_enabled=state->luke_afw_enabled=state->dlss_motion_vectors=true;
+    state->nvidia_options.ofr=true;state->nvidia_options.rife_model=-1;
+    state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::fsr3;
+    std::array<std::shared_ptr<SwapchainState>,2> chains;
+    std::array<ProjectionResourceMapping,2> mappings;
+    ProjectionSnapshot snapshot;ProjectionLayerSnapshot projection;
+    for(unsigned eye=0;eye<2;++eye) {
+        XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        info.width=width;info.height=height;info.arraySize=info.faceCount=info.mipCount=info.sampleCount=1;
+        auto& chain=chains[eye];chain=std::make_shared<SwapchainState>(state,info);
+        chain->handle=reinterpret_cast<XrSwapchain>(0x9290+eye);
+        chain->d3d12_history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+        ID3D12Resource* source[]{colors[eye].Get()};
+        ok(chain->d3d12_history->initialize(f.device12.Get(),f.queue.Get(),source,D3D12_RESOURCE_STATE_COMMON),"join history");
+        chain->last_released_index=0;
+        XrCompositionLayerProjectionView view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        view.subImage.swapchain=chain->handle;view.subImage.imageRect.extent={width,height};
+        projection.views.push_back(view);
+        mappings[eye].application_swapchain=chain->handle;mappings[eye].views.push_back({0,eye});
+        std::scoped_lock lock(g_state_mutex);g_swapchains[chain->handle]=chain;
+    }
+    struct Cleanup {
+        std::array<std::shared_ptr<SwapchainState>,2>& chains;
+        ~Cleanup(){xrfg::configure_dlss_motion_vector_tracking(false);xrfg::retire_disabled_dlss_motion_vector_resources();
+            std::scoped_lock lock(g_state_mutex);for(const auto& chain:chains)g_swapchains.erase(chain->handle);}
+    } cleanup{chains};
+    snapshot.layers.push_back(std::move(projection));
+    xrfg::configure_luke_color_origin_extent(width,height);
+    for(unsigned span:{2U,1U}) {
+        xrfg::configure_dlss_motion_vector_tracking(false);xrfg::retire_disabled_dlss_motion_vector_resources();
+        xrfg::configure_dlss_motion_vector_tracking(true);state->aer_native_guide_cache.reset();
+        std::array<std::uint32_t,2> expected{};
+        for(unsigned n=1;n<=8;++n) {
+            const unsigned eye=n%2;
+            ComPtr<ID3D12GraphicsCommandList> recorded;
+            f.commands([&](ID3D12GraphicsCommandList* list) {
+                recorded=list;xrfg::DlssMotionVectorPublication p;
+                p.stream=92900+span;p.output=colors[eye].Get();p.motion_vectors=motion.Get();p.depth=depth.Get();
+                p.producer_queue=f.queue.Get();p.producer_command_list=list;
+                p.output_width=p.motion_width=p.depth_width=width;p.output_height=p.motion_height=p.depth_height=height;
+                p.resource_state=p.depth_resource_state=D3D12_RESOURCE_STATE_COMMON;
+                p.protect_snapshot_lifetime=true;p.raw_motion_native_span=span;p.raw_motion_native_span_confirmed=true;
+                auto frame=xrfg::publish_dlss_motion_vectors(p);check(frame && frame->color_origin_token,"join protected native publication");
+                expected[eye]=frame->color_origin_token;
+                ok(xrfg::mark_luke_color_origin(list,colors[eye].Get(),expected[eye],D3D12_RESOURCE_STATE_COMMON,
+                    f.device12.Get()),"join exact colour CRC");
+            });
+            ID3D12CommandList* lists[]{recorded.Get()};xrfg::report_dlss_motion_vector_submission(f.queue.Get(),1,lists);
+            xrfg::D3D12HistoryCaptureTicket capture;
+            ok(chains[eye]->d3d12_history->capture(0,&capture),"join release-bound capture");
+            ok(chains[eye]->d3d12_history->commit(capture),"join commit capture");
+            chains[eye]->last_released_capture=capture;
+            if(n<4)continue;
+            record_projection_capture_order(snapshot,mappings);f.gpu_wait();
+            // Exact captured inputs and guide receipts are already complete.
+            // A newer unrelated ingress wait must not block the marker reader.
+            ComPtr<ID3D12Fence> future;
+            ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&future)),"join future ingress gate");
+            struct Unblock {ComPtr<ID3D12Fence> fence;~Unblock(){fence->Signal(1);}} unblock{future};
+            ok(f.queue->Wait(future.Get(),1),"hold unrelated future ingress");
+            check(refresh_aer_native_guides(state,snapshot,mappings)==S_OK,"actual native AER colour-token join did not attach both eyes");
+            check(state->aer_native_guide_cache->read_queue.Get()!=f.queue.Get(),"join reused the stalled ingress queue");
+            for(unsigned e=0;e<2;++e) {
+                auto guides=chains[e]->last_released_motion_vectors;
+                check(guides && guides->resolved_eye==int(e) && guides->eye_count==1 && guides->eyes[0] &&
+                    guides->eyes[0]->color_origin_token==expected[e],"join mixed, replaced or guessed an eye's native publication");
+                check(bool(guides->eyes[0]->bridge)==(span==1),"N1 join lost its exact composer input or N2 was recomposed");
+            }
+            check(refresh_aer_native_guides(state,snapshot,mappings)==S_OK,"held exact guides were not reused");
+        }
+    }
+    std::puts("Native AER GPU ingress: real CRC reads, protected producer history, both eyes, N1/N2 and stalled ingress isolation PASS");
     return 0;
 }

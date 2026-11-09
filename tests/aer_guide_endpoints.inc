@@ -1,7 +1,7 @@
 // Split resources model Luke's alternating native eyes. Providers retain a
 // separate temporal context per eye; a held peer never enters the provider.
 void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
-    xrfg::D3D12FrameGenerationMode mode) {
+    xrfg::D3D12FrameGenerationMode mode,bool n1=false) {
     constexpr UINT width=256,height=128;
     const auto texture=[&](DXGI_FORMAT format,UINT value) {
         auto desc=stereo_texture_description(width,height);
@@ -59,6 +59,12 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
             g->output_width=g->motion_width=g->depth_width=width;
             g->output_height=g->motion_height=g->depth_height=height;
             g->resource_state=g->depth_resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            if(n1) {
+                g->serial=serial*2+1;g->previous_serial=g->serial-2;
+                g->raw_motion_native_span=1;g->raw_motion_native_span_confirmed=true;
+                auto middle=std::make_shared<xrfg::DlssMotionVectorFrame>(*g);
+                middle->serial=g->serial-1;g->bridge=std::move(middle);
+            }
             set->eyes[0]=std::move(g);return set;
         };
         xrfg::D3D12HistoryCaptureTicket capture{};

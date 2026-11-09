@@ -959,6 +959,7 @@ struct SessionState {
     std::shared_ptr<AerNativeGuideCache> aer_native_guide_cache;
     std::array<XrPosef,2> ofr_source_poses{};
     std::array<XrFovf,2> ofr_source_fovs{};
+    std::array<std::int64_t,2> ofr_source_started_ns{};
     // D35: bounded opt-in allocation/adapter records; never a pacing input.
     std::mutex video_memory_mutex;
     Microsoft::WRL::ComPtr<IDXGIAdapter3> video_memory_adapter;
@@ -9063,7 +9064,7 @@ bool realign_ofr_paired_metadata(GeneratedFrameEndInfo& first,
     auto& a=first.projections[0].views[eye];auto& b=second.projections[0].views[eye];
     b.pose=a.pose;b.fov=a.fov;
     a.pose=previous.layers[0].views[eye].pose;a.fov=previous.layers[0].views[eye].fov;
-    first.interface_stamp.aer_mixed=true;second.interface_stamp.aer_mixed=true;
+    first.interface_stamp.mark_aer_mixed();second.interface_stamp.mark_aer_mixed();
     return true;
 }
 
@@ -14053,7 +14054,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 }
             }
             const bool aer_single=success && state->nvidia_options.ofr && job->pair && job->snapshot.aer_fresh_mask!=3;
-            if(aer_single) {real=std::move(synthetic);real->blackbar_pose.paired=false;real->interface_stamp.aer_mixed=true;job->pair=false;}
+            if(aer_single) {real=std::move(synthetic);real->blackbar_pose.paired=false;real->interface_stamp.mark_aer_mixed();job->pair=false;}
             if(success && state->nvidia_options.ofr && (aer_single || job->pair))
                 xrfg::embedded::ofr_last_success_ms=GetTickCount64();
             xrfg::bridge_flight_logger().end(build_token,
@@ -14792,6 +14793,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     }
     terminal.interface_stamp.scene_owner=0x4146570000000001ULL;
     terminal.interface_stamp.scene_serial=produced.scene_serial;
+    terminal.interface_stamp.reconstruction_reference=!produced.held_afw_pair;
     const bool captured = capture_projection_snapshot(&terminal.info, &terminal_snapshot);
     terminal_snapshot.blackbar_pose=snapshot.blackbar_pose;
     terminal_snapshot.interface_stamp = terminal.interface_stamp;
@@ -16698,6 +16700,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     state->nvidia_options = options;
     state->ofr_delivery=0;state->ofr_last_mask=0;
     state->ofr_source_tracker.reset();
+    state->ofr_source_started_ns={};
     state->aer_native_guide_cache.reset();
     xrfg::embedded::ofr_last_success_ms=0;xrfg::embedded::ofr_delivery=0;
     state->frame_generation_mode = generation_mode;
@@ -17995,9 +17998,14 @@ XrResult layer_end_frame_impl(
         if(sources[0].serial && sources[1].serial) {
             aer_source_decision=state->ofr_source_tracker.observe(sources);
             current_snapshot.aer_fresh_mask=state->ofr_fresh_mask=aer_source_decision->fresh;
+            if(!aer_source_decision->continuity)state->ofr_source_started_ns={};
             for(unsigned eye=0;eye<2;++eye) {
                 auto& view=current_snapshot.layers[0].views[eye];
                 if(aer_source_decision->fresh&(1U<<eye)) {
+                    const auto previous=state->ofr_source_started_ns[eye];
+                    auto& origin=current_snapshot.interface_stamp.aer_history_started_ns;
+                    if(previous>0)origin=origin?std::min(origin,previous):previous;
+                    state->ofr_source_started_ns[eye]=interface_stamp.cycle?interface_stamp.cycle->started_ns:0;
                     state->ofr_source_poses[eye]=view.pose;state->ofr_source_fovs[eye]=view.fov;
                 } else {
                     view.pose=state->ofr_source_poses[eye];view.fov=state->ofr_source_fovs[eye];
@@ -18673,7 +18681,11 @@ XrResult layer_end_frame_impl(
     if (afw_selected && !completed_afw) {
         // OFXR off: deliver the terminal output unchanged. This exact object
         // is also the source of freeze_completed_afw_frame when OFXR is on.
-        submitted_end_info = &afw_terminal_submission.info;
+        // The delivery path below reads first_generated's source stamp and
+        // completion receipts. Do not submit AFW pixels with its empty sibling's
+        // timing identity (which made all OSR timing fields remain N/A).
+        first_generated=std::move(afw_terminal_submission);
+        submitted_end_info = &first_generated.info;
     } else if (prepared.kind == PreparedGenerationKind::prime) {
         if (build_generated_frame_end_info(
                 produced_end_info,
@@ -18749,7 +18761,7 @@ XrResult layer_end_frame_impl(
     }
     if(prepared.kind==PreparedGenerationKind::prime) attach_djules_outputs(prepared,first_generated);
     else if(pair_ready) attach_djules_outputs(prepared,current_generated,&first_generated,extra_ready?&extra_generated:nullptr);
-    if(ofr_single) {pair_ready=false;first_generated.interface_stamp.aer_mixed=true;}
+    if(ofr_single) {pair_ready=false;first_generated.interface_stamp.mark_aer_mixed();}
     if (completed_afw) {
         first_generated.composition_images = completed_afw->submission->composition_images;
         current_generated.composition_images = completed_afw->submission->composition_images;

@@ -41,6 +41,10 @@ struct InterfaceNativeTiming {
 // than sampling whatever newer frame is running on the producer thread.
 class InterfaceCycle {
     mutable std::mutex mutex_;
+    std::int64_t dependency_started_{};
+    std::int64_t latency_start() const noexcept {
+        return dependency_started_>0 ? std::min(started_ns,dependency_started_) : started_ns;
+    }
     struct Interval { std::int64_t first{}, last{}; };
     std::array<Interval, 64> intervals_{};
     std::size_t count_{};
@@ -69,6 +73,13 @@ public:
     const std::int64_t started_ns;
     explicit InterfaceCycle(std::int64_t started,std::int64_t producer_start=0) noexcept
         : production_started_(producer_start),started_ns(started) {}
+    // AER needs a later publication to interpolate an earlier same-eye source.
+    // Retain the actual dependency clock; never infer a fixed refresh penalty.
+    void source_dependency(std::int64_t started) noexcept {
+        std::scoped_lock lock(mutex_);
+        if(started>0 && started<=started_ns)
+            dependency_started_=dependency_started_?std::min(dependency_started_,started):started;
+    }
     void call(std::int64_t first, std::int64_t last) noexcept {
         std::scoped_lock lock(mutex_);
         if (!first || last < first || first < started_ns) { valid_=false; return; }
@@ -160,7 +171,7 @@ public:
             for(std::size_t i=0;i<outputs;++i)
                 returned=std::max(returned,synthetic_entries[i]+static_cast<std::int64_t>(outputs-i)*period);
         }
-        runtime_ms=float(returned-started_ns)*1e-6F;
+        runtime_ms=float(returned-latency_start())*1e-6F;
         return std::isfinite(runtime_ms);
     }
     bool read(std::int64_t accepted_ns, float& ofxr_ms, float& cycle_ms) const noexcept {
@@ -173,7 +184,7 @@ public:
             producer_returned_<started_ns) return false;
         std::int64_t held{};for(std::size_t i=0;i<count_;++i)held+=intervals_[i].last-intervals_[i].first;
         ofxr_ms=float(held)*1e-6F;
-        cycle_ms=float(std::max(producer_returned_,accepted_ns)-started_ns)*1e-6F;
+        cycle_ms=float(std::max(producer_returned_,accepted_ns)-latency_start())*1e-6F;
         return true;
     }
     // Wall-clock partition at the source End handoff, not GPU kernel durations.
@@ -214,8 +225,8 @@ public:
         // of intercepted calls to a guessed engine render duration.
         game=production_started_>0 && production_started_<=source_end
             ? float(source_end-production_started_)*1e-6F : 0.F;
-        generation=float(ready-source_end)*1e-6F;
-        delivery=estimated-float(ready-started_ns)*1e-6F;
+        generation=float(ready-source_end+started_ns-latency_start())*1e-6F;
+        delivery=estimated-float(ready-latency_start())*1e-6F;
         // Floating-point subtraction may leave a few nanoseconds below zero.
         if(delivery<-.001F)return false;
         delivery=std::max(0.F,delivery);return true;
@@ -242,9 +253,17 @@ struct InterfaceFrameStamp {
     std::shared_ptr<InterfaceCycle> cycle;
     // Exact source identity, independent of XR calls/slots; zero is unknown.
     std::uint64_t scene_owner{},scene_serial{};
-    // AER output: one exact raw eye and one reconstructed eye. Timing follows
-    // this admitted input cycle to its first mixed output, not held-eye age.
+    // AER output: one exact raw eye and one reconstructed eye. The source
+    // clock includes the earlier same-eye endpoint required by interpolation.
     bool aer_mixed{};
+    std::int64_t aer_history_started_ns{};
+    void mark_aer_mixed() noexcept {
+        aer_mixed=true;
+        if(cycle)cycle->source_dependency(aer_history_started_ns);
+    }
+    // An OSR/AFW reconstruction carries an admitted real-eye reference too,
+    // while its FPS classification remains independent of AER framegen.
+    bool reconstruction_reference{};
 };
 enum class InterfaceSource : std::uint32_t { none, steamvr_pre_submit_gpu, real_frame_qpc, predicted_display_qpc, application_cpu_qpc, steamvr_display, openxr_period, accepted_submissions, steamvr_delivery, producer_call_qpc, frame_cycle_qpc, frame_cycle_slot_estimate, steamvr_scene_delivery, accepted_scene_submissions, native_frame_cycle_qpc, native_predicted_display_qpc, runtime_accepted_delivery, runtime_return_cycle_qpc, native_runtime_return_cycle_qpc, minimum_cycle_qpc, native_minimum_cycle_qpc };
 struct InterfaceTelemetry {

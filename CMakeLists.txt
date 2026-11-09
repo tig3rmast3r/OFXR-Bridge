@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.928.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.929.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2637,6 +2637,8 @@ endif()
 
 if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
     add_test(NAME xrfg_aer_native_guide_cache COMMAND xrfg_private_runtime_layer_tests aer-native-guide-cache)
+    add_test(NAME xrfg_aer_native_guide_join_gpu COMMAND xrfg_private_runtime_layer_tests aer-native-guide-join)
+    set_tests_properties(xrfg_aer_native_guide_join_gpu PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
     set_tests_properties(xrfg_aer_native_guide_cache PROPERTIES TIMEOUT 15)
     foreach(route framework framework-buffer director director-buffer framework-missing-guides director-buffer-missing-guides)
         add_test(NAME xrfg_aer_alternate_${route}_gpu COMMAND xrfg_private_runtime_layer_tests aer-alternate-${route})

@@ -260,6 +260,7 @@ int main(int argc,char** argv) {
     const bool aer_path=route.starts_with("aer-");if(aer_path)route.erase(0,4);
     const bool aer_swap=aer_path&&route.starts_with("swap-");if(aer_swap)route.erase(0,5);
     if(route=="native-guide-cache")return aer_native_guide_cache_test();
+    if(route=="native-guide-join")return aer_native_guide_join_test();
     if(route=="rife-memory-recovery") {
         xrfg_fixture::ControlProfile profile;Fixture f(true);f.unblock();
         auto dispatch=std::make_shared<Dispatch>();auto state=std::make_shared<SessionState>(dispatch);
@@ -547,6 +548,9 @@ int main(int argc,char** argv) {
             if(held){produced.held_afw_pair=pair;produced.reconstructed_afw_pair.reset();}
             GeneratedFrameEndInfo terminal;ProjectionSnapshot snapshot;
             check(build_afw_terminal_submission(&end,original,produced,terminal,snapshot),"fresh/held terminal ownership");
+            check(terminal.interface_stamp.reconstruction_reference==!held &&
+                snapshot.interface_stamp.reconstruction_reference==!held,
+                "fresh OSR owns a timing reference; held reconstruction cannot become a new latency sample");
             check(snapshot.layers[0].views[1].pose.position.x==.068F && snapshot.layers[0].views[0].pose.position.x==0,
                 "terminal and downstream snapshot preserve the exact corrected position");
             check(terminal.info.displayTime==123,"metadata correction does not reschedule displayTime");

@@ -1266,7 +1266,7 @@ void status_pane(Panel& p) {
         format(ofxr,sizeof(ofxr),current && m.ofxr_time_valid,m.ofxr_time_ms);
         format(cycle,sizeof(cycle),current && m.cycle_valid,m.cycle_length_ms);
         std::snprintf(ui.help_buffer,sizeof(ui.help_buffer),
-            "WaitFrame entry through observed real runtime End completion, bounded below by one physical refresh per confirmed generated output. OFXR time %s (CPU wall time inside the intercepted OpenXR calls). Cycle length %s (WaitFrame entry through completion of the same real frame).",ofxr,cycle);
+            "Observed source cycle through real runtime End completion, bounded below by one refresh per confirmed generated output. AER framegen includes the earlier same-eye input needed for interpolation; no fixed refresh penalty is added. OFXR time %s (CPU wall time inside intercepted OpenXR calls). Source cycle %s. This is not measured headset scanout or motion-to-photon latency.",ofxr,cycle);
         cell_help(left+cell,y,{"Cycle minimum",ui.help_buffer});
     }
     y+=row_height;

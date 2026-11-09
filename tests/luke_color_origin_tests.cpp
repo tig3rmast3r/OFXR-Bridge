@@ -608,10 +608,23 @@ void gpu_tests() {
     require(pair_receipt.submitted&&pair_receipt.fence&&pair_receipt.value&&
         pair_receipt.fence->GetCompletedValue()<pair_receipt.value,
         "timed-out origin read lost its pending fence or reused its source lease early");
+    const auto pending_pair=pair_receipt;
+    std::array<std::uint32_t,2> pending_tokens{};std::array<HRESULT,2> pending_results{};
+    require(pending_pair.pending && xrfg::poll_luke_color_origin_pair(pending_pair,pending_tokens,pending_results)==E_PENDING,
+        "pending exact readback was decoded before its own fence");
     check(gate->Signal(2),"release pair reader gate");
     require(pair_stalled==HRESULT_FROM_WIN32(WAIT_TIMEOUT) &&
         pair_results[0]==pair_stalled && pair_results[1]==pair_stalled &&
         !pair_tokens[0] && !pair_tokens[1],"stalled pair returned stale tokens");
+    const auto pending_deadline=GetTickCount64()+5000;
+    while(pending_pair.fence->GetCompletedValue()<pending_pair.value && GetTickCount64()<pending_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    require(read_pair({pair_a.Get(),pair_b.Get()})==DXGI_ERROR_WAS_STILL_DRAWING,
+        "new colours overwrote a completed readback before its owner decoded it");
+    check(xrfg::poll_luke_color_origin_pair(pending_pair,pair_tokens,pair_results),"decode retained exact readback");
+    require(pair_tokens[0]==token_b && pair_tokens[1]==token_b && pair_results[0]==S_OK && pair_results[1]==S_OK,
+        "pending reader attributed its old ROI to the newer colour pair");
+    check(xrfg::poll_luke_color_origin_pair(pending_pair,pair_tokens,pair_results),"idempotent pending poll");
     check(read_pair({pair_b.Get(),pair_b.Get()}),"paired reuse after timeout");
     require(pair_tokens[0]==token_b && pair_tokens[1]==token_b,"paired readback reused before retirement");
     // Final Output differs from the intermediate and has an explicit active rectangle.

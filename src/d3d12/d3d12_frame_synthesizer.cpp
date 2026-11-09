@@ -1072,6 +1072,9 @@ struct D3D12FrameSynthesizer::Impl {
     std::atomic<HRESULT> rife_error{S_OK};
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
+    // Session transport queue survives method changes. An asynchronous RIFE
+    // eye owns a private submission queue, never the next method's transport.
+    ComPtr<ID3D12CommandQueue> input_queue;
     std::shared_ptr<D3D12SwapchainHistory> history;
     std::vector<Destination> current_destinations;
     std::vector<Destination> synthetic_destinations;
@@ -2802,6 +2805,7 @@ struct D3D12FrameSynthesizer::Impl {
         packed_eye_stride = static_cast<UINT>(stride);
 
         device = input_device;
+        this->input_queue = input_queue;
         queue = input_queue;
         if (input_nvidia_options.rife_model >= 0 && input_nvidia_options.rife_async) {
             // Each asynchronous eye owns its GPU submission order. Sharing the
@@ -7703,7 +7707,7 @@ struct D3D12FrameSynthesizer::Impl {
         }
         // R22 applies to OFXR vectors, Hybrid and native DLSS-G only.
         // FSR consumes its unchanged release-bound guides; no extra pass there.
-        if (generation_mode != D3D12FrameGenerationMode::fsr3 && next.motion_vectors) {
+        if ((generation_mode != D3D12FrameGenerationMode::fsr3 || nvidia_options.ofr) && next.motion_vectors) {
             bool bridged = false;
             for (const auto& eye : next.motion_vectors->eyes)
                 bridged |= eye && eye->bridge != nullptr;
@@ -7718,6 +7722,11 @@ struct D3D12FrameSynthesizer::Impl {
                         static_cast<UINT>(work_slot_index), next.motion_vectors,
                         {next.views.data(), next.view_count});
                 }
+                // AER N1 is admitted only for composition. Allocation/shader
+                // failure must not silently fall through with opposite-eye MV.
+                if(nvidia_options.ofr)for(const auto& eye:next.motion_vectors->eyes)
+                    if(eye && eye->bridge && eye->raw_motion_native_span_confirmed &&
+                        eye->raw_motion_native_span==1)return kD3D12FrameSynthesisStaleGuides;
             }
         }
         bool used_game_motion = false;
@@ -8044,7 +8053,7 @@ HRESULT D3D12FrameSynthesizer::replace_resources_locked(D3D12OpticalFlowBackend 
         // doubles the transient VRAM cost and can make an otherwise valid
         // switch fail. No submitted GPU work survives the idle proof above.
         auto device=impl_->device;
-        auto queue=impl_->queue;
+        auto queue=impl_->input_queue;
         auto history=impl_->history;
         const auto view_format=impl_->view_format;
         const auto release_state=impl_->release_state;

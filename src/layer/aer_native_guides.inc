@@ -20,7 +20,9 @@ struct AerNativeGuideCache {
         }
     };
     std::array<Eye,2> eyes;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> read_queue;
     xrfg::LukeColorOriginReadReceipt pending;
+    unsigned pending_mask{};
     bool poisoned{};
 };
 
@@ -34,13 +36,20 @@ bool aer_native_guides_requested(const SessionState& state) noexcept {
 
 bool aer_native_same_eye_history(const xrfg::DlssMotionVectorFrame& frame) noexcept {
     const auto& previous=frame.previous_same_guide;
-    // These are raw colour endpoints, not the post-AFW N1 composer output.
-    // A same-eye history key alone does not turn adjacent-eye vectors into
-    // same-eye motion. Require the producer-confirmed two-native-frame span.
-    return frame.raw_motion_native_span_confirmed && frame.raw_motion_native_span==2 &&
+    const bool same =
         frame.stream && frame.epoch && frame.serial && frame.previous_serial && previous &&
         previous->stream==frame.stream && previous->epoch==frame.epoch &&
         previous->serial==frame.previous_serial && previous->serial<frame.serial;
+    if(!same || !frame.raw_motion_native_span_confirmed)return false;
+    if(frame.raw_motion_native_span==2)return true;
+    // An original N1 field must traverse the exact intervening publication.
+    // Merely accepting its same-eye key would feed opposite-eye motion to FG.
+    const auto& middle=frame.previous_opposite_guide;
+    return frame.raw_motion_native_span==1 && middle &&
+        middle->stream==frame.stream && middle->epoch==frame.epoch &&
+        middle->serial==previous->serial+1 && frame.serial==middle->serial+1 &&
+        middle->publication==previous->publication+1 && frame.publication==middle->publication+1 &&
+        middle->raw_motion_native_span_confirmed && middle->raw_motion_native_span==1;
 }
 
 // The marker reader already owns its allocator/readback and refuses reuse
@@ -70,7 +79,7 @@ HRESULT read_aer_luke_capture_origins(ID3D12CommandQueue* queue,
         if(FAILED(wait)){cancel();return wait;}
     }
     const auto hr=xrfg::read_luke_color_origin_pair(queue,{colors[0].Get(),colors[1].Get()},
-        tokens,results,D3D12_RESOURCE_STATE_COMMON,8,nullptr,&receipt);
+        tokens,results,D3D12_RESOURCE_STATE_COMMON,32,nullptr,&receipt);
     if(receipt.fence && receipt.value) {
         for(unsigned eye=0;eye<2;++eye)if(acquired&(1U<<eye))
             if(FAILED(inputs[eye].history->retire_consumer(leases[eye],receipt.fence.Get(),receipt.value)))poisoned=true;
@@ -125,11 +134,27 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
         if(!session->aer_native_guide_cache)session->aer_native_guide_cache=std::make_shared<AerNativeGuideCache>();
         auto& cache=*session->aer_native_guide_cache;
         if(cache.poisoned){clear();return E_FAIL;}
+        if(!cache.read_queue) {
+            // Reading on the ingress queue put the CPU's marker wait behind
+            // unrelated interop/guide waits. Only the exact pinned capture
+            // fences precede this reader; synthesis waits its own guide receipts.
+            D3D12_COMMAND_QUEUE_DESC description{};description.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+            const auto hr=session->d3d12_device->CreateCommandQueue(&description,IID_PPV_ARGS(&cache.read_queue));
+            if(FAILED(hr)){clear();return hr;}
+            cache.read_queue->SetName(L"OFXR AER exact colour origins");
+        }
         if(cache.pending.fence && cache.pending.value) {
             const auto completed=cache.pending.fence->GetCompletedValue();
             if(completed==UINT64_MAX){cache.poisoned=true;clear();return DXGI_ERROR_DEVICE_REMOVED;}
             if(completed<cache.pending.value){clear();return S_FALSE;}
-            cache.pending={};
+            std::array<std::uint32_t,2> tokens{};
+            std::array<HRESULT,2> results{};
+            if(cache.pending.pending && SUCCEEDED(xrfg::poll_luke_color_origin_pair(cache.pending,tokens,results)))
+                for(unsigned eye=0;eye<2;++eye)if(cache.pending_mask&(1U<<eye)) {
+                    cache.eyes[eye].attempted=true;
+                    cache.eyes[eye].token=SUCCEEDED(results[eye])?tokens[eye]:0;
+                }
+            cache.pending={};cache.pending_mask=0;
         }
         unsigned read_mask{};
         for(unsigned eye=0;eye<2;++eye) {
@@ -143,15 +168,14 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
             std::array<std::uint32_t,2> tokens{};
             std::array<HRESULT,2> results{E_PENDING,E_PENDING};
             xrfg::LukeColorOriginReadReceipt receipt;
-            const auto hr=read_aer_luke_capture_origins(session->d3d12_queue.Get(),inputs,read_mask,
+            const auto hr=read_aer_luke_capture_origins(cache.read_queue.Get(),inputs,read_mask,
                 tokens,results,receipt,cache.poisoned);
             if(cache.poisoned){clear();return E_FAIL;}
             if(FAILED(hr)) {
                 // Keep exact source leases retired by the submitted copy fence.
-                // The reader API has no decode-pending operation: once that
-                // fence is complete a bounded ROI retry is safe. Never retry
-                // before completion or substitute a newer guide meanwhile.
-                cache.pending=std::move(receipt);clear();return S_FALSE;
+                // Poll this exact readback on completion, never copy again
+                // and silently replace the source that timed out.
+                cache.pending=std::move(receipt);cache.pending_mask=read_mask;clear();return S_FALSE;
             }
             for(unsigned eye=0;eye<2;++eye)if(read_mask&(1U<<eye)) {
                 auto& item=cache.eyes[eye];item.attempted=true;
@@ -166,9 +190,14 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
                 item.guides.reset();item.epoch_rejected=true;
             }
             if(!item.guides && item.token && !item.epoch_rejected) {
-                const auto frame=xrfg::resolve_luke_guide_token(item.token,session->d3d12_queue.Get(),session->d3d12_device.Get());
+                auto frame=xrfg::resolve_luke_guide_token(item.token,cache.read_queue.Get(),session->d3d12_device.Get());
                 if(frame && frame->color_origin_token==item.token && frame->publication &&
                     frame->motion_vectors && frame->depth && aer_native_same_eye_history(*frame)) {
+                    if(frame->raw_motion_native_span==1) {
+                        auto composed=std::make_shared<xrfg::DlssMotionVectorFrame>(*frame);
+                        composed->bridge=frame->previous_opposite_guide;
+                        frame=std::move(composed);
+                    }
                     auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();
                     guides->eye_count=1;guides->resolved_eye=int(eye);guides->eyes[0]=frame;
                     item.guides=std::move(guides);
