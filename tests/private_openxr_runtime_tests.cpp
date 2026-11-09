@@ -63,6 +63,9 @@ struct Fixture {
     bool cycle_waited{},cycle_begun{};
     unsigned successful_waits{};
     std::atomic_bool throttled{true};
+    std::int64_t mock_consumption_deadline{};
+    unsigned mock_consumed{},mock_missed{};
+    std::vector<std::int64_t> mock_end_deadlines;
     bool real_common{},reuse_current_real_image{};
     std::atomic_int slow_image_wait_ms{};
     std::atomic_int slow_frame_wait_ms{};
@@ -120,7 +123,12 @@ struct Fixture {
     explicit Fixture(bool d12,bool split=true,std::function<int(unsigned)> variable_wait={},bool physical_clock=false,bool diagnostics=true,bool release_readiness=false,std::size_t capacity=3,bool adaptive_buffer=false):native12(d12),frame_wait_us(std::move(variable_wait)) {
         current=this;
         if(d12) {
-            ok(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device12)),"actual D3D12 device");
+            ComPtr<IDXGIAdapter> software;
+            if(std::getenv("XRFG_TEST_WARP")){
+                ComPtr<IDXGIFactory4> factory;ok(CreateDXGIFactory2(0,IID_PPV_ARGS(&factory)),"software fixture factory");
+                ok(factory->EnumWarpAdapter(IID_PPV_ARGS(&software)),"WARP software adapter");
+            }
+            ok(D3D12CreateDevice(software.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device12)),"actual D3D12 device");
             D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
             ok(device12->CreateCommandQueue(&desc,IID_PPV_ARGS(&queue)),"queue");
             if(split) {
@@ -132,7 +140,7 @@ struct Fixture {
             ok(device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"GPU gate");
         } else {
             D3D_FEATURE_LEVEL level{};
-            ok(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,&device11,&level,&context),"actual D3D11 device");
+            ok(D3D11CreateDevice(nullptr,std::getenv("XRFG_TEST_WARP")?D3D_DRIVER_TYPE_WARP:D3D_DRIVER_TYPE_HARDWARE,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,&device11,&level,&context),"actual D3D11 device");
         }
         xrfg::PrivateOpenXrRuntime::Options options;
         options.real={reinterpret_cast<XrInstance>(1),reinterpret_cast<XrSession>(2),wait,begin,end,create,destroy,enumerate,acquire,wait_image,release,to_qpc};
@@ -249,6 +257,7 @@ struct Fixture {
         XrTime prediction{};std::int64_t predicted_at{};
         {std::scoped_lock protocol(f.protocol);check(f.cycle_begun,"real End follows real Begin even if next Wait completed");f.cycle_begun=false;prediction=f.begun_prediction;predicted_at=f.begun_wait_return;}
         if(!info->layerCount){++f.empty_ends;return XR_SUCCESS;}
+        if(f.mock_consumption_deadline){f.mock_end_deadlines.push_back(f.mock_consumption_deadline);if(start<=f.mock_consumption_deadline)++f.mock_consumed;else ++f.mock_missed;}
         f.native_windows.push_back(prediction-epoch-start);
         if(prediction<=epoch+start)std::fprintf(stderr,
             "Expired native: D12=%d director=%d content=%u prediction_lead=%.6fms age=%.6fms waits=%u begins=%u discards=%u image_wait=%dms\n",
@@ -1634,7 +1643,8 @@ void queue_priority_policy() {
 }
 }
 #include "private_overlay_destroy_fixture.inc"
-int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
+#include "rife_handoff_fixture.inc"
+int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="rife-handoff"){rife_handoff_matrix();return 0;}if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
 if(argc>1 && std::string_view(argv[1])=="stalled-renewal"){
     for(bool d12:{true,false})for(bool directed:{true,false})stalled_native_renewal(d12,directed,0);

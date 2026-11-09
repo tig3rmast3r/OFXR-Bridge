@@ -17047,6 +17047,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     state->menu_enabled = SUCCEEDED(result) && control.desired.enabled;
     if(state->private_runtime) {
         state->private_runtime->set_ready_clock(state->menu_enabled && ordered_multiframe(*state));
+        state->private_runtime->set_rife_handoff(state->menu_enabled && state->nvidia_options.rife_model>=0 && state->dispatch->steamvr_runtime);
         const auto buffer=state->private_runtime->set_buffer_capacity(control.desired.increase_buffer?3:2,state->menu_enabled,true);
         if(XR_FAILED(buffer)) {result=E_FAIL;state->menu_enabled=false;}
         const auto policy=state->private_runtime->set_director_enabled(

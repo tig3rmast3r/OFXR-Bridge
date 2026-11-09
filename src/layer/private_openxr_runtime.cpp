@@ -4,6 +4,7 @@
 #include "xrfg/owned_d11_output.hpp"
 #include "xrfg/private_pacing_buffer.hpp"
 #include "xrfg/private_refresh_wait_policy.hpp"
+#include "xrfg/rife_handoff_schedule.hpp"
 #include "xrfg/two_output_schedule.hpp"
 #include "xrfg/two_frame_capture.hpp"
 
@@ -107,6 +108,7 @@ struct PrivateOpenXrRuntime::Impl {
         bool director{true};
         bool adaptive_buffer{};
         bool clean_bypass{};
+        bool rife_handoff{};
         std::uint64_t policy_epoch{};
         bool pair_previous{}; // submit for the previous frame's slot time (pair_next_end_with_previous)
         XrTime content_time{}; // submit for this display time (set_next_end_content_time)
@@ -117,6 +119,8 @@ struct PrivateOpenXrRuntime::Impl {
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
         XrResult result{XR_SUCCESS};
         std::int64_t entered{},returned{};
+        std::int64_t handoff{};
+        std::uint64_t packet{},slot{};
     };
     struct WaitJob {std::int64_t target{};std::uint64_t accepted_ordinal{};};
     Options options;
@@ -124,6 +128,8 @@ struct PrivateOpenXrRuntime::Impl {
     std::atomic_bool clean_bypass{};
     std::atomic_bool buffered{};
     std::atomic_bool ready_clock{};
+    std::atomic_bool rife_handoff{};
+    std::atomic<std::int64_t> rife_gate_at{},rife_gate_period{};
     std::atomic_bool stable_phase{};
     std::uint64_t policy_epoch{}; // under accept_mutex
     std::mutex mutex,accept_mutex,copy_mutex,stop_mutex;
@@ -195,6 +201,7 @@ struct PrivateOpenXrRuntime::Impl {
     HANDLE wait_timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
     explicit Impl(Options input):options(std::move(input)),director_enabled(options.director_enabled),clean_bypass(options.clean_bypass),buffered(options.adaptive_buffer && options.capacity==3),stable_phase(options.capacity>=3) {
         ready_clock=options.native_frame_contract && options.native_wait_for_prepared;
+        rife_handoff=options.native_frame_contract && options.native_rife_handoff;
         requested_capacity=options.capacity;
         options.capacity=delivery_capacity(requested_capacity,options.director_enabled);stable_phase=options.capacity>=3;
     }
@@ -629,17 +636,29 @@ struct PrivateOpenXrRuntime::Impl {
         auto result=std::move(wait_result);wait_result.reset();return result;
     }
     void wait_loop() noexcept {
+        RifeHandoffSchedule rife_slots;
         try {for(;;) {
             WaitJob job;
+            std::shared_ptr<Packet> phase_packet;
             {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping ||
                 (wait_job && (wait_job->accepted_ordinal==0 ||
                     (ready_clock.load() ? !prepared.empty() :
                      (director_enabled.load() || buffered.load()) ? accepted_packets>=wait_job->accepted_ordinal : !prepared.empty())));});
-             if(stopping)break;job=*wait_job;wait_job.reset();wait_active=true;}
+             if(stopping)break;job=*wait_job;wait_job.reset();wait_active=true;
+             if(job.accepted_ordinal && !prepared.empty() && prepared.front()->rife_handoff)phase_packet=prepared.front();}
+            WaitResult result;
+            if(phase_packet){
+                const auto physical=period(0);
+                const auto gate=rife_gate_period.load()==physical?rife_gate_at.load():0;
+                if(auto target=rife_slots.claim(physical,gate,clock_ns())){
+                    job.target=std::max(job.target,target->entry);result.handoff=target->handoff;
+                    result.packet=phase_packet->sequence;result.slot=target->slot;
+                }
+            }
             if(!sleep_until(job.target,1'250'000,true)) {
                 std::scoped_lock lock(mutex);wait_active=false;break;
             }
-            WaitResult result;result.entered=clock_ns();
+            result.entered=clock_ns();
             try {result.result=real_wait(result.prediction);}
             catch(...) {result.result=XR_ERROR_RUNTIME_FAILURE;}
             result.returned=clock_ns();
@@ -926,6 +945,21 @@ struct PrivateOpenXrRuntime::Impl {
                 const auto initial_begin_enter=begin_enter,initial_begin_leave=begun_at;
                 if(!packet && !take_prepared())break;
                 const bool directed=packet->director;
+                const bool phased=packet->rife_handoff && clock->packet==packet->sequence && clock->handoff>0;
+                std::int64_t witnessed_gate{};
+                if(packet->rife_handoff){
+                    const auto cost=wait_leave-wait_enter+begun_at-begin_enter+release_leave-release_enter;
+                    if(rife_gate_period.load()!=physical){rife_gate_at=0;rife_gate_period=physical;}
+                    const auto blocked=std::max(wait_leave-wait_enter,begun_at-begin_enter);
+                    if(blocked>physical/8 && blocked<physical*2 && packet->prepared_at<=wait_enter){
+                        witnessed_gate=begun_at;
+                        if(diagnostic)options.trace(47,packet->sequence,begun_at,blocked);
+                    }
+                    if(diagnostic){
+                        if(phased)options.trace(46,packet->sequence,clock->handoff,static_cast<std::int64_t>(clock->slot));
+                        options.trace(48,packet->sequence,cost,0);
+                    }
+                }
                 if(diagnostic)options.trace(33,packet->sequence,initial_begin_enter,initial_begin_leave);
                 if(options.native_director_only && directed) {
                     // Director-only native policy. The V819 Framework branch
@@ -949,7 +983,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // Refill only the newly learned increment. The ordinary
                     // handoff chain/FIFO retains that margin; do not charge the
                     // historical reserve to every already-ready output.
-                    const auto deadline=(early?clock_ns():std::max(clock_ns(),last_handoff+physical))+refill;
+                    const auto deadline=phased?std::max(clock_ns(),clock->handoff):(early?clock_ns():std::max(clock_ns(),last_handoff+physical))+refill;
                     unsigned renewed{};
                     while(!stopping && prediction.shouldRender && !renewals_stalled()) {
                         const auto at=prediction_qpc(prediction);
@@ -996,6 +1030,7 @@ struct PrivateOpenXrRuntime::Impl {
                     if(options.trace)options.trace(3,packet->sequence,end.displayTime,prediction.predictedDisplayTime);
                     if(!sleep_until(deadline,1'250'000)){retire(packet);fifo->retire();break;}
                     const auto entered=clock_ns();result=options.real.end(options.real.session,&end);const auto returned=clock_ns();begun=false;
+                    if(witnessed_gate)rife_gate_at=witnessed_gate;
                     observe_capture(*packet,end,result,entered,returned);
                     if(packet->adaptive_buffer && result==XR_SUCCESS && end.layerCount) {
                         auto late=std::max(std::int64_t{},returned-deadline);
@@ -1143,7 +1178,8 @@ struct PrivateOpenXrRuntime::Impl {
                     // Retain the same fixed intended cadence as Legacy VDXR,
                     // rather than using the extra credit only as a queue limit.
                     // The runtime still supplies every real prediction/Begin.
-                    if(packet->adaptive_buffer) {
+                    if(phased)deadline=clock->handoff;
+                    else if(packet->adaptive_buffer) {
                         deadline=ticks(framework_clock.claim(point(clock_ns()-framework_shift),std::chrono::nanoseconds(physical)))+framework_shift;
                         if(!sleep_until(std::max(std::int64_t{},deadline-1'250'000),std::min<std::int64_t>(1'250'000,physical/8))) {
                             retire(packet);fifo->retire();break;
@@ -1188,7 +1224,7 @@ struct PrivateOpenXrRuntime::Impl {
                 // Begin/End remain exclusively serialized on this consumer;
                 // the worker needs accepted owned input before entering Wait,
                 // and may overlap that input's independent GPU preparation.
-                if(!post_wait(directed?deadline+physical-runtime_budget.lead(physical)-
+                if(!phased && !post_wait(directed?deadline+physical-runtime_budget.lead(physical)-
                         // A small initial native lookahead lets a near-refresh
                         // pipeline enter the learner's operating range. This
                         // advances Wait only; it never delays End or adds a
@@ -1232,12 +1268,13 @@ struct PrivateOpenXrRuntime::Impl {
                     // Include the edge guard in this final spin window. A
                     // second tiny timer wait for that2us tail would reintroduce
                     // scheduler jitter instead of preserving the early wakeup.
-                    if((directed || packet->adaptive_buffer) && !sleep_until(deadline+2'000,packet->adaptive_buffer?1'252'000:PrivateOutputSchedule::preparation_lead+2'000)) {
+                    if((directed || packet->adaptive_buffer || phased) && !sleep_until(deadline+2'000,packet->adaptive_buffer?1'252'000:PrivateOutputSchedule::preparation_lead+2'000)) {
                         retire(packet);fifo->retire();break;
                     }
                     const auto at_end=clock_ns();
                     result=options.real.end(options.real.session,&end);begun=false;
                     const auto returned=clock_ns();
+                    if(witnessed_gate)rife_gate_at=witnessed_gate;
                     observe_capture(*packet,end,result,at_end,returned);
                     if(packet->adaptive_buffer && result==XR_SUCCESS && end.layerCount) {
                         if(!directed)framework_clock.submitted(point(deadline-framework_shift),std::chrono::nanoseconds(physical),point(returned-framework_shift));
@@ -1289,6 +1326,7 @@ struct PrivateOpenXrRuntime::Impl {
                         (packet->pair_previous?1:0)|(packet->content_time?2:0)|(packet->content_time && packet->content_time!=prediction.predictedDisplayTime?4:0));
                     if(XR_SUCCEEDED(result))trace(2,packet->sequence,directed?(slots.valid()?slots.delay():schedule.delay()):0);
                     result=drop_refused_frame(packet->sequence,result);
+                    if(phased && XR_SUCCEEDED(result) && !post_wait(0))result=XR_ERROR_CALL_ORDER_INVALID;
                 }
                 // Publish a failed End before freeing a producer credit; a
                 // woken producer must not accept another frame in that gap.
@@ -1436,6 +1474,9 @@ void PrivateOpenXrRuntime::set_ready_clock(bool enabled) noexcept {
      s.refresh_wait_policy=PrivateRefreshWaitPolicy{};}
     s.changed.notify_all();
     try{s.trace(41,enabled?1:0);}catch(...){}
+}
+void PrivateOpenXrRuntime::set_rife_handoff(bool enabled) noexcept {
+    impl_->rife_handoff=enabled && impl_->options.native_frame_contract;
 }
 bool PrivateOpenXrRuntime::ready_clock_enabled() const noexcept {return impl_->ready_clock.load();}
 XrResult PrivateOpenXrRuntime::set_director_enabled(bool enabled) {
@@ -1595,6 +1636,7 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
     packet=std::make_shared<Impl::Packet>();packet->delivery=delivery;
     packet->clean_bypass=s.clean_bypass.load();
     packet->director=!packet->clean_bypass && s.director_enabled.load();
+    packet->rife_handoff=!packet->clean_bypass && s.rife_handoff.load();
     packet->adaptive_buffer=!packet->clean_bypass && s.buffered.load();packet->policy_epoch=s.policy_epoch;XrResult result;
     const auto paired=s.pair_next.exchange(false);const auto content=s.next_content_time.exchange(0);
     packet->pair_previous=!packet->clean_bypass && paired;

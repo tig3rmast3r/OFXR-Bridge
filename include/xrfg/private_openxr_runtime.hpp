@@ -100,6 +100,9 @@ public:
         // and required display-edge+guard coverage (V651). This is bounded to one
         // attempt per packet, separate from expired-cycle recovery. A still-current
         // replacement may retain a shorter horizon; never spin for that preference.
+        // Stage46: learned native entry QPC and reservation ordinal (V955).
+        // Stage47: witnessed blocking native gate QPC/cost.48: cost/zero lookahead.
+        // Emitted after Begin, not on the timed native End edge.
         // Stage35: buffered FIFO-head release entry/return before native Begin, b/c.
         // Stage33: real Begin entry/return QPC in b/c; emitted after the packet is known.
         // Stage32: diagnostic GPU copy start/end calibrated to QPC ns, b/c.
@@ -125,6 +128,7 @@ public:
         // RIFE: acquire a native cycle only after the FIFO head's GPU copy
         // completed. Ordinary OFXR keeps its existing overlap/admission.
         bool native_wait_for_prepared{};
+        bool native_rife_handoff{}; // learn native running-start phase; no assumed scanout offset
         // Luke D11/SteamVR only. Freeze image readiness at Release, not after
         // newer game commands at End. Admission/work budget is selected separately.
         bool d11_release_readiness{};
@@ -147,6 +151,7 @@ public:
     void set_clean_bypass(bool);
     [[nodiscard]] bool clean_bypass_enabled() const noexcept;
     void set_ready_clock(bool) noexcept;
+    void set_rife_handoff(bool) noexcept; // SteamVR RIFE physical phase; no effect on other generators
     [[nodiscard]] bool ready_clock_enabled() const noexcept;
     XrResult set_buffer_capacity(std::size_t,bool stabilization_active=true,bool reset_learning=false);
     [[nodiscard]] std::size_t buffer_capacity() const noexcept;
