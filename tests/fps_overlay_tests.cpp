@@ -46,6 +46,18 @@ int main(int argc, char** argv) {
             "66 repeated submissions must not inflate 78 new outputs to 144");
         unique.submitted(2'000'000'000, true, false);
         require(!unique.snapshot(2'000'000'000).active, "repeated synthetic must not extend green status");
+        FpsCounter aer;
+        for(int i=0;i<90;++i) {
+            const auto t=std::int64_t(i)*1'000'000'000/90;
+            aer.submitted(t,i%2==0,true,true);
+            aer.submitted(t,true,false,true); // repeated presentation is not new content
+        }
+        const auto mixed=aer.snapshot(999'999'999);
+        require(mixed.active && mixed.aer_eye_equivalents,"mixed AER output is generating");
+        require(std::abs(mixed.submitted_fps-90)<.1F &&
+            std::abs(mixed.real_fps-45)<.1F && std::abs(mixed.generated_fps-45)<.1F,
+            "90 one-real/one-generated-eye outputs are 45+45 stereo equivalents, never 0+90 or 90+90");
+        require(!aer.snapshot(3'000'000'000).aer_eye_equivalents,"mixed labels expire with their samples");
         require(rasterize_fps_overlay(24, 12, {144, true, false, 78, true}, false) ==
             rasterize_fps_overlay(24, 12, {0,true,false,78,true}, false), "fresh delivered count must override submissions");
         for (auto position : {FpsOverlayPosition::off, FpsOverlayPosition::upper_left,

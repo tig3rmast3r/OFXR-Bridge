@@ -28,6 +28,30 @@ inline Decision classify(const std::array<Source,2>& previous,
     }
     return result;
 }
+// Observation belongs to the source stream, not to the last generation job.
+// A provider refusal, a skipped output or a menu must not erase which eye the
+// application actually released. No resource ownership or GPU work is retained.
+class SourceTracker {
+    std::array<Source,2> previous_{};
+    unsigned delivery_{}, last_fresh_{};
+    bool observed_{};
+public:
+    void reset() noexcept { *this={}; }
+    Decision observe(const std::array<Source,2>& current) noexcept {
+        for(const auto& source:current) if(!source.resource || !source.epoch || !source.serial) {
+            reset();return {0,false};
+        }
+        auto decision=classify(previous_,current);
+        previous_=current;
+        if(!observed_) {observed_=true;return decision;}
+        if(!decision.fresh)return decision;
+        const unsigned delivery=decision.paired()?2:1;
+        decision.continuity &= (!delivery_ || delivery_==delivery) &&
+            (delivery!=1 || last_fresh_!=decision.fresh);
+        delivery_=delivery;last_fresh_=decision.fresh;
+        return decision;
+    }
+};
 // Temporal phase only; never exchange physical eye resources.
 constexpr unsigned newer_eye(bool swap) noexcept { return swap?0:1; }
 }

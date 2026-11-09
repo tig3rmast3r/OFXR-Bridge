@@ -399,6 +399,18 @@ int main(int argc,char** argv) {
             session->ofr_delivery=2;check(djules_application_period(*session,11'111'111)==22'222'222,"paired physical pacing");
             session->ofr_delivery=1;check(djules_application_period(*session,11'111'111)==11'111'111,"alternate physical pacing");
             check(!djules_triple_active(*session),"ordinary triple preference cannot add OFR outputs");
+            // A generator/menu reset must not reset source-eye observation.
+            session->ofr_source_tracker.reset();
+            std::array<xrfg::ofr::Source,2> observed{{{11,101,1},{22,202,1}}};
+            session->ofr_source_tracker.observe(observed);
+            for(unsigned frame=0;frame<24;++frame) {
+                session->previous_projection=ProjectionSnapshot{};
+                clear_generation_continuity(session);
+                ++observed[frame%2].serial;
+                const auto decision=session->ofr_source_tracker.observe(observed);
+                check(decision.fresh==(1u<<(frame%2)) && decision.continuity,
+                    "shipping continuity reset preserves alternating source observation");
+            }
             GeneratedFrameEndInfo first,second;ProjectionSnapshot previous;
             first.projections.resize(1);second.projections.resize(1);previous.layers.resize(1);
             first.projections[0].views.resize(2);second.projections[0].views.resize(2);previous.layers[0].views.resize(2);
@@ -410,6 +422,8 @@ int main(int argc,char** argv) {
                 second.projections[0].views[eye].subImage.imageArrayIndex=eye;
             }
             check(realign_ofr_paired_metadata(first,second,previous,swap),"OFR metadata accepted");
+            check(first.interface_stamp.aer_mixed && second.interface_stamp.aer_mixed,
+                "both paired AER outputs retain mixed content telemetry");
             const auto newer=xrfg::ofr::newer_eye(swap),older=newer^1;
             check(first.projections[0].views[newer].pose.position.x==float(newer) &&
                 second.projections[0].views[newer].pose.position.x==float(10+newer),"endpoint cameras follow selected pixels");

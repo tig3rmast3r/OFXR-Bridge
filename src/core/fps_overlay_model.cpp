@@ -37,14 +37,15 @@ FpsCounter::Bucket& FpsCounter::bucket(std::int64_t now) noexcept {
     return entry;
 }
 
-void FpsCounter::submitted(std::int64_t now, bool synthetic, bool new_content) noexcept {
+void FpsCounter::submitted(std::int64_t now, bool synthetic, bool new_content, bool aer_mixed) noexcept {
     if (!new_content) return;
     cadence_.record(now);
     auto& entry = bucket(now);
     ++entry.output;
-    if (synthetic) ++entry.generated;
+    if (aer_mixed) ++entry.mixed;
+    else if (synthetic) ++entry.generated;
     else ++entry.real;
-    if (synthetic) last_synthetic_ns_ = std::max(last_synthetic_ns_,now);
+    if (synthetic || aer_mixed) last_synthetic_ns_ = std::max(last_synthetic_ns_,now);
 }
 
 FpsSnapshot FpsCounter::snapshot(std::int64_t now) const noexcept {
@@ -57,8 +58,9 @@ FpsSnapshot FpsCounter::snapshot(std::int64_t now) const noexcept {
     for (const auto& entry : buckets_) {
         if (entry.epoch < 0 || entry.epoch > epoch || entry.epoch < epoch - 9) continue;
         result.submitted_fps += static_cast<float>(entry.output) / seconds;
-        result.real_fps += static_cast<float>(entry.real) / seconds;
-        result.generated_fps += static_cast<float>(entry.generated) / seconds;
+        result.real_fps += (static_cast<float>(entry.real) + .5F*entry.mixed) / seconds;
+        result.generated_fps += (static_cast<float>(entry.generated) + .5F*entry.mixed) / seconds;
+        result.aer_eye_equivalents |= entry.mixed!=0;
     }
     // Hysteresis across alternating S/B slots; no green merely because armed,
     // initialized, primed, repeated, or because an attempted S failed.

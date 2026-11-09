@@ -97,6 +97,7 @@ struct OpenXrFpsOverlay::Impl {
         SceneIdentity scene;
         std::shared_ptr<InterfaceDeliveryReceipt> delivery;
         std::int64_t entered_qpc{};
+        bool aer_mixed{};
     };
     std::vector<PendingNativeCount> pending_native_counts;
     void poll_native_counts(std::int64_t now) noexcept {
@@ -105,9 +106,9 @@ struct OpenXrFpsOverlay::Impl {
             for(const auto& r:i->results) pending |= r && r->resolve()==D3D12NativeFrameResult::pending;
             if(pending && now-i->submitted_ns < 1'000'000'000) { ++i; continue; }
             if(!pending && classify_native_frame_content(i->results,i->output,true,true).synthetic) {
-                counter.submitted(i->submitted_ns,true,true);
+                counter.submitted(i->submitted_ns,true,true,i->aer_mixed);
                 if(luke_scene_measurement)accepted_scenes.accepted(i->submitted_ns,i->scene);
-                if(i->cycle)i->cycle->synthetic_accepted(i->accepted_qpc,i->period,i->entered_qpc);
+                if(i->cycle && !i->aer_mixed)i->cycle->synthetic_accepted(i->accepted_qpc,i->period,i->entered_qpc);
                 if(i->delivery)i->delivery->synthetic_confirmed.store(true,std::memory_order_release);
             }
             i=pending_native_counts.erase(i);
@@ -912,6 +913,7 @@ struct OpenXrFpsOverlay::Impl {
         }
         out.game_fps = fps.real_fps;
         out.generated_fps = fps.generated_fps;
+        out.aer_eye_equivalents = fps.aer_eye_equivalents;
         out.rates_valid = fps.sample_valid;
         if(luke_scene_measurement) {
             // Preserve the established real/generated OFXR counters. Only the
@@ -1270,13 +1272,13 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
         }
     }
     std::int64_t display{};
-    if (measure && !synthetic && nonempty && impl_->converter)
+    if (measure && (!synthetic || stamp.aer_mixed) && nonempty && impl_->converter)
         if (!impl_->converter(impl_->converter_user, info->displayTime, display)) display = 0;
     std::shared_ptr<InterfaceDeliveryReceipt> delivery;
     const bool capture_delivery=two_frame_capture_delivery_active();
     if(nonempty && impl_->private_delivery_end && ((measure && stamp.cycle)||capture_delivery)) {
         if(measure && stamp.cycle)stamp.cycle->require_native_delivery();
-        try {delivery=std::make_shared<InterfaceDeliveryReceipt>(synthetic);
+        try {delivery=std::make_shared<InterfaceDeliveryReceipt>(synthetic,stamp.aer_mixed);
             if(capture_delivery){
                 delivery->capture_cycle=stamp.cycle?stamp.cycle->started_ns:0;
                 delivery->capture_owner=stamp.scene_owner;delivery->capture_serial=stamp.scene_serial;
@@ -1290,10 +1292,10 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
     const auto result = prepared.submit?prepared.submit(submitted,delivery):
         delivery?impl_->private_delivery_end(submitted,delivery):impl_->downstream_end(impl_->session, submitted);
     const auto accepted_clock = measure ? interface_clock_ns() : 0;
-    if (measure && !synthetic) {
+    if (measure && (!synthetic || stamp.aer_mixed)) {
         if(result==XR_SUCCESS && nonempty && stamp.cycle)stamp.cycle->real_prediction(display);
         impl_->timings.submitted(stamp, submit_clock, result == XR_SUCCESS,
-            nonempty, synthetic, new_content, display, accepted_clock);
+            nonempty, synthetic && !stamp.aer_mixed, new_content, display, accepted_clock);
     }
     if (result != XR_SUCCESS) {
         if (impl_->menu_open) impl_->menu_event(8, result);
@@ -1310,17 +1312,18 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
                 BridgeFlightOperation::luke_afw_stage,scene.owner?1:0,1240,info->displayTime,scene.serial);
             impl_->accepted_scenes.accepted(now,scene);
         }
-        impl_->counter.submitted(now,metrics.synthetic,metrics.new_content);
-        if(measure && stamp.cycle && metrics.synthetic)
+        impl_->counter.submitted(now,metrics.synthetic,metrics.new_content,
+            stamp.aer_mixed && (metrics.synthetic || !synthetic));
+        if(measure && stamp.cycle && metrics.synthetic && !stamp.aer_mixed)
             stamp.cycle->synthetic_accepted(accepted_clock,impl_->estimate_period(),submit_clock);
-        if(delivery && metrics.synthetic)delivery->synthetic_confirmed.store(true,std::memory_order_release);
+        if(delivery && (metrics.synthetic || (stamp.aer_mixed && metrics.new_content)))delivery->synthetic_confirmed.store(true,std::memory_order_release);
         if(synthetic && new_content && !metrics.synthetic) {
             bool pending=false;
             for(const auto& r:native_results) pending |= r && r->resolve()==D3D12NativeFrameResult::pending;
             if(pending && impl_->pending_native_counts.size()<64)
                 impl_->pending_native_counts.push_back({{native_results.begin(),native_results.end()},now,native_output,
                     measure ? stamp.cycle : nullptr,accepted_clock,impl_->estimate_period(),
-                    {stamp.scene_owner,stamp.scene_serial,native_output+1},delivery,submit_clock});
+                    {stamp.scene_owner,stamp.scene_serial,native_output+1},delivery,submit_clock,stamp.aer_mixed});
         }
     }
     return result;

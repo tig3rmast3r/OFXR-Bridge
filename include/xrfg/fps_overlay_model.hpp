@@ -20,6 +20,7 @@ struct FpsSnapshot {
     bool delivered_valid{};
     float real_fps{}, generated_fps{};
     bool sample_valid{};
+    bool aer_eye_equivalents{};
 };
 
 // Caller serializes access. Fixed storage, monotonic wall-clock measurements;
@@ -28,7 +29,7 @@ struct FpsSnapshot {
 
 class FpsCounter {
 public:
-    void submitted(std::int64_t now_ns, bool synthetic, bool new_content = true) noexcept;
+    void submitted(std::int64_t now_ns, bool synthetic, bool new_content = true, bool aer_mixed = false) noexcept;
     [[nodiscard]] FpsSnapshot snapshot(std::int64_t now_ns) const noexcept;
     [[nodiscard]] DeliveryCadenceBatch cadence(std::int64_t now_ns) const noexcept {return cadence_.snapshot(now_ns);}
     void reset() noexcept { *this = {}; }
@@ -38,6 +39,7 @@ private:
         std::int64_t epoch{-1};
         std::uint32_t output{};
         std::uint32_t real{}, generated{};
+        std::uint32_t mixed{};
     };
     Bucket& bucket(std::int64_t now_ns) noexcept;
     std::array<Bucket, 12> buckets_{};

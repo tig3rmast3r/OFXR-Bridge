@@ -350,6 +350,23 @@ int main() {
         const auto fixture=std::filesystem::temp_directory_path()/(L"ofxr-v460-timing-"+std::to_wstring(GetCurrentProcessId()));
         std::filesystem::create_directories(fixture);
         SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",fixture.c_str());
+        {
+            auto mixed=std::make_shared<InterfaceCycle>(100'000'000,95'000'000);
+            mixed->call(100'000'000,104'000'000);mixed->producer_returned(106'000'000);
+            auto reference=std::make_shared<InterfaceDeliveryReceipt>(true,true);
+            mixed->attach_native_delivery(reference);
+            float held{},length{},minimum{};
+            check(!mixed->read(115'000'000,held,length),"pending mixed native output stays N/A");
+            reference->completed(true,112'000'000,115'000'000,125'000'000,110'000'000);
+            reference->synthetic_confirmed.store(true);
+            check(mixed->read(115'000'000,held,length) && held==4 && length==15,
+                "AER mixed native reference supplies measured hold and cycle time");
+            check(mixed->read_minimum_cycle(115'000'000,minimum) && minimum==15,
+                "mixed reference is one physical output, not another synthetic before itself");
+            float game{},generation{},delivery{};
+            check(mixed->stages(104'000'000,115'000'000,minimum,game,generation,delivery),
+                "mixed readiness receipt supplies generation/delivery stages");
+        }
         timing_sample_cohorts();
         buffer_preferences();minimum_spacing_rules();production_boundaries();timing();complete_cycle();estimated_cycle();native_delivery_cycle();stage_partition_and_baseline();wording();
         const auto before=snapshot();

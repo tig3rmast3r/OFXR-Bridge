@@ -18,13 +18,15 @@ std::int64_t interface_qpc_ns(std::int64_t ticks) noexcept;
 // owns no cycle, overlay or session, so retained packets cannot form a cycle.
 struct InterfaceDeliveryReceipt {
     const bool synthetic;
+    const bool mixed_reference;
     // F8-only identity, frozen before private submission. No timing policy.
     std::uint64_t capture_cycle{},capture_owner{},capture_serial{};
     std::uint32_t capture_generated_index{};
     std::atomic<bool> synthetic_confirmed{false};
     std::atomic<int> outcome{0}; // 0 pending, 1 nonempty native success, -1 failure/empty
     std::int64_t entered_ns{},returned_ns{},display_ns{},prepared_ns{};
-    explicit InterfaceDeliveryReceipt(bool generated) noexcept:synthetic(generated) {}
+    explicit InterfaceDeliveryReceipt(bool generated,bool mixed=false) noexcept
+        :synthetic(generated),mixed_reference(mixed) {}
     void completed(bool success,std::int64_t entered,std::int64_t returned,
                    std::int64_t display,std::int64_t prepared=0) noexcept {
         entered_ns=entered;returned_ns=returned;display_ns=display;prepared_ns=prepared;
@@ -56,7 +58,7 @@ class InterfaceCycle {
         const InterfaceDeliveryReceipt* first{};
         for(std::size_t i=0;i<native_count_;++i) {
             const auto& receipt=native_[i];
-            if(receipt->synthetic || receipt->outcome.load(std::memory_order_acquire)!=1)continue;
+            if((receipt->synthetic && !receipt->mixed_reference) || receipt->outcome.load(std::memory_order_acquire)!=1)continue;
             if(receipt->entered_ns<started_ns || receipt->returned_ns<receipt->entered_ns)continue;
             if(!first || receipt->entered_ns<first->entered_ns)first=receipt.get();
         }
@@ -132,7 +134,7 @@ public:
             returned=real.returned_ns;
             for(std::size_t i=0;i<native_count_;++i) {
                 const auto& r=native_[i];
-                if(!r->synthetic || r->outcome.load(std::memory_order_acquire)!=1 ||
+                if(!r->synthetic || r->mixed_reference || r->outcome.load(std::memory_order_acquire)!=1 ||
                     !r->synthetic_confirmed.load(std::memory_order_acquire))continue;
                 if(r->entered_ns<started_ns || r->entered_ns>=real.entered_ns ||
                     outputs==synthetic_entries.size())return false;
@@ -192,11 +194,12 @@ public:
             const InterfaceDeliveryReceipt* first{};
             bool has_synthetic{};
             for(std::size_t i=0;i<native_count_;++i) {
-                const auto& r=native_[i];if(!r->synthetic)continue;
+                const auto& r=native_[i];if(!r->synthetic && !r->mixed_reference)continue;
                 has_synthetic=true;
                 if(r->outcome.load(std::memory_order_acquire)!=1 ||
                    !r->synthetic_confirmed.load(std::memory_order_acquire) ||
-                   r->entered_ns>=real.entered_ns)continue;
+                   r->entered_ns>real.entered_ns ||
+                   (r->entered_ns==real.entered_ns && !r->mixed_reference))continue;
                 if(!first || r->entered_ns<first->entered_ns)first=r.get();
             }
             if(has_synthetic) {
@@ -239,6 +242,9 @@ struct InterfaceFrameStamp {
     std::shared_ptr<InterfaceCycle> cycle;
     // Exact source identity, independent of XR calls/slots; zero is unknown.
     std::uint64_t scene_owner{},scene_serial{};
+    // AER output: one exact raw eye and one reconstructed eye. Timing follows
+    // this admitted input cycle to its first mixed output, not held-eye age.
+    bool aer_mixed{};
 };
 enum class InterfaceSource : std::uint32_t { none, steamvr_pre_submit_gpu, real_frame_qpc, predicted_display_qpc, application_cpu_qpc, steamvr_display, openxr_period, accepted_submissions, steamvr_delivery, producer_call_qpc, frame_cycle_qpc, frame_cycle_slot_estimate, steamvr_scene_delivery, accepted_scene_submissions, native_frame_cycle_qpc, native_predicted_display_qpc, runtime_accepted_delivery, runtime_return_cycle_qpc, native_runtime_return_cycle_qpc, minimum_cycle_qpc, native_minimum_cycle_qpc };
 struct InterfaceTelemetry {
@@ -250,6 +256,7 @@ struct InterfaceTelemetry {
     float gpu_render_ms{}, ofxr_delay_ms{}, presentation_ms{}, cpu_render_ms{};
     float ofxr_time_ms{}, cycle_length_ms{};
     bool rates_valid{}, generating{};
+    bool aer_eye_equivalents{};
     bool gpu_valid{}, delay_valid{}, presentation_valid{}, cpu_valid{};
     bool ofxr_time_valid{}, cycle_valid{};
     InterfaceSource gpu_source{}, delay_source{}, presentation_source{}, cpu_source{}, display_source{}, output_source{};

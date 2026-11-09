@@ -953,6 +953,9 @@ struct SessionState {
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
     std::atomic_uint ofr_delivery{}; // 0 learning,1 alternate,2 paired
     unsigned ofr_fresh_mask{3},ofr_last_mask{};
+    xrfg::ofr::SourceTracker ofr_source_tracker;
+    std::array<XrPosef,2> ofr_source_poses{};
+    std::array<XrFovf,2> ofr_source_fovs{};
     // D35: bounded opt-in allocation/adapter records; never a pacing input.
     std::mutex video_memory_mutex;
     Microsoft::WRL::ComPtr<IDXGIAdapter3> video_memory_adapter;
@@ -9028,6 +9031,7 @@ bool realign_ofr_paired_metadata(GeneratedFrameEndInfo& first,
     auto& a=first.projections[0].views[eye];auto& b=second.projections[0].views[eye];
     b.pose=a.pose;b.fov=a.fov;
     a.pose=previous.layers[0].views[eye].pose;a.fov=previous.layers[0].views[eye].fov;
+    first.interface_stamp.aer_mixed=true;second.interface_stamp.aer_mixed=true;
     return true;
 }
 
@@ -14004,7 +14008,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 }
             }
             const bool aer_single=success && state->nvidia_options.ofr && job->pair && job->snapshot.aer_fresh_mask!=3;
-            if(aer_single) {real=std::move(synthetic);real->blackbar_pose.paired=false;job->pair=false;}
+            if(aer_single) {real=std::move(synthetic);real->blackbar_pose.paired=false;real->interface_stamp.aer_mixed=true;job->pair=false;}
             if(success && state->nvidia_options.ofr && (aer_single || job->pair))
                 xrfg::embedded::ofr_last_success_ms=GetTickCount64();
             xrfg::bridge_flight_logger().end(build_token,
@@ -16646,6 +16650,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     state->optical_flow_backend = backend;
     state->nvidia_options = options;
     state->ofr_delivery=0;state->ofr_last_mask=0;
+    state->ofr_source_tracker.reset();
     xrfg::embedded::ofr_last_success_ms=0;xrfg::embedded::ofr_delivery=0;
     state->frame_generation_mode = generation_mode;
     state->hybrid_requested=control.desired.hybrid;
@@ -18130,8 +18135,7 @@ XrResult layer_end_frame_impl(
         if(!stereo_projection || current_snapshot.layers.size()!=1)
             return bypass_generation(GenerationPrepareReason::missing_capture);
         const auto sources=ofr_sources(current_snapshot,projection_mappings);
-        const auto prior=previous_snapshot ? ofr_sources(*previous_snapshot,projection_mappings) : std::array<xrfg::ofr::Source,2>{};
-        const auto decision=xrfg::ofr::classify(prior,sources);
+        const auto decision=state->ofr_source_tracker.observe(sources);
         if(!sources[0].serial || !sources[1].serial)
             return bypass_generation(GenerationPrepareReason::missing_capture);
         state->ofr_fresh_mask=decision.fresh;current_snapshot.aer_fresh_mask=decision.fresh;
@@ -18144,9 +18148,20 @@ XrResult layer_end_frame_impl(
             return bypass_generation(GenerationPrepareReason::missing_capture);
         }
         const unsigned delivery=decision.paired()?2:1;
-        const bool lost=!decision.continuity ||
-            (state->ofr_delivery.load()!=0 && state->ofr_delivery.load()!=delivery) ||
-            (delivery==1 && state->ofr_last_mask==decision.fresh);
+        const auto anchor=previous_snapshot ? xrfg::ofr::classify(
+            ofr_sources(*previous_snapshot,projection_mappings),sources) : xrfg::ofr::Decision{};
+        // An observed source may have been refused by the generator. Keep its
+        // cadence, but never interpolate over a missing generation anchor.
+        const bool lost=!decision.continuity || (previous_snapshot &&
+            (!anchor.continuity || anchor.fresh!=decision.fresh));
+        for(unsigned eye=0;eye<2;++eye) {
+            auto& view=current_snapshot.layers[0].views[eye];
+            if(decision.fresh&(1u<<eye)) {
+                state->ofr_source_poses[eye]=view.pose;state->ofr_source_fovs[eye]=view.fov;
+            } else {
+                view.pose=state->ofr_source_poses[eye];view.fov=state->ofr_source_fovs[eye];
+            }
+        }
         if(lost && previous_snapshot) {
             clear_generation_continuity(state);metadata_pairable=false;previous_snapshot.reset();
         }
@@ -18154,12 +18169,6 @@ XrResult layer_end_frame_impl(
         xrfg::embedded::ofr_delivery=delivery;
         // A repeated eye's pixels retain their render camera, even if the mod
         // has refreshed both submitted poses for the next presentation.
-        if(previous_snapshot && delivery==1) {
-            for(unsigned eye=0;eye<2;++eye) if(!(decision.fresh&(1u<<eye))) {
-                current_snapshot.layers[0].views[eye].pose=previous_snapshot->layers[0].views[eye].pose;
-                current_snapshot.layers[0].views[eye].fov=previous_snapshot->layers[0].views[eye].fov;
-            }
-        }
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
             9230,decision.fresh,delivery,lost?1:0);
     }
@@ -18637,7 +18646,7 @@ XrResult layer_end_frame_impl(
     }
     if(prepared.kind==PreparedGenerationKind::prime) attach_djules_outputs(prepared,first_generated);
     else if(pair_ready) attach_djules_outputs(prepared,current_generated,&first_generated,extra_ready?&extra_generated:nullptr);
-    if(ofr_single) pair_ready=false;
+    if(ofr_single) {pair_ready=false;first_generated.interface_stamp.aer_mixed=true;}
     if (completed_afw) {
         first_generated.composition_images = completed_afw->submission->composition_images;
         current_generated.composition_images = completed_afw->submission->composition_images;
@@ -18849,7 +18858,7 @@ XrResult layer_end_frame_impl(
                !handover_djules_outputs(state.get(),first_generated.pending_outputs)) return XR_ERROR_RUNTIME_FAILURE;
             report_native_frame_content(state.get(),&first_generated);
             return state->fps_overlay
-                ? state->fps_overlay->end_frame(physical_end, pair_ready,true,native_frame_results(&first_generated),first_generated.native_output, produced_snapshot.interface_stamp)
+                ? state->fps_overlay->end_frame(physical_end, pair_ready || ofr_single,true,native_frame_results(&first_generated),first_generated.native_output, first_generated.interface_stamp)
                 : content_end_frame(session, physical_end);
         });
         log_luke_physical_boundary(state, submitted_end_info, frame_serial, 5, &prepared, result);

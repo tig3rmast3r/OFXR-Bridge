@@ -359,8 +359,8 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     struct Number { std::string value; const char* label; PanelTone tone; };
     const Number numbers[]{
         {value(m.output_fps,current&&output_rate_valid(m),true),state.runtime.luke_detected?"New submitted FPS":"Output FPS",tone},
-        {value(m.game_fps,current&&m.rates_valid,true),"Real submitted",metric_tone(m.rates_valid)},
-        {value(m.generated_fps,current&&m.rates_valid,true),"Gen submitted",metric_tone(m.rates_valid)},
+        {value(m.game_fps,current&&m.rates_valid,true),m.aer_eye_equivalents?"Real eye equiv.":"Real submitted",metric_tone(m.rates_valid)},
+        {value(m.generated_fps,current&&m.rates_valid,true),m.aer_eye_equivalents?"Gen eye equiv.":"Gen submitted",metric_tone(m.rates_valid)},
         {value(m.display_hz,current&&m.display_hz>0,true),"Display Hz",PanelTone::dim},
         {value(m.ofxr_time_ms,current&&m.ofxr_time_valid,false),"OFXR time",metric_tone(m.ofxr_time_valid)},
         {value(m.cycle_length_ms,current&&m.cycle_valid,false),"Cycle length",metric_tone(m.cycle_valid)},
