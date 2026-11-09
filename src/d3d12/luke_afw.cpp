@@ -2773,7 +2773,9 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             in.background_history_only = gap_background && history_usable;
             // The validated binding/mode is available during normal play.
             // tracking_valid is diagnostic-only and must not gate rendering.
-            in.conservative_cabin_history=guide.gta_headlock && guide.gta_headlock->mode==0;
+            in.conservative_cabin_history=(guide.gta_headlock && guide.gta_headlock->mode==0) ||
+                (guide.osr_native_cabin_motion && guide.raw_motion_native_span_confirmed &&
+                 guide.raw_motion_native_span==1 && guide.compose_native_object_history);
             in.lower_quality=settings.osr_lower_quality;
             in.reset_history = guide.reset;
             // The history frame's own motion needs that eye's frame before it

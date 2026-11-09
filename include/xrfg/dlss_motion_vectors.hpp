@@ -90,7 +90,7 @@ struct DlssMotionVectorPublication {
     // DLSS consumes float XY; only our existing owned motion copy is typed.
     // Generic/external publishers keep the original resource format.
     bool dlss_float_motion{};
-    // Original one-step GTA inputs need both immutable object-motion intervals.
+    // Original one-step GTA/Cyberpunk inputs need both immutable object-motion intervals.
     bool compose_native_object_history{};
     std::optional<LukeGtaHeadlock> gta_headlock;
     // The camera arrives at submission (attach_dlss_motion_vector_camera):
@@ -102,6 +102,8 @@ struct DlssMotionVectorPublication {
     // Exact native camera source clock shared by independently observed eye
     // features. Does not replace each feature's NGX production sequence.
     std::uint64_t source_clock_owner{},source_clock_sequence{};
+    // Cyberpunk OSR: exact pre-REAL-VR N1 capture, never inferred from N2.
+    bool osr_native_cabin_motion{};
 };
 
 // A camera attached to a published frame at its submission.
@@ -240,6 +242,7 @@ struct DlssMotionVectorFrame {
     bool placed{};
     std::array<float, 4> placed_motion_rect{};
     std::uint64_t source_clock_owner{},source_clock_sequence{};
+    bool osr_native_cabin_motion{};
 };
 
 // The vector and depth rectangles a consumer maps the guide's output onto:

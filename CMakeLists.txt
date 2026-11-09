@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.927.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.928.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2041,6 +2041,12 @@ if(TARGET xrfg_three_slot_director_tests AND TARGET xrfg_sl_fixture_legacy)
         crimson-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
     set_tests_properties(xrfg_crimson_ngx_actual_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    foreach(cyberpunk_mode osr osr-bypass afw)
+      add_test(NAME xrfg_cyberpunk_${cyberpunk_mode}_capture COMMAND xrfg_three_slot_director_tests
+          cyberpunk-${cyberpunk_mode}-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+          "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+      set_tests_properties(xrfg_cyberpunk_${cyberpunk_mode}_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    endforeach()
     foreach(unlisted_motion swap original)
       add_test(NAME xrfg_unlisted_motion_${unlisted_motion}_capture COMMAND xrfg_three_slot_director_tests
           unlisted-motion-${unlisted_motion}-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"

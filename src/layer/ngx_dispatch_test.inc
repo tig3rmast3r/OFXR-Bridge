@@ -395,12 +395,13 @@ NVSDK_NGX_Result actual_crimson_public_forwarder(ID3D12GraphicsCommandList* list
         c.injector_motion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     actual_fixture_copy(list,c.public_depth,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         c.injector_depth,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    if(test_gta_enhanced_production_identity) {
+    if(test_gta_enhanced_production_identity||test_cyberpunk_native_motion) {
         auto& modified=*static_cast<DispatchParameters*>(const_cast<NVSDK_NGX_Parameter*>(parameters));
         modified.motion=c.injector_motion;modified.depth=c.injector_depth;
         modified.output=c.injector_output;
     }
-    const auto result=evaluate<0>(list,handle,parameters,callback);
+    const auto result=test_cyberpunk_bypass_native ? state().modules[0].evaluate(list,handle,parameters,callback) :
+        evaluate<0>(list,handle,parameters,callback);
     if(test_gta_enhanced_production_identity&&NVSDK_NGX_SUCCEED(result)) {
         // GTA's actual public fixture delegates directly to the typed body.
         // Inspect its native target here, before the wrapper's final composite.
@@ -650,7 +651,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
     bool scene_camera=false,SelectLukeExecutionQueue selector=nullptr,bool outlaws=false,bool dead_space=false,bool gta=false) {
     const auto require=[](bool ok,const char* message){if(!ok)throw std::runtime_error(message);};
     const auto check=[&](HRESULT result,const char* message){require(SUCCEEDED(result),message);};
-    const bool original_public_guides=test_crimson_native_motion||gta;
+    const bool original_public_guides=test_crimson_native_motion||gta||cyberpunk_original_motion();
     const bool final_public_color=original_public_guides||gta;
     try {
         const auto vr_module=LoadLibraryW(realvr),sl_module=LoadLibraryW(streamline);
@@ -1103,7 +1104,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                 context.expect_capture=n!=12;
                 parameters.motion=n==12?nullptr:motion.Get();
             }
-            if(gta) {
+            if(gta||test_cyberpunk_native_motion) {
                 // A new caller production supplies its own public bindings;
                 // do not reuse the previous wrapper's in-place mutation.
                 parameters.output=color.Get();parameters.motion=motion.Get();parameters.depth=depth.Get();
@@ -1140,6 +1141,20 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                 context.frame->raw_motion_native_span==((dead_space || test_ghost_native_motion ||
                     test_horizon_native_motion||test_unlisted_motion_swap)?2u:1u),
                 "actual title/runtime capture used the wrong native motion interval");
+            if(context.frame && test_cyberpunk_native_motion) {
+                std::cout<<"Cyberpunk receipt frame="<<n<<" original="<<original_public_guides
+                    <<" span="<<context.frame->raw_motion_native_span
+                    <<" confirmed="<<context.frame->raw_motion_native_span_confirmed
+                    <<" cabin="<<context.frame->osr_native_cabin_motion
+                    <<" composed="<<context.frame->compose_native_object_history
+                    <<" caller_output="<<(context.frame->output.Get()==color.Get())<<'\n';
+                require(
+                context.frame->osr_native_cabin_motion==original_public_guides &&
+                context.frame->compose_native_object_history==original_public_guides &&
+                (!original_public_guides || (context.frame->raw_motion_native_span_confirmed &&
+                 context.frame->output.Get()==color.Get())),
+                "Cyberpunk OSR lost exact original N1/cabin/final-output receipt or changed legacy AFW");
+            }
             const unsigned successful=n>=recycle_production?n-recycle_production+1:
                 n-(logical_family&&n>=12?1:0);
             if(logical_family&&n!=12&&n>=2&&n<recycle_production)
@@ -1651,6 +1666,16 @@ int run_horizon_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline
 int run_crimson_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline) {
     test_crimson_native_motion=true;
     return run_actual_ngx_capture_pipeline(realvr,streamline,false);
+}
+int run_cyberpunk_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline,bool osr,bool bypass) {
+    test_cyberpunk_native_motion=true;
+    test_cyberpunk_bypass_native=bypass;
+    const auto saved=embedded::afw_snapshot().desired;
+    auto settings=saved;settings.osr=osr?2:0;
+    if(!embedded::request_afw(settings))return 1;
+    if(!osr) {test_unlisted_typed_dispatch=true;test_unlisted_motion_swap=true;}
+    const auto result=run_actual_ngx_capture_pipeline(realvr,streamline,false);
+    return embedded::request_afw(saved)?result:1;
 }
 // An unlisted REAL VR title: N-2 exactly when its typed SR call received
 // other MotionVectors than the public call, N-1 when it received the game's.

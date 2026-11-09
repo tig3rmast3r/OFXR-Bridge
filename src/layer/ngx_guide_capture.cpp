@@ -127,6 +127,8 @@ bool test_ghost_native_motion{};
 bool test_horizon_native_motion{};
 bool test_dead_space_production_identity{};
 bool test_gta_enhanced_production_identity{};
+bool test_cyberpunk_native_motion{};
+bool test_cyberpunk_bypass_native{};
 // An unlisted REAL VR title whose public call reaches a typed SR module,
 // with (swap) or without REAL VR replacing MotionVectors in between.
 bool test_unlisted_typed_dispatch{};
@@ -157,6 +159,21 @@ bool gta_enhanced_process() {
 #endif
 }
 bool cached_luke_title() {return dead_space_process()||gta_enhanced_process();}
+bool cyberpunk_process() {
+    static const bool selected=[] {
+        wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
+        const auto* name=wcsrchr(path,L'\\');
+        return !_wcsicmp(name?name+1:path,L"Cyberpunk2077.exe");
+    }();
+#ifdef XRFG_NATIVE_INGRESS_TESTS
+    return selected||test_cyberpunk_native_motion;
+#else
+    return selected;
+#endif
+}
+bool cyberpunk_original_motion() {
+    return cyberpunk_process() && embedded::afw_snapshot().desired.osr==2;
+}
 void title_capture_log(const char* message,UINT64 a=0,UINT64 b=0,UINT64 c=0,UINT64 d=0) {
     if(gta_enhanced_process()&&strncmp(message,"dead_space_",11)==0) {
         char label[MAX_PATH+40]{};snprintf(label,sizeof(label),"gta_enhanced_%s",message+11);
@@ -284,7 +301,7 @@ bool same_eye_native_motion() noexcept {
     }();
 #ifdef XRFG_NATIVE_INGRESS_TESTS
     const bool same_eye=selected||test_ghost_native_motion||test_horizon_native_motion||
-        test_gta_enhanced_production_identity||test_dead_space_production_identity;
+        test_gta_enhanced_production_identity||test_dead_space_production_identity||test_cyberpunk_native_motion;
 #else
     const bool same_eye=selected;
 #endif
@@ -1167,7 +1184,9 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
             log("luke_motion_source",static_cast<unsigned>(source),g.raw_motion_native_span,call,guide_stream);
     }
     if(observed_motion_span) {g.raw_motion_native_span=observed_motion_span;g.raw_motion_native_span_confirmed=true;}
-    g.compose_native_object_history=luke && gta_enhanced_process() && g.raw_motion_native_span==1;
+    g.osr_native_cabin_motion=luke && cyberpunk_process() &&
+        observed_motion_span==1 && g.raw_motion_native_span_confirmed;
+    g.compose_native_object_history=luke && (gta_enhanced_process() || g.osr_native_cabin_motion) && g.raw_motion_native_span==1;
     if(luke&&gta_enhanced_process())
         g.gta_headlock=query_luke_gta_headlock(bridge_flight_logger().enabled());
     // Scoped camera values replace apply_camera's camera read, while its Luke
@@ -1321,6 +1340,8 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     }
     if(snapshot_attempted)*snapshot_attempted=true;
     auto frame=publish_dlss_motion_vectors(g);
+    if(g.osr_native_cabin_motion && (call<=8 || call%300==0))
+        log("cyberpunk_original_n1",call,frame?frame->publication:0,g.camera_frame_token,g.compose_native_object_history);
     if(frame && camera_at_submission) {
         native_ingress::register_pending_real_vr_camera(frame->stream,frame->publication);
         static std::atomic_bool reported{};
@@ -1619,7 +1640,11 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
     // GTA's original N-1 object intervals are composed with native depth;
     // freeze them before REAL VR's history-conditioned combined field.
     // The final caller scope still stamps only after the wrapper returns.
-    const bool original_public=(crimson_desert_process() || gta_enhanced_process()) && native_ingress::luke_detected() &&
+    // Cyberpunk OSR snapshots the original N1 game inputs here too. REAL VR
+    // still rewrites its own DLSS inputs; only our immutable guide copies use
+    // N1. Its original public Output is marked after the wrapper completes,
+    // including when another injector bypasses the typed-native hook.
+    const bool original_public=(crimson_desert_process() || gta_enhanced_process() || cyberpunk_original_motion()) && native_ingress::luke_detected() &&
         !state().modules[slot].typed_implementation;
     const bool delegate_nr=original_public && native_available;
     NgxEvaluationBoundary scope(slot,state().modules[slot].typed_implementation,
