@@ -2039,7 +2039,7 @@ void log_benchmark_configuration(SessionState& state) noexcept {
         (s.pacing_mode==1 ? 1ULL << 40 : 0ULL) | (std::uint64_t(s.pacing_mode)<<42) | (single_director_pacing(state) ? 1ULL << 41 : 0ULL) |
         (state.private_runtime ? (1ULL<<45) | (state.private_runtime->buffer_capacity()>=3 ? 1ULL<<44:0ULL):0ULL) |
         (s.increase_buffer ? 1ULL<<46:0ULL) |
-        (s.ofr && s.enabled ? 1ULL<<48:0ULL) | (s.ofr_swap ? 1ULL<<49:0ULL) |
+        (s.ofr_enabled && s.enabled ? 1ULL<<48:0ULL) | (s.ofr_swap ? 1ULL<<49:0ULL) |
         (state.private_runtime && state.private_runtime->clean_bypass_enabled() ? 1ULL<<50:0ULL) |
         (xrfg::autonomous::benchmark_active(control.benchmark) ? (1ULL<<24) | (std::uint64_t(control.benchmark.index)<<25) : 0ULL);
     logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, control.revision, bits,
