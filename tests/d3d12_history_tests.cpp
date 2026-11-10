@@ -6253,24 +6253,26 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 #include "rife_switch_lifecycle.inc"
 
 int main(int argc, char** argv) {
-    if(argc>1 && std::string_view(argv[1])=="aer-guide-alias") {
+    if(argc>1 && (std::string_view(argv[1])=="aer-guide-alias" || std::string_view(argv[1])=="aer-guide-opaque")) {
         try {
             D3D12WarpFixture fixture(true);
-            test_guide_device_ownership(fixture);
+            const bool opaque=std::string_view(argv[1])=="aer-guide-opaque";
+            if(!opaque)test_guide_device_ownership(fixture);
             for(bool n1:{false,true}) {
-                test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::fsr3,n1,true);
-                test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::ofxr,n1,true,true);
+                test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::fsr3,n1,true,false,opaque);
+                test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::ofxr,n1,true,true,opaque);
             }
             fixture.require_no_debug_errors();return 0;
         }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
     }
 #ifdef XRFG_NATIVE_DLSSG
-    if(argc>1 && std::string_view(argv[1])=="aer-native-alias") {
+    if(argc>1 && (std::string_view(argv[1])=="aer-native-alias" || std::string_view(argv[1])=="aer-native-opaque")) {
         try {
             if(!native_test_has_supported_nvidia_adapter())return 77;
             D3D12WarpFixture fixture(true);
             require(xrfg::native_dlssg_lifetime_snapshot().shared_initializations==0,"alias test starts before shared NGX init");
-            for(bool n1:{false,true})test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::native_dlss,n1,true);
+            const bool opaque=std::string_view(argv[1])=="aer-native-opaque";
+            for(bool n1:{false,true})test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::native_dlss,n1,true,false,opaque);
             require(xrfg::native_dlssg_lifetime_snapshot().shared_initializations==0,"alias entered shared NGX init");
             fixture.require_no_debug_errors();return 0;
         }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

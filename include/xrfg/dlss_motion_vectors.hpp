@@ -133,6 +133,14 @@ struct DlssNativeCameraHistory {
     std::uint32_t raw_motion_native_span{1};
     std::uint64_t source_clock_owner{},source_clock_sequence{};
 };
+// Captured when OFXR creates an owned snapshot, not inferred from GetDevice.
+// Sharing the immutable pair binds the allocation owner to that exact resource.
+struct DlssSnapshotAllocation {
+    const Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    const Microsoft::WRL::ComPtr<ID3D12Device> device;
+    DlssSnapshotAllocation(ID3D12Resource* r,ID3D12Device* d):resource(r),device(d){}
+};
+
 struct DlssMotionVectorFrame {
     std::uint64_t stream{};
     std::uint64_t epoch{};
@@ -246,6 +254,7 @@ struct DlssMotionVectorFrame {
     std::uint64_t source_clock_owner{},source_clock_sequence{};
     bool osr_native_cabin_motion{};
     OsrSourceTime source_camera_time{};
+    std::shared_ptr<const DlssSnapshotAllocation> motion_allocation,depth_allocation;
 };
 
 // The vector and depth rectangles a consumer maps the guide's output onto:

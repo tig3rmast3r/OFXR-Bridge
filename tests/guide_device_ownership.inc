@@ -22,5 +22,13 @@ void test_guide_device_ownership(D3D12WarpFixture& fixture) {
     require(!xrfg::guide_resource_on_device(unrelated.Get(),frame,motion.Get(),true),"same adapter admitted without shared backing");
     auto forged=frame;forged.motion_snapshot_device=unrelated;
     require(!xrfg::guide_resource_on_device(alias.Get(),forged,motion.Get(),true),"unproved allocation receipt admitted");
+    auto bound=frame;
+    bound.motion_allocation=std::make_shared<const xrfg::DlssSnapshotAllocation>(motion.Get(),fixture.device());
+    require(xrfg::guide_resource_on_device(alias.Get(),bound,motion.Get(),true),"bound allocation receipt refused");
+    auto wrong_resource=bound;wrong_resource.motion_vectors=depth;
+    require(!xrfg::guide_resource_on_device(fixture.device(),wrong_resource,depth.Get(),true),"allocation receipt accepted a replacement resource");
+    auto wrong_owner=bound;
+    wrong_owner.motion_allocation=std::make_shared<const xrfg::DlssSnapshotAllocation>(motion.Get(),unrelated.Get());
+    require(!xrfg::guide_resource_on_device(fixture.device(),wrong_owner,motion.Get(),true),"bound allocation accepted an unproved owner");
     std::cout<<"Guide device ownership: native/alias motion and depth, generic/missing/forged/unproved refusals PASS\n";
 }

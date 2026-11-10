@@ -2,25 +2,41 @@
 // separate temporal context per eye; a held peer never enters the provider.
 class GuideConsumerDeviceAlias final:public ReportedDeviceAlias {
 public:
-    explicit GuideConsumerDeviceAlias(ID3D12Device* native):ReportedDeviceAlias(native),native_(native){}
+    explicit GuideConsumerDeviceAlias(ID3D12Device* native,bool opaque=false):ReportedDeviceAlias(native),native_(native),opaque_(opaque){}
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID key,UINT* size,void* data) override {
+        return opaque_ && key==d3d_owner::receipt_guid?DXGI_ERROR_NOT_FOUND:
+            ReportedDeviceAlias::GetPrivateData(key,size,data);
+    }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID key,UINT size,const void* data) override {
+        return opaque_ && key==d3d_owner::receipt_guid?S_OK:
+            ReportedDeviceAlias::SetPrivateData(key,size,data);
+    }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** output) override {
         const auto hr=ReportedDeviceAlias::QueryInterface(iid,output);
         return hr==E_NOINTERFACE?native_->QueryInterface(iid,output):hr;
     }
 private:
     ComPtr<ID3D12Device> native_;
+    bool opaque_{};
 };
 
 void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
-    xrfg::D3D12FrameGenerationMode mode,bool n1=false,bool alias=false,bool hybrid=false) {
+    xrfg::D3D12FrameGenerationMode mode,bool n1=false,bool alias=false,bool hybrid=false,bool opaque=false) {
     constexpr UINT width=256,height=128;
+    ComPtr<ID3D12Device> consumer=fixture.device();
+    ComPtr<ID3D12CommandQueue> consumer_queue=fixture.queue();
+    if(alias) {
+        consumer.Attach(new GuideConsumerDeviceAlias(fixture.device(),opaque));
+        consumer_queue.Attach(new QueueWithReportedDeviceAlias(fixture.queue(),consumer.Get()));
+    }
+    auto* creator=opaque?consumer.Get():fixture.device();
     const auto texture=[&](DXGI_FORMAT format,UINT value) {
         auto desc=stereo_texture_description(width,height);
         desc.DepthOrArraySize=1;desc.Format=format;
         desc.Flags=format==kFormat?D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET:D3D12_RESOURCE_FLAG_NONE;
         const auto heap=heap_properties(D3D12_HEAP_TYPE_DEFAULT);
         ComPtr<ID3D12Resource> result;
-        require_hresult(fixture.device()->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,
+        require_hresult(creator->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,
             &desc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&result)),"AER guide texture");
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};UINT rows{};UINT64 row_bytes{},bytes{};
         fixture.device()->GetCopyableFootprints(&desc,0,1,0,&fp,&rows,&row_bytes,&bytes);
@@ -48,12 +64,6 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
         return result;
     };
     auto motion=texture(DXGI_FORMAT_R32G32_FLOAT,0),depth=texture(DXGI_FORMAT_R32_FLOAT,0);
-    ComPtr<ID3D12Device> consumer=fixture.device();
-    ComPtr<ID3D12CommandQueue> consumer_queue=fixture.queue();
-    if(alias) {
-        consumer.Attach(new GuideConsumerDeviceAlias(fixture.device()));
-        consumer_queue.Attach(new QueueWithReportedDeviceAlias(fixture.queue(),consumer.Get()));
-    }
     for(UINT eye=0;eye<2;++eye) {
         const UINT color=eye?211:43;
         auto a=texture(kFormat,color),b=texture(kFormat,color+1);
@@ -75,7 +85,9 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
             g->producer_queue=consumer_queue;g->motion_vectors=motion;g->depth=depth;
             g->verified_producer_device=alias && mode==xrfg::D3D12FrameGenerationMode::native_dlss
                 ?consumer.Get():fixture.device();
-            g->motion_snapshot_device=g->depth_snapshot_device=fixture.device();
+            g->motion_snapshot_device=g->depth_snapshot_device=creator;
+            g->motion_allocation=std::make_shared<const xrfg::DlssSnapshotAllocation>(motion.Get(),creator);
+            g->depth_allocation=std::make_shared<const xrfg::DlssSnapshotAllocation>(depth.Get(),creator);
             g->output_width=g->motion_width=g->depth_width=width;
             g->output_height=g->motion_height=g->depth_height=height;
             g->resource_state=g->depth_resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
