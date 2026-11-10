@@ -38,6 +38,13 @@ void static_projection_tests() {
             for(const auto& ref:m.views)require(ref.projection_index==unsigned(first),"scene references changed after static filtering");
             destinations.push_back({m.application_swapchain,reinterpret_cast<XrSwapchain>(handle_value(m.application_swapchain)+0x1000)});
         }
+        std::vector<std::shared_ptr<xrfg::D3D12SwapchainHistory>> histories;
+        for(const auto& m:mapped.mappings) {
+            auto history=std::make_shared<xrfg::D3D12SwapchainHistory>();histories.push_back(history);
+            snapshot.capture_order.push_back({m.application_swapchain,history,10,10});
+        }
+        const auto sources=ofr_sources(snapshot,mapped.mappings);
+        require(sources[0].serial==10 && sources[1].serial==10,"AER must identify both scene eyes beside a static projection");
         for(bool synthetic:{false,true}) {
             GeneratedFrameEndInfo output;
             require(build_generated_frame_end_info(&end,snapshot,synthetic,destinations,&output),"mutable scene with immutable projection must build");
