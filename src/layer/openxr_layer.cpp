@@ -9061,13 +9061,16 @@ struct GeneratedFrameEndInfo {
 
 // Keep cameras attached to the exact endpoint pixels selected by OFR.
 bool realign_ofr_paired_metadata(GeneratedFrameEndInfo& first,
-    GeneratedFrameEndInfo& second,const ProjectionSnapshot& previous,bool swap) noexcept {
-    if(first.projections.size()!=1 || second.projections.size()!=1 || previous.layers.size()!=1 ||
-       first.projections[0].views.size()!=2 || second.projections[0].views.size()!=2 || previous.layers[0].views.size()!=2) return false;
+    GeneratedFrameEndInfo& second,const ProjectionSnapshot& previous,bool swap,std::size_t scene=0) noexcept {
+    if(first.projections.size()!=previous.layers.size() || second.projections.size()!=previous.layers.size() ||
+       scene>=previous.layers.size() || first.projections[scene].views.size()!=2 ||
+       second.projections[scene].views.size()!=2 || previous.layers[scene].views.size()!=2 ||
+       first.projections[scene].layer_index!=previous.layers[scene].layer_index ||
+       second.projections[scene].layer_index!=previous.layers[scene].layer_index) return false;
     const auto eye=xrfg::ofr::newer_eye(swap);
-    auto& a=first.projections[0].views[eye];auto& b=second.projections[0].views[eye];
+    auto& a=first.projections[scene].views[eye];auto& b=second.projections[scene].views[eye];
     b.pose=a.pose;b.fov=a.fov;
-    a.pose=previous.layers[0].views[eye].pose;a.fov=previous.layers[0].views[eye].fov;
+    a.pose=previous.layers[scene].views[eye].pose;a.fov=previous.layers[scene].views[eye].fov;
     first.interface_stamp.mark_aer_mixed();second.interface_stamp.mark_aer_mixed();
     return true;
 }
@@ -11692,6 +11695,15 @@ void refresh_release_bound_projection_guides(
     }
 }
 
+// Immutable projections participate in composition, never temporal generation.
+// Use the OpenXR creation contract, not image size, game name or layer order.
+[[nodiscard]] bool projection_layer_is_static(const ProjectionLayerSnapshot& layer) noexcept {
+    return !layer.views.empty() && std::all_of(layer.views.begin(),layer.views.end(),[](const auto& view) {
+        const auto chain=find_swapchain(view.subImage.swapchain);
+        return chain && (chain->create_info.createFlags & XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT);
+    });
+}
+
 [[nodiscard]] ProjectionMappingResult
 build_projection_resource_mappings(const ProjectionSnapshot& snapshot) noexcept {
     ProjectionMappingResult output{};
@@ -12068,16 +12080,40 @@ void record_projection_capture_order(
     } catch (...) { snapshot.capture_order.clear(); }
 }
 
+// One mutable stereo scene may be surrounded by immutable projections. Keep
+// reference indices in the original snapshot: dropping layers would change the
+// submitted composition and attach cameras to the wrong eye/layer.
+[[nodiscard]] std::optional<std::size_t> ofr_scene_projection(
+    const ProjectionSnapshot& snapshot,std::span<const ProjectionResourceMapping> mappings) noexcept {
+    std::optional<std::size_t> scene;
+    unsigned eyes{};
+    for(const auto& mapping:mappings) {
+        if(mapping.views.empty())return std::nullopt;
+        for(const auto& ref:mapping.views) {
+            if(ref.projection_index>=snapshot.layers.size() || ref.view_index>1 ||
+                snapshot.layers[ref.projection_index].views.size()!=2 ||
+                snapshot.layers[ref.projection_index].views[ref.view_index].subImage.swapchain!=mapping.application_swapchain ||
+                (scene && *scene!=ref.projection_index) || (eyes&(1u<<ref.view_index)))return std::nullopt;
+            scene=ref.projection_index;eyes|=1u<<ref.view_index;
+        }
+    }
+    if(!scene || eyes!=3)return std::nullopt;
+    for(std::size_t i=0;i<snapshot.layers.size();++i)
+        if(i!=*scene && !projection_layer_is_static(snapshot.layers[i]))return std::nullopt;
+    return scene;
+}
+
 [[nodiscard]] std::array<xrfg::ofr::Source,2> ofr_sources(
     const ProjectionSnapshot& snapshot, std::span<const ProjectionResourceMapping> mappings) noexcept {
     std::array<xrfg::ofr::Source,2> result{};
-    if(snapshot.layers.size()!=1 || snapshot.layers[0].views.size()!=2) return {};
+    const auto scene=ofr_scene_projection(snapshot,mappings);
+    if(!scene)return {};
     for(const auto& mapping:mappings) {
         const auto capture=std::find_if(snapshot.capture_order.begin(),snapshot.capture_order.end(),
             [&](const auto& c){return c.swapchain==mapping.application_swapchain;});
         if(capture==snapshot.capture_order.end()) return {};
         for(const auto& reference:mapping.views) {
-            if(reference.projection_index!=0 || reference.view_index>1) return {};
+            if(reference.projection_index!=*scene || reference.view_index>1) return {};
             auto& source=result[reference.view_index];
             if(source.serial) return {};
             source={static_cast<std::uintptr_t>(handle_value(mapping.application_swapchain)),
@@ -12264,13 +12300,14 @@ constexpr float kMaxSyntheticCameraMoveMeters = 0.5F;
 [[nodiscard]] std::optional<ProjectionSnapshot> synthetic_camera_snapshot(
     const ProjectionSnapshot& previous,
     const ProjectionSnapshot& current,
-    float fraction) noexcept {
+    float fraction,std::optional<std::size_t> scene=std::nullopt) noexcept {
     try {
-        if (previous.layers.size() != current.layers.size()) {
+        if (previous.layers.size() != current.layers.size() || (scene && *scene>=current.layers.size())) {
             return std::nullopt;
         }
         ProjectionSnapshot camera = current;
         for (std::size_t layer_index = 0; layer_index < camera.layers.size(); ++layer_index) {
+            if(scene && layer_index!=*scene)continue;
             auto& views = camera.layers[layer_index].views;
             const auto& previous_views = previous.layers[layer_index].views;
             if (previous_views.size() != views.size()) {
@@ -14036,7 +14073,8 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                     synthetic_info.composition_images = job->metadata->composition_images;
                     synthetic_info.djules_leader=job->triple && state->nvidia_options.rife_model<0;
                     if(success && state->nvidia_options.ofr && job->snapshot.aer_fresh_mask==3) {
-                        success=job->aer_previous && realign_ofr_paired_metadata(synthetic_info,*real,*job->aer_previous,state->nvidia_options.ofr_swap);
+                        const auto scene=ofr_scene_projection(job->snapshot,job->mappings);
+                        success=job->aer_previous && scene && realign_ofr_paired_metadata(synthetic_info,*real,*job->aer_previous,state->nvidia_options.ofr_swap,*scene);
                     }
                     if (success) synthetic = make_presenter_owned_frame(std::move(synthetic_info));
                     success = success && synthetic != nullptr;
@@ -14938,9 +14976,9 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     job->extra_fraction=synthetic_interpolation_fraction(state,previous,job->snapshot,1);
     job->third_fraction=synthetic_interpolation_fraction(state,previous,job->snapshot,2);
     if (previous && (state->nvidia_options.ofr || xrfg::autonomous::r19_camera_enabled.load(std::memory_order_acquire))) {
-        job->synthetic_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->fraction);
-        job->extra_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->extra_fraction);
-        job->third_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->third_fraction);
+        job->synthetic_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->fraction,state->nvidia_options.ofr?ofr_scene_projection(job->snapshot,job->mappings):std::nullopt);
+        job->extra_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->extra_fraction,state->nvidia_options.ofr?ofr_scene_projection(job->snapshot,job->mappings):std::nullopt);
+        job->third_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->third_fraction,state->nvidia_options.ofr?ofr_scene_projection(job->snapshot,job->mappings):std::nullopt);
     }
     job->mappings.assign(mappings.begin(), mappings.end());
     job->post_afw_frame = std::move(post_afw_frame);
@@ -17378,6 +17416,7 @@ struct PrivateDepthStrip {
     std::span<const ProjectionResourceMapping> mappings) noexcept {
     if (snapshot.layers.empty()) return FsrStereoGuideReason::non_stereo_projection;
     for (std::size_t projection = 0; projection < snapshot.layers.size(); ++projection) {
+        if (projection_layer_is_static(snapshot.layers[projection])) continue;
         const auto& views = snapshot.layers[projection].views;
         if (views.size() != 2) return FsrStereoGuideReason::non_stereo_projection;
         std::array<std::shared_ptr<const xrfg::DlssMotionVectorFrame>, 2> eyes;
@@ -18062,8 +18101,9 @@ XrResult layer_end_frame_impl(
     // Source observation is independent of guide availability and generation
     // success. A failed native join still consumes this source identity once;
     // later held polls must not republish it as raw AER or change its camera.
+    const auto aer_scene=ofr_scene_projection(current_snapshot,projection_mappings);
     std::optional<xrfg::ofr::Decision> aer_source_decision;
-    if(state->nvidia_options.ofr && resource_mappings.ready()) {
+    if(state->nvidia_options.ofr && resource_mappings.ready() && aer_scene) {
         record_projection_capture_order(current_snapshot,projection_mappings);
         const auto sources=ofr_sources(current_snapshot,projection_mappings);
         if(sources[0].serial && sources[1].serial) {
@@ -18071,7 +18111,7 @@ XrResult layer_end_frame_impl(
             current_snapshot.aer_fresh_mask=state->ofr_fresh_mask=aer_source_decision->fresh;
             if(!aer_source_decision->continuity)state->ofr_source_started_ns={};
             for(unsigned eye=0;eye<2;++eye) {
-                auto& view=current_snapshot.layers[0].views[eye];
+                auto& view=current_snapshot.layers[*aer_scene].views[eye];
                 if(aer_source_decision->fresh&(1U<<eye)) {
                     const auto previous=state->ofr_source_started_ns[eye];
                     auto& origin=current_snapshot.interface_stamp.aer_history_started_ns;
@@ -18142,7 +18182,7 @@ XrResult layer_end_frame_impl(
     const bool panel_arming_pending=!generation_arming_pending&&panel_generation_pending(panels);
     const bool stereo_projection = !current_snapshot.layers.empty() &&
         std::all_of(current_snapshot.layers.begin(), current_snapshot.layers.end(),
-            [](const auto& layer) { return layer.views.size() == 2; });
+            [](const auto& layer) { return layer.views.size() == 2 || projection_layer_is_static(layer); });
     const auto report_guide_reason = [&](FsrStereoGuideReason reason) {
         using GS = xrfg::autonomous::GenerationState;
         state->generation_status = reason == FsrStereoGuideReason::missing_guides ? GS::missing_motion :
@@ -18305,7 +18345,7 @@ XrResult layer_end_frame_impl(
     bool metadata_pairable =
         latest_application_frame && previous_snapshot && snapshots_compatible;
     if(state->nvidia_options.ofr) {
-        if(!stereo_projection || current_snapshot.layers.size()!=1)
+        if(!aer_scene)
             return bypass_generation(GenerationPrepareReason::missing_capture);
         const auto sources=ofr_sources(current_snapshot,projection_mappings);
         const auto decision=aer_source_decision ? *aer_source_decision : state->ofr_source_tracker.observe(sources);
@@ -18337,7 +18377,7 @@ XrResult layer_end_frame_impl(
         const bool lost=!decision.continuity || (previous_snapshot &&
             (!anchor.continuity || anchor.fresh!=decision.fresh));
         for(unsigned eye=0;eye<2;++eye) {
-            auto& view=current_snapshot.layers[0].views[eye];
+            auto& view=current_snapshot.layers[*aer_scene].views[eye];
             if(decision.fresh&(1u<<eye)) {
                 state->ofr_source_poses[eye]=view.pose;state->ofr_source_fovs[eye]=view.fov;
             } else {
@@ -18602,8 +18642,8 @@ XrResult layer_end_frame_impl(
     const auto extra_fraction=synthetic_interpolation_fraction(state,previous_snapshot,current_snapshot,1);
     const auto third_fraction=synthetic_interpolation_fraction(state,previous_snapshot,current_snapshot,2);
     const bool r19_camera=state->nvidia_options.ofr || xrfg::autonomous::r19_camera_enabled.load(std::memory_order_acquire);
-    const auto synthetic_camera=previous_snapshot && r19_camera ? synthetic_camera_snapshot(*previous_snapshot,current_snapshot,interpolation_fraction) : std::nullopt;
-    const auto extra_camera=previous_snapshot && r19_camera ? synthetic_camera_snapshot(*previous_snapshot,current_snapshot,extra_fraction) : std::nullopt;
+    const auto synthetic_camera=previous_snapshot && r19_camera ? synthetic_camera_snapshot(*previous_snapshot,current_snapshot,interpolation_fraction,state->nvidia_options.ofr?aer_scene:std::nullopt) : std::nullopt;
+    const auto extra_camera=previous_snapshot && r19_camera ? synthetic_camera_snapshot(*previous_snapshot,current_snapshot,extra_fraction,state->nvidia_options.ofr?aer_scene:std::nullopt) : std::nullopt;
     const xrfg::D3D12PresentationTransform final_color_transform{};
     PreparedProjectionFrame prepared = afw_selected
         ? completed_afw && state->menu_enabled && !generation_cooling_down &&
@@ -18815,7 +18855,7 @@ XrResult layer_end_frame_impl(
 
     const bool ofr_single=state->nvidia_options.ofr && pair_ready && state->ofr_fresh_mask!=3;
     if(state->nvidia_options.ofr && pair_ready && previous_snapshot && !ofr_single &&
-       !realign_ofr_paired_metadata(first_generated,current_generated,*previous_snapshot,state->nvidia_options.ofr_swap))
+       (!aer_scene || !realign_ofr_paired_metadata(first_generated,current_generated,*previous_snapshot,state->nvidia_options.ofr_swap,*aer_scene)))
         return bypass_generation(GenerationPrepareReason::generated_end_info_failed);
     bool extra_ready=pair_ready && djules_triple_active(*state);
     if(extra_ready) {

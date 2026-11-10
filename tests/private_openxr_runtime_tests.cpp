@@ -243,6 +243,8 @@ struct Fixture {
         if(f.begin_callback)f.begin_callback(ordinal);
         return discarded?XR_FRAME_DISCARDED:XR_SUCCESS;
     }
+    unsigned scene_projection_layer{};
+    bool extra_projection{};
     static XrResult XRAPI_CALL end(XrSession,const XrFrameEndInfo* info) {
         // Timestamp native entry before fixture validation/bookkeeping, so its
         // work cannot masquerade as an early subsequent runtime handoff.
@@ -276,7 +278,7 @@ struct Fixture {
         if(info->displayTime>prediction)++f.advanced_predictions;
         unsigned color{},overlay_color{};bool has_overlay{};float position{};
         if(info->layerCount) {
-            auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+            auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[f.scene_projection_layer]);
             check(p->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION && p->viewCount==f.expected_views,"owned projection metadata");
             auto& chain=f.chains.at(p->views[0].subImage.swapchain);position=p->views[0].pose.position.x;
             std::scoped_lock lock(f.gpu);
@@ -288,7 +290,7 @@ struct Fixture {
                 f.right_pixels.push_back(f.read_pixel(f.chains.at(right.swapchain),right.imageRect.offset.x,right.imageRect.offset.y,right.imageArrayIndex));
                 f.stereo_handles.push_back({p->views[0].subImage.swapchain,p->views[1].subImage.swapchain});
             }
-            if(info->layerCount>1) {
+            if(info->layerCount>1 && !f.extra_projection) {
                 auto* quad=reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[1]);
                 check(quad->type==XR_TYPE_COMPOSITION_LAYER_QUAD,"owned overlay metadata");
                 overlay_color=f.read_pixel(f.chains.at(quad->subImage.swapchain));has_overlay=true;

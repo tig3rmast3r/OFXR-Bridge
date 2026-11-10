@@ -45,6 +45,46 @@ void static_projection_tests() {
         }
         const auto sources=ofr_sources(snapshot,mapped.mappings);
         require(sources[0].serial==10 && sources[1].serial==10,"AER must identify both scene eyes beside a static projection");
+        const auto scene=ofr_scene_projection(snapshot,mapped.mappings);
+        require(scene && *scene==unsigned(first),"AER must select the mutable scene without changing layer order");
+        xrfg::ofr::SourceTracker tracker;tracker.observe(sources);
+        for(unsigned frame=0;frame<12;++frame) {
+            const unsigned changed=layout==1?frame%2:0;
+            ++snapshot.capture_order[changed].serial;
+            const auto current=ofr_sources(snapshot,mapped.mappings);
+            const auto fresh=tracker.observe(current);
+            require(fresh.fresh==(layout==1?(1u<<changed):3u),"AER fresh mask must use eye captures, never the static projection");
+            require(!tracker.observe(current).fresh,"held polls must not advance AER cadence");
+        }
+        for(bool swap:{false,true}) {
+            auto previous=snapshot;
+            for(unsigned eye=0;eye<2;++eye) {
+                previous.layers[*scene].views[eye].pose.position.x=float(eye)*.064F;
+                snapshot.layers[*scene].views[eye].pose.position.x=.01F+float(eye)*.064F;
+                // Unrelated static metadata must neither invalidate scene cameras
+                // nor receive the AER endpoint camera correction.
+                previous.layers[!*scene].views[eye].pose.position.x=-100;
+                snapshot.layers[!*scene].views[eye].pose.position.x=100;
+            }
+            const auto camera=synthetic_camera_snapshot(previous,snapshot,.5F,scene);
+            require(camera.has_value(),"static camera movement must not reject scene interpolation");
+            require(camera->layers[!*scene].views[0].pose.position.x==100,"static projection camera was interpolated");
+            GeneratedFrameEndInfo early,late;
+            require(build_generated_frame_end_info(&end,snapshot,true,destinations,&early),"AER earlier output metadata");
+            require(build_generated_frame_end_info(&end,snapshot,false,destinations,&late),"AER later output metadata");
+            // Source pointers still carry original app poses; the endpoint correction
+            // must use the selected previous scene, never static metadata.
+            const auto static_pose=early.projections[!*scene].views[0].pose.position.x;
+            const auto newer=xrfg::ofr::newer_eye(swap);
+            const auto endpoint=early.projections[*scene].views[newer].pose.position.x;
+            require(realign_ofr_paired_metadata(early,late,previous,swap,*scene),"paired AER metadata with extra immutable projection");
+            require(early.projections[*scene].views[newer].pose.position.x==previous.layers[*scene].views[newer].pose.position.x &&
+                late.projections[*scene].views[newer].pose.position.x==endpoint,"AER endpoint cameras attached to wrong layer");
+            require(early.projections[!*scene].views[0].pose.position.x==static_pose &&
+                late.projections[!*scene].views[0].pose.position.x==static_pose,"paired AER altered static projection metadata");
+        }
+        auto ambiguous=snapshot;ambiguous.layers[!*scene].views=ambiguous.layers[*scene].views;
+        require(!ofr_scene_projection(ambiguous,mapped.mappings),"second mutable scene incorrectly accepted for AER");
         for(bool synthetic:{false,true}) {
             GeneratedFrameEndInfo output;
             require(build_generated_frame_end_info(&end,snapshot,synthetic,destinations,&output),"mutable scene with immutable projection must build");
@@ -60,5 +100,5 @@ void static_projection_tests() {
         require(!build_projection_resource_mappings(invalid).ready(),"invalid static rectangle silently accepted");
         {std::scoped_lock lock(g_state_mutex);g_swapchains.clear();}
     }
-    std::cout<<"PASS: immutable projection preserved; packed/split/array scenes; both layer orders; real/generated output; mutable refusal retained\n";
+    std::cout<<"PASS: immutable projection preserved; packed/split/array scenes; both layer orders; real/generated/AER output; fresh/held/paired/swap/cameras; mutable refusal retained\n";
 }

@@ -5,6 +5,9 @@ int aer_alternate_delivery_test(std::string_view route) {
     const bool buffered=route.find("buffer")!=std::string_view::npos;
     const bool fast=route.find("fast")!=std::string_view::npos;
     const bool missing_guides=route.find("missing-guides")!=std::string_view::npos;
+    const bool static_projection=route.find("static-")!=std::string_view::npos;
+    const bool static_first=route.find("static-first")!=std::string_view::npos;
+    const bool native12=route.find("d12")!=std::string_view::npos;
     constexpr unsigned sources=18;
     constexpr float step=.002F,ipd=.032F;
     xrfg_fixture::ControlProfile profile;
@@ -20,8 +23,9 @@ int aer_alternate_delivery_test(std::string_view route) {
     xrfg::autonomous::apply_runtime_settings();
     ComPtr<ID3D12Debug> debug;
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
-    Fixture f(false);f.transport->stop();f.transport.reset();f.throttled=false;
+    Fixture f(native12);f.transport->stop();f.transport.reset();f.throttled=false;
     f.real_common=true;f.expected_views=2;f.unblock();
+    f.extra_projection=static_projection;f.scene_projection_layer=static_projection&&static_first?1:0;
     f.create_state=[]{return D3D12_RESOURCE_STATE_COMMON;};
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);
     dispatch->steamvr_runtime=true;dispatch->wait_frame=paced_steamvr_fixture_wait;
@@ -34,13 +38,13 @@ int aer_alternate_delivery_test(std::string_view route) {
         *out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;
     };
     auto state=std::make_shared<SessionState>(dispatch);state->handle=reinterpret_cast<XrSession>(2);
-    state->graphics_binding=SessionGraphicsBinding::d3d11;
+    state->graphics_binding=native12?SessionGraphicsBinding::d3d12:SessionGraphicsBinding::d3d11;
     state->vdxr_legacy=false; // model the actual SteamVR session, not default Legacy routing
-    ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),f.device12.GetAddressOf(),f.queue.GetAddressOf()),"AER D11 interop device");
+    if(!native12)ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),f.device12.GetAddressOf(),f.queue.GetAddressOf()),"AER D11 interop device");
     state->d3d12_device=f.device12;state->d3d12_queue=f.queue;
     state->d3d11_device=f.device11;state->d3d11_context=f.context;
-    state->luke_afw_enabled=true;state->graphics_binding_capabilities|=8ULL;
-    initialize_luke_synthesis_queue(*state);
+    state->luke_afw_enabled=!native12;if(!native12)state->graphics_binding_capabilities|=8ULL;
+    if(!native12)initialize_luke_synthesis_queue(*state);
     ok(apply_embedded_control(state),"AER matrix initial provider settings");
     {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;g_instances[dispatch->instance]=dispatch;}
     ok(install_private_runtime(state),"AER matrix real private native endpoint");
@@ -56,14 +60,27 @@ int aer_alternate_delivery_test(std::string_view route) {
     XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};info.width=256;info.height=128;
     info.arraySize=info.faceCount=info.mipCount=info.sampleCount=1;info.format=DXGI_FORMAT_R8G8B8A8_UNORM;
     info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-    std::array<XrSwapchain,2> app{};
-    for(auto& chain:app) {
+    const auto create_source=[&](const XrSwapchainCreateInfo& desc) {
+        XrSwapchain chain{};
         f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
-        xr_ok(layer_create_swapchain_impl(state->handle,&info,&chain),"AER split application chain");
+        xr_ok(layer_create_swapchain_impl(state->handle,&desc,&chain),"AER application chain");
         f.create_state=[]{return D3D12_RESOURCE_STATE_COMMON;};
-        std::array<XrSwapchainImageD3D11KHR,3> images;for(auto& image:images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};
-        unsigned count{};xr_ok(layer_enumerate_swapchain_images_impl(chain,3,&count,
-            reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"AER D11 image/capture setup");
+        unsigned count{};
+        if(native12) {
+            std::array<XrSwapchainImageD3D12KHR,3> images;for(auto& image:images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
+            xr_ok(layer_enumerate_swapchain_images_impl(chain,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"AER D12 capture setup");
+        } else {
+            std::array<XrSwapchainImageD3D11KHR,3> images;for(auto& image:images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};
+            xr_ok(layer_enumerate_swapchain_images_impl(chain,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"AER D11 capture setup");
+        }
+        return chain;
+    };
+    std::array<XrSwapchain,2> app{create_source(info),create_source(info)};
+    XrSwapchain fixed{};
+    if(static_projection) {
+        auto immutable=info;immutable.width=immutable.height=4;
+        immutable.createFlags=XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
+        fixed=create_source(immutable);
     }
     f.release_callback=[&](XrSwapchain handle,unsigned index)->XrResult {
         auto chain=find_swapchain(handle);check(bool(chain),"AER release source exists");
@@ -73,8 +90,17 @@ int aer_alternate_delivery_test(std::string_view route) {
     };
     std::vector<std::array<float,2>> poses;
     f.inspect_layers=[&](const XrFrameEndInfo* end) {
-        check(end && end->layerCount==1,"AER output keeps exactly its projection layer");
-        const auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(end->layers[0]);
+        check(end && end->layerCount==(static_projection?2u:1u),"AER output preserves all projection layers");
+        if(static_projection) {
+            const auto* fixed_layer=reinterpret_cast<const XrCompositionLayerProjection*>(end->layers[static_first?0:1]);
+            check(fixed_layer->viewCount==2,"static projection keeps both subimages");
+            for(unsigned eye=0;eye<2;++eye) {
+                const auto& sub=fixed_layer->views[eye].subImage;
+                check(sub.imageRect.offset.x==int(eye*2) && sub.imageRect.extent.width==2 && sub.imageRect.extent.height==4,"static projection geometry preserved");
+                check(f.read_pixel(f.chains.at(sub.swapchain),sub.imageRect.offset.x,0)==77,"AER static projection pixels preserved");
+            }
+        }
+        const auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(end->layers[f.scene_projection_layer]);
         check(p->viewCount==2,"AER output keeps both logical eyes");
         poses.push_back({p->views[0].pose.position.x,p->views[1].pose.position.x});
     };
@@ -93,8 +119,15 @@ int aer_alternate_delivery_test(std::string_view route) {
         const auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;
         end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
+        auto fixed_views=views;
+        for(unsigned eye=0;eye<2;++eye)fixed_views[eye].subImage={fixed,{{int(eye*2),0},{2,4}},0};
+        auto fixed_projection=projection;fixed_projection.views=fixed_views.data();
+        const auto* fixed_layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&fixed_projection);
+        const XrCompositionLayerBaseHeader* layers[]={static_first?fixed_layer:layer,static_first?layer:fixed_layer};
+        if(static_projection){end.layerCount=2;end.layers=layers;}
         xr_ok(layer_end_frame_impl(state->handle,&end),"AER source End");
     };
+    if(static_projection)f.write(fixed,77);
     f.write(app[0],40);f.write(app[1],184);
     for(unsigned source=0;source<sources;++source) {
         if(source)f.write(app[(source-1)%2],source%2?40:184);
@@ -132,6 +165,7 @@ int aer_alternate_delivery_test(std::string_view route) {
     xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,false);
     state->fps_overlay.reset();f.release_callback={};
     for(auto chain:app)xr_ok(layer_destroy_swapchain_impl(chain),"AER matrix original chain cleanup");
+    if(static_projection)xr_ok(layer_destroy_swapchain_impl(fixed),"immutable projection cleanup");
     f.transport->stop();
     ComPtr<ID3D12InfoQueue> messages;
     if(SUCCEEDED(f.device12.As(&messages)))for(UINT64 i=0;i<messages->GetNumStoredMessagesAllowedByRetrievalFilter();++i) {
@@ -142,8 +176,8 @@ int aer_alternate_delivery_test(std::string_view route) {
         }
     }
     {std::scoped_lock lock(g_state_mutex);g_sessions.clear();g_swapchains.clear();g_instances.clear();}
-    std::printf("AER D11 %s buffer%u storedFast%u missingGuides%u:18fresh outputs,28held polls,exact eye pixels,%s PASS\n",
-        directed?"Director":"Framework",unsigned(buffered),unsigned(fast),unsigned(missing_guides),
+    std::printf("AER %s %s static%u first%u buffer%u storedFast%u missingGuides%u:18fresh outputs,28held polls,exact eye pixels,%s PASS\n",
+        native12?"D12":"D11",directed?"Director":"Framework",unsigned(static_projection),unsigned(static_first),unsigned(buffered),unsigned(fast),unsigned(missing_guides),
         missing_guides?"honest waiting/raw fallback,no held duplicates":"coherent poses,no raw fallback");
     return 0;
 }

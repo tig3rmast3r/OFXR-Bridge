@@ -107,17 +107,18 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
     };
     try {
         // No size/parity/latest fallback for packed or ambiguous projections.
-        if(mappings.size()!=2 || snapshot.layers.size()!=1 || snapshot.layers[0].views.size()!=2)return S_FALSE;
+        const auto scene=ofr_scene_projection(snapshot,mappings);
+        if(mappings.size()!=2 || !scene)return S_FALSE;
         std::array<LukeOriginHistoryProbe,2> inputs;
         for(const auto& mapping:mappings) {
-            if(mapping.views.size()!=1 || mapping.views[0].projection_index!=0 || mapping.views[0].view_index>1) {
+            if(mapping.views.size()!=1 || mapping.views[0].projection_index!=*scene || mapping.views[0].view_index>1) {
                 clear();return S_FALSE;
             }
             const auto eye=unsigned(mapping.views[0].view_index);
             const auto chain=find_swapchain(mapping.application_swapchain);
             if(!chain || chain->session!=session || chains[eye]){clear();return S_FALSE;}
             chains[eye]=chain;
-            const auto& view=snapshot.layers[0].views[eye];
+            const auto& view=snapshot.layers[*scene].views[eye];
             if(view.subImage.swapchain!=mapping.application_swapchain || view.subImage.imageArrayIndex ||
                 chain->create_info.arraySize!=1){clear();return S_FALSE;}
             const auto recorded=std::find_if(snapshot.capture_order.begin(),snapshot.capture_order.end(),
