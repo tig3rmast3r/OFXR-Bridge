@@ -6,6 +6,7 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 
 namespace xrfg {
@@ -37,15 +38,18 @@ class OwnedNgxParameters final:public NVSDK_NGX_Parameter {
             if constexpr(std::is_pointer_v<T> && std::is_pointer_v<S>) {
                 *value=static_cast<T>(stored);return NVSDK_NGX_Result_Success;
             } else if constexpr(std::is_arithmetic_v<T> && std::is_arithmetic_v<S>) {
-                if constexpr(std::is_same_v<T,S>){*value=stored;return NVSDK_NGX_Result_Success;}
-                if constexpr(std::is_integral_v<T>) {
+                if constexpr(std::is_same_v<T,S>) {
+                    *value=stored;return NVSDK_NGX_Result_Success;
+                } else if constexpr(std::is_integral_v<T> && std::is_integral_v<S>) {
+                    if(!std::in_range<T>(stored))return NVSDK_NGX_Result_FAIL_InvalidParameter;
+                } else if constexpr(std::is_integral_v<T>) {
                     const long double n=static_cast<long double>(stored);
+                    const auto upper=std::ldexp(1.0L,std::numeric_limits<T>::digits);
                     if(!std::isfinite(n) || n<static_cast<long double>(std::numeric_limits<T>::lowest()) ||
-                        n>static_cast<long double>(std::numeric_limits<T>::max()))return NVSDK_NGX_Result_FAIL_InvalidParameter;
+                        n>=upper)return NVSDK_NGX_Result_FAIL_InvalidParameter;
                 }
                 *value=static_cast<T>(stored);return NVSDK_NGX_Result_Success;
-            }
-            return NVSDK_NGX_Result_FAIL_InvalidParameter;
+            } else return NVSDK_NGX_Result_FAIL_InvalidParameter;
         },found->second);
     }
 public:

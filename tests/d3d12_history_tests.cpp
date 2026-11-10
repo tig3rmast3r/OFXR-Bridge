@@ -6261,6 +6261,8 @@ int main(int argc, char** argv) {
             table.Set("fov",1.46F);require(NVSDK_NGX_SUCCEED(table.Get("fov",&d)) && std::abs(d-1.46)<.00001,"SDK float to double query");
             table.Set("near",.05);require(NVSDK_NGX_SUCCEED(table.Get("near",&f)) && std::abs(f-.05F)<.00001F,"SDK double to float query");
             table.Set("id",0xfedcba9876543210ULL);require(NVSDK_NGX_SUCCEED(table.Get("id",&wide)) && wide==0xfedcba9876543210ULL,"private64-bit identity must remain exact");
+            require(NVSDK_NGX_FAILED(table.Get("id",&i)),"out-of-range integer query must not wrap");
+            table.Set("invalid",std::numeric_limits<double>::quiet_NaN());require(NVSDK_NGX_FAILED(table.Get("invalid",&i)),"NaN cannot become a numeric integer");
             auto* resource=reinterpret_cast<ID3D12Resource*>(std::uintptr_t(0x12340000));
             table.Set("resource",resource);require(NVSDK_NGX_SUCCEED(table.Get("resource",&ptr)) && ptr==resource,"SDK resource/void pointer interoperability");
             ID3D12Resource* restored{};require(NVSDK_NGX_SUCCEED(table.Get("resource",&restored)) && restored==resource,"SDK typed resource query");
