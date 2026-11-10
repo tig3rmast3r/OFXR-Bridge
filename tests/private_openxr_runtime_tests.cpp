@@ -1644,7 +1644,11 @@ void queue_priority_policy() {
 }
 #include "private_overlay_destroy_fixture.inc"
 #include "rife_handoff_fixture.inc"
-int main(int argc,char** argv){if(argc>1 && std::string_view(argv[1])=="rife-handoff"){rife_handoff_matrix();return 0;}if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
+static int rife_aer_handoff_test(int argc,char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="rife-aer-handoff") {rife_handoff_matrix(true);return 0;}
+    return -1;
+}
+int main(int argc,char** argv){if(const auto r=rife_aer_handoff_test(argc,argv);r>=0)return r;if(argc>1 && std::string_view(argv[1])=="rife-handoff"){rife_handoff_matrix();return 0;}if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
 if(argc>1 && std::string_view(argv[1])=="stalled-renewal"){
     for(bool d12:{true,false})for(bool directed:{true,false})stalled_native_renewal(d12,directed,0);

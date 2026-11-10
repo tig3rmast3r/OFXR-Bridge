@@ -5,6 +5,10 @@
 #include <cstdlib>
 
 namespace xrfg {
+constexpr bool rife_native_handoff_required(bool steamvr,bool enabled,int model,bool aer) noexcept {
+    (void)aer;
+    return steamvr && enabled && model>=0;
+}
 // Native running-start phase, observed when Wait/Begin actually blocks. Display
 // scanout is not this boundary: V954's vsync-1ms phase submitted at late start.
 // Until a native gate is witnessed, preserve the V953 native policy.
