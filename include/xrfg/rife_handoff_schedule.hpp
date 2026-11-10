@@ -6,8 +6,11 @@
 
 namespace xrfg {
 constexpr bool rife_native_handoff_required(bool steamvr,bool enabled,int model,bool aer) noexcept {
-    (void)aer;
-    return steamvr && enabled && model>=0;
+    // AER already produces one mixed stereo packet per alternating input.
+    // Rounding that packet to another learned native phase can hold capture
+    // credit until a later refresh and lock the source into a lower cadence.
+    // Ordinary paired RIFE retains the validated low-rate handoff policy.
+    return steamvr && enabled && model>=0 && !aer;
 }
 // Native running-start phase, observed when Wait/Begin actually blocks. Display
 // scanout is not this boundary: V954's vsync-1ms phase submitted at late start.
