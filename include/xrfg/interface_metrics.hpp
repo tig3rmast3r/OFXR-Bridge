@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include "xrfg/delivery_cadence.hpp"
+#include "xrfg/aer_framegen_evidence.hpp"
 
 namespace xrfg {
 // QPC nanoseconds on Windows. Display-time conversion uses this same domain.
@@ -255,6 +256,8 @@ struct InterfaceFrameStamp {
     std::uint64_t scene_owner{},scene_serial{};
     // AER output: one exact raw eye and one reconstructed eye. The source
     // clock includes the earlier same-eye endpoint required by interpolation.
+    std::shared_ptr<AerFramegenEvidence> aer_evidence;
+    unsigned aer_delivery{}; // release pattern, not pixel-freshness proof
     bool aer_mixed{};
     std::int64_t aer_history_started_ns{};
     void mark_aer_mixed() noexcept {

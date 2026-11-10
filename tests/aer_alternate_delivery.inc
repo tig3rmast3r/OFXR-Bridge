@@ -167,6 +167,12 @@ int aer_alternate_delivery_test(std::string_view route) {
     }
     stop_continuous_presenter(state);
     xr_ok(f.transport->drain(),"AER matrix final native drain");
+    (void)state->fps_overlay->metrics(); // retire GPU/native receipt observations
+    const auto evidence=std::atomic_load(&xrfg::embedded::ofr_evidence)->snapshot();
+    if(missing_guides)check(evidence.outputs==0 && evidence.bypasses>0,
+        "AER meter must expose raw fallback, not treat enabled generation as active");
+    else check(evidence.outputs>sources/2 && evidence.delivery==1,
+        "AER meter must confirm physical mixed-eye outputs and alternating source delivery");
     xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,false);
     state->fps_overlay.reset();f.release_callback={};
     for(auto chain:app)xr_ok(layer_destroy_swapchain_impl(chain),"AER matrix original chain cleanup");

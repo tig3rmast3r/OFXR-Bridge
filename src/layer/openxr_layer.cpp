@@ -16782,6 +16782,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     state->nvidia_options = options;
     state->ofr_delivery=0;state->ofr_last_mask=0;
     state->ofr_source_tracker.reset();
+    std::atomic_store(&xrfg::embedded::ofr_evidence,std::make_shared<xrfg::AerFramegenEvidence>());
     state->ofr_source_started_ns={};
     state->guided_generation_ms=0;
     state->aer_native_guide_cache.reset();
@@ -17678,6 +17679,7 @@ XrResult layer_end_frame_impl(
             S_OK, 126,
             startup_request->stream, startup_request->epoch);
     const HRESULT control_result = apply_embedded_control(state, startup_request.has_value(), end_info);
+    if(state->nvidia_options.ofr)interface_stamp.aer_evidence=std::atomic_load(&xrfg::embedded::ofr_evidence);
     if(state->private_runtime && requested_ordered_multiframe(desired_control.desired) &&
         pipelined_presenter_mode && !state->pipelined_presenter_mode) {
         // Reconfiguration may have retired an inherited legacy owner. Do not
@@ -18387,6 +18389,7 @@ XrResult layer_end_frame_impl(
         if(lost && previous_snapshot) {
             clear_generation_continuity(state);metadata_pairable=false;previous_snapshot.reset();
         }
+        current_snapshot.interface_stamp.aer_delivery=delivery;
         state->ofr_delivery=delivery;
         xrfg::embedded::ofr_delivery=delivery;
         // A repeated eye's pixels retain their render camera, even if the mod

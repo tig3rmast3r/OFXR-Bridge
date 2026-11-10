@@ -82,7 +82,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 96201;
+constexpr std::uint32_t kAbi = 97101;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1496,6 +1496,34 @@ std::string_view interface_vectors_text(const Snapshot& s, std::uint64_t now) no
     // consumer, never evidence of FSR-origin vectors.
     return s.connected && r.upscaler_evaluations && r.upscaler_motion &&
         now >= r.upscaler_last_seen_ms && now - r.upscaler_last_seen_ms < 2000 ? "DLSS" : "None";
+}
+bool interface_aer_active(const Snapshot& s,std::uint64_t now) noexcept {
+    const auto& r=s.runtime;const auto& e=r.ofr_evidence;
+    return s.connected && s.desired.enabled && s.desired.ofr_enabled && !r.pending &&
+        r.applied_revision==s.revision && r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000 &&
+        e.outputs && e.last_output_ms && now>=e.last_output_ms && now-e.last_output_ms<1000 &&
+        e.last_output_ms>=e.last_bypass_ms;
+}
+std::string interface_aer_text(const Snapshot& s,std::uint64_t now) {
+    if(!s.desired.ofr_enabled)return "AER: Off";
+    if(!s.desired.enabled)return "AER: Inactive (framegen off)";
+    if(!s.connected)return "AER: Waiting for game";
+    const auto& r=s.runtime;const auto& e=r.ofr_evidence;
+    if(r.pending || r.applied_revision!=s.revision)return "AER: Applying settings";
+    const bool live=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
+    const char* state=interface_aer_active(s,now)?"ACTIVE":!live?"NO LIVE PROOF":
+        e.last_bypass_ms && e.last_bypass_ms>=e.last_output_ms?"BYPASS":"NO CONFIRMED OUTPUT";
+    char text[128]{};
+    std::snprintf(text,sizeof(text),"AER: %s | Out %llu | Byp %llu | ? %llu",state,
+        static_cast<unsigned long long>(e.outputs),static_cast<unsigned long long>(e.bypasses),
+        static_cast<unsigned long long>(e.unknown));
+    return text;
+}
+std::string_view interface_aer_source_text(const Snapshot& s) noexcept {
+    if(!s.desired.ofr_enabled || !s.desired.enabled)return {};
+    return s.runtime.ofr_delivery==1?"Input: alternating releases (pixels unverified)":
+        s.runtime.ofr_delivery==2?"Input: paired releases; AER phase assumed":
+        "Input: waiting for release cadence";
 }
 std::string_view interface_state_text(const Snapshot& s) noexcept {
     if (!s.connected) return "Waiting";

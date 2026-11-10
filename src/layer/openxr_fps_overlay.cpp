@@ -100,7 +100,37 @@ struct OpenXrFpsOverlay::Impl {
         bool aer_mixed{};
     };
     std::vector<PendingNativeCount> pending_native_counts;
+    struct PendingAerOutput {
+        std::shared_ptr<AerFramegenEvidence> evidence;
+        std::shared_ptr<InterfaceDeliveryReceipt> delivery;
+        std::vector<std::shared_ptr<D3D12NativeFrameResult>> results;
+        std::uint64_t submitted_ms{};
+        unsigned output{}, source_delivery{};
+        bool mixed{}, private_delivery{};
+    };
+    std::vector<PendingAerOutput> pending_aer_outputs;
+    void poll_aer_outputs() noexcept {
+        const auto now=GetTickCount64();
+        for(auto i=pending_aer_outputs.begin();i!=pending_aer_outputs.end();) {
+            const int native=i->private_delivery ? (i->delivery ? i->delivery->outcome.load(std::memory_order_acquire) : 0) : 1;
+            bool pending=false, generated=true;
+            if(i->mixed)for(const auto& result:i->results) {
+                if(!result){generated=false;continue;}
+                const auto mask=result->resolve();
+                pending|=mask==D3D12NativeFrameResult::pending;
+                generated &= mask!=D3D12NativeFrameResult::pending && i->output<result->outputs && (mask&(1u<<i->output));
+            }
+            if(native<0 || (!pending && !generated))i->evidence->bypassed(now);
+            else if(native==1 && !pending) {
+                if(i->mixed)i->evidence->confirmed(now,i->source_delivery);
+                else i->evidence->bypassed(now);
+            } else if(now>=i->submitted_ms && now-i->submitted_ms>=1000)i->evidence->unknown.fetch_add(1);
+            else {++i;continue;}
+            i=pending_aer_outputs.erase(i);
+        }
+    }
     void poll_native_counts(std::int64_t now) noexcept {
+        poll_aer_outputs();
         for (auto i=pending_native_counts.begin(); i!=pending_native_counts.end();) {
             bool pending=false;
             for(const auto& r:i->results) pending |= r && r->resolve()==D3D12NativeFrameResult::pending;
@@ -1276,7 +1306,7 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
         if (!impl_->converter(impl_->converter_user, info->displayTime, display)) display = 0;
     std::shared_ptr<InterfaceDeliveryReceipt> delivery;
     const bool capture_delivery=two_frame_capture_delivery_active();
-    if(nonempty && impl_->private_delivery_end && ((measure && stamp.cycle)||capture_delivery)) {
+    if(nonempty && impl_->private_delivery_end && ((measure && stamp.cycle)||capture_delivery||stamp.aer_evidence)) {
         if(measure && stamp.cycle)stamp.cycle->require_native_delivery();
         try {delivery=std::make_shared<InterfaceDeliveryReceipt>(synthetic,stamp.aer_mixed);
             if(capture_delivery){
@@ -1292,6 +1322,19 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
     const auto result = prepared.submit?prepared.submit(submitted,delivery):
         delivery?impl_->private_delivery_end(submitted,delivery):impl_->downstream_end(impl_->session, submitted);
     const auto accepted_clock = measure ? interface_clock_ns() : 0;
+    if(stamp.aer_evidence && new_content && nonempty) {
+        if(result!=XR_SUCCESS)stamp.aer_evidence->bypassed(GetTickCount64());
+        else if(impl_->pending_aer_outputs.size()>=64)stamp.aer_evidence->unknown.fetch_add(1);
+        else {
+            // GPU decisions and physical private End must both complete. A
+            // successful virtual admission or an enabled checkbox is insufficient.
+            try {impl_->pending_aer_outputs.push_back({stamp.aer_evidence,delivery,
+                {native_results.begin(),native_results.end()},GetTickCount64(),native_output,
+                stamp.aer_delivery,stamp.aer_mixed,bool(impl_->private_delivery_end)});}
+            catch(...) {stamp.aer_evidence->unknown.fetch_add(1);}
+        }
+        impl_->poll_aer_outputs();
+    }
     if (measure && (!synthetic || stamp.aer_mixed)) {
         if(result==XR_SUCCESS && nonempty && stamp.cycle)stamp.cycle->real_prediction(display);
         impl_->timings.submitted(stamp, submit_clock, result == XR_SUCCESS,

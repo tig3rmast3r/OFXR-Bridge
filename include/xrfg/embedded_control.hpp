@@ -1,4 +1,6 @@
 #pragma once
+#include "xrfg/aer_framegen_evidence.hpp"
+#include <memory>
 #include <cstdint>
 #include <atomic>
 
@@ -101,6 +103,7 @@ AfwSnapshot afw_snapshot();
 bool request_afw(AfwSettings settings);
 inline std::atomic_uint64_t ofr_last_success_ms{};
 inline std::atomic_uint ofr_delivery{};
+inline std::shared_ptr<AerFramegenEvidence> ofr_evidence=std::make_shared<AerFramegenEvidence>();
 inline std::atomic_int active_osr_mode{-1},active_osr_lower_quality{-1};
 inline void report_osr_configuration(int mode,bool lower) noexcept {
     active_osr_mode.store(mode,std::memory_order_relaxed);

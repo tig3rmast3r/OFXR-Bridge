@@ -1,4 +1,5 @@
 #pragma once
+#include "xrfg/aer_framegen_evidence.hpp"
 #include "xrfg/gpu_usage_status.hpp"
 #include "xrfg/cpu_usage_status.hpp"
 #include "xrfg/keybinds.hpp"
@@ -190,7 +191,8 @@ struct RuntimeStatus {
     bool rife_execution_active{}; // a fresh, live worker receipt exists (false is not proof of Torch)
     unsigned rife_error{}; // fresh receipt: 1 timeout, 2 unavailable, 3 optimization failure
     int osr_mode{-1},osr_lower_quality{-1}; // last successfully submitted reconstruction
-    bool ofr_running{};
+    AerFramegenEvidenceSnapshot ofr_evidence{};
+    bool ofr_running{}; // confirmed retimed output, not preparation or flag alone
     unsigned ofr_delivery{}; // 0 learning, 1 alternating, 2 paired.
     bool uevr_osr{}; // UEVR Alternating/AFR attached as OSR's eye source, as Luke Ross is
 };
@@ -263,6 +265,9 @@ bool interface_telemetry_requested() noexcept;
 void report_interface_telemetry(InterfaceTelemetry value) noexcept;
 std::string_view interface_reconstruction_text(const Snapshot& value,std::uint64_t now_ms) noexcept;
 std::string interface_status_text(const Snapshot& value,bool include_reconstruction=true);
+bool interface_aer_active(const Snapshot&,std::uint64_t now_ms) noexcept;
+std::string interface_aer_text(const Snapshot&,std::uint64_t now_ms);
+std::string_view interface_aer_source_text(const Snapshot&) noexcept;
 std::string_view interface_state_text(const Snapshot& value) noexcept;
 std::string_view interface_vectors_text(const Snapshot& value, std::uint64_t now_ms) noexcept;
 // Global settings are never redirected by the active game.

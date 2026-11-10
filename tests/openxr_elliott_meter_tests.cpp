@@ -307,6 +307,39 @@ int main(int argc, char** argv) {
             xrfg::InterfaceFrameStamp meter_stamp{471,xrfg::interface_clock_ns(),0};
             check(overlay.end_frame(&info,false,true,{},0,meter_stamp)==XR_SUCCESS&&clock_conversions>0,
                 "visible meter enables existing timing counter without menu");
+            // Exercise the actual submission observer. Admission, GPU success,
+            // native delivery and mixed-eye identity are distinct evidence.
+            xrfg::InterfaceFrameStamp aer_stamp{};
+            aer_stamp.aer_evidence=std::make_shared<xrfg::AerFramegenEvidence>();
+            aer_stamp.aer_delivery=2;aer_stamp.mark_aer_mixed();
+            std::shared_ptr<xrfg::InterfaceDeliveryReceipt> native_receipt;
+            overlay.set_private_delivery_end([&](const XrFrameEndInfo* submitted,const auto& receipt) {
+                native_receipt=receipt;return end(session,submitted);
+            });
+            auto decision=std::make_shared<xrfg::D3D12NativeFrameResult>();decision->outputs=1;
+            std::array results{decision};
+            check(overlay.end_frame(&info,true,true,results,0,aer_stamp)==XR_SUCCESS,"AER observer admitted output");
+            check(native_receipt && !aer_stamp.aer_evidence->snapshot().outputs,"virtual End alone is not AER proof");
+            decision->mask=1;(void)overlay.metrics();
+            check(!aer_stamp.aer_evidence->snapshot().outputs,"GPU success without native delivery is not proof");
+            native_receipt->completed(true,1,2,3);(void)overlay.metrics();
+            check(aer_stamp.aer_evidence->snapshot().outputs==1 && aer_stamp.aer_evidence->snapshot().delivery==2,
+                "GPU plus physical End confirms one actual retimed output");
+            decision=std::make_shared<xrfg::D3D12NativeFrameResult>();decision->outputs=1;decision->mask=0;results[0]=decision;
+            check(overlay.end_frame(&info,true,true,results,0,aer_stamp)==XR_SUCCESS,"provider bypass accepted");
+            native_receipt->completed(true,1,2,3);(void)overlay.metrics();
+            check(aer_stamp.aer_evidence->snapshot().outputs==1 && aer_stamp.aer_evidence->snapshot().bypasses==1,
+                "native interpolation refusal cannot count as successful AER");
+            decision->mask=1;
+            check(overlay.end_frame(&info,true,false,results,0,aer_stamp)==XR_SUCCESS,"held output accepted");
+            (void)overlay.metrics();check(aer_stamp.aer_evidence->snapshot().outputs==1,"held repetition cannot inflate AER success");
+            const auto old_proof=aer_stamp.aer_evidence;
+            check(overlay.end_frame(&info,true,true,results,0,aer_stamp)==XR_SUCCESS,"old configuration pending delivery");
+            aer_stamp.aer_evidence=std::make_shared<xrfg::AerFramegenEvidence>();
+            native_receipt->completed(true,1,2,3);(void)overlay.metrics();
+            check(old_proof->snapshot().outputs==2 && !aer_stamp.aer_evidence->snapshot().outputs,
+                "delayed old-mode receipt cannot activate a replacement configuration");
+            overlay.set_private_delivery_end({});
             write_position(ini,L"elliott_controller");
             std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
             check(overlay.end_frame(&info,false)==XR_SUCCESS&&observed_count==1,"flip show delay");

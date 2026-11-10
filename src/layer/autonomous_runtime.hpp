@@ -122,9 +122,18 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.afw_projection_frames=afw.projection_frames; out.afw_ready_frames=afw.ready_frames;
     const auto now=GetTickCount64();
     out.afw_flat_scene=afw.flat_scene;
-    const auto ofr_last=embedded::ofr_last_success_ms.load(std::memory_order_relaxed);
-    out.ofr_running=afw.desired.ofr && control.desired.enabled && ofr_last && now>=ofr_last && now-ofr_last<2000;
+    if(const auto evidence=std::atomic_load(&embedded::ofr_evidence))out.ofr_evidence=evidence->snapshot();
+    const auto ofr_last=out.ofr_evidence.last_output_ms;
+    out.ofr_running=afw.desired.ofr && control.desired.enabled && ofr_last && now>=ofr_last && now-ofr_last<1000 &&
+        ofr_last>=out.ofr_evidence.last_bypass_ms;
     out.ofr_delivery=embedded::ofr_delivery.load(std::memory_order_relaxed);
+    if(afw.desired.ofr && control.desired.enabled && bridge_flight_logger().enabled()) {
+        static std::atomic_uint64_t next_aer_report{};auto next=next_aer_report.load();
+        if(now>=next && next_aer_report.compare_exchange_strong(next,now+1000))
+            bridge_flight_logger().event(BridgeFlightOperation::presenter_transition,9231,
+                out.ofr_evidence.outputs,out.ofr_evidence.bypasses,
+                (out.ofr_evidence.unknown<<2)|out.ofr_evidence.delivery);
+    }
     out.afw_running=!(afw.desired.ofr&&control.desired.enabled) && !afw.flat_scene && afw.desired.mode!=0 && afw.last_success_ms &&
         now>=afw.last_success_ms && now-afw.last_success_ms<2000;
     out.nr_running=nr.running;

@@ -348,7 +348,9 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
         (!autonomous::reconstruction_source(r) || state.desired.afw_mode==0 || (fresh && r.afw_running));
     const bool ofxr_active=m.generating && state.desired.enabled && autonomous::interface_generation_active(state) && !r.provider_error;
     const bool rife_error=state.desired.enabled && state.desired.frame_generation==4 && r.rife_error;
-    const bool healthy=current && !rife_error && (ofxr_active || autonomous::interface_afw_only_active(state,now_ms)) && optional_ready;
+    const bool aer_requested=state.desired.ofr_enabled && state.desired.enabled;
+    const bool aer_active=autonomous::interface_aer_active(state,now_ms);
+    const bool healthy=(!aer_requested || aer_active) && current && !rife_error && (ofxr_active || autonomous::interface_afw_only_active(state,now_ms)) && optional_ready;
     const auto tone=healthy ? PanelTone::good : PanelTone::bad;
     const auto metric_tone=[&](bool valid){return healthy && valid ? PanelTone::good : PanelTone::bad;};
     const auto value=[](float v,bool valid,bool rate){
@@ -369,9 +371,11 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const std::string explanation=autonomous::interface_status_text(state,false);
     const auto reconstruction=autonomous::interface_reconstruction_text(state,now_ms);
     const auto vector_rows=wrap(vectors,51), status_rows=wrap(explanation,51);
+    const auto aer_rows=wrap(autonomous::interface_aer_text(state,now_ms),60);
+    const auto aer_source=autonomous::interface_aer_source_text(state);
     const auto benchmark=elliott_benchmark_text(state,now_ms);
     const int rows_top=214+(benchmark.empty()?0:28), line_height=22;
-    const int count=std::min<int>(int(vector_rows.size()+status_rows.size()+1+(nr_model_missing?1:0)),
+    const int count=std::min<int>(int(vector_rows.size()+status_rows.size()+1+aer_rows.size()+(!aer_source.empty()?1:0)+(nr_model_missing?1:0)),
         (h-rows_top-8)/line_height);
     const int used=rows_top+count*line_height+8;
     if(used_height)*used_height=unsigned(used);
@@ -418,6 +422,12 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     };
     if(nr_model_missing){c.text(margin,y,"Neural Rendering: nvngx_dlssnr.dll missing",body,PanelTone::bad);++drawn;y+=line_height;}
     if(drawn<count){c.text(margin,y,reconstruction,body,PanelTone::good);++drawn;y+=line_height;}
+    for(const auto& text:aer_rows)if(drawn<count) {
+        c.text(margin,y,text,body,aer_requested?(aer_active?PanelTone::good:PanelTone::warn):PanelTone::dim);++drawn;y+=line_height;
+    }
+    if(!aer_source.empty() && drawn<count) {
+        c.text(margin,y,aer_source,body,PanelTone::dim);++drawn;y+=line_height;
+    }
     rows("Vectors:",vector_rows);rows("Status:",status_rows);
     return c.take();
 }
