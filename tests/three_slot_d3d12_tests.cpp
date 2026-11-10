@@ -609,7 +609,12 @@ int main(int argc,char** argv) {
         if(publication_test && dispatch->steamvr_runtime)s->vdxr_legacy=false;
         s->control_revision=xrfg::embedded::snapshot().revision;
         if(mode=="msfs-order-guards") { test_msfs_capture_order(*s); session_state.reset(); return 0; }
-        hr(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&s->d3d12_device)),"device");
+        ComPtr<IDXGIAdapter> software;
+        if(static_projection_test) {
+            ComPtr<IDXGIFactory4> factory;hr(CreateDXGIFactory1(IID_PPV_ARGS(&factory)),"software factory");
+            hr(factory->EnumWarpAdapter(IID_PPV_ARGS(&software)),"WARP adapter");
+        }
+        hr(D3D12CreateDevice(software.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&s->d3d12_device)),"device");
         if(mode=="bounded-publication-scope") {optical_reserve_scope_test();session_state.reset();return 0;}
         if(mode=="bounded-publication-preparation" || mode=="bounded-publication-old-control") {bounded_optical_preparation_test(mode.ends_with("old-control"));session_state.reset();return 0;}
         if(mode=="bounded-publication-publication") {optical_reserve_activation_test();session_state.reset();return 0;}
