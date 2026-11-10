@@ -11772,6 +11772,14 @@ build_projection_resource_mappings(const ProjectionSnapshot& snapshot) noexcept 
                     return output;
                 }
 
+                // Immutable OpenXR images (including UEVR's dummy projection)
+                // are composition inputs, not temporal sources. Enumeration
+                // deliberately gives them no capture/history or generator.
+                // Keep validating their rectangles and retain their layer, but
+                // never require a fresh capture to admit the mutable scene.
+                if (create_info.createFlags & XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT)
+                    continue;
+
                 auto mapping = std::find_if(
                     output.mappings.begin(),
                     output.mappings.end(),
@@ -12382,10 +12390,13 @@ void place_snapshot_panels(const ProjectionSnapshot& snapshot,float fraction,
                     return !candidate.panel && candidate.application_swapchain ==
                            view.subImage.swapchain;
                 });
-            if (destination == destinations.end() ||
-                destination->destination_swapchain == XR_NULL_HANDLE) {
-                return false;
+            if (destination == destinations.end()) {
+                const auto unchanged = find_swapchain(view.subImage.swapchain);
+                if (unchanged && (unchanged->create_info.createFlags & XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT))
+                    continue; // preserve the immutable projection on real AND generated frames
+                return false; // every mutable projection still needs an owned destination
             }
+            if (destination->destination_swapchain == XR_NULL_HANDLE) return false;
             view.subImage.swapchain = destination->destination_swapchain;
             if (synthetic) {
                 // The V008 shader generates the synthetic image in B's camera
