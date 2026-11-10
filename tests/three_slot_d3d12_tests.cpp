@@ -52,6 +52,7 @@ bool triple_switch{};
 bool deep_switch{};
 bool lower_vram_test{}, direct_output_test{};
 bool capture_busy_test{};
+bool static_projection_test{};
 unsigned private_budget_limit{}, private_budget_refusals{};
 bool reference_stall_test{};
 std::chrono::steady_clock::time_point reference_synthetic_returned{};
@@ -233,7 +234,20 @@ XrResult XRAPI_CALL fake_end_impl(XrSession,const XrFrameEndInfo* end) {
     if(fsr_queue_slow && ends.load() == 5) std::this_thread::sleep_for(std::chrono::milliseconds(25));
     ++ends;
     if (!end->layerCount) { ++empty_submissions; return XR_SUCCESS; }
-    const auto* projection=reinterpret_cast<const XrCompositionLayerProjection*>(end->layers[0]);
+    const unsigned scene_layer=static_projection_test?1:0;
+    if(static_projection_test) {
+        require(end->layerCount==4,"static projection preserved with scene and panels");
+        const auto* fixed=reinterpret_cast<const XrCompositionLayerProjection*>(end->layers[0]);
+        require(fixed->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION && fixed->viewCount==2,"immutable projection metadata");
+        for(unsigned eye=0;eye<2;++eye) {
+            const auto& sub=fixed->views[eye].subImage;
+            require(sub.imageRect.extent.width==2 && sub.imageRect.extent.height==4 && sub.imageRect.offset.x==int(eye*2),"static projection rectangle changed");
+            const auto image=submitted_image(sub.swapchain);
+            const auto p=pixel(image.Get(),sub.imageArrayIndex,is_private_image(sub.swapchain)?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_RENDER_TARGET);
+            require((p&255)==55,"immutable projection pixels changed");
+        }
+    }
+    const auto* projection=reinterpret_cast<const XrCompositionLayerProjection*>(end->layers[scene_layer]);
     bool synthetic=synthetic_handles.contains(projection->views[0].subImage.swapchain);
     if(transport_test && triple_core && synthetic && !session_state->separate_synthesis)
         std::this_thread::sleep_for(std::chrono::milliseconds(8)); // allow the next producer to attempt reuse
@@ -294,9 +308,9 @@ XrResult XRAPI_CALL fake_end_impl(XrSession,const XrFrameEndInfo* end) {
             correct &= (p&255)==expected;
         }
     }
-    correct &= end->layerCount==(promotion_test && !session_state->three_slot_director ? 1u : 3u);
-    for(unsigned i=1;i<end->layerCount;++i) {
-        const auto* q=reinterpret_cast<const XrCompositionLayerQuad*>(end->layers[i]);
+    correct &= end->layerCount==(static_projection_test?4u:promotion_test && !session_state->three_slot_director ? 1u : 3u);
+    for(unsigned i=1;i<end->layerCount-scene_layer;++i) {
+        const auto* q=reinterpret_cast<const XrCompositionLayerQuad*>(end->layers[i+scene_layer]);
         correct &= q->type==XR_TYPE_COMPOSITION_LAYER_QUAD && q->subImage.imageArrayIndex==i-1;
         ComPtr<ID3D12Resource> image=submitted_image(q->subImage.swapchain);
         const unsigned p=pixel(image.Get(),q->subImage.imageArrayIndex,
@@ -407,6 +421,7 @@ int main(int argc,char** argv) {
         s->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::nvidia;
         s->nvidia_new_route = true; s->djules_route=kTestDjules;
         const std::string_view mode = argc>1 ? argv[1] : "";
+        static_projection_test=mode=="static-projection";
         if(mode.starts_with("worker-busy-")) {
             dispatch->virtual_desktop_runtime=true;
             s->vdxr_legacy=true;s->djules_route=true;s->nvidia_new_route=false;
@@ -1575,6 +1590,14 @@ int main(int argc,char** argv) {
             // covered by the existing NVIDIA/FSR transport fixtures.
             const bool msfs_fidelity=msfs_time_test && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::fidelity_fx;
             end.layerCount=(promotion_test && !s->three_slot_director) || msfs_fidelity ? 1 : 3;end.layers=layers;
+            auto static_views=views;
+            for(unsigned eye=0;eye<2;++eye) {
+                static_views[eye].subImage={fixed->handle,{{int(eye*2),0},{2,4}},0};
+            }
+            auto static_layer=projection;static_layer.views=static_views.data();
+            const XrCompositionLayerBaseHeader* static_layers[]={reinterpret_cast<const XrCompositionLayerBaseHeader*>(&static_layer),layers[0],layers[1],layers[2]};
+            if(static_projection_test) {end.layerCount=4;end.layers=static_layers;}
+
             if(msfs_time_test && !mode.starts_with("msfs-control-") && n%3==0)
                 end.displayTime-=4*8333333; // fresh captures, backward app prediction as in MSFS
             if(msfs_time_test && !mode.starts_with("msfs-control-") && n>1 && n%3==1) end.displayTime=msfs_previous_time;
