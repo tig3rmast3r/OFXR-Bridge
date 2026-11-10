@@ -637,7 +637,7 @@ bool generation(Panel& p) {
             const char* delivery=state.runtime.ofr_delivery==1?"Alternating eye releases":state.runtime.ofr_delivery==2?"Paired releases (phase assumed)":"Learning release cadence";
             reason(p,delivery);
             notice(p,interface_aer_active(state,GetTickCount64())?Tone::ok:Tone::warn,
-                interface_aer_text(state,GetTickCount64()));
+                interface_aer_text(state,GetTickCount64()).c_str());
             // Passive SR/RR observations are sufficient to offer a method, not
             // proof that this eye's released colour owns compatible guides.
             // In particular, cumulative publication/use counters can be stale.
