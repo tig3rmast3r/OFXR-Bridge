@@ -4565,6 +4565,8 @@ void test_guide_composer(D3D12WarpFixture& fixture) {
     require(cross && cross != cross_set && cross->eyes[0] && !cross->eyes[0]->bridge &&
                 cross->eyes[0]->motion_vectors.Get() != cross_set->eyes[0]->motion_vectors.Get(),
         "a bridged eye's vectors were not given a texture of their own");
+    require(cross->eyes[0]->motion_snapshot_device.Get()==fixture.device(),
+        "composed texture retained its input allocation receipt");
     for (const float x : read(*cross->eyes[0])) {
         require(std::abs(x - motion) < 0.5F,
                 "vectors into the other eye did not reach this eye's previous image");
@@ -6245,11 +6247,34 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 
 #include "history_v474_wait_tests.inc"
 #include "synthesis_memory_lifecycle_tests.inc"
+#include "xrfg/d3d12_guide_ownership.hpp"
+#include "guide_device_ownership.inc"
 #include "aer_guide_endpoints.inc"
 #include "rife_switch_lifecycle.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="aer-guide-alias") {
+        try {
+            D3D12WarpFixture fixture(true);
+            test_guide_device_ownership(fixture);
+            for(bool n1:{false,true}) {
+                test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::fsr3,n1,true);
+                test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::ofxr,n1,true,true);
+            }
+            fixture.require_no_debug_errors();return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
 #ifdef XRFG_NATIVE_DLSSG
+    if(argc>1 && std::string_view(argv[1])=="aer-native-alias") {
+        try {
+            if(!native_test_has_supported_nvidia_adapter())return 77;
+            D3D12WarpFixture fixture(true);
+            require(xrfg::native_dlssg_lifetime_snapshot().shared_initializations==0,"alias test starts before shared NGX init");
+            for(bool n1:{false,true})test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::native_dlss,n1,true);
+            require(xrfg::native_dlssg_lifetime_snapshot().shared_initializations==0,"alias entered shared NGX init");
+            fixture.require_no_debug_errors();return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="owned-ngx-parameters") {
         try {
             xrfg::OwnedNgxParameters a,b;

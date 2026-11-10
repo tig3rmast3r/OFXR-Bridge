@@ -1,7 +1,18 @@
 // Split resources model Luke's alternating native eyes. Providers retain a
 // separate temporal context per eye; a held peer never enters the provider.
+class GuideConsumerDeviceAlias final:public ReportedDeviceAlias {
+public:
+    explicit GuideConsumerDeviceAlias(ID3D12Device* native):ReportedDeviceAlias(native),native_(native){}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** output) override {
+        const auto hr=ReportedDeviceAlias::QueryInterface(iid,output);
+        return hr==E_NOINTERFACE?native_->QueryInterface(iid,output):hr;
+    }
+private:
+    ComPtr<ID3D12Device> native_;
+};
+
 void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
-    xrfg::D3D12FrameGenerationMode mode,bool n1=false) {
+    xrfg::D3D12FrameGenerationMode mode,bool n1=false,bool alias=false,bool hybrid=false) {
     constexpr UINT width=256,height=128;
     const auto texture=[&](DXGI_FORMAT format,UINT value) {
         auto desc=stereo_texture_description(width,height);
@@ -37,6 +48,12 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
         return result;
     };
     auto motion=texture(DXGI_FORMAT_R32G32_FLOAT,0),depth=texture(DXGI_FORMAT_R32_FLOAT,0);
+    ComPtr<ID3D12Device> consumer=fixture.device();
+    ComPtr<ID3D12CommandQueue> consumer_queue=fixture.queue();
+    if(alias) {
+        consumer.Attach(new GuideConsumerDeviceAlias(fixture.device()));
+        consumer_queue.Attach(new QueueWithReportedDeviceAlias(fixture.queue(),consumer.Get()));
+    }
     for(UINT eye=0;eye<2;++eye) {
         const UINT color=eye?211:43;
         auto a=texture(kFormat,color),b=texture(kFormat,color+1);
@@ -44,9 +61,9 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
         ID3D12Resource* sources[]{a.Get(),b.Get()},*currents[]{current.Get()},*synthetics[]{synthetic.Get()};
         auto history=std::make_shared<xrfg::D3D12SwapchainHistory>();
         require_hresult(history->initialize(fixture.device(),fixture.queue(),sources,D3D12_RESOURCE_STATE_RENDER_TARGET),"AER split history");
-        xrfg::D3D12NvidiaOpticalFlowOptions options;options.ofr=true;
+        xrfg::D3D12NvidiaOpticalFlowOptions options;options.ofr=true;options.hybrid=hybrid;
         xrfg::D3D12FrameSynthesizer synthesizer;
-        require_hresult(synthesizer.initialize(fixture.device(),fixture.queue(),history,currents,synthetics,
+        require_hresult(synthesizer.initialize(consumer.Get(),consumer_queue.Get(),history,currents,synthetics,
             kFormat,D3D12_RESOURCE_STATE_RENDER_TARGET,xrfg::D3D12OpticalFlowBackend::fidelity_fx,
             options,false,xrfg::luke_primary_generation_mode(true,options.ofr,mode),true),"AER guide synthesizer");
         auto view=make_reprojection_views()[eye];view.logical_eye=eye;view.array_slice=0;
@@ -55,7 +72,10 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
             auto set=std::make_shared<xrfg::DlssMotionVectorSet>();set->eye_count=1;set->resolved_eye=int(eye);
             auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=stream?stream:910+eye;
             g->epoch=1;g->serial=serial;g->previous_serial=serial-1;g->publication=serial;
-            g->producer_queue=fixture.queue();g->motion_vectors=motion;g->depth=depth;
+            g->producer_queue=consumer_queue;g->motion_vectors=motion;g->depth=depth;
+            g->verified_producer_device=alias && mode==xrfg::D3D12FrameGenerationMode::native_dlss
+                ?consumer.Get():fixture.device();
+            g->motion_snapshot_device=g->depth_snapshot_device=fixture.device();
             g->output_width=g->motion_width=g->depth_width=width;
             g->output_height=g->motion_height=g->depth_height=height;
             g->resource_state=g->depth_resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
