@@ -144,9 +144,21 @@ int aer_native_guide_join_test() {
         ~Cleanup(){xrfg::configure_dlss_motion_vector_tracking(false);xrfg::retire_disabled_dlss_motion_vector_resources();
             std::scoped_lock lock(g_state_mutex);for(const auto& chain:chains)g_swapchains.erase(chain->handle);}
     } cleanup{chains};
-    snapshot.layers.push_back(std::move(projection));
+    XrSwapchainCreateInfo immutable{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    immutable.width=immutable.height=4;immutable.arraySize=1;immutable.createFlags=XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
+    auto fixed=std::make_shared<SwapchainState>(state,immutable);fixed->handle=reinterpret_cast<XrSwapchain>(0x9292);
+    {std::scoped_lock lock(g_state_mutex);g_swapchains[fixed->handle]=fixed;}
+    struct StaticCleanup {XrSwapchain handle;~StaticCleanup(){std::scoped_lock lock(g_state_mutex);g_swapchains.erase(handle);}} static_cleanup{fixed->handle};
+    auto fixed_projection=projection;
+    for(unsigned eye=0;eye<2;++eye)fixed_projection.views[eye].subImage={fixed->handle,{{int(eye*2),0},{2,4}},0};
     xrfg::configure_luke_color_origin_extent(width,height);
-    for(unsigned span:{2U,1U}) {
+    for(unsigned placement=0;placement<3;++placement) {
+      snapshot.layers={projection};
+      if(placement==1)snapshot.layers.insert(snapshot.layers.begin(),fixed_projection);
+      if(placement==2)snapshot.layers.push_back(fixed_projection);
+      for(std::size_t i=0;i<snapshot.layers.size();++i)snapshot.layers[i].layer_index=i;
+      for(auto& mapping:mappings)mapping.views[0].projection_index=placement==1?1:0;
+      for(unsigned span:{2U,1U}) {
         xrfg::configure_dlss_motion_vector_tracking(false);xrfg::retire_disabled_dlss_motion_vector_resources();
         xrfg::configure_dlss_motion_vector_tracking(true);state->aer_native_guide_cache.reset();
         std::array<std::uint32_t,2> expected{};
@@ -197,8 +209,10 @@ int aer_native_guide_join_test() {
                 check(bool(guides->eyes[0]->bridge)==(span==1),"N1 join lost its exact composer input or N2 was recomposed");
             }
             check(refresh_aer_native_guides(state,snapshot,mappings)==S_OK,"held exact guides were not reused");
+            check(classify_fsr_stereo_guides(snapshot,mappings)==FsrStereoGuideReason::ready,"static projection must not request native scene guides");
         }
     }
-    std::puts("Native AER GPU ingress: real CRC reads, protected producer history, both eyes, N1/N2 and stalled ingress isolation PASS");
+    }
+    std::puts("Native AER GPU ingress: CRC, protected histories, both eyes, N1/N2, static first/last, guide admission and stalled ingress isolation PASS");
     return 0;
 }

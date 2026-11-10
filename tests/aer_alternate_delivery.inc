@@ -43,6 +43,11 @@ int aer_alternate_delivery_test(std::string_view route) {
     if(!native12)ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),f.device12.GetAddressOf(),f.queue.GetAddressOf()),"AER D11 interop device");
     state->d3d12_device=f.device12;state->d3d12_queue=f.queue;
     state->d3d11_device=f.device11;state->d3d11_context=f.context;
+    if(native12) {
+        D3D12_COMMAND_QUEUE_DESC queue_info{};queue_info.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+        ok(f.device12->CreateCommandQueue(&queue_info,IID_PPV_ARGS(&state->d3d12_synthesis_queue)),"native session synthesis queue");
+        state->private_delivery_queue=f.delivery_queue;
+    }
     state->luke_afw_enabled=!native12;if(!native12)state->graphics_binding_capabilities|=8ULL;
     if(!native12)initialize_luke_synthesis_queue(*state);
     ok(apply_embedded_control(state),"AER matrix initial provider settings");

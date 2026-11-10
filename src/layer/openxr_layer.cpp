@@ -17414,7 +17414,7 @@ struct PrivateDepthStrip {
 [[nodiscard]] FsrStereoGuideReason classify_fsr_stereo_guides(
     const ProjectionSnapshot& snapshot,
     std::span<const ProjectionResourceMapping> mappings) noexcept {
-    if (snapshot.layers.empty()) return FsrStereoGuideReason::non_stereo_projection;
+    if (snapshot.layers.empty() || mappings.empty()) return FsrStereoGuideReason::non_stereo_projection;
     for (std::size_t projection = 0; projection < snapshot.layers.size(); ++projection) {
         if (projection_layer_is_static(snapshot.layers[projection])) continue;
         const auto& views = snapshot.layers[projection].views;
@@ -18101,7 +18101,7 @@ XrResult layer_end_frame_impl(
     // Source observation is independent of guide availability and generation
     // success. A failed native join still consumes this source identity once;
     // later held polls must not republish it as raw AER or change its camera.
-    const auto aer_scene=ofr_scene_projection(current_snapshot,projection_mappings);
+    const auto aer_scene=state->nvidia_options.ofr?ofr_scene_projection(current_snapshot,projection_mappings):std::nullopt;
     std::optional<xrfg::ofr::Decision> aer_source_decision;
     if(state->nvidia_options.ofr && resource_mappings.ready() && aer_scene) {
         record_projection_capture_order(current_snapshot,projection_mappings);
