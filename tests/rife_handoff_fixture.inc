@@ -17,6 +17,7 @@ static void rife_handoff_matrix(bool aer=false) {
         };
         const auto native_origin=ns()+period/3;std::int64_t native_turn=-1;
         HANDLE gate_timer=CreateWaitableTimerExW(nullptr,nullptr,0x2,TIMER_ALL_ACCESS);
+        HANDLE source_timer=CreateWaitableTimerExW(nullptr,nullptr,0x2,TIMER_ALL_ACCESS);
         if(gated)f.begin_callback=[&](unsigned){
             // Independent native compositor running-start. A late call returns
             // immediately; spacing successes alone cannot prove consumption.
@@ -43,7 +44,12 @@ static void rife_handoff_matrix(bool aer=false) {
                 // but ready packet can still enter the current native gate.
                 f.wait_count(n);
                 const auto ready=ns()+period-(n%3==0?3'000'000:700'000);
-                std::this_thread::sleep_for(7ms);
+                auto remaining=ready-ns();
+                if(remaining>600'000) {
+                    LARGE_INTEGER due{};due.QuadPart=-(remaining-500'000)/100;
+                    check(source_timer && SetWaitableTimer(source_timer,&due,0,nullptr,nullptr,FALSE),"AER source work timer");
+                    check(WaitForSingleObject(source_timer,1000)==WAIT_OBJECT_0,"AER source work completion");
+                }
                 while(ns()<ready)YieldProcessor();
             } else if(!aer && n%2==0)
                 std::this_thread::sleep_until(origin+std::chrono::nanoseconds((n/2)*30'303'030LL));
@@ -67,6 +73,7 @@ static void rife_handoff_matrix(bool aer=false) {
         f.transport->set_rife_handoff(false);
         for(auto chain:chains)xr_ok(f.transport->destroy_swapchain(chain),"RIFE source cleanup");
         CloseHandle(gate_timer);
+        CloseHandle(source_timer);
         std::printf("RIFE_HANDOFF gated=%u director=%u fast=%u buffer=%u outputs=%u native_fps=%.3f modeled_consumed=%u missed=%u learned=%zu exact_pixels_poses=PASS device=%s\n",gated,director,fast,buffer,count,rate,f.mock_consumed,f.mock_missed,targets.size(),std::getenv("XRFG_TEST_WARP")?"WARP":"hardware");
     }
     native_contract_fixture_mode=native_adaptive_wait_fixture_mode=native_director_only_fixture_mode=false;
