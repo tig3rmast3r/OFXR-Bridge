@@ -40,6 +40,7 @@ private:
     struct EyeResources {
         Microsoft::WRL::ComPtr<ID3D12Resource> texture;
         Microsoft::WRL::ComPtr<ID3D12Resource> decision;
+        std::shared_ptr<const DlssSnapshotAllocation> allocation;
         UINT width{};
         UINT height{};
     };

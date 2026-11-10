@@ -46,6 +46,7 @@ constexpr D3D12_RESOURCE_STATES kSnapshotReadState =
 struct SnapshotSlot {
     ComPtr<ID3D12Resource> resource;
     ComPtr<ID3D12Device> allocation_device;
+    std::shared_ptr<const DlssSnapshotAllocation> allocation;
     D3D12_RESOURCE_DESC description{};
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
     std::shared_ptr<DlssSnapshotRetention> retention;
@@ -361,11 +362,13 @@ HRESULT snapshot_resource(
     std::shared_ptr<DlssSnapshotRetention>* retention = nullptr,
     ComPtr<ID3D12Device>* allocation_receipt = nullptr,
     std::size_t retained_capacity = SnapshotCount,
-    bool dlss_float_motion = false) noexcept {
+    bool dlss_float_motion = false,
+    std::shared_ptr<const DlssSnapshotAllocation>* bound_allocation = nullptr) noexcept {
     if (source == nullptr || producer_command_list == nullptr ||
         producer_queue == nullptr || snapshot == nullptr) return E_POINTER;
     snapshot->Reset();
     if (allocation_receipt) allocation_receipt->Reset();
+    if (bound_allocation) bound_allocation->reset();
     const auto list_identity=identity(producer_command_list);
     if(!list_identity)return E_NOINTERFACE;
 
@@ -442,8 +445,12 @@ HRESULT snapshot_resource(
             nullptr,
             IID_PPV_ARGS(resource.GetAddressOf()));
         if (FAILED(result)) return result;
+        std::shared_ptr<const DlssSnapshotAllocation> allocation;
+        try { allocation=std::make_shared<const DlssSnapshotAllocation>(resource.Get(),allocation_device.Get()); }
+        catch(...) {return E_OUTOFMEMORY;}
         slot.resource = std::move(resource);
         slot.allocation_device = allocation_device;
+        slot.allocation = std::move(allocation);
         slot.description = description;
         slot.state = D3D12_RESOURCE_STATE_COMMON;
     }
@@ -479,6 +486,7 @@ HRESULT snapshot_resource(
     slot.state = snapshot_state;
     *snapshot = slot.resource;
     if (allocation_receipt) *allocation_receipt = slot.allocation_device;
+    if (bound_allocation) *bound_allocation = slot.allocation;
     slot.retention = std::move(lifetime);
     slot.producer_command_list=producer_command_list;
     slot.producer_identity=list_identity.Get();
@@ -671,6 +679,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
 
         ComPtr<ID3D12Resource> motion_snapshot;
         ComPtr<ID3D12Device> motion_snapshot_device, depth_snapshot_device;
+        std::shared_ptr<const DlssSnapshotAllocation> motion_allocation,depth_allocation;
         std::shared_ptr<DlssSnapshotRetention> motion_retention, depth_retention;
         const bool retain_snapshots=publication.protect_snapshot_lifetime || publication.direct_output_receipt;
         const std::size_t retained_capacity=publication.direct_output_receipt ? 6 : kSnapshotSlotCount;
@@ -680,7 +689,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
                 publication.verified_producer_device,
                 &motion_snapshot, kSnapshotReadState,
                 retain_snapshots ? &motion_retention : nullptr,
-                &motion_snapshot_device,retained_capacity,publication.dlss_float_motion); };
+                &motion_snapshot_device,retained_capacity,publication.dlss_float_motion,&motion_allocation); };
         HRESULT snapshot_result=snapshot_motion();
         while(snapshot_result==HRESULT_FROM_WIN32(ERROR_BUSY) && publication.protect_snapshot_lifetime &&
             reclaim_luke_history_snapshot(stream))snapshot_result=snapshot_motion();
@@ -701,7 +710,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
                     publication.producer_queue,
                     publication.verified_producer_device, &depth_snapshot, kSnapshotReadState,
                     retain_snapshots ? &depth_retention : nullptr,
-                    &depth_snapshot_device,retained_capacity); };
+                    &depth_snapshot_device,retained_capacity,false,&depth_allocation); };
             snapshot_result=snapshot_depth();
             while(snapshot_result==HRESULT_FROM_WIN32(ERROR_BUSY) && publication.protect_snapshot_lifetime &&
                 reclaim_luke_history_snapshot(stream))snapshot_result=snapshot_depth();
@@ -735,6 +744,8 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->motion_vectors = std::move(motion_snapshot);
         frame->motion_snapshot_device = std::move(motion_snapshot_device);
         frame->depth_snapshot_device = std::move(depth_snapshot_device);
+        frame->motion_allocation=std::move(motion_allocation);
+        frame->depth_allocation=std::move(depth_allocation);
         frame->producer_queue = publication.producer_queue;
         frame->verified_producer_device =
             publication.verified_producer_device;

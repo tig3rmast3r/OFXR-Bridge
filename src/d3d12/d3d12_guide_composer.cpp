@@ -157,6 +157,8 @@ std::shared_ptr<const DlssMotionVectorSet> D3D12GuideComposer::compose(
                 resources.width = b->motion_width;
                 resources.height = b->motion_height;
             }
+            if(!resources.allocation || resources.allocation->resource.Get()!=resources.texture.Get())
+                resources.allocation=std::make_shared<const DlssSnapshotAllocation>(resources.texture.Get(),device_.Get());
             if (!resources.decision) {
                 D3D12_HEAP_PROPERTIES heap{};
                 heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -244,6 +246,7 @@ std::shared_ptr<const DlssMotionVectorSet> D3D12GuideComposer::compose(
             auto composed = std::make_shared<DlssMotionVectorFrame>(*b);
             composed->motion_vectors = resources.texture;
             composed->motion_snapshot_device = device_;
+            composed->motion_allocation = resources.allocation;
             composed->motion_x = 0;
             composed->motion_y = 0;
             composed->motion_slice = 0;

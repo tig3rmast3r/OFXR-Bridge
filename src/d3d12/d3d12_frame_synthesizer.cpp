@@ -6086,7 +6086,7 @@ struct D3D12FrameSynthesizer::Impl {
             current_source.motion_vectors &&
             current_source.motion_vectors->eye_count == target_views.size();
         if (nvidia_options.hybrid) {
-            // 1196: Hybrid's guide pair, result = its failure code (0 composed
+            // 1496: Hybrid's guide pair, result = its failure code (0 composed
             // with the game's vectors, 1 no previous, 2 no current guides),
             // b the current first eye's serial, c the previous one's. The
             // first sixteen pairs, every change of code and every 256th.
@@ -6102,7 +6102,7 @@ struct D3D12FrameSynthesizer::Impl {
                         source.motion_vectors->eyes[0] ? source.motion_vectors->eyes[0]->serial : 0;
                 };
                 bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
-                    static_cast<std::int64_t>(code), 1196, serial(current_source), serial(previous_source));
+                    static_cast<std::int64_t>(code), 1496, serial(current_source), serial(previous_source));
             }
         }
         if (!hybrid && valid_game_motion_pair(previous_source, current_source, std::min<UINT>(std::max<UINT>(image_description.DepthOrArraySize, current_source.view_count), kDlssMotionVectorEyeCount))) {
