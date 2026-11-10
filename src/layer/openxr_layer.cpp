@@ -4222,7 +4222,8 @@ void refresh_native_generation_capacity(SessionState& state) noexcept {
             S_FALSE,1003,handle_value(state.handle),0);
         return;
     }
-    state.native_dlss_generated_frames=xrfg::native_dlssg_max_generated_frames(state.d3d12_device.Get());
+    state.native_dlss_generated_frames=xrfg::native_dlssg_max_generated_frames(
+        state.d3d12_device.Get(),state.luke_afw_enabled);
 }
 
 // Optical flow needs the application's XR colors, not AFW's native guides.

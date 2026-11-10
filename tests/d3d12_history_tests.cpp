@@ -24,6 +24,7 @@
 #include <wrl/client.h>
 #ifdef XRFG_NATIVE_DLSSG
 #include <nvsdk_ngx_helpers_dlssg_d3d.h>
+#include "xrfg/ngx_owned_parameters.hpp"
 #endif
 
 #include <algorithm>
@@ -6248,6 +6249,41 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 #include "rife_switch_lifecycle.inc"
 
 int main(int argc, char** argv) {
+#ifdef XRFG_NATIVE_DLSSG
+    if(argc>1 && std::string_view(argv[1])=="owned-ngx-parameters") {
+        try {
+            xrfg::OwnedNgxParameters a,b;
+            NVSDK_NGX_Parameter& table=a;
+            unsigned u=19;int i{};float f{};double d{};unsigned long long wide{};void* ptr{};
+            require(NVSDK_NGX_FAILED(table.Get("absent",&u)) && u==19,"missing private parameter must not invent a value");
+            table.Set("width",3370u);require(NVSDK_NGX_SUCCEED(table.Get("width",&i)) && i==3370,"SDK integer query conversion");
+            table.Set("width",3088);require(NVSDK_NGX_SUCCEED(table.Get("width",&u)) && u==3088,"SDK overwrite/cross-type integer");
+            table.Set("fov",1.46F);require(NVSDK_NGX_SUCCEED(table.Get("fov",&d)) && std::abs(d-1.46)<.00001,"SDK float to double query");
+            table.Set("near",.05);require(NVSDK_NGX_SUCCEED(table.Get("near",&f)) && std::abs(f-.05F)<.00001F,"SDK double to float query");
+            table.Set("id",0xfedcba9876543210ULL);require(NVSDK_NGX_SUCCEED(table.Get("id",&wide)) && wide==0xfedcba9876543210ULL,"private64-bit identity must remain exact");
+            auto* resource=reinterpret_cast<ID3D12Resource*>(std::uintptr_t(0x12340000));
+            table.Set("resource",resource);require(NVSDK_NGX_SUCCEED(table.Get("resource",&ptr)) && ptr==resource,"SDK resource/void pointer interoperability");
+            ID3D12Resource* restored{};require(NVSDK_NGX_SUCCEED(table.Get("resource",&restored)) && restored==resource,"SDK typed resource query");
+            table.Set("null",static_cast<ID3D11Resource*>(nullptr));require(NVSDK_NGX_SUCCEED(table.Get("null",&ptr)) && !ptr,"null SDK resource remains a present parameter");
+            require(NVSDK_NGX_FAILED(table.Get("resource",&u)),"pointer cannot become a numeric parameter");
+            require(NVSDK_NGX_FAILED(b.Get("width",&u)),"private feature maps cannot leak parameters into each other");
+            table.Reset();require(NVSDK_NGX_FAILED(table.Get("width",&u)),"private reset clears only its own values");
+            std::cout<<"Private NGX SDK parameter types, independent ownership and reset PASS\n";return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+    if(argc>1 && std::string_view(argv[1])=="aer-native-isolated") {
+        try {
+            if(!native_test_has_supported_nvidia_adapter())return 77;
+            D3D12WarpFixture fixture(true);
+            require(xrfg::native_dlssg_lifetime_snapshot().shared_initializations==0,"isolated test must start before any shared NGX init");
+            require(xrfg::native_dlssg_max_generated_frames(fixture.device(),true)>0,"private provider capability probe without shared NGX init");
+            for(bool n1:{false,true})test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::native_dlss,n1);
+            require(xrfg::native_dlssg_lifetime_snapshot().shared_initializations==0,"Luke capability/create/evaluate entered shared NGX initialization");
+            fixture.require_no_debug_errors();
+            std::cout<<"Actual private DLSS-G N1/N2 per-eye generation with zero shared NGX initialization PASS\n";return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+#endif
     if(argc>1&&std::string_view(argv[1])=="rife-switch-lifecycle") {
         try {D3D12WarpFixture fixture(true);test_rife_switch_lifecycle(fixture);fixture.require_no_debug_errors();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

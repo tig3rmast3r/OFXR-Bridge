@@ -20,6 +20,7 @@
 
 #ifdef XRFG_NATIVE_DLSSG
 #include "xrfg/ngx_feature_paths.hpp"
+#include "xrfg/ngx_owned_parameters.hpp"
 #include "native_dlssg_pack_shader.hpp"
 #include "native_dlssg_pixel_shader.hpp"
 #include "native_dlssg_seed_shader.hpp"
@@ -324,7 +325,9 @@ struct DeviceUse {
 struct AdapterFrames {
     LUID adapter;
     std::uint32_t frames;
+    bool isolated{};
 };
+std::atomic<std::uint64_t> shared_initializations{};
 std::mutex ngx_mutex;
 std::vector<DeviceUse> ngx_devices;
 std::vector<AdapterFrames> ngx_frames;
@@ -371,6 +374,7 @@ HRESULT acquire_ngx(ID3D12Device *d) {
     GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
     auto logs = *local ? std::filesystem::path(local) / L"ofxr-bridge" / L"NGX" : dir / L"NGX";
     std::filesystem::create_directories(logs);
+    ++shared_initializations;
     const auto result = NVSDK_NGX_D3D12_Init_with_ProjectID("2152e8d8-a3d7-4d4c-88a5-37f740f81036",
                                                             NVSDK_NGX_ENGINE_TYPE_CUSTOM,
                                                             "OFXR-Bridge", logs.c_str(), d, &info);
@@ -515,6 +519,14 @@ UINT recover_direct(ID3D12Device* device, NVSDK_NGX_Parameter* private_caps) {
     return frames;
 }
 
+UINT query_isolated_frames(ID3D12Device* device) {
+    OwnedNgxParameters caps;
+    const auto frames=recover_direct(device,&caps);
+    bridge_flight_logger().event(BridgeFlightOperation::native_dlssg_provider,
+        frames?1:0,11,frames,1);
+    return frames;
+}
+
 // Requires acquire_ngx. Zero when frame generation is unavailable.
 std::uint32_t query_generated_frames(ID3D12Device* device) {
     NVSDK_NGX_Parameter *caps{};
@@ -546,15 +558,15 @@ std::uint32_t query_generated_frames(ID3D12Device* device) {
 bool same_adapter(const LUID &x, const LUID &y) {
     return x.LowPart == y.LowPart && x.HighPart == y.HighPart;
 }
-void remember_frames(ID3D12Device *d, std::uint32_t frames) {
+void remember_frames(ID3D12Device *d, std::uint32_t frames,bool isolated=false) {
     const LUID adapter = d->GetAdapterLuid();
     std::scoped_lock lock(ngx_mutex);
     for (const auto &e : ngx_frames) {
-        if (same_adapter(e.adapter, adapter)) {
+        if (same_adapter(e.adapter, adapter) && e.isolated==isolated) {
             return;
         }
     }
-    ngx_frames.push_back({adapter, frames});
+    ngx_frames.push_back({adapter, frames,isolated});
 }
 } // namespace
 
@@ -572,6 +584,7 @@ struct D3D12NativeDlssG::Impl {
         bool direct{};
         NVSDK_NGX_Handle *handle{};
         NVSDK_NGX_Parameter *params{};
+        std::unique_ptr<OwnedNgxParameters> owned_params;
         ComPtr<ID3D12Resource> color, motion, depth;
         // The reseed's colour, when it needs a format of its own.
         ComPtr<ID3D12Resource> seed_color;
@@ -637,7 +650,7 @@ struct D3D12NativeDlssG::Impl {
     UINT recorded_slot{kSlots};
     ComPtr<ID3D12GraphicsCommandList> capture_list;
     bool diagnostic_decisions{}, capture_only{}, test_output{}, reseed_every_pair{};
-    bool direct_route{}, recover_requested{}, recovery_attempted{};
+    bool direct_route{}, recover_requested{}, recovery_attempted{},isolated{};
     FILE *decision_log{};
     Skip skip{Skip::none};
     std::shared_ptr<D3D12NativeFrameResult> last_result;
@@ -727,7 +740,7 @@ struct D3D12NativeDlssG::Impl {
     }
     void release_feature(Feature &f) noexcept {
         release_owned_feature(f.handle,f.direct);
-        if (f.params) {
+        if (f.params && !f.owned_params) {
             NVSDK_NGX_D3D12_DestroyParameters(f.params);
         }
         f = {};
@@ -784,8 +797,12 @@ struct D3D12NativeDlssG::Impl {
             return hr;
         }
         f.direct = direct_route;
-        auto result = f.direct ? NVSDK_NGX_D3D12_GetCapabilityParameters(&f.params)
-                               : NVSDK_NGX_D3D12_AllocateParameters(&f.params);
+        NVSDK_NGX_Result result=NVSDK_NGX_Result_Success;
+        if(isolated) {
+            f.owned_params=std::make_unique<OwnedNgxParameters>();
+            f.params=f.owned_params.get();
+        } else result = f.direct ? NVSDK_NGX_D3D12_GetCapabilityParameters(&f.params)
+                                 : NVSDK_NGX_D3D12_AllocateParameters(&f.params);
         if (NVSDK_NGX_FAILED(result)) {
             return E_FAIL;
         }
@@ -1163,7 +1180,7 @@ D3D12NativeDlssGLifetime native_dlssg_lifetime_snapshot() noexcept {
         lifetime.release_attempts.load(std::memory_order_relaxed),
         lifetime.released.load(std::memory_order_relaxed),
         lifetime.release_failures.load(std::memory_order_relaxed),
-        lifetime.live.load(std::memory_order_relaxed)};
+        lifetime.live.load(std::memory_order_relaxed),shared_initializations.load(std::memory_order_relaxed)};
 #else
     return {};
 #endif
@@ -1174,7 +1191,7 @@ D3D12NativeDlssG::~D3D12NativeDlssG() = default;
 
 HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *queue,
                                      const D3D12_RESOURCE_DESC &source,
-                                     DXGI_FORMAT format, UINT scale) noexcept {
+                                     DXGI_FORMAT format, UINT scale,bool isolated_provider) noexcept {
 #ifdef XRFG_NATIVE_DLSSG
     try {
         auto p = std::make_unique<Impl>();
@@ -1203,18 +1220,20 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
         p->near_far_partition = environment(L"XRFG_TEST_NATIVE_DLSSG_NEAR_FAR", p->near_far_partition);
         p->object_separation = environment(L"XRFG_TEST_NATIVE_DLSSG_SEPARATION", p->object_separation);
         p->vectors_dilated = environment(L"XRFG_TEST_NATIVE_DLSSG_DILATED");
-        HRESULT hr = acquire_ngx(device);
-        if (FAILED(hr)) {
-            return hr;
+        p->isolated=isolated_provider;
+        HRESULT hr=S_OK;
+        if(!isolated_provider) {
+            hr=acquire_ngx(device);
+            if(FAILED(hr))return hr;
+            p->acquired=true;
         }
-        p->acquired = true;
-        const std::uint32_t frames = query_generated_frames(device);
-        remember_frames(device, frames);
+        const std::uint32_t frames = isolated_provider?query_isolated_frames(device):query_generated_frames(device);
+        remember_frames(device, frames,isolated_provider);
         if (!frames) {
             return DXGI_ERROR_UNSUPPORTED;
         }
         p->max_outputs = frames;
-        p->direct_route = uses_direct(device);
+        p->direct_route = isolated_provider || uses_direct(device);
         hr = p->pipelines();
         if (FAILED(hr)) {
             return hr;
@@ -1265,6 +1284,7 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
     (void)source;
     (void)format;
     (void)scale;
+    (void)isolated_provider;
     return DXGI_ERROR_UNSUPPORTED;
 #endif
 }
@@ -1844,7 +1864,7 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
 #endif
 }
 
-std::uint32_t native_dlssg_max_generated_frames(ID3D12Device *device) noexcept {
+std::uint32_t native_dlssg_max_generated_frames(ID3D12Device *device,bool isolated_provider) noexcept {
 #ifdef XRFG_NATIVE_DLSSG
     try {
         if (!device) {
@@ -1854,10 +1874,15 @@ std::uint32_t native_dlssg_max_generated_frames(ID3D12Device *device) noexcept {
         {
             std::scoped_lock lock(ngx_mutex);
             for (const auto &e : ngx_frames) {
-                if (same_adapter(e.adapter, adapter)) {
+                if (same_adapter(e.adapter, adapter) && e.isolated==isolated_provider) {
                     return e.frames;
                 }
             }
+        }
+        if (isolated_provider) {
+            const auto frames=query_isolated_frames(device);
+            remember_frames(device,frames,true);
+            return frames;
         }
         if (FAILED(acquire_ngx(device))) {
             return 0;
@@ -1871,6 +1896,7 @@ std::uint32_t native_dlssg_max_generated_frames(ID3D12Device *device) noexcept {
     }
 #else
     (void)device;
+    (void)isolated_provider;
     return 0;
 #endif
 }

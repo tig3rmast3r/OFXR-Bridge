@@ -2888,7 +2888,8 @@ struct D3D12FrameSynthesizer::Impl {
         }
         if (generation_mode == D3D12FrameGenerationMode::native_dlss) {
             native_dlss = std::make_unique<D3D12NativeDlssG>();
-            result = native_dlss->initialize(device.Get(), queue.Get(), image_description, view_format, nvidia_options.native_scale);
+            result = native_dlss->initialize(device.Get(), queue.Get(), image_description, view_format,
+                nvidia_options.native_scale,allow_luke_guide_device_alias && nvidia_options.ofr);
             if (FAILED(result)) return result;
         }
         if (generation_mode == D3D12FrameGenerationMode::fsr3) {

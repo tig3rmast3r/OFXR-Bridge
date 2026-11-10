@@ -17,6 +17,7 @@ struct D3D12NativeDlssGLifetime {
     // Every nonnull create result counts, including failure-returned handles.
     std::uint64_t created{},failed_create_handles{};
     std::uint64_t release_attempts{},released{},release_failures{},live{};
+    std::uint64_t shared_initializations{};
 };
 [[nodiscard]] D3D12NativeDlssGLifetime native_dlssg_lifetime_snapshot() noexcept;
 
@@ -47,7 +48,7 @@ class D3D12NativeDlssG final {
     // XRFG_NATIVE_DLSSG_SCALE overrides it.
     HRESULT initialize(ID3D12Device *device, ID3D12CommandQueue *queue,
                        const D3D12_RESOURCE_DESC &source, DXGI_FORMAT view_format,
-                       UINT scale = 100) noexcept;
+                       UINT scale = 100,bool isolated_provider=false) noexcept;
     // S_FALSE means the pair was not generated and no output was written. The
     // list may still hold NGX history work, so call submitted() for any list
     // that is executed after record(), whatever it returned.
@@ -71,6 +72,6 @@ class D3D12NativeDlssG final {
 // Frames NGX can generate between two rendered frames on this device's
 // adapter: 0 when native frame generation is unavailable, 1 for 2X only, and
 // 2 or more when 3X is possible. The first call per adapter queries NGX.
-[[nodiscard]] std::uint32_t native_dlssg_max_generated_frames(ID3D12Device *device) noexcept;
+[[nodiscard]] std::uint32_t native_dlssg_max_generated_frames(ID3D12Device *device,bool isolated_provider=false) noexcept;
 
 } // namespace xrfg
