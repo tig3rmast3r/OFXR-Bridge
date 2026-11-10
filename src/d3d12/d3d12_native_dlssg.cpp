@@ -584,7 +584,8 @@ struct D3D12NativeDlssG::Impl {
         bool direct{};
         NVSDK_NGX_Handle *handle{};
         NVSDK_NGX_Parameter *params{};
-        std::unique_ptr<OwnedNgxParameters> owned_params;
+        // The temporary seed descriptor aliases this feature's parameter map.
+        std::shared_ptr<OwnedNgxParameters> owned_params;
         ComPtr<ID3D12Resource> color, motion, depth;
         // The reseed's colour, when it needs a format of its own.
         ComPtr<ID3D12Resource> seed_color;
@@ -799,7 +800,7 @@ struct D3D12NativeDlssG::Impl {
         f.direct = direct_route;
         NVSDK_NGX_Result result=NVSDK_NGX_Result_Success;
         if(isolated) {
-            f.owned_params=std::make_unique<OwnedNgxParameters>();
+            f.owned_params=std::make_shared<OwnedNgxParameters>();
             f.params=f.owned_params.get();
         } else result = f.direct ? NVSDK_NGX_D3D12_GetCapabilityParameters(&f.params)
                                  : NVSDK_NGX_D3D12_AllocateParameters(&f.params);
