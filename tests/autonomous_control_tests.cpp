@@ -37,13 +37,13 @@ void codec() {
         "passive observation distinguishes motion from depth without activating guide capture");
     xrfg::autonomous::Settings desired;
     require(!desired.ofr_enabled && desired.ofr_scale==2 && !desired.ofr_swap,"OFR defaults off, 50%, normal phase");
-    for(int backend:{0,1})for(bool swap:{false,true}) {
-        auto ofr=desired;ofr.ofr_enabled=true;ofr.ofr_backend=backend;ofr.ofr_swap=swap;
-        const auto saved=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(ofr));
-        require(saved.ofr_enabled && saved.ofr_backend==backend && saved.ofr_scale==2 && saved.ofr_swap==swap,
-            "OFR profile round trip survives Basic sanitation");
+    for(bool advanced:{false,true})for(int backend:{0,1})for(bool swap:{false,true}) {
+        auto ofr=desired;ofr.advanced_mode=advanced;ofr.ofr_enabled=true;ofr.ofr_backend=backend;ofr.ofr_swap=swap;
+        const auto saved=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(ofr,true));
+        require(saved.ofr_enabled && saved.ofr_backend==backend && saved.ofr_scale==2 && saved.ofr_swap==(advanced&&swap),
+            "AER profile preserves Swap only with the global Advanced policy");
         const auto merged=xrfg::autonomous::merge_changes(desired,desired,ofr);
-        require(merged.ofr_enabled && merged.ofr_backend==backend && merged.ofr_swap==swap,"OFR profile merge");
+        require(merged.ofr_enabled && merged.ofr_backend==backend && merged.ofr_swap==(advanced&&swap),"AER profile merge respects Advanced policy");
     }
     for(int method:{0,1,2,3,4}) {
         auto aer=desired;aer.frame_generation=method;aer.ofr_enabled=true;

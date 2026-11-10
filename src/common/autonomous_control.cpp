@@ -1499,7 +1499,7 @@ std::string_view interface_vectors_text(const Snapshot& s, std::uint64_t now) no
 }
 bool interface_aer_active(const Snapshot& s,std::uint64_t now) noexcept {
     const auto& r=s.runtime;const auto& e=r.ofr_evidence;
-    return s.connected && s.desired.enabled && s.desired.ofr_enabled && !r.pending &&
+    return s.connected && s.desired.enabled && s.desired.ofr_enabled && r.generation_state!=GenerationState::paused && !r.pending &&
         r.applied_revision==s.revision && r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000 &&
         e.outputs && e.last_output_ms && now>=e.last_output_ms && now-e.last_output_ms<1000 &&
         e.last_output_ms>=e.last_bypass_ms;
@@ -1510,6 +1510,7 @@ std::string interface_aer_text(const Snapshot& s,std::uint64_t now) {
     if(!s.connected)return "AER: Waiting for game";
     const auto& r=s.runtime;const auto& e=r.ofr_evidence;
     if(r.pending || r.applied_revision!=s.revision)return "AER: Applying settings";
+    if(r.generation_state==GenerationState::paused)return "AER: Paused";
     const bool live=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
     const char* state=interface_aer_active(s,now)?"ACTIVE":!live?"NO LIVE PROOF":
         e.last_bypass_ms && e.last_bypass_ms>=e.last_output_ms?"BYPASS":"NO CONFIRMED OUTPUT";
