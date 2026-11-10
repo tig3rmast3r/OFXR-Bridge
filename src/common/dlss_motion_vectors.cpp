@@ -143,6 +143,33 @@ bool writer_complete(const SnapshotSlot& slot) noexcept {
     return completed!=UINT64_MAX && completed>=slot.producer_fence_value;
 }
 
+// A stale consumer can pin slots outside the fourteen-token lookup window.
+// Keeping that whole window until AFTER the next publication can then prevent
+// that publication forever. On pressure, forget only a registry-owned old key
+// whose two snapshots have completed and have no CPU/GPU reader. Recent stream
+// anchors and externally resolved frames remain pinned by their own ownership.
+bool reclaim_luke_history_snapshot(StreamState& stream) noexcept {
+    const auto available=[](const auto& slots,const auto& retention) {
+        if(!retention || retention.use_count()!=2 || !retention->reusable())return false;
+        return std::any_of(slots.begin(),slots.end(),[&](const auto& slot) {
+            return slot.retention==retention && writer_complete(slot);
+        });
+    };
+    for(auto it=stream.luke_origin_history.begin();it!=stream.luke_origin_history.end();++it) {
+        const auto& frame=*it;
+        if(frame.use_count()!=1 || !available(stream.snapshots,frame->motion_retention) ||
+            (frame->depth && !available(stream.depth_snapshots,frame->depth_retention)))continue;
+        static std::atomic_uint64_t deadline{};
+        const auto now=GetTickCount64();auto before=deadline.load(std::memory_order_relaxed);
+        if(now>=before && deadline.compare_exchange_strong(before,now+1000,std::memory_order_relaxed))
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,S_OK,1189,
+                frame->color_origin_token,stream.luke_origin_history.size());
+        stream.luke_origin_history.erase(it);
+        return true;
+    }
+    return false;
+}
+
 void clear_frame_history(StreamState& stream) noexcept {
     stream.previous.reset();stream.previous2.reset();stream.latest.reset();
     stream.luke_origin_history.clear();
@@ -277,15 +304,20 @@ std::uint32_t invalid_bits(const DlssMotionVectorPublication& publication) noexc
     return bits;
 }
 
-// 1187: the first eight publications the registry refuses for each reason:
+// 1187: the first eight refusals per reason, then at most one per second:
 // result = the stream's low 32 bits, a = 1187, b = reason (1 tracking off,
 // 2 invalid, 3 no colour token, 4 output snapshot, 5 vectors snapshot,
-// 6 depth snapshot, 7 publication counter), c = invalid_bits for reason 2.
+// 6 depth snapshot, 7 publication counter), c = invalid_bits for reason 2,
+// or the snapshot HRESULT for reasons 4..6.
 void record_refusal(const DlssMotionVectorPublication& publication,
     std::uint64_t reason, std::uint64_t detail = 0) noexcept {
     static std::array<std::atomic<unsigned>, 8> recorded{};
-    if (reason >= recorded.size() ||
-        recorded[reason].fetch_add(1, std::memory_order_relaxed) >= 8) return;
+    static std::array<std::atomic_uint64_t, 8> deadlines{};
+    if (reason >= recorded.size()) return;
+    if(recorded[reason].fetch_add(1,std::memory_order_relaxed)>=8) {
+        const auto now=GetTickCount64();auto before=deadlines[reason].load(std::memory_order_relaxed);
+        if(now<before || !deadlines[reason].compare_exchange_strong(before,now+1000,std::memory_order_relaxed))return;
+    }
     bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
         static_cast<std::int64_t>(publication.stream & 0xFFFFFFFFULL), 1187, reason, detail);
 }
@@ -620,17 +652,18 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         }
         ComPtr<ID3D12Resource> output_snapshot;
         if (publication.snapshot_output) {
-            if (FAILED(snapshot_resource(stream.output_snapshots,
+            const auto output_result=snapshot_resource(stream.output_snapshots,
                     stream.next_output_snapshot, publication.output,
                     publication.output_resource_state,
                     publication.producer_command_list,
                     publication.producer_queue,
                     publication.verified_producer_device,
                     &output_snapshot,
-                    D3D12_RESOURCE_STATE_COMMON))) {
+                    D3D12_RESOURCE_STATE_COMMON);
+            if (FAILED(output_result)) {
                 ++state.statistics.snapshot_failures;
                 state.statistics.status = DlssMotionVectorStatus::invalid_input;
-                record_refusal(publication, 4);
+                record_refusal(publication, 4,static_cast<std::uint32_t>(output_result));
                 return {};
             }
             ++state.statistics.snapshot_copies;
@@ -641,33 +674,41 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         std::shared_ptr<DlssSnapshotRetention> motion_retention, depth_retention;
         const bool retain_snapshots=publication.protect_snapshot_lifetime || publication.direct_output_receipt;
         const std::size_t retained_capacity=publication.direct_output_receipt ? 6 : kSnapshotSlotCount;
-        if (FAILED(snapshot_resource(stream.snapshots, stream.next_snapshot,
+        const auto snapshot_motion=[&] { return snapshot_resource(stream.snapshots, stream.next_snapshot,
                 publication.motion_vectors, publication.resource_state,
                 publication.producer_command_list, publication.producer_queue,
                 publication.verified_producer_device,
                 &motion_snapshot, kSnapshotReadState,
                 retain_snapshots ? &motion_retention : nullptr,
-                &motion_snapshot_device,retained_capacity,publication.dlss_float_motion))) {
+                &motion_snapshot_device,retained_capacity,publication.dlss_float_motion); };
+        HRESULT snapshot_result=snapshot_motion();
+        while(snapshot_result==HRESULT_FROM_WIN32(ERROR_BUSY) && publication.protect_snapshot_lifetime &&
+            reclaim_luke_history_snapshot(stream))snapshot_result=snapshot_motion();
+        if (FAILED(snapshot_result)) {
             ++state.statistics.snapshot_failures;
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
-            record_refusal(publication, 5);
+            record_refusal(publication, 5,static_cast<std::uint32_t>(snapshot_result));
             return {};
         }
         ++state.statistics.snapshot_copies;
 
         ComPtr<ID3D12Resource> depth_snapshot;
         if (publication.depth != nullptr) {
-            if (FAILED(snapshot_resource(stream.depth_snapshots,
+            const auto snapshot_depth=[&] { return snapshot_resource(stream.depth_snapshots,
                     stream.next_depth_snapshot, publication.depth,
                     publication.depth_resource_state,
                     publication.producer_command_list,
                     publication.producer_queue,
                     publication.verified_producer_device, &depth_snapshot, kSnapshotReadState,
                     retain_snapshots ? &depth_retention : nullptr,
-                    &depth_snapshot_device,retained_capacity))) {
+                    &depth_snapshot_device,retained_capacity); };
+            snapshot_result=snapshot_depth();
+            while(snapshot_result==HRESULT_FROM_WIN32(ERROR_BUSY) && publication.protect_snapshot_lifetime &&
+                reclaim_luke_history_snapshot(stream))snapshot_result=snapshot_depth();
+            if (FAILED(snapshot_result)) {
                 ++state.statistics.snapshot_failures;
                 state.statistics.status = DlssMotionVectorStatus::invalid_input;
-                record_refusal(publication, 6);
+                record_refusal(publication, 6,static_cast<std::uint32_t>(snapshot_result));
                 return {};
             }
             ++state.statistics.snapshot_copies;
