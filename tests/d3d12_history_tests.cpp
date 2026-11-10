@@ -1858,6 +1858,12 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
         // Preserve the explicit cross-queue ownership counterfactual below:
         // actual GPU copies finish, but n3/n4 have no admitted receipt yet.
         auto frame = publish(n,false,n!=3 && n!=4);
+        require(frame->motion_allocation && frame->depth_allocation &&
+            frame->motion_allocation->resource.Get()==frame->motion_vectors.Get() &&
+            frame->depth_allocation->resource.Get()==frame->depth.Get() &&
+            frame->motion_allocation->device.Get()==fixture.device() &&
+            frame->depth_allocation->device.Get()==fixture.device(),
+            "protected publisher lost exact motion/depth allocation bindings");
         require(published && published->publication == frame->publication &&
             published->color_origin_token != 0 &&
             published->color_origin_token == frame->color_origin_token &&
@@ -4567,6 +4573,10 @@ void test_guide_composer(D3D12WarpFixture& fixture) {
         "a bridged eye's vectors were not given a texture of their own");
     require(cross->eyes[0]->motion_snapshot_device.Get()==fixture.device(),
         "composed texture retained its input allocation receipt");
+    require(cross->eyes[0]->motion_allocation &&
+        cross->eyes[0]->motion_allocation->resource.Get()==cross->eyes[0]->motion_vectors.Get() &&
+        cross->eyes[0]->motion_allocation->device.Get()==fixture.device(),
+        "composed motion retained the raw input resource binding");
     for (const float x : read(*cross->eyes[0])) {
         require(std::abs(x - motion) < 0.5F,
                 "vectors into the other eye did not reach this eye's previous image");
