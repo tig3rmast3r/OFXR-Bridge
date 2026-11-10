@@ -414,6 +414,27 @@ void failed_receipt_allocation_is_quarantined(Fixture& fixture) {
     std::puts("Snapshots: deterministic post-Execute bad_alloc seals markers; later Reset/reuse cannot clear quarantine (3 expected textures) PASS");
 }
 #endif
+void protected_history_pressure(Fixture& fixture) {
+    begin_tracking();
+    std::vector<std::shared_ptr<const xrfg::DlssMotionVectorFrame>> held;
+    for(unsigned n=1;n<=96;++n) {
+        auto recording=fixture.make_recording();
+        xrfg::DlssMotionVectorPublication p;
+        p.stream=41120;p.output=fixture.inputs[0].Get();p.motion_vectors=fixture.inputs[1].Get();
+        p.depth=fixture.inputs[2].Get();p.producer_queue=fixture.queue.Get();p.producer_command_list=recording.list.Get();
+        p.output_width=p.output_height=p.motion_width=p.motion_height=p.depth_width=p.depth_height=64;
+        p.resource_state=p.depth_resource_state=D3D12_RESOURCE_STATE_COMMON;
+        p.protect_snapshot_lifetime=true;p.raw_motion_native_span=1;p.raw_motion_native_span_confirmed=true;
+        recording.frame=xrfg::publish_dlss_motion_vectors(p);
+        require(bool(recording.frame),"protected producer stalled behind an old consumer and its own token history");
+        for(const auto& old:held)require(old->motion_vectors!=recording.frame->motion_vectors &&
+            old->depth!=recording.frame->depth,"pressure overwrote an externally pinned guide");
+        ok(recording.list->Close(),"pressure publication close");fixture.submit(recording);fixture.wait();
+        if(n<=3)held.push_back(recording.frame);
+    }
+    held.clear();disable();fixture.check_debug();
+    std::puts("Protected token history: stale consumer pins cannot stall completed ongoing production PASS");
+}
 } // namespace dlss_snapshot_lifetime_fixture
 int main(int argc,char** argv) {
     try {
@@ -426,6 +447,7 @@ int main(int argc,char** argv) {
         require(no_registry_allocation,"empty begin/abandon lazily allocated registry storage");
 #endif
         std::setvbuf(stdout,nullptr,_IONBF,0);Fixture fixture(argc>1 && std::string_view(argv[1])=="warp");
+        if(argc>1 && std::string_view(argv[1])=="history-pressure") {protected_history_pressure(fixture);return 0;}
         unsubmitted_and_blocked_writer(fixture);retired_stream_and_reenable(fixture);protected_consumer(fixture);
         independent_writer_queues(fixture);repeated_toggles(fixture);
         successful_reset_cancels_unsubmitted(fixture);reset_does_not_cancel_executed_writer(fixture);

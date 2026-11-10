@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.964.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.965.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1788,8 +1788,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_compile_definitions(xrfg_dlss_snapshot_lifetime_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         target_link_libraries(xrfg_dlss_snapshot_lifetime_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
         add_test(NAME xrfg_dlss_snapshot_lifetime_gpu COMMAND xrfg_dlss_snapshot_lifetime_tests)
+        add_test(NAME xrfg_dlss_snapshot_history_pressure COMMAND xrfg_dlss_snapshot_lifetime_tests history-pressure)
         add_test(NAME xrfg_dlss_snapshot_lifetime_warp COMMAND xrfg_dlss_snapshot_lifetime_tests warp)
-        set_tests_properties(xrfg_dlss_snapshot_lifetime_gpu xrfg_dlss_snapshot_lifetime_warp
+        set_tests_properties(xrfg_dlss_snapshot_lifetime_gpu xrfg_dlss_snapshot_lifetime_warp xrfg_dlss_snapshot_history_pressure
             PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         add_test(NAME xrfg_synthesis_init_diagnostics COMMAND xrfg_d3d12_history_tests init-diagnostics)
         set_tests_properties(xrfg_synthesis_init_diagnostics PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
