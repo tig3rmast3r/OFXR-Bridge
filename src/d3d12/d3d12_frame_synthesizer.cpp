@@ -5,6 +5,7 @@
 #include "xrfg/fsr_guide_geometry.hpp"
 #include "xrfg/luke_aer_guide_geometry.hpp"
 #include "xrfg/d3d12_guide_composer.hpp"
+#include "xrfg/d3d12_guide_ownership.hpp"
 #include "xrfg/fsr_frame_generation.hpp"
 #include "xrfg/gpu_flight_diagnostics.hpp"
 #include "xrfg/two_frame_capture.hpp"
@@ -3333,17 +3334,8 @@ struct D3D12FrameSynthesizer::Impl {
     [[nodiscard]] bool compatible_game_motion_resource(
         const DlssMotionVectorFrame& frame,
         ID3D12Resource* resource) const noexcept {
-        if (same_device(device.Get(), resource)) return true;
-        // Luke Ross' Streamline interposer can expose a different canonical
-        // device identity from a resource's GetDevice. Accept that alias only
-        // for the Luke bridge, only on the same adapter, and only when the
-        // in-process publisher retained the exact producer device it already
-        // verified while recording the snapshot copy.
-        return allow_luke_guide_device_alias &&
-            same_adapter(device.Get(), resource) &&
-            frame.verified_producer_device &&
-            same_identity(
-                device.Get(), frame.verified_producer_device.Get());
+        return guide_resource_on_device(device.Get(),frame,resource,
+            allow_luke_guide_device_alias);
     }
 
     [[nodiscard]] HRESULT create_game_motion_views(
@@ -3394,7 +3386,7 @@ struct D3D12FrameSynthesizer::Impl {
             depth_description.Format = DXGI_FORMAT_R32_FLOAT;
             depth_description.Texture2DArray.FirstArraySlice = 0;
             ID3D12Resource* depth = nullptr;
-            if (usable_guide_depth(*frame) && same_device(device.Get(), frame->depth.Get())) {
+            if (usable_guide_depth(*frame) && compatible_game_motion_resource(*frame, frame->depth.Get())) {
                 const D3D12_RESOURCE_DESC depth_resource = frame->depth->GetDesc();
                 depth = frame->depth.Get();
                 depth_description.Format = depth_view_format(depth_resource.Format);
@@ -3486,7 +3478,7 @@ struct D3D12FrameSynthesizer::Impl {
     // sizes stay below 32768.
     void apply_hybrid_guide_constants(SynthesisParameters& parameters,
         const DlssMotionVectorFrame& guide) const noexcept {
-        const bool depth = usable_guide_depth(guide) && same_device(device.Get(), guide.depth.Get());
+        const bool depth = usable_guide_depth(guide) && compatible_game_motion_resource(guide, guide.depth.Get());
         parameters.use_game_motion = guide.output_x | (guide.output_y << 16U);
         parameters.game_motion_padding = (guide.output_width & 0x7FFFU) |
             ((guide.output_height & 0x7FFFU) << 16U) | (depth ? 0x8000U : 0U) |
@@ -3521,7 +3513,7 @@ struct D3D12FrameSynthesizer::Impl {
         bool to_read) const noexcept {
         for (UINT eye = 0; eye < guides.eye_count; ++eye) {
             const auto& guide = guides.eyes[eye];
-            if (!guide || !usable_guide_depth(*guide) || !same_device(device.Get(), guide->depth.Get()) ||
+            if (!guide || !usable_guide_depth(*guide) || !compatible_game_motion_resource(*guide, guide->depth.Get()) ||
                 guide->depth_resource_state == kShaderReadState ||
                 (eye != 0 && guides.eyes[0] && guide->depth.Get() == guides.eyes[0]->depth.Get())) continue;
             const auto barrier = to_read
@@ -3557,7 +3549,7 @@ struct D3D12FrameSynthesizer::Impl {
                 built[eye]) continue;
             const auto& guide = *guides.eyes[eye];
             if (!guide.motion_vectors || guide.output_width == 0 || guide.output_height == 0) continue;
-            if (!usable_guide_depth(guide) || !same_device(device.Get(), guide.depth.Get())) continue;
+            if (!usable_guide_depth(guide) || !compatible_game_motion_resource(guide, guide.depth.Get())) continue;
             EyeSplat& splat = eyes[eye];
             splat.parameters = draw_parameters;
             apply_hybrid_guide_constants(splat.parameters, guide);
@@ -8251,7 +8243,7 @@ bool D3D12FrameSynthesizer::can_pair_fsr(std::shared_ptr<const DlssMotionVectorS
             impl_->previous, next, expected_guide_eyes)) return false;
     for (UINT eye = 0; eye < next.motion_vectors->eye_count; ++eye) {
         const auto& guide = next.motion_vectors->eyes[eye];
-        if (!guide->depth || !same_device(impl_->device.Get(), guide->depth.Get()) ||
+        if (!guide->depth || !impl_->compatible_game_motion_resource(*guide, guide->depth.Get()) ||
             !guide->depth_width || !guide->depth_height || !guide->motion_width ||
             !guide->motion_height) return false;
     }

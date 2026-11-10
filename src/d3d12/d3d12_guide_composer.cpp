@@ -243,6 +243,7 @@ std::shared_ptr<const DlssMotionVectorSet> D3D12GuideComposer::compose(
 
             auto composed = std::make_shared<DlssMotionVectorFrame>(*b);
             composed->motion_vectors = resources.texture;
+            composed->motion_snapshot_device = device_;
             composed->motion_x = 0;
             composed->motion_y = 0;
             composed->motion_slice = 0;

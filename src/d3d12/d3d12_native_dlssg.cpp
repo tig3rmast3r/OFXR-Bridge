@@ -1,4 +1,5 @@
 #include "xrfg/d3d12_native_dlssg.hpp"
+#include "xrfg/d3d12_guide_ownership.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/two_frame_capture.hpp"
 #include <algorithm>
@@ -208,16 +209,6 @@ DXGI_FORMAT depth_format(DXGI_FORMAT f) {
     default:
         return f;
     }
-}
-bool same_device(ID3D12Device *d, ID3D12DeviceChild *r) {
-    if (!r) {
-        return false;
-    }
-    ComPtr<ID3D12Device> rd;
-    ComPtr<IUnknown> x, y;
-    return SUCCEEDED(r->GetDevice(IID_PPV_ARGS(&rd))) &&
-           SUCCEEDED(d->QueryInterface(IID_PPV_ARGS(&x))) &&
-           SUCCEEDED(rd->QueryInterface(IID_PPV_ARGS(&y))) && x.Get() == y.Get();
 }
 bool valid_rect(ID3D12Resource *r, UINT x, UINT y, UINT w, UINT h, UINT slice) {
     if (!r || !w || !h) {
@@ -1451,8 +1442,9 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                                     : DXGI_FORMAT_UNKNOWN;
                 const auto df =
                     g->depth ? depth_format(g->depth->GetDesc().Format) : DXGI_FORMAT_UNKNOWN;
-                if (!same_device(p.device.Get(), g->motion_vectors.Get()) ||
-                    !same_device(p.device.Get(), g->depth.Get())) return skip(Skip::guides, 11, i);
+                if (!guide_resource_on_device(p.device.Get(),*g,g->motion_vectors.Get(),p.isolated) ||
+                    !guide_resource_on_device(p.device.Get(),*g,g->depth.Get(),p.isolated))
+                    return skip(Skip::guides, 11, i);
                 if (!valid_rect(g->motion_vectors.Get(),g->motion_x,g->motion_y,
                     g->motion_width,g->motion_height,g->motion_slice)) return skip(Skip::guides,12,i);
                 if (!valid_rect(g->depth.Get(),g->depth_x,g->depth_y,g->depth_width,g->depth_height,

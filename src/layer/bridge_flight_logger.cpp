@@ -426,7 +426,9 @@ struct BridgeFlightLogger::Impl {
         const bool ui_progress=record.operation==BridgeFlightOperation::menu_status && record.result>=89800 && record.result<=89813;
         const bool control_transition=record.operation==BridgeFlightOperation::embedded_configuration && (record.result==89830 || record.result==89910 || record.result<0);
         const bool allocation_failure=record.operation==BridgeFlightOperation::swapchain_eligibility && record.result==13;
-        const bool benchmark = record.operation==BridgeFlightOperation::vram_usage || allocation_failure || ui_progress || control_transition || rife_dependency || pacing_receipt || rife_timing || eye_changed || fsr_description ||
+        const bool hybrid_guide_receipt=record.operation==BridgeFlightOperation::luke_afw_stage &&
+            record.a==1196 && record.result>=0;
+        const bool benchmark = record.operation==BridgeFlightOperation::vram_usage || hybrid_guide_receipt || allocation_failure || ui_progress || control_transition || rife_dependency || pacing_receipt || rife_timing || eye_changed || fsr_description ||
             record.operation==BridgeFlightOperation::generation_prepare ||
             record.operation==BridgeFlightOperation::continuity_reset ||
             record.operation==BridgeFlightOperation::fsr_recovery ||
