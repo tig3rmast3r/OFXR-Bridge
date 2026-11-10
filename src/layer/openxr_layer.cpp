@@ -16,6 +16,7 @@
 #include "xrfg/frame_capture.hpp"
 #include "xrfg/diagnostic_ring_sink.hpp"
 #include "xrfg/d3d12_frame_synthesizer.hpp"
+#include "xrfg/luke_aer_guide_geometry.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/fsr_guide_geometry.hpp"
@@ -4107,9 +4108,8 @@ create_d3d11_frame_generation_swapchains(
             backend,
             synthesis_options,
             xrfg::bridge_flight_logger().gpu_instrumentation_enabled(),
-            session->luke_afw_enabled
-                ? xrfg::D3D12FrameGenerationMode::ofxr
-                : session->frame_generation_mode,
+            xrfg::luke_primary_generation_mode(session->luke_afw_enabled,
+                synthesis_options.ofr,session->frame_generation_mode),
             (session->graphics_binding_capabilities & 8ULL) != 0, session->luke_afw_enabled);
         xrfg::bridge_flight_logger().end(
             initialize_token,
@@ -16950,9 +16950,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
                 result=synthesis->suspend_flow_resources();
             if (SUCCEEDED(result) && changed && !chain->panel_source) {
                 result = synthesis->reconfigure(backend, synthesis_options,
-                    state->luke_afw_enabled
-                        ? xrfg::D3D12FrameGenerationMode::ofxr
-                        : generation_mode);
+                    xrfg::luke_primary_generation_mode(state->luke_afw_enabled,
+                        synthesis_options.ofr,generation_mode));
             }
             // All old eye providers were suspended above. Allocate the new
             // active RIFE provider here, before frame submission can hold the

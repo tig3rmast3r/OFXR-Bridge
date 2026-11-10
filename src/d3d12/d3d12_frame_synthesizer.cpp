@@ -3,6 +3,7 @@
 #include "rife_dependency_timing.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/fsr_guide_geometry.hpp"
+#include "xrfg/luke_aer_guide_geometry.hpp"
 #include "xrfg/d3d12_guide_composer.hpp"
 #include "xrfg/fsr_frame_generation.hpp"
 #include "xrfg/gpu_flight_diagnostics.hpp"
@@ -4157,6 +4158,24 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
+    [[nodiscard]] HRESULT place_aer_source_guides(RollingSource& source) noexcept {
+        if(!nvidia_options.ofr || !allow_luke_guide_device_alias ||
+            (generation_mode==D3D12FrameGenerationMode::ofxr && !nvidia_options.hybrid) ||
+            !source.motion_vectors)return S_OK;
+        std::array<DlssEyeView,kDlssMotionVectorEyeCount> views{};
+        if(source.view_count>views.size())return kD3D12FrameSynthesisStaleGuides;
+        for(UINT i=0;i<source.view_count;++i) {
+            const auto& v=source.views[i];const auto& f=v.fov;
+            const auto r=resolved_rect(v.image_rect,UINT(image_description.Width),image_description.Height);
+            views[i]={std::tan(f.angle_left),std::tan(f.angle_right),std::tan(f.angle_up),
+                std::tan(f.angle_down),int(r.offset_x),int(r.offset_y),r.width,r.height};
+        }
+        auto placed=place_luke_aer_guides(source.motion_vectors,{views.data(),source.view_count});
+        if(!placed)return kD3D12FrameSynthesisStaleGuides;
+        source.motion_vectors=std::move(placed);
+        return S_OK;
+    }
+
     void synthetic_target_state(ID3D12GraphicsCommandList* list,
                                 std::uint32_t index, bool rendering) {
         if (release_state == D3D12_RESOURCE_STATE_RENDER_TARGET) return;
@@ -4714,12 +4733,13 @@ struct D3D12FrameSynthesizer::Impl {
                 guide.motion_x, guide.motion_y,
                 guide.motion_width, guide.motion_height};
             if (guide.placed) {
-                const auto regions = fsr_guide_regions(guide);
+                const auto regions = allow_luke_guide_device_alias && nvidia_options.ofr
+                    ? fsr_luke_aer_guide_regions(guide) : fsr_guide_regions(guide);
                 if (!regions) return kD3D12FrameSynthesisStaleGuides;
                 depth_rect = {regions->depth[0], regions->depth[1], regions->depth[2], regions->depth[3]};
                 motion_rect = {regions->motion[0], regions->motion[1], regions->motion[2], regions->motion[3]};
             }
-            if (allow_luke_guide_device_alias && !cinema_projection) {
+            if (allow_luke_guide_device_alias && !cinema_projection && !guide.placed) {
                 // Luke's final AER eye is 3063x3344 while the pre-AER DLSS
                 // depth and motion guides are square. FSR assumes render and
                 // display rectangles describe the same aspect ratio. Crop the
@@ -7298,6 +7318,8 @@ struct D3D12FrameSynthesizer::Impl {
             history->cancel_consumer(next.lease);
             next.clear();
         };
+        result=place_aer_source_guides(next);
+        if(FAILED(result)){cancel_next();return result;}
         if (generation_mode != D3D12FrameGenerationMode::ofxr &&
             !has_complete_game_motion_set(next)) {
             // FSR cannot recover from a prime that has no temporal guides: the
@@ -7733,8 +7755,20 @@ struct D3D12FrameSynthesizer::Impl {
                 // failure must not silently fall through with opposite-eye MV.
                 if(nvidia_options.ofr)for(const auto& eye:next.motion_vectors->eyes)
                     if(eye && eye->bridge && eye->raw_motion_native_span_confirmed &&
-                        eye->raw_motion_native_span==1)return kD3D12FrameSynthesisStaleGuides;
+                        eye->raw_motion_native_span==1) {
+                        slot.command_list->Close();slot.current_copy_command_list->Close();
+                        if(slot.synthesis_command_list)slot.synthesis_command_list->Close();
+                        cancel_next();return kD3D12FrameSynthesisStaleGuides;
+                    }
             }
+        }
+        // Composition must see the complete native grids. Crop only the
+        // consumer's metadata afterwards, and retain that same mapping in A.
+        result=place_aer_source_guides(next);
+        if(FAILED(result)) {
+            slot.command_list->Close();slot.current_copy_command_list->Close();
+            if(slot.synthesis_command_list)slot.synthesis_command_list->Close();
+            cancel_next();return result;
         }
         bool used_game_motion = false;
         result = record_pair(

@@ -431,6 +431,8 @@ struct BridgeFlightLogger::Impl {
             record.operation==BridgeFlightOperation::continuity_reset ||
             record.operation==BridgeFlightOperation::fsr_recovery ||
             record.operation==BridgeFlightOperation::fsr_context_lifecycle ||
+            record.operation==BridgeFlightOperation::native_dlssg_record ||
+            record.operation==BridgeFlightOperation::native_dlssg_provider ||
             record.operation == BridgeFlightOperation::benchmark_configuration ||
             record.operation == BridgeFlightOperation::benchmark_command ||
             record.operation == BridgeFlightOperation::benchmark_rates || record.operation == BridgeFlightOperation::benchmark_cycles ||

@@ -1,4 +1,5 @@
 #include "xrfg/fsr_guide_geometry.hpp"
+#include "xrfg/luke_aer_guide_geometry.hpp"
 #include "xrfg/d3d12_history.hpp"
 #include "xrfg/d3d12_rife.hpp"
 #include <thread>

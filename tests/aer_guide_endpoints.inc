@@ -48,7 +48,7 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
         xrfg::D3D12FrameSynthesizer synthesizer;
         require_hresult(synthesizer.initialize(fixture.device(),fixture.queue(),history,currents,synthetics,
             kFormat,D3D12_RESOURCE_STATE_RENDER_TARGET,xrfg::D3D12OpticalFlowBackend::fidelity_fx,
-            options,false,mode),"AER guide synthesizer");
+            options,false,xrfg::luke_primary_generation_mode(true,options.ofr,mode),true),"AER guide synthesizer");
         auto view=make_reprojection_views()[eye];view.logical_eye=eye;view.array_slice=0;
         view.image_rect={0,0,width,height};
         const auto guides=[&](UINT serial,UINT stream=0) {
