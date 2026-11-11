@@ -138,7 +138,8 @@ void test_native_dlss_nvidia_prime(D3D12WarpFixture& fixture) {
 
 void test_native_dlss_packed_stereo(D3D12WarpFixture& fixture, bool cropped,
                                     DXGI_FORMAT format = kFormat, bool recover_core = false,
-                                    StereoPattern* observed = nullptr, bool resized_eye = false) {
+                                    StereoPattern* observed = nullptr, bool resized_eye = false,
+                                    bool dynamic_clip = false) {
     constexpr UINT width = 256, height = 128, margin = 16;
     const auto previous = translated_motion_pattern(width, height, {0, 0});
     const auto current = translated_motion_pattern(width, height, {8, -8});
@@ -213,6 +214,10 @@ void test_native_dlss_packed_stereo(D3D12WarpFixture& fixture, bool cropped,
         auto b = std::make_shared<xrfg::DlssMotionVectorFrame>(*a);
         b->serial = 2;
         b->previous_serial = 1;
+        if (dynamic_clip) {
+            a->camera_near = .1F; a->camera_far = 1000.F;
+            b->camera_near = .2F; b->camera_far = 2000.F;
+        }
         a_guides.eyes[eye] = a;
         b_guides.eyes[eye] = b;
         views[eye].array_slice = 0;
@@ -242,6 +247,25 @@ void test_native_dlss_packed_stereo(D3D12WarpFixture& fixture, bool cropped,
     require_hresult(native.initialize(fixture.device(), fixture.queue(), packed[0]->GetDesc(),
                                       format), "packed native initialization");
     const std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{output.Get()}}};
+    if (dynamic_clip) {
+        for (unsigned invalid=0; invalid<4; ++invalid) {
+            auto refused=b_guides;
+            auto g=std::make_shared<xrfg::DlssMotionVectorFrame>(*refused.eyes[0]);
+            if(invalid==0)g->depth_inverted=!g->depth_inverted;
+            if(invalid==1)g->depth_infinite=!g->depth_infinite;
+            if(invalid==2)g->camera_near=std::numeric_limits<float>::quiet_NaN();
+            if(invalid==3)g->camera_far=g->camera_near;
+            refused.eyes[0]=std::move(g);
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                require(native.record(list,0,packed[0].Get(),packed[1].Get(),views,views,
+                    &a_guides,&refused,outputs,D3D12_RESOURCE_STATE_RENDER_TARGET)==S_FALSE &&
+                    native.last_skip()==xrfg::D3D12NativeDlssG::Skip::guides,
+                    "dynamic clipping must retain depth-convention and invalid-plane refusal");
+                require(native.last_result()->detail==(invalid<2?8u:16u),
+                    "dynamic clipping must preserve the specific guide refusal");
+            });
+        }
+    }
     if (resized_eye) {
         // Unknown or narrower cameras must STILL fail bounds admission. The
         // fix may map a proven view; it must not waive the guard or mutate the

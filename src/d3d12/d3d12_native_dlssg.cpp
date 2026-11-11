@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include <share.h>
 #include <filesystem>
@@ -1429,8 +1430,10 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             if (!ga.serial || gb.previous_serial != ga.serial) return skip(Skip::guides, 5, i);
             if (ga.stream != gb.stream) return skip(Skip::guides, 6, i);
             if (ga.epoch != gb.epoch) return skip(Skip::guides, 7, i);
-            if (ga.depth_inverted != gb.depth_inverted || ga.depth_infinite != gb.depth_infinite ||
-                ga.camera_near != gb.camera_near || ga.camera_far != gb.camera_far) {
+            if (ga.depth_inverted != gb.depth_inverted || ga.depth_infinite != gb.depth_infinite) {
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage, i, 1436,
+                    (std::uint64_t(ga.depth_inverted) << 32) | gb.depth_inverted,
+                    (std::uint64_t(ga.depth_infinite) << 32) | gb.depth_infinite);
                 return skip(Skip::guides, 8, i);
             }
             // The aligned A is written into textures sized for B's viewport.
@@ -1683,8 +1686,16 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 const auto &e = p.eyes[i];
                 reseed = reseed || e.serial != ga.serial || e.stream != ga.stream ||
                          e.epoch != ga.epoch ||
+                         ga.camera_near != gb.camera_near || ga.camera_far != gb.camera_far ||
                          alignment_pixels(av[i], bv[i], params.extent[0], params.extent[1]) >
                              kReseedPixels;
+                if (ga.camera_near != gb.camera_near || ga.camera_far != gb.camera_far) {
+                    const auto bits = [](float value) {std::uint32_t result{};
+                        std::memcpy(&result, &value, sizeof(result));return result;};
+                    bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage, i, 1435,
+                        (std::uint64_t(bits(ga.camera_near)) << 32) | bits(gb.camera_near),
+                        (std::uint64_t(bits(ga.camera_far)) << 32) | bits(gb.camera_far));
+                }
             }
             // The seed's colour may be a texture of its own; its motion and depth
             // are the feature's, which the reset does not read.
@@ -1712,7 +1723,11 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 snapshot("dlssg_aligned_previous", seed.color.Get(), kRead);
                 snapshot("dlssg_seed_motion", seed.motion.Get(), kRead);
                 snapshot("dlssg_seed_depth", seed.depth.Get(), kRead);
-                if (FAILED(p.evaluate(list, t, seed, bv[first], *ag->eyes[guide_index(first)],
+                // The seed packs only A's colour, already aligned to B. Its
+                // reset does not consume A's depth/motion. Describe it with
+                // B's clipping distances too, so changing near/far planes
+                // never mix depth encodings in the fresh NGX history.
+                if (FAILED(p.evaluate(list, t, seed, bv[first], *bg->eyes[guide_index(first)],
                                       first_params, 1, 1, true))) {
                     t.restore();
                     return skip(Skip::evaluate_failed);

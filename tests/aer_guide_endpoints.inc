@@ -21,7 +21,8 @@ private:
 };
 
 void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
-    xrfg::D3D12FrameGenerationMode mode,bool n1=false,bool alias=false,bool hybrid=false,bool opaque=false) {
+    xrfg::D3D12FrameGenerationMode mode,bool n1=false,bool alias=false,bool hybrid=false,bool opaque=false,
+    bool dynamic_clip=false) {
     constexpr UINT width=256,height=128;
     ComPtr<ID3D12Device> consumer=fixture.device();
     ComPtr<ID3D12CommandQueue> consumer_queue=fixture.queue();
@@ -91,6 +92,7 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
             g->output_width=g->motion_width=g->depth_width=width;
             g->output_height=g->motion_height=g->depth_height=height;
             g->resource_state=g->depth_resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            if(dynamic_clip) {g->camera_near=.1F+.01F*serial;g->camera_far=1000.F+serial;}
             if(n1) {
                 g->serial=serial*2+1;g->previous_serial=g->serial-2;
                 g->raw_motion_native_span=1;g->raw_motion_native_span_confirmed=true;
@@ -153,6 +155,7 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
             } else require_hresult(synthesizer.wait_for_previous_submission(30000),"AER fresh guided pair ready");
             require(!ticket.held_capture,"fresh same-eye input was mistaken for repeated peer");
             require(ticket.used_game_motion,"native consumer omitted its exact game-motion receipt");
+            if(dynamic_clip)require(ticket.aer_retimed,"valid changing clipping planes bypassed AER");
             if(ticket.native_result)native_generated|=ticket.native_result->mask.load()!=0;
             else require(ticket.aer_retimed,"FSR guided pair did not enter AER retiming");
             const auto expected=readback_single_slice(fixture,sources[serial%2],D3D12_RESOURCE_STATE_RENDER_TARGET);

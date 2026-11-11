@@ -18671,8 +18671,14 @@ XrResult layer_end_frame_impl(
               current_snapshot, mapping_span, metadata_pairable, interpolation_fraction, false, nullptr, {},
               extra_fraction, synthetic_camera ? &*synthetic_camera : nullptr, extra_camera ? &*extra_camera : nullptr);
     if(state->nvidia_options.ofr && prepared.kind==PreparedGenerationKind::pair &&
-       !std::all_of(prepared.resources.begin(),prepared.resources.end(),[](const auto& r){return r.panel||r.generation.aer_retimed;}))
-        return bypass_generation(GenerationPrepareReason::synthesis_busy);
+       !std::all_of(prepared.resources.begin(),prepared.resources.end(),[](const auto& r){return r.panel||r.generation.aer_retimed;})) {
+        const bool incompatible_guides=std::any_of(prepared.resources.begin(),prepared.resources.end(),[](const auto& r){
+            return !r.panel && !r.generation.aer_retimed && r.generation.native_result &&
+                r.generation.native_result->skip==static_cast<unsigned>(xrfg::D3D12NativeDlssG::Skip::guides);
+        });
+        return bypass_generation(incompatible_guides ? GenerationPrepareReason::native_stereo_unavailable
+            : GenerationPrepareReason::synthesis_busy);
+    }
     if(prepared.kind!=PreparedGenerationKind::none && !state->nvidia_options.ofr) {
         const auto panel_inputs=freeze_panel_inputs(*state,current_snapshot,mapping_span);
         prepare_panel_generation(*state,current_snapshot,panel_inputs,prepared,interpolation_fraction,extra_fraction,false,third_fraction);

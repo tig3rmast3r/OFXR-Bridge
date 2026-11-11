@@ -6423,7 +6423,8 @@ int main(int argc, char** argv) {
             std::cout<<"Private NGX SDK parameter types, independent ownership and reset PASS\n";return 0;
         }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
     }
-    if(argc>1 && std::string_view(argv[1])=="aer-native-isolated") {
+    if(argc>1 && (std::string_view(argv[1])=="aer-native-isolated" ||
+                 std::string_view(argv[1])=="aer-native-dynamic-clip")) {
         try {
             if(!native_test_has_supported_nvidia_adapter())return 77;
             D3D12WarpFixture fixture(true);
@@ -6431,7 +6432,8 @@ int main(int argc, char** argv) {
             const auto frames=xrfg::native_dlssg_max_generated_frames(fixture.device(),true);
             require(frames>0 && frames<=xrfg::D3D12NativeFrameResult::kMaxOutputs,
                 "private provider capability must retain supported outputs without exceeding transport capacity");
-            for(bool n1:{false,true})test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::native_dlss,n1);
+            const bool dynamic=std::string_view(argv[1])=="aer-native-dynamic-clip";
+            for(bool n1:{false,true})test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::native_dlss,n1,false,false,false,dynamic);
             require(xrfg::native_dlssg_lifetime_snapshot().shared_initializations==0,"Luke capability/create/evaluate entered shared NGX initialization");
             fixture.require_no_debug_errors();
             std::cout<<"Actual private DLSS-G N1/N2 per-eye generation with zero shared NGX initialization PASS\n";return 0;
@@ -6785,6 +6787,25 @@ int main(int argc, char** argv) {
             if(xrfg::native_dlssg_max_generated_frames(fixture.device())==0)return 77;
             test_native_dlss_packed_stereo(fixture,false,kFormat,false,nullptr,true);
             fixture.require_no_debug_errors();return 0;
+        }
+        if (argc > 1 && std::string_view(argv[1]) == "native-dlssg-dynamic-clip") {
+            if(!native_test_has_supported_nvidia_adapter())return 77;
+            D3D12WarpFixture fixture(true);
+            auto& capture=xrfg::manager();
+            capture.session=std::make_shared<xrfg::Session>();capture.active_frame=1;
+            const auto session=capture.session;
+            test_native_dlss_packed_stereo(fixture,false,kFormat,false,nullptr,false,true);
+            require(session->native_dlssg_evaluations.size()==2,"dynamic clip needs reset seed and actual pair");
+            for(const auto& evaluation:session->native_dlssg_evaluations)
+                require(evaluation.near_plane==.2F && evaluation.far_plane==2000.F,
+                    "aligned seed and current must use B's clipping distances");
+            require(session->native_dlssg_evaluations.front().reset &&
+                !session->native_dlssg_evaluations.back().reset,"dynamic clipping did not seed before generation");
+            capture.active_frame=0;capture.session.reset();
+            test_native_dlss_packed_stereo(fixture,true,kFormat,false,nullptr,false,true);
+            fixture.require_no_debug_errors();
+            std::cout<<"Dynamic clipping: actual stereo generation, B projection seed, invalid-depth refusal and cropped borders PASS\n";
+            return 0;
         }
         if (argc > 1 && std::string_view(argv[1]) == "native-dlssg-capture") {
             if (!native_test_has_supported_nvidia_adapter()) return 77;
