@@ -1,64 +1,41 @@
-# RIFE frame generation (nightly)
+# RIFE frame generation
 
-RIFE is an experimental frame-generation route with NVIDIA CUDA/TensorRT and
-an optional Radeon Vulkan backend. See [Radeon preparation and testing](RIFE_VULKAN.md).
-Select **RIFE** in
-the Frame generation menu, between OFXR and Hybrid. The existing OFXR default
-does not change when RIFE is installed.
+RIFE uses NVIDIA CUDA/TensorRT to generate frames from colour images. It does
+not require the game's DLSS motion vectors or depth. Luke Ross **OSR/AFW** and
+**Neural Rendering** retain their own requirements when used alongside RIFE.
 
-RIFE estimates motion from colour images; it does not require the game's DLSS
-motion vectors or depth. Luke Ross **OSR/AFW** and **Neural Rendering** retain
-their own capture and model requirements when used alongside RIFE.
-
-The tray also offers **RIFE ⡂†’ Reinstall RIFE...** for a clean runtime/cache reset
-and **RIFE ⡂†’ Pre-compile TensorRT for found games...** to prepare the seven Quality
-presets using each game's last recorded resolution and eye layout. Open games
-once with V863 or newer to populate the list; diagnostics need not be enabled.
-See [offline preparation and progress](V863_RIFE_PRECOMPILE.md).
-
-Installed source files are aligned automatically with the current tray at startup.
-This updates only the source overlay, preserving dependency libraries, weights and
-compatible engine caches. See [source updates](V864_RIFE_OVERLAY_UPDATE.md).
+Radeon Vulkan support is still being tested. Its installation choice is disabled
+in this release. The [Radeon testing guide](RIFE_VULKAN.md) covers that backend.
 
 ## Install or check RIFE
 
-The complete OFXR ZIP includes both installation choices in the tray dialog.
-No separate installer, runtime selector or edited folder setting is needed.
-The Radeon choice installs the Vulkan worker and its preparation tools in the
-same managed AppData location used by the tray and games.
+1. Extract the **complete** OFXR archive to a writable folder. Keep its `tools`
+   and `python` folders beside `OFXRBridgeTray.exe`, and close any running games.
+2. Open the tray menu and choose **RIFE > Check RIFE...**.
+3. If the runtime is missing or needs repair, confirm **Install** with
+   **NVIDIA (CUDA / TensorRT)** selected.
+4. A PowerShell window shows progress. Wait for installation to finish and for
+   the tray to report the result.
+5. Choose **RIFE > Check RIFE...** again. Confirm that it reports a ready runtime
+   and identifies the GPU and available backend. If it reports a problem, use the
+   displayed log path and the [troubleshooting guide](TROUBLESHOOTING.md).
+6. In Frame generation settings, select **RIFE**. Start with model **4.4**,
+   **Medium** Quality and **2X**.
 
-1. Extract the **complete** OFXR archive. Keep its `tools` and `python` folders
-   beside `OFXRBridgeTray.exe`.
-2. Open the tray menu and choose **RIFE ⡂†’ Check RIFE...**. The tray remains responsive
-   while the check runs.
-3. If RIFE is missing or needs repair, confirm the installation. **NVIDIA** is
-   selected; **AMD Radeon - Vulkan (experimental)** is available when the package
-   includes its payload. Select it for Radeon; the complete V962 ZIP includes it.
-   Radeon starts with model 4.4 and prepares
-   device-specific Vulkan plans instead of TensorRT engines.
-4. A PowerShell window shows the installation progress. It needs no further
-   keyboard input. Wait for the tray to report the result.
-5. Select **RIFE** in the settings and start with the default **4.4** model,
-   **Medium** Quality and **2X** multiplier.
+The runtime is installed in **`%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`**.
+NVIDIA RIFE uses about **8 GB** installed and needs at least **14 GB free** during
+setup. Optimization caches need additional space. Initial installation requires
+an Internet connection.
 
-The managed runtime is shared between OFXR builds and installed under
-**`%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`**. NVIDIA uses about **8 GB** after
-installation and requires **14 GB free** during setup. Radeon Vulkan requires
-at least **2 GB free** for setup.
-Optimization caches use additional space and can grow as you change settings.
-An Internet connection is needed for the initial installation. No administrator
-elevation, global Python/pip installation, PATH change or driver installation
-is performed.
+Use **RIFE > Reinstall RIFE...** if you need to reinstall the runtime. To prepare
+TensorRT engines ahead of play, first open each game once so OFXR records its
+resolution, then close the games and select **RIFE > Pre-compile TensorRT for
+found games...**. See the [pre-compilation guide](V863_RIFE_PRECOMPILE.md).
 
-**Check RIFE** verifies the pinned dependencies, model and adapter files, and
-runs a small actual RIFE 4.4 inference on the installed CUDA or Vulkan backend. A ready result reports the GPU and
-available backend. No package, development or ancestor directories are searched. If the AppData
-runtime is absent, the check offers installation even if another copy exists.
-
-If the GPU is unsupported, busy or out of memory, or the check times out, the
-tray reports the problem without offering automatic reinstallation. Close GPU
-applications and retry a busy check. A repair offer is reserved for a missing
-or damaged runtime. The result includes the log path for diagnosing failures.
+**Check RIFE** verifies the installation and runs a small RIFE 4.4 inference.
+If the GPU is busy, unsupported or out of memory, or the check times out, close
+other GPU applications and retry as appropriate. Use the reported log when
+requesting help; a busy check does not necessarily mean reinstallation is needed.
 
 ## Models, Quality and multipliers
 
@@ -80,11 +57,10 @@ predicts displacement and blending fields at the chosen Quality; OFXR then
 uses them to sample the original full-resolution colour images. It does not
 enlarge a low-resolution generated RGB frame. Real frames remain unchanged.
 
-**2X** is the default. Experimental **3X** and **4X** are supported on the native
+**2X** is the default. **3X** and **4X** are supported on the native
 D3D12 route and on compatible Luke Ross routes after OSR/AFW has produced the
 stereo pair, using either Framework or Director. Other legacy/shared/interop
-routes retain 2X support. An unsupported multi-output request is refused rather
-than represented by repeated copies of a generated image.
+routes retain 2X support. **AER framegen** uses 2X only.
 
 RIFE produces images; the selected pacing route still controls delivery.
 Its speed, artifacts and achievable headset frame rate depend on the game,
@@ -154,10 +130,3 @@ OFXR release archive.
 For building and assembling a complete package, see
 [`BUILDING_RIFE.md`](BUILDING_RIFE.md). For general OFXR setup and diagnostic
 logging, see the [README](../README.md).
-
-V865 reduces native D3D12/CUDA handoff stalls and allows one owned next-source
-capture during generation. Models and compatible engines are unchanged. See
-[implementation and targeted validation](V865_RIFE_PIPELINE.md).
-
-V866 gives Normal native SteamVR RIFE3X/4X independent output banks while Fast
-keeps its smaller allocation. See [scope and validation](V866_RIFE_OUTPUT_BANKS.md).

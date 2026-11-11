@@ -1,7 +1,7 @@
 # OFXR-BRIDGE troubleshooting
 
 > [!IMPORTANT]
-> **First, make sure you are on the latest version: 0.3.2.** Every release
+> **First, make sure you are on the latest release.** Every release
 > fixes problems reported here, so check the
 > [releases page](https://github.com/tig3rmast3r/OFXR-Bridge/releases) before
 > anything else. **About** in the tray menu shows the version you are running.
@@ -49,6 +49,9 @@ The information overlay says what OFXR is doing:
 - **Top right:** what runs, for example **OFXR 0.3.0**, **Hybrid + OSR**,
   **OSR**, **Real frames only**, **Waiting** or **Paused**.
 - **Top centre:** VRAM use.
+- **AER:** **ACTIVE** confirms recent reconstructed output submitted to the runtime;
+  **BYPASS** or **NO CONFIRMED OUTPUT** means that AER output is not confirmed.
+  Paired releases report an assumed phase, not automatic proof that the game is AER.
 - **Vectors:** **DLSS** when OFXR sees the game's DLSS, **None** otherwise.
 - **Status:** any problem, in plain words (the tables below use the same
   words), then **OFXR**, **OSR** or **AFW**, and **Neural Render**, each
@@ -62,9 +65,9 @@ The information overlay says what OFXR is doing:
 | OFXR was not enabled when the game started | Select **Enable** in the tray, then restart the game. |
 | The game runs **as administrator** | Run the game, and Steam or its launcher, normally, not as administrator. |
 | The game runs under another Windows user | Run the tray and the game under the same Windows account. |
-| The game is 32-bit | Not supported in 0.3. |
+| The game is 32-bit | Extract the complete archive, including its `ofxr_x86` folder, so the tray can enable the 32-bit layer. |
 | The game uses OpenGL | Not supported. |
-| The game's anti-cheat blocks it | Star Citizen works with Easy Anti-Cheat, because OFXR's files are signed. Only the official release is signed. Other anti-cheats may still block OFXR. Using OFXR with an anti-cheat protected game is at your own risk. |
+| The game's anti-cheat blocks it | For Star Citizen, use the **signed ZIP** attached to the release. Other EAC games may work but are not verified, and other anti-cheats may still block OFXR. Using OFXR with an anti-cheat protected game is at your own risk. |
 | The game crashes at start | Try without ReShade and other OpenXR layers, then [send a log](#still-stuck-send-a-log). |
 
 ## B. OFXR is loaded but not generating
@@ -108,8 +111,8 @@ In Luke Ross R.E.A.L. VR games, OFXR rebuilds the eye the game skipped. The
 
 | Cause | What to do |
 | --- | --- |
-| The game already runs near your headset's refresh rate | Nothing to gain: OFXR helps games that can't hold full rate. In a Luke Ross game, try **Frame Reconstruction only** instead. |
-| The game runs **below half** your refresh rate (under 45 FPS at 90 Hz) | Lower the refresh rate (72 Hz needs 36 FPS) or the game's settings until it holds half. For games around a third, choose **3X** under **Multiplier** (OFXR 0.2.14 engine or DLSS-G; not in Luke Ross games). |
+| The game already runs near your headset's refresh rate | In a Luke Ross game, try **Frame Reconstruction only** for OSR/AFW, or compare **AER framegen** when starting from plain Legacy AER. |
+| The game runs **below half** your refresh rate (under 45 FPS at 90 Hz) | Lower the refresh rate (72 Hz needs 36 FPS) or the game's settings until it holds half. For games around a third, try **3X** under **Multiplier** on a supported route. Available 3X/4X choices depend on the generator, graphics path and GPU; **AER framegen** remains 2X. |
 | **3X** is on for a game that can hold half your refresh rate | Go back to 2X: 3X holds the game to a third of the refresh rate, and 2X looks better. |
 | Your VR software's own frame smoothing is on | Turn it off, it fights OFXR: **SteamVR** Motion Smoothing and "fixed frame rate at half" (per-application video settings), **Meta** ASW, **Virtual Desktop** SSW, **Pimax Play** Smart Smoothing, **Pico Streaming Assistant** Frame Interpolation. |
 | Frames feel uneven although the number is high | Switch **Pacing** between Director and Framework (step 1 [above](#low-frame-rate-or-stutter)). |
@@ -128,7 +131,7 @@ records it in its CSV.
 
 - **Fast mode (lower vram, lower latency, may reduce performance)** keeps
   fewer working images. Compare both: its effect on performance depends on the
-  game. It has no effect in Luke Ross games.
+  game. It does not change Luke Ross OSR/AFW reconstruction itself.
 - **Pimax headsets:** Pimax OpenXR keeps its own copy of every image, so
   everything costs more VRAM on it. If VRAM is tight, run your Pimax through
   SteamVR with

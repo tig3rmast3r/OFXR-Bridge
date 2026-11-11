@@ -10,6 +10,7 @@ losing your frame rate.
 In Luke Ross R.E.A.L. VR games, it turns Legacy AER into real stereo: it fills
 in the eye the game skips each frame, so the game feels like true stereo VR,
 for little more than Legacy AER costs at your headset's frame rate.
+See [Luke Ross usage](#luke-ross-usage) for setup and the two reconstruction methods.
 
 It runs from a tray icon: turn it on before you start the game and it works
 quietly in the background, without changing any game files. It works with
@@ -17,17 +18,9 @@ OpenXR games only (see below).
 
 Download it from [GitHub Releases](https://github.com/tig3rmast3r/OFXR-Bridge/releases).
 
-What changed in this version: see the [release notes](https://github.com/tig3rmast3r/OFXR-Bridge/releases).
+A complete list of changes is available in the [changelog](CHANGELOG.md).
 
-**RIFE:** the complete ZIP includes NVIDIA CUDA/TensorRT and experimental
-Radeon Vulkan installation choices. Open **RIFE -> Reinstall RIFE...** in the
-tray, select your backend and install. Radeon starts with model 4.4. No separate
-installer or folder setting is needed; see [Radeon quick start](LEGGIMI-RADEON.txt).
-RIFE is installed in `%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`; no package or parent folders are searched.
-See the [RIFE guide](docs/RIFE.md). The stable release remains a separate download;
-a nightly or self-compiled build must be signed separately for anti-cheat use.
-
-Not working, or not feeling smoother? See the [troubleshooting guide](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/docs/TROUBLESHOOTING.md).
+Not working, or not feeling smoother? See [Troubleshooting](#troubleshooting).
 
 > [!WARNING]
 > This is a beta release. It may not work with your game, VR mod, GPU or OpenXR
@@ -45,12 +38,22 @@ Not working, or not feeling smoother? See the [troubleshooting guide](https://gi
 > - **Optical flow:** works on AMD and NVIDIA cards with the **FidelityFX**
 >   engine. The **NVIDIA 0.2.1 / 0.2.14 / 0.3.0** engines use NVIDIA's Optical
 >   Flow hardware: an RTX card or a GTX 1660. On an AMD card, select FidelityFX.
-> - **Hybrid, FSR 3.1, DLSS-G and Luke Ross OSR/AFW:** the game must run
->   **DLSS** Super Resolution or Ray Reconstruction (OFXR takes its guides from it).
-> - **DLSS-G:** an RTX 40 or 50-series card.
-> - **RIFE (nightly):** the separate NVIDIA CUDA/TensorRT runtime, or the optional
->   experimental Radeon Vulkan runtime. Radeon hardware validation is pending.
->   RIFE itself does not need game motion vectors or depth.
+> - **Hybrid, FSR 3.1 and DLSS-G:** require an **NVIDIA GPU** and the game's
+>   **DLSS Super Resolution or Ray Reconstruction** enabled, with compatible
+>   motion vectors and depth. **DLSS-G** additionally requires an RTX 40 or
+>   50-series card; higher multipliers depend on hardware support.
+> - **RIFE:** install its runtime using the **RIFE** menu in the tray before
+>   selecting it. NVIDIA installation is available; Radeon Vulkan support is
+>   still being tested and its installation choice is disabled in this release.
+>   RIFE does not require DLSS motion vectors or depth. See [RIFE installation](#rife-installation).
+> - **AER framegen:** requires **plain alternate-eye rendering**, without the
+>   mod's additional AER reconstruction or interpolation fixes. In UEVR this
+>   rendering method is called **Alternating / AFR**. Use ordinary frame
+>   generation for native stereo.
+> - **OSR and AFW:** are supported with **Luke Ross mods**, **DLSS enabled** and
+>   a game in the [compatible Luke Ross list](#compatible-luke-ross-games).
+> - **DLSS 5 Neural Rendering:** requires an **NVIDIA GPU**. Its model DLL is
+>   not included and must be added manually; see [Neural Rendering installation](#neural-rendering-installation).
 > - The [Microsoft Visual C++ Redistributable x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
 
 ## Features
@@ -58,225 +61,322 @@ Not working, or not feeling smoother? See the [troubleshooting guide](https://gi
 **Frame generation**
 
 - Optical flow: **NVIDIA** (Fast, Medium, Slow) at 100%, 75%, 50% or 25%
-  resolution, or **AMD FidelityFX**.
-- **RIFE (nightly)**: NVIDIA CUDA/TensorRT neural interpolation, plus an optional
-  experimental Radeon Vulkan backend with device-specific preparation for 4.4.
-- **Hybrid**: FidelityFX flow combined with the game's own motion vectors.
+  flow resolution, or **AMD FidelityFX**.
+- **RIFE** neural frame interpolation using NVIDIA CUDA/TensorRT.
+- **Hybrid** combines optical flow with the game's motion vectors.
 - **FSR 3.1** and **DLSS** Frame Generation, fed with the game's DLSS guides.
-- **3X** frame generation on the OFXR 0.2.14 route.
+- **3X and 4X** frame generation on supported routes and hardware.
+- **AER framegen** reconstructs temporally aligned stereo from alternate-eye
+  rendering, using your selected generator.
 
 **Luke Ross R.E.A.L. VR games**
 
-- **OSR (OFXR Stereo Reconstruction)** rebuilds the eye the game skipped, with
-  **AFW (legacy)** as an alternative.
-- **Frame Reconstruction only**: a full stereo pair every frame, without
-  OFXR-generated frames.
+- Two methods: **OSR (OFXR Stereo Reconstruction) / AFW (legacy)**, or
+  **AER framegen**.
+- **Frame Reconstruction only** disables the frame-generation stage to improve
+  performance when you only need OSR/AFW stereo reconstruction.
+- See [Luke Ross usage](#luke-ross-usage) to choose a method and configure the mod.
 
 **Games and platforms**
 
 - D3D12, D3D11 and Vulkan games, through VDXR or SteamVR.
-- UEVR, REFramework mods, OpenComposite and Cheeky Foveated DLSS.
-- **Star Citizen**: the official signed release can load through Easy Anti-Cheat.
+- UEVR, REFramework, MUTAR and Luke Ross mods, plus OpenComposite.
+- **Cheeky Foveated DLSS:** partial support.
+- **Star Citizen:** use the **signed** build for Easy Anti-Cheat. Other games
+  using Easy Anti-Cheat may also work; see [Star Citizen](#star-citizen-easy-anti-cheat).
 - **OpenKneeboard** and other OpenXR panels are interpolated with the game.
 
 **Tray and overlay**
 
-- Per-game settings, changed in the headset (**F10**) or on the desktop.
+- Per-game settings, changed in the headset (**F10**) or through the desktop
+  profile drop-down.
 - Automated benchmarks that can pick the best settings for each game.
-- An in-headset FPS counter and an information overlay.
+- An in-headset FPS counter and an information overlay that can sit at the
+  bottom of your view or follow a controller.
+- Reconfigurable keyboard shortcuts through **Configure keybinds...** in the tray.
 - Optional DLSS 5 Neural Rendering (model DLL supplied separately).
-  Nightly includes [NR capture diagnostics](docs/V849_NR_CAPTURE.md) and [the V862 RIFE compilation correction](docs/V862_RIFE_TIMEOUT.md).
 - A `status.json` export for tools such as MSFS AutoFPS.
 
-The default is **NVIDIA OFXR 0.3.0, Medium, 50% flow resolution**. Flow
-resolution sets the cost of motion estimation, not the output resolution.
+## Installation
 
-## Installation and use
-
-1. Extract the complete archive to a writable folder.
+1. Extract the complete archive to a writable folder. For an Easy Anti-Cheat
+   game, choose the **signed** ZIP from the release assets.
 2. Run `OFXRBridgeTray.exe` and select **Enable**.
-3. Start the game. With injectors such as UEVR, leave OFXR enabled while the
+3. For NVIDIA users, install RIFE if you want to use it and add the Neural
+   Rendering model DLL if you want that feature, following the instructions below.
+4. Optional: select **Configure keybinds...** in the tray to change the shortcuts.
+5. Start the game. With injectors such as UEVR, leave OFXR enabled while the
    mod is injected.
-4. Open the settings with **F10** in the headset, or **Settings...** in the
-   tray. Most settings apply at once; those marked "restart game" apply at the
-   next launch.
-5. When finished, close the game, then select **Disable** or exit the tray.
+6. Open the settings with **F10** (or your configured shortcut) in the headset,
+   or **Settings...** in the tray. Most changes apply while playing; options
+   marked **restart game** apply on the next launch.
+7. When finished, close the game, then select **Disable** or exit the tray.
 
-For DLSS 5 Neural Rendering, place your own `nvngx_dlssnr.dll` model in the
-`ofxr` folder. It is not included, and nothing else needs it. Don't confuse it
-with the included `nvngx.dll_dlssnr.dll` forwarder.
+### RIFE installation
 
-### RIFE on nightly
+RIFE is installed in **`%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`** and is shared
+by your OFXR installations. Allow about **8 GB** for the installed NVIDIA runtime
+and at least **14 GB free** during setup. Optimization caches need additional space.
 
-Choose **Check RIFE...** in the tray. If the runtime is missing or needs repair,
-confirm the NVIDIA installation; a PowerShell window shows progress without
-requiring further input. It installs under
-**`%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`**, using about **8 GB** installed
-and requiring at least **14 GB free** for download and staging. GPU optimization
-caches need additional space. Packages with the optional Radeon Vulkan payload
-offer a second experimental installation choice; see [Radeon RIFE](docs/RIFE_VULKAN.md).
+1. Close the game and open **RIFE -> Check RIFE...** in the tray.
+2. If RIFE is missing, accept the installation prompt. To repair an existing
+   installation, choose **RIFE -> Reinstall RIFE...**.
+3. In **Install RIFE**, select **NVIDIA (CUDA / TensorRT)** and click **Install**.
+   The Radeon Vulkan choice is greyed out while Radeon support is being tested.
+4. Wait for the PowerShell installation window to finish. It shows download
+   and setup progress and needs no further input.
+5. Run **RIFE -> Check RIFE...** again and confirm that the runtime is ready.
+   If it reports a problem, follow its message and check the reported log or
+   consult the [RIFE guide](docs/RIFE.md) before selecting RIFE.
+6. Start the game, select **RIFE** under Frame generation and begin with
+   **RIFE 4.4**, **Medium** Quality and **2X**.
 
-Start with **RIFE 4.4**, **Medium** Quality and **2X**. Experimental 3X/4X are
-available on the native D3D12 route and compatible Luke Ross routes after
-OSR/AFW reconstruction. Other legacy/shared/interop routes retain 2X support.
-See the [RIFE guide](docs/RIFE.md) for supported paths, compilation, caches and
-troubleshooting. Installing RIFE does not change the default OFXR engine.
+The first use of a new resolution or Quality can take longer while TensorRT
+optimization completes. The information overlay shows **Optimizing, please wait**.
+For further installation and cache guidance, see the [RIFE guide](docs/RIFE.md).
 
-### For the best results
+### Neural Rendering installation
 
-- **Performance lower than expected, or motion uneven? Change
-  [Pacing](#pacing) first.** Switch **Settings / Pacing** between **Director**
-  (the default) and **Framework** and compare in the same scene: it applies
-  while you play, and Framework can be better.
-- **Turn off your VR software's own frame smoothing:** SteamVR Motion
-  Smoothing, Meta ASW, Virtual Desktop SSW, Pimax Smart Smoothing, Pico Frame
-  Interpolation. It fights with OFXR.
-- **Pick a refresh rate close to double your game's frame rate** (triple with
-  3X). If OFXR still stops short, your VR software repeats frames and the image
-  judders.
-- **Use OFXR's FPS counter.** Other counters (fpsVR, SteamVR frame timing,
-  in-game) can show about half of what reaches the headset.
+For DLSS 5 Neural Rendering on NVIDIA, place your own **`nvngx_dlssnr.dll`**
+model in the extracted package's **`ofxr`** folder, then enable Neural Rendering
+in the settings. The model is not included in the ZIP. It is different from the
+included **`nvngx.dll_dlssnr.dll`** forwarder; keep that file in place.
 
-### SteamVR swapchain limits
+## Usage
 
-Some combinations, particularly Luke Ross AFW and UEVR Synced Sequential, can approach SteamVR's OpenXR swapchain limit. The number used depends on the game, mod, route and enabled overlays; Luke Ross does not universally require exactly 16 swapchains.
+### Global usage
 
-If allocation fails, disable unnecessary **OpenXR overlays** and inspect the swapchain details in the **Luke Ross** tab where available. Compatible Luke Ross outputs share final native swapchains by default. This startup option is INI-only: [ofxr] luke_shared_swapchains=0 disables it after restarting the game. fpsVR uses a SteamVR overlay rather than an additional OpenXR swapchain.
+The best settings depend on the game, mod, GPU, headset resolution and OpenXR
+runtime. Compare options in the same representative scene and aim for a stable
+headset refresh rate before increasing image quality.
 
-Other graphics injectors can also affect compatibility and resource use. When troubleshooting, first test with only the components required for the game.
+Turn off your VR software's own frame interpolation, such as SteamVR Motion
+Smoothing, Meta ASW, Virtual Desktop SSW, Pimax Smart Smoothing or Pico Frame
+Interpolation, while using OFXR. Choose a refresh rate your game and generator
+can sustain: ordinary 2X needs roughly half the headset frame rate from the game,
+3X roughly a third and 4X roughly a quarter. AER framegen has a different role;
+see the mod-specific sections below.
 
-### Reading the meters
+#### Pacing: Framework, Director, Buffer and Fast
 
-The **information overlay** (the default, at the bottom of your view) and the
-**FPS counter** (in a corner, if you choose it instead) show whether OFXR is
-working:
+Pacing controls when completed frames reach the OpenXR runtime. A generator can
+be fast enough but still feel uneven if its frames are delivered at the wrong
+cadence. Games and configurations react differently, so there is no single
+combination that wins everywhere.
 
-| In the headset | It means |
+Compare **Framework** and **Director**, together with both **Buffer** and
+**Fast** switches, while playing the same scene:
+
+- **Framework / Director** change the delivery policy. On the SteamVR path,
+  switch between them in Settings and compare smoothness, FPS and Cycle minimum.
+  The VDXR path uses Framework pacing.
+- **Buffer** gives delivery more headroom and can improve stability, at the cost
+  of additional latency.
+- **Fast** can reduce VRAM use and latency, but may reduce performance. Test
+  both settings rather than assuming it always helps.
+
+Leave **Tray -> Pacing (restart game) -> Auto** selected for **VDXR and SteamVR**.
+Auto chooses the appropriate path for those runtimes. With another OpenXR
+backend, you can compare **Force VDXR** and **Force SteamVR** and restart the game
+between tests. Other backends have not been tested.
+
+#### Choosing a frame generator
+
+| Generator | What to expect |
 | --- | --- |
-| No overlay or counter at all | OFXR is not loaded in the game (see [Installation](#installation-and-use)) |
-| **Information overlay**, numbers in **green** | OFXR is working |
-| **Information overlay**, numbers in **red** | OFXR is loaded, but not generating frames, or a stage you enabled (Luke Ross reconstruction, Neural Rendering) is not running. The status in the top right corner says what runs, for example **OSR**, **Waiting** or **Paused**. |
-| A **green** FPS counter | OFXR is generating frames |
-| A **blue** FPS counter | Luke Ross reconstruction (OSR or AFW) is producing the frames |
-| A **red** FPS counter | OFXR is loaded, but not generating or reconstructing frames |
+| **FidelityFX** | The least expensive optical-flow option, with support across GPU vendors, but generally the lowest image quality. |
+| **OFXR NVIDIA 0.2.1 / 0.2.14 / 0.3.0** | NVIDIA-only optical flow. Fast and generally better-looking than FidelityFX, but can ghost around moving characters, especially in third-person games. Compare the available engines on your system. |
+| **RIFE** | Usually produces better results than OFXR optical flow and avoids its characteristic character ghosting. Low Quality presets can shimmer. It generally costs more, with cost depending on the preset and game resolution. A good choice for third-person games; avoid it for dense city scenes such as Spider-Man. Its 3X output generally looks smoother than optical-flow 3X. It does not need DLSS guides. |
+| **Hybrid** | Combines optical flow with captured DLSS motion vectors and depth. A useful starting point when the game provides compatible guides. |
+| **FSR 3.1** | Uses FSR frame generation with the game's captured DLSS guides; the game still needs DLSS enabled. |
+| **DLSS-G** | NVIDIA frame generation using captured DLSS guides, with a supported GPU and driver. |
 
-**Generation**, **Delivery** and **Cycle minimum** describe the bridge's processing and delivery path. Cycle minimum covers the observed bridge/runtime delivery cycle; it is not complete input-to-photon latency.
+Quality and artifacts vary by scene and configuration. The flow-resolution
+setting controls the cost of motion estimation, not the final output resolution.
+3X/4X availability depends on the generator, graphics API, runtime and GPU;
+**AER framegen is 2X-only**. The settings expose the multipliers supported by the
+selected route.
 
-## GPU requirements
+**DLSS-G preset (next launch)** lets you choose **A** for quality or **C** for a
+lighter model where supported. Restart the game after changing it.
 
-The NVIDIA optical-flow routes require a Turing-generation GPU or newer with Optical Flow hardware support and a compatible driver. RTX 20/30/40/50-series and GTX 1660-family cards have this hardware. TU117-based cards, including some GTX 1650 variants, do not. Pascal cards such as the GTX 10 series are not supported by these routes. See NVIDIA's [Optical Flow hardware requirements](https://docs.nvidia.com/video-technologies/optical-flow-sdk/nvofa-application-note/index.html).
+#### Per-game settings
 
-FidelityFX Optical Flow is the alternative for GPUs without NVIDIA Optical Flow hardware.
+OFXR saves a profile for each game's executable under
+**`%LOCALAPPDATA%\ofxr-bridge\Profiles`**. In the desktop Settings window, use the
+**profile drop-down** to select and edit a game, including when that game is
+closed. **Global default** supplies the starting settings for new game profiles.
+Changes made through the in-game menu are saved to that game's profile.
 
-In the current integration, the vector-based routes and Luke Ross OSR/AFW obtain their guides from **DLSS Super Resolution or Ray Reconstruction**. They require compatible DLSS inputs; selecting FSR Frame Generation here does not mean that the game must use FSR upscaling.
+#### Reading the meters
 
-Native NVIDIA DLSS Frame Generation additionally requires supported hardware, DLLs and drivers. NVIDIA lists Frame Generation for RTX 40/50-series cards and native Multi Frame Generation for RTX 50-series cards in its [DLSS feature overview](https://www.nvidia.com/en-gb/geforce/news/nvidia-app-update-dlss-overrides-and-more/). The Djules route's 3X option is a separate implementation.
+Use OFXR's own FPS counter or information overlay when comparing settings.
+Other counters may report the game's input FPS rather than OFXR's output FPS.
+Select a corner counter, a bottom information overlay or the controller-following
+information overlay under **Display**.
 
-## Compatibility
+- **Green information-overlay numbers:** the selected generation and processing
+  stages are working. **Red:** a selected stage is not running; read the status.
+- A **green FPS counter** means frame generation is active; **blue** means
+  OSR/AFW reconstruction is producing frames; **red** means neither is active.
+- With **AER framegen**, read its separate **ACTIVE / BYPASS / NO CONFIRMED OUTPUT**
+  state and **Out / Byp** counts. The ordinary generator state alone does not
+  confirm AER reconstruction. **Paired releases; AER phase assumed** means the
+  input's temporal phase is being taken from your selected AER settings.
 
-- Tested extensively with Quest 3 + Virtual Desktop using VDXR, and Sboys3 with SteamVR using MeganeX and Crystal Super.
-- Support for UEVR, REFramework-based mods and OpenComposite.
-- Support for the Luke Ross framework, with OSR and AFW (legacy) available for selected titles.
-- Limited testing with native DirectX 11 and DirectX 12 games.
-- Preliminary support for Vulkan games.
+**Generation**, **Delivery** and **Cycle minimum** describe processing and delivery
+through OFXR and the runtime. Cycle minimum is not complete input-to-photon latency.
 
-Other configurations may work, but have not received the same testing.
+#### Benchmarks
 
-> [!WARNING]
-> High-resolution rendering and Luke Ross AFW can require substantial VRAM. A 12 GB GPU may be insufficient for some combinations of game settings, headset resolution and enabled features. There is no single VRAM requirement for every game.
+Enable **Enable benchmarks** in the tray, then open the benchmark controls under
+**Display**. Choose the optical-flow, complete or Luke Ross suite and stay in the
+same representative scene throughout the run. Turn **AER framegen off** before
+running the ordinary suites.
 
-## Luke Ross R.E.A.L. VR games
+- Each test has **2.5 seconds** to settle and **5 seconds** of measurement.
+- Diagnostic logging is not required; benchmark CSV output is automatic.
+- Results include FPS, Cycle minimum and VRAM use. They are saved under
+  **`%LOCALAPPDATA%\ofxr-bridge\Benchmarks`**; use **Open folder** in the tray.
+- Suite length adapts to the available routes and earlier results. Skipped tests
+  remain n.a. in the CSV.
+- **Auto pick best one** applies the winning settings at completion. Otherwise,
+  the previous settings are restored. Stopping also restores them; manually
+  changing a tested setting stops automation and keeps your edit.
 
-Luke Ross's Legacy AER mode renders one eye per frame, alternating. OFXR
-rebuilds the other eye from the colour, depth and camera of the eye the game
-rendered, so the headset gets a full stereo pair every frame.
+The suite changes only its tested parameters. Other settings, such as your chosen
+flow resolution and RIFE Quality, are retained.
 
-On nightly, OSR preserves the current stereo warp wherever it resolves and uses
-history only to fill missing surfaces. See the [OSR update history](docs/OSR_HISTORY.md)
-for the character-tremble and object-contour corrections.
+### Luke Ross usage
 
-**Reconstruction** has three choices:
+Use a recent Luke Ross mod and choose between **OSR/AFW reconstruction with
+ordinary frame generation** and **AER framegen**. OSR/AFW and the native-guide
+AER methods require a game in the [compatible list](#compatible-luke-ross-games).
 
-| Reconstruction | |
-| --- | --- |
-| **Off** | Disables stereo reconstruction; frame generation and Neural Rendering remain independent. |
-| **OSR** (default) | OFXR's own reconstruction. Less ghosting and a lower GPU cost than AFW. |
-| **AFW** | PureDark's AFW provider, with its quality controls (below). |
+**Set up the Luke Ross mod first:**
 
-Changing it applies while the game runs. Profiles from 0.3.1 start on OSR.
-The green status reports **OSR: Off**, **OSR: Luke Ross**, or **OSR: Other**
-from actual runtime activity. Other identifies a compatible mod without a Luke
-Ross marker; it is a valid state. The legacy engine uses the AFW label.
-Off is controlled here, rather than in the advanced Framewarp mode menus.
+1. Select **Legacy AER** in the REAL VR menu. Disable AER V2, AER 1/2 and other
+   built-in interpolation or AER correction modes.
+2. Lower the **Reduce shaking** slider.
+3. Turn off **Camera rotation compensation**, where offered. It can make
+   gamepad or vehicle turns look stepped when combined with OFXR reconstruction.
+4. For **OSR/AFW**, enable **DLSS Super Resolution or Ray Reconstruction** in the
+   game. DLSS is also required for Hybrid, FSR 3.1 or DLSS-G with AER framegen.
 
-**Luke Ross setup:**
+#### OSR / AFW
 
-1. Use an up-to-date Luke Ross mod (tested with v2609.18.2 and newer).
-2. In the REAL VR menu, select **Legacy AER**. AER V2 and AER 1/2 don't work
-   with OFXR's reconstruction.
-3. In the REAL VR menu, turn off **Camera rotation compensation** if it is
-   offered. Left on, turning in vehicles looks stepped.
-4. Turn on DLSS in the game.
-5. Optional: **Frame Reconstruction only (AFW or OSR, restart game)** sends the
-   reconstructed pairs straight to the headset, without OFXR-generated frames
-   (it was called "AFW Only" in 0.3.1). Use it when the game reaches your
-   refresh rate on its own: lower latency, fewer artifacts. Otherwise leave it
-   off so OFXR generates frames too. Neural Rendering still works. Restart the
-   game after changing it.
+**OSR** is OFXR's own alternative to **AFW**, with less ghosting. It generally
+works best together with ordinary frame generation: OSR rebuilds the eye skipped
+by Legacy AER, then the frame generator adds frames between the reconstructed
+stereo pairs. **AFW (legacy)** remains available as an alternative.
 
-<details>
-<summary>AFW (legacy) quality controls</summary>
+With either method, a game's HUD or overlay icons can double during movement,
+including strafing or turning with a gamepad. Check the observations below.
 
-When **AFW** is selected, use **Advanced parameters / Framewarp mode / Combined** for the normal AFW path.
+**Frame Reconstruction only** disables the extra frame-generation stage while
+keeping OSR/AFW stereo reconstruction. It can improve performance when the game
+already reaches the required refresh rate. Restart the game after changing it.
 
-- Start with AFW **1x1**. At high resolutions, try **2x2** if AFW costs too much performance. **4x4** is a stronger quality compromise and is generally intended for very high resolutions.
-- **Depth dilation** can reduce ghosting, flicker and shimmering, with less precise object silhouettes.
-- **Ignore motion** controls the threshold for ignoring per-object motion vectors. It is not a general flicker-reduction control. For disappearing fine details during rotation, a higher value may help; around **10** has been useful for character hair in Star Wars Outlaws with AFW.
+For AFW quality controls, start with **1x1** and try **2x2** if its cost is too
+high at your resolution. **Depth dilation** trades sharper object outlines for
+less ghosting or shimmer. These AFW controls are available when AFW is selected.
 
-These AFW-specific quality controls are hidden when OSR is selected. AFW quality changes apply while the game is running; the bridge rebuilds the affected history when needed.
+#### AER framegen
 
-</details>
+Select your generator, turn on **Advanced mode**, then enable **AER framegen**.
+Leave **Frame Reconstruction only** off; restart the game if you changed it.
+AER framegen uses the generator to reconstruct the other eye at the correct
+point in time, rather than providing the usual full-stereo FPS multiplication.
+Do not expect the same FPS gain as ordinary frame generation.
 
-### Luke Ross games and HUD observations
+This can cost more performance than OSR with ordinary frame generation, but it
+keeps the HUD clean in the tested cases. Choose the method that gives you the
+best balance of HUD clarity, smoothness and performance.
 
-The table retains the HUD observations from 0.3.1 and adds the newly confirmed results. Empty cells are awaiting verification.
-HUD or overlay icons may double when moving, strafing or rotating with gamepad
+For the games below, compatible DLSS guides also make **Hybrid**, **FSR 3.1** and
+**DLSS-G** available with AER framegen. **Hybrid** is the recommended starting
+point. Use the AER state in the information overlay to check that reconstruction
+is active. **Swap**, also in Advanced mode, reverses the assumed temporal phase
+if the eyes appear out of step.
+
+#### Compatible Luke Ross games
+
+These games support the listed Luke Ross reconstruction paths. HUD observations
+below concern **OSR/AFW**; empty cells have no recorded observation yet. HUD or
+overlay icons may double while moving, strafing or rotating with a gamepad.
 
 | Game | HUD observations |
 | --- | --- |
 | Avatar: Frontiers of Pandora | |
 | Crimson Desert | HUD correct; overlay icons double |
-| Cyberpunk 2077 | |
+| Cyberpunk 2077 | HUD correct |
 | Dead Space (2023) | HUD double; overlay icons correct |
 | DOOM: The Dark Ages | HUD double |
 | Ghost of Tsushima | HUD double |
-| Grand Theft Auto V Enhanced | HUD correct |
+| Grand Theft Auto V Enhanced | HUD double |
 | Horizon Forbidden West | HUD double |
 | Indiana Jones and the Great Circle | HUD double |
 | Kingdom Come: Deliverance II | HUD correct |
 | Marvel's Spider-Man Remastered | HUD correct |
 | Marvel's Spider-Man: Miles Morales | HUD correct |
+| Red Dead Redemption 2 | HUD correct |
 | Star Wars Outlaws | HUD double |
 | The Last of Us Part I | |
 | Uncharted: Legacy of Thieves Collection | |
 
-These are observations from tested builds, not guarantees for every configuration. Other titles may work, but can require additional capture support or fixes.
+### UEVR
 
-### OpenXR panels and OpenKneeboard
+Select **OpenXR** in UEVR. With **Native Stereo**, use ordinary frame generation
+and compare its generators, Framework/Director pacing, Buffer and Fast according
+to the requirements above. Native Stereo remains the recommended choice for the
+best performance in the tested configurations.
 
-Version 0.3.2 can interpolate compatible OpenXR quad-panel images and poses separately from the main eye images. This includes panels using separate textures and panels sharing a texture atlas. It can help external overlays such as OpenKneeboard remain consistent with generated output frames.
+There is also **partial AER framegen support** for UEVR's **Alternating / AFR**
+rendering method. Use plain alternating-eye output without additional AER
+reconstruction or interpolation fixes, then enable **AER framegen** in OFXR's
+Advanced settings. Results depend on the game and mod configuration.
 
-This applies to OpenXR panel layers. HUD elements already drawn into a game's eye image are part of that image; their behaviour is covered by the per-game HUD observations above. SteamVR overlays follow their own overlay path.
+### REFramework and MUTAR
 
-## Star Citizen
+For REFramework games running in **stereo**, use ordinary OFXR frame generation.
 
-The official release's OFXR files (the tray, the OpenXR and Vulkan layers,
-and the NGX forwarders) are digitally signed, so Easy Anti-Cheat lets OFXR load in Star
-Citizen. Tested with SteamVR and VDXR: optical flow, Hybrid and DLSS-G work.
-Enable the tray before starting the game.
+For MUTAR's **AER** modes, turn off the mod's interpolation, warp and other AER
+reconstruction fixes so that it supplies plain AER. Then enable **AER framegen**
+in OFXR's Advanced settings and choose your generator. Aim to reach the headset's
+refresh rate for the best results. The difference can be subtle in a quiet scene;
+turning the camera makes the temporal alignment easier to judge.
 
-Only the official release archive is signed: a build you compile yourself is
-not, and Easy Anti-Cheat refuses it.
+### Microsoft Flight Simulator 2024
+
+MSFS 2024 has been tested extensively. **Director + Buffer** has given the most
+stable pacing in our tests, at the cost of higher latency. Compare it with the
+other combinations on your own system, keeping the same scene and settings.
+
+#### OpenKneeboard
+
+Compatible OpenXR panels, including OpenKneeboard, can have their images and poses
+interpolated alongside the game. This includes panels with separate textures or
+shared texture atlases. HUD elements already drawn into a game's eye images are
+part of those images; SteamVR overlays use a separate path.
+
+#### status.json and AutoFPS
+
+Enable **Export status.json** under **Settings / Display** to write OFXR's live
+state once a second, including whether it is enabled or paused, the multiplier,
+game and headset frame rates, and the latency.
+[MSFS AutoFPS](https://github.com/ResetXPDR/MSFS_AutoFPS) can read it to maintain the
+simulator's target frame rate. See the [status.json format](docs/STATUS_JSON.md).
+
+### Star Citizen (Easy Anti-Cheat)
+
+Use the **signed** ZIP attached to the release for Star Citizen. OFXR's tray,
+OpenXR and Vulkan layers, and NGX forwarders need to be signed for Easy Anti-Cheat
+to let them load. Enable the tray before starting the game.
+
+Optical flow, Hybrid and DLSS-G have been tested with SteamVR and VDXR. Other
+OpenXR games using Easy Anti-Cheat may also work, but have not been verified.
+An unsigned build, including one you compile yourself, is not suitable for this
+path unless it is signed.
 
 > [!CAUTION]
 > OFXR is an independent project, not endorsed by Cloud Imperium Games or Easy
@@ -284,7 +384,7 @@ not, and Easy Anti-Cheat refuses it.
 > we accept no responsibility for any account action, ban or other
 > consequence. Check the game's terms of service before you play.
 
-## Assetto Corsa
+### Assetto Corsa
 
 An optional modified OptiScaler add-on provides DLSS upscaling, OFXR and optional DLSS 5 Neural Rendering for Assetto Corsa in VR. It is distributed separately from the standalone bridge.
 
@@ -298,133 +398,29 @@ An optional modified OptiScaler add-on provides DLSS upscaling, OFXR and optiona
 
 Keep CSP's method set to **OptiScaler**. The add-on includes the required DLSS SR/FG runtime files; the DLSS 5 Neural Rendering model is not included. Do not place the modified `version.dll` beside `acs.exe`: it belongs in the CSP OptiScaler cache selected by the installer.
 
-## Finding the best settings for each game
+### Other games and mods
 
-The best configuration depends on the game, mod, headset, GPU and runtime. Compare settings on your own system rather than assuming one route will always win.
-
-### Per-game profiles
-
-OFXR-BRIDGE stores shared data under **`%LOCALAPPDATA%\ofxr-bridge`**. Per-game profiles are stored in **`Profiles`**, using the game's executable name.
-
-When a game has no profile, the bridge creates one from the current main **`ofxr-bridge.ini`** settings. Changes made in-game are saved to that game's profile. Desktop edits to the main configuration set the starting point for new profiles.
-
-**Reset to defaults** restores the built-in factory defaults for the selected configuration; it does not copy your customized main INI. Tray options remain global.
-
-### Pacing
-
-If performance is lower than expected or motion looks uneven, **change Pacing
-first**: it is often the setting that makes the biggest difference.
-
-- **Settings / Pacing** (SteamVR path): **Director** (default) or
-  **Framework**. It applies while you play, so compare both in the same
-  scene; Framework can be better. With VDXR, OFXR always
-  uses Framework pacing and the choice is unavailable.
-- **Tray / Pacing (restart game)** selects the transport path. **Auto**
-  (recommended) uses the VDXR path with VDXR and the SteamVR path otherwise.
-  **Force VDXR** and **Force SteamVR** are for other OpenXR runtimes not yet
-  tested. Restart the game after changing it.
-
-### Frameworks
-
-| Framework | Starting considerations |
-| --- | --- |
-| FidelityFX | Optical-flow alternative for non-NVIDIA GPUs; image quality can be lower. |
-| OFXR 0.2.1 | Latency-oriented route; performance can vary substantially by configuration. |
-| OFXR 0.2.14 | Djules-based route, including a 3X option. |
-| OFXR 0.3.0 | Default NVIDIA route; compare its performance and latency in each game. |
-| RIFE (nightly) | NVIDIA CUDA/TensorRT, or experimental Radeon Vulkan with prepared RIFE 4.4. |
-| Hybrid | Combines FidelityFX with captured motion vectors. |
-| FSR 3.1 | FSR frame generation using the captured guides. |
-| DLSS-G | NVIDIA frame generation; requires compatible hardware and can have a higher cost. |
-
-Vector-based routes depend on valid captured guides. Ordinary optical-flow OFXR does not require Luke Ross reconstruction to be active.
-
-**DLSS-G preset (next launch)** selects the requested NVIDIA model preset. **A** is Full/quality and is the default request; **C** is Lite/faster. Restart the game after changing it. If the driver rejects C, the bridge attempts A. A saved driver-profile request does not by itself prove which model the driver ultimately loaded; global driver overrides can also apply. Benchmarks use the selected preset rather than forcing C.
-
-### Fast mode
-
-**Fast mode (lower vram, lower latency, may reduce performance)** uses private synthesis textures and a reduced swapchain allocation where supported. It can reduce VRAM use or latency, but its performance effect varies by game and route. 3X retains the capacity needed for its additional output frames, so its memory savings can differ.
-
-Fast mode has **no effect on the Luke Ross reconstruction path**. For other paths, benchmark both settings rather than assuming that it always helps or always hurts VDXR.
-
-### Benchmarks
-
-**Enable benchmarks** is on by default in the tray, making the benchmark controls available under **Display**. Choose the optical-flow, complete or Luke Ross suite, then remain in the same representative scene throughout the run. **Auto pick best one** is enabled by default; no benchmark starts automatically.
-
-- Each test lasts **7.5 seconds**: **2.5 seconds** settling, then **5 seconds** measured.
-- Diagnostic logging is not required. Benchmark CSV output is automatic.
-- Results include FPS and Cycle minimum statistics. VRAM use is sampled near the end of each test.
-- Results are saved under **`%LOCALAPPDATA%\ofxr-bridge\Benchmarks`**. Use **Open folder** in the tray, then open **Benchmarks**.
-- Suite length adapts to measured results and headset resolution. Skipped tests remain n.a. in the CSV.
-- At completion, the suite restores the previous settings unless **Auto pick best one** is enabled. Stopping restores them too; manually changing a tested setting cancels the automation and keeps that edit.
-
-Benchmarks change the parameters covered by the selected suite. Other quality settings, such as your chosen flow resolution, are retained.
-
-<details>
-<summary>Example configurations (earlier measurements)</summary>
-
-These are earlier measurements, retained for reference. Rows labelled AFW or AFW only were measured with the AFW provider; they are not OSR performance measurements. The old AFW only label corresponds to **Frame Reconstruction only** with **AFW (legacy)** selected.
-
-Test system: Intel 265K and RTX 4090. Quest 3 uses VDXR; MeganeX uses SteamVR. Latency is shown only for runs measured with the current Cycle minimum meter, in milliseconds. **+ Buffer** means Increase buffer is enabled.
-
-| Game | Quest 3 - Godlike / VDXR - top 2 | MeganeX - sboys3 / SteamVR - top 3 |
-| --- | --- | --- |
-| Assassin's Creed Valhalla | 1. 0.3.0 Fast 70 fps<br>2. 0.3.0 71 fps | 1. Director 0.2.13 Fast + Buffer 75 fps 65 ms<br>2. Framework 0.3.0 Fast + Buffer 74 fps 62 ms<br>3. Framework 0.2.1 Fast 73 fps 62 ms |
-| Crimson Desert (RT, no RR) | 1. 0.2.13 AFW 1x1 81 fps<br>2. 0.3.0 AFW 1x1 82 fps | 1. Director 0.3.0 + AFW 1x1 84 fps 67 ms<br>2. Director 0.2.13 + Buffer + AFW 1x1 85 fps 68 ms<br>3. Framework 0.2.1 + AFW 1x1 74 fps 39 ms |
-| Doom The Dark Ages | 1. 0.3.0 AFW 1x1 90 fps<br>2. 0.2.13 AFW 1x1 90 fps | 1. AFW only 2x2 73 fps 20 ms<br>2. Director 0.2.1 + AFW 1x1 90 fps 35 ms<br>3. Framework 0.3.0 + AFW 1x1 90 fps 56 ms |
-| Ghost of Tsushima | 1. AFW only 2x2 74 fps<br>2. 0.2.1 AFW 1x1 90 fps | 1. AFW only 2x2 86 fps 19 ms<br>2. Director 0.2.1 + AFW 1x1 90 fps 35 ms<br>3. Framework 0.2.13 + Buffer + AFW 1x1 90 fps 56 ms |
-| Ghost of Tsushima (dlss5) | 1. 0.2.13 AFW 1x1 84 fps<br>2. 0.3.0 AFW 1x1 84 fps | 1. Director 0.2.1 + AFW 1x1 90 fps 35 ms<br>2. Framework 0.2.13 + AFW 1x1 90 fps 56 ms<br>3. Framework 0.3.0 + AFW 1x1 90 fps 56 ms |
-| Ghostwire Tokyo (Native + dlss5) | 1. Hybrid 77 fps<br>2. Hybrid Fast 77 fps | 1. Framework Hybrid + Buffer 71 fps 47 ms<br>2. Framework 0.3.0 Fast + Buffer 74 fps 52 ms<br>3. Framework 0.2.13 Fast + Buffer 72 fps 52 ms |
-| Ghostwire Tokyo (Native) | 1. Hybrid Fast 90 fps<br>2. FSR 90 fps | 1. Director Hybrid 90 fps 35 ms<br>2. Framework FSR Fast + Buffer 90 fps 46 ms<br>3. Director 0.2.1 90 fps 36 ms |
-| High on Life 2 (Native Joe) | 1. Hybrid 90 fps<br>2. Hybrid Fast 90 fps | 1. Framework Hybrid Fast + Buffer 90 fps 40 ms<br>2. Framework 0.3.0 Fast + Buffer 90 fps 41 ms<br>3. Framework 0.2.1 + Buffer 90 fps 41 ms |
-| Horizon Forbidden West | 1. 0.3.0 AFW 1x1 82 fps<br>2. 0.2.13 AFW 1x1 82 fps | 1. AFW only 2x2 73 fps 18 ms<br>2. Director 0.3.0 + AFW 1x1 90 fps 67 ms<br>3. Director 0.2.13 + AFW 1x1 90 fps 67 ms |
-| Indiana Jones and the Great Circle | 1. 0.2.13 AFW 1x1 90 fps<br>2. 0.3.0 AFW 1x1 90 fps | 1. AFW only 1x1 78 fps 21 ms<br>2. Director 0.2.1 + Buffer + AFW 1x1 90 fps 46 ms<br>3. Framework 0.3.0 + AFW 1x1 90 fps 56 ms |
-| Kingdom Come Deliverance II | 1. AFW only 1x1 87 fps<br>2. AFW only 2x2 90 fps | AFW only 1x1 81 fps<br>AFW only 2x2 90 fps |
-| Kingdom Come Deliverance II (dlss5) | 1. 0.2.13 AFW 1x1 90 fps<br>2. 0.3.0 AFW 1x1 90 fps | 1. Framework 0.2.13 + AFW 1x1 90 fps 56 ms<br>2. Framework 0.3.0 + Buffer + AFW 1x1 90 fps 56 ms<br>3. Director 0.2.1 + Buffer + AFW 1x1 88 fps 46 ms |
-| MSFS2024 (fly, VR ultra, foveated) | 1. 0.2.13 Fast 89 fps 63 ms<br>2. 0.3.0 87 fps 45 ms | 1. Framework 0.3.0 85 fps 83 ms<br>2. Framework 0.2.13 85 fps 84 ms<br>3. Framework 0.2.1 Fast 83 fps 77 ms |
-| MSFS2024 (ground, VR very high) | 1. Hybrid Fast 90 fps 57 ms<br>2. FSR 88 fps 40 ms | 1. Framework Hybrid Fast 90 fps 74 ms<br>2. Framework 0.3.0 Fast 90 fps 74 ms<br>3. Framework 0.2.1 Fast + Buffer 90 fps 74 ms |
-| No man's sky VR | 1. 0.2.1 90 fps<br>2. 0.2.1 Fast 90 fps | 1. Director 0.3.0 Fast + Buffer 90 fps 55 ms<br>2. Director 0.2.13 Fast + Buffer 90 fps 55 ms<br>3. Framework 0.2.1 90 fps 65 ms |
-| Nobody Wants to Die (Native) | 1. Hybrid 75 fps<br>2. 0.2.13 Fast 76 fps | 1. Director 0.3.0 Fast + Buffer 69 fps 59 ms<br>2. Framework 0.2.13 Fast 69 fps 58 ms<br>3. Director Hybrid 65 fps 54 ms |
-| Returnal (syncseq) | 1. Hybrid 90 fps<br>2. Hybrid Fast 90 fps | 1. Framework Hybrid Fast 90 fps 51 ms<br>2. Framework FSR Fast 89 fps 52 ms<br>3. Framework 0.3.0 Fast 90 fps 54 ms |
-| Returnal (syncseq+dlss5) | 1. 0.2.1 Fast 74 fps<br>2. 0.2.1 72 fps | 1. Director 0.2.13 70 fps 66 ms<br>2. Framework 0.3.0 Fast 69 fps 63 ms<br>3. Director Hybrid Fast 66 fps 55 ms |
-| Skyrim VR | 1. 0.2.13 Fast 90 fps<br>2. 0.3.0 Fast 90 fps | 1. Framework 0.3.0 Fast 90 fps 46 ms<br>2. Framework 0.2.13 Fast + Buffer 90 fps 45 ms<br>3. Framework 0.2.1 90 fps 55 ms |
-| Star Wars Outlaws (RT+RR) | 1. 0.3.0 AFW 1x1 90 fps<br>2. 0.2.13 AFW 1x1 90 fps | 1. Director 0.2.1 + Buffer + AFW 1x1 90 fps 46 ms<br>2. Framework 0.2.13 + Buffer + AFW 1x1 90 fps 56 ms<br>3. Framework 0.3.0 + Buffer + AFW 1x1 90 fps 56 ms |
-| Stellar Blade (Native) | 1. FSR 90 fps<br>2. FSR Fast 90 fps | 1. Director Hybrid 90 fps 44 ms<br>2. Director 0.2.1 Fast 90 fps 37 ms<br>3. Framework FSR 90 fps 54 ms |
-| The Callisto Protocol (Native) | 1. 0.2.13 89 fps<br>2. 0.3.0 89 fps | 1. Framework 0.2.13 + Buffer 87 fps 67 ms<br>2. Framework 0.3.0 86 fps 65 ms<br>3. Framework 0.2.1 + Buffer 83 fps 55 ms |
-| The Planet Crafter | 1. 0.2.1 90 fps<br>2. 0.2.1 Fast 90 fps | 1. Framework 0.2.13 Fast 90 fps 52 ms<br>2. Framework 0.3.0 Fast 90 fps 52 ms<br>3. Framework 0.2.1 Fast 90 fps 54 ms |
-
-</details>
-
-### Other tools: status.json
-
-**Export status.json** in **Settings / Display** (off by default) writes OFXR's
-live state once a second: whether OFXR is enabled or paused, the multiplier, the
-game and headset frame rates, and the latency.
-[MSFS AutoFPS](https://github.com/ResetXPDR/MSFS_AutoFPS) reads it to keep the
-simulator at its target frame rate. File format:
-[status.json](https://github.com/tig3rmast3r/OFXR-Bridge/blob/main/docs/STATUS_JSON.md).
-
-## What the tray changes on your PC
-
-When you select **Enable**, the tray prepares a versioned runtime cache under **`%LOCALAPPDATA%\ofxr-bridge\RuntimeLayer`** and registers the bridge's OpenXR implicit-layer manifest for the current Windows user. It also manages its Vulkan layer registration when that support is enabled. The OpenXR loader loads the bridge DLL into participating game processes. Your active OpenXR runtime is unchanged. The official release's OFXR files are digitally signed (see [Star Citizen](#star-citizen)).
-
-The standalone bridge does not replace game files. The optional Assetto Corsa add-on has its own installation procedure and does modify the documented game/CSP files.
-
-**Disable** removes the registrations owned by the tray and signals active bridge instances to stop. Exiting the tray also disarms it, and a watchdog attempts cleanup after an unexpected tray exit. Disabling does not unload a DLL from an already running game: close the game to finish that session.
-
-Profiles, benchmarks, cached runtime files and logs remain in the common folder. Use **Open folder** in the tray to inspect them. Avoid deleting files while the game or tray is using them.
-
-Selecting a DLSS-G preset can update the game's NVIDIA driver profile. **Crash debug** also configures crash diagnostics, including DRED, for subsequent launches. These are separate from enabling the ordinary OpenXR layer.
+Testing outside the configurations described above is partial. If a specific
+game or mod does not work, please open a [GitHub issue](https://github.com/tig3rmast3r/OFXR-Bridge/issues)
+with the game, mod, GPU, OpenXR runtime and OFXR settings, plus a diagnostic log
+when available. See [Reporting problems](#reporting-problems).
 
 ## Known issues
 
 - OFXR 0.2.14 3X is not supported in Luke Ross games.
-- HUD behaviour varies by Luke Ross game and reconstruction choice; see the HUD observations table.
+- OSR relies on the game's DLSS motion vectors, which are not perfect; artifacts
+  can remain in the reconstructed eye. HUD observations are listed in the
+  [Luke Ross table](#compatible-luke-ross-games).
 - **Cheeky Foveated DLSS in Luke Ross games** needs a fix on the Cheeky Foveated DLSS side.
-- OSR reconstructs areas missing from the current source eye using temporal history and hole filling. Fast-changing objects and newly revealed regions can still show reconstruction artifacts.
 - DLSS 5 Neural Rendering can cause instability or device-hung crashes in some games.
 - Extra OpenXR layers or overlays can exhaust the available swapchain budget.
 - Vulkan support remains experimental.
+
+## Troubleshooting
+
+For setup problems, uneven motion, missing guides or crashes, see the
+[troubleshooting guide](docs/TROUBLESHOOTING.md). If it does not resolve the
+problem, collect the information below when reporting it.
 
 ## Reporting problems
 

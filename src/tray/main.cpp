@@ -862,6 +862,11 @@ struct RifeInstallDialog {
     std::wstring reason;
     bool vulkan_available{},vulkan_selected{};
 };
+bool rife_vulkan_installation_available(const RifeInstallDialog& state) noexcept {
+    // Keep the public installer disabled while Radeon validation is in progress.
+    constexpr bool released=false;
+    return released && state.vulkan_available;
+}
 INT_PTR CALLBACK rife_install_dialog_procedure(HWND dialog,UINT message,WPARAM wparam,LPARAM lparam) {
     if(message==WM_INITDIALOG) {
         auto* state=reinterpret_cast<RifeInstallDialog*>(lparam);
@@ -869,7 +874,7 @@ INT_PTR CALLBACK rife_install_dialog_procedure(HWND dialog,UINT message,WPARAM w
         SetDlgItemTextW(dialog,IDC_RIFE_REASON,state->reason.c_str());
         SetDlgItemTextW(dialog,IDC_RIFE_DESTINATION,state->destination.c_str());
         CheckRadioButton(dialog,IDC_RIFE_NVIDIA,IDC_RIFE_AMD,IDC_RIFE_NVIDIA);
-        EnableWindow(GetDlgItem(dialog,IDC_RIFE_AMD),state->vulkan_available);
+        EnableWindow(GetDlgItem(dialog,IDC_RIFE_AMD),rife_vulkan_installation_available(*state));
         state->vulkan_selected=false;
         SetDlgItemTextW(dialog,IDC_RIFE_SPACE,L"NVIDIA: about 8 GB installed, 14 GB free for setup. Radeon Vulkan: keep 2 GB free for setup. Per-game caches need additional space.");
         return TRUE;
@@ -878,8 +883,9 @@ INT_PTR CALLBACK rife_install_dialog_procedure(HWND dialog,UINT message,WPARAM w
         const auto id=LOWORD(wparam);
         if(id==IDOK) {
             auto* state=reinterpret_cast<RifeInstallDialog*>(GetWindowLongPtrW(dialog,DWLP_USER));
-            if(IsDlgButtonChecked(dialog,IDC_RIFE_AMD)==BST_CHECKED&&!state->vulkan_available)return TRUE;
-            state->vulkan_selected=state->vulkan_available && IsDlgButtonChecked(dialog,IDC_RIFE_AMD)==BST_CHECKED;
+            const bool vulkan_available=rife_vulkan_installation_available(*state);
+            if(IsDlgButtonChecked(dialog,IDC_RIFE_AMD)==BST_CHECKED&&!vulkan_available)return TRUE;
+            state->vulkan_selected=vulkan_available && IsDlgButtonChecked(dialog,IDC_RIFE_AMD)==BST_CHECKED;
             EndDialog(dialog,IDOK);return TRUE;
         }
         if(id==IDCANCEL){EndDialog(dialog,IDCANCEL);return TRUE;}
