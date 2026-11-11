@@ -344,11 +344,11 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     // A model the user has not installed is told apart below: the frames are
     // fine, so the numbers keep their colour.
     const bool nr_model_missing=state.desired.nr_enabled && r.nr_model_missing;
+    const bool aer_requested=state.desired.ofr_enabled && state.desired.enabled;
     const bool optional_ready=(!state.desired.nr_enabled || (fresh && r.nr_running) || nr_model_missing) &&
-        (!autonomous::reconstruction_source(r) || state.desired.afw_mode==0 || (fresh && r.afw_running));
+        (aer_requested || !autonomous::reconstruction_source(r) || state.desired.afw_mode==0 || (fresh && r.afw_running));
     const bool ofxr_active=m.generating && state.desired.enabled && autonomous::interface_generation_active(state) && !r.provider_error;
     const bool rife_error=state.desired.enabled && state.desired.frame_generation==4 && r.rife_error;
-    const bool aer_requested=state.desired.ofr_enabled && state.desired.enabled;
     const bool aer_active=autonomous::interface_aer_active(state,now_ms);
     const bool healthy=(!aer_requested || aer_active) && current && !rife_error && (ofxr_active || autonomous::interface_afw_only_active(state,now_ms)) && optional_ready;
     const auto tone=healthy ? PanelTone::good : PanelTone::bad;

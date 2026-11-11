@@ -94,6 +94,31 @@ int main(int argc,char** argv){try{
     check(autonomous::interface_aer_active(aer,now),"fresh confirmed AER output activates the status");
     check(autonomous::interface_aer_source_text(aer).find("phase assumed")!=std::string::npos,"paired releases cannot certify AER input");
     check(count_top(rasterize_elliott_meter(aer,now,false,false),red)==0,"confirmed AER restores healthy metrics");
+    for(bool uevr:{false,true}) {
+        auto priority=aer;
+        priority.desired.luke_osr=2;
+        priority.runtime.luke_detected=!uevr;priority.runtime.uevr_osr=uevr;
+        priority.runtime.afw_running=false;
+        priority.runtime.motion_source=1;
+        priority.runtime.generation_state=autonomous::GenerationState::missing_motion;
+        check(autonomous::interface_state_text(priority)=="AER Frame Gen" &&
+            autonomous::interface_generation_active(priority),"confirmed AER supersedes legacy fallback status");
+        check(autonomous::interface_reconstruction_text(priority,now)=="OSR/AFW off, using AER Frame Gen" &&
+            count_top(rasterize_elliott_meter(priority,now,false,false),red)==0,
+            "saved Luke/UEVR OSR is bypassed without making confirmed AER red");
+        auto failed=priority;failed.runtime.provider_error=5;
+        check(autonomous::interface_state_text(failed)=="AER Frame Gen: Error" &&
+            count_top(rasterize_elliott_meter(failed,now,false,false),red)>0,"AER provider errors stay visible");
+        auto bypass=priority;bypass.runtime.ofr_evidence.last_bypass_ms=now+1;
+        check(count_top(rasterize_elliott_meter(bypass,now+1,false,false),red)>0,"AER bypass remains red with saved OSR");
+        auto restored=priority;restored.desired.ofr_enabled=false;
+        check(autonomous::interface_reconstruction_text(restored,now)=="OSR: Off" &&
+            count_top(rasterize_elliott_meter(restored,now,false,false),red)>0,
+            "turning AER off restores the saved OSR readiness requirement");
+        priority.runtime.afw_running=true;priority.runtime.pacing_mode=autonomous::kAfwOnlyPacingMode;
+        check(!autonomous::interface_afw_only_active(priority,now) &&
+            autonomous::interface_state_text(priority)=="AER Frame Gen","old AFW-only activity cannot override AER");
+    }
     check(!autonomous::interface_aer_active(aer,now+1000),"AER proof expires independently of ordinary generator FPS");
     proof.last_bypass_ms=now+1;proof.bypasses=1;
     check(!autonomous::interface_aer_active(aer,now+1) && autonomous::interface_aer_text(aer,now+1).find("BYPASS")!=std::string::npos,"later bypass supersedes successful history");

@@ -172,7 +172,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.upscaler_motion=observed.motion; out.upscaler_depth=observed.depth;
     out.guide_publications=guides.published; out.guide_matches=guides.matched; out.guide_uses=guides.used;
     out.generation_mode=desired.frame_generation; out.motion_source=control.desired.motion_vectors;
-    const bool post_afw = out.luke_detected && afw.desired.mode != 0;
+    const bool post_afw = !(afw.desired.ofr && control.desired.enabled) && out.luke_detected && afw.desired.mode != 0;
     if (post_afw && (out.generation_mode == 0 || out.generation_mode == 3))
         out.motion_source = 0; // Complete post-AFW color pair, no native peer-eye guides.
     if (!control.desired.enabled) generation=GenerationState::paused;

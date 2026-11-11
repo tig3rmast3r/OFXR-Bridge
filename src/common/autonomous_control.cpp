@@ -1540,6 +1540,13 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
         return "RIFE optimization error";
     if(s.desired.enabled && s.desired.frame_generation==4 && r.rife_optimizing)
         return "Optimizing, please wait";
+    if(s.desired.enabled && s.desired.ofr_enabled) {
+        if(r.provider_error)return "AER Frame Gen: Error";
+        if(interface_aer_active(s,GetTickCount64()))
+            return s.desired.nr_enabled && r.nr_running ? "AER Frame Gen + Neural" : "AER Frame Gen";
+        return r.ofr_evidence.last_bypass_ms && r.ofr_evidence.last_bypass_ms>=r.ofr_evidence.last_output_ms
+            ? "AER Frame Gen: Bypass" : "AER Frame Gen: Waiting";
+    }
     const bool active = r.telemetry.updated_ms && GetTickCount64() - r.telemetry.updated_ms < 2000 && r.telemetry.generating;
     if (active && (r.generation_mode == 0 || r.generation_mode == 3) && r.motion_source == 1 &&
         r.generation_state != GenerationState::ready) return "Fallback";
@@ -1568,6 +1575,9 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
     return r.ready ? "Real frames only" : "Waiting";
 }
 bool interface_generation_active(const Snapshot& s) noexcept {
+    if(s.desired.enabled && s.desired.ofr_enabled)
+        return interface_aer_active(s,GetTickCount64()) && !s.runtime.provider_error &&
+            !(s.desired.frame_generation==4 && s.runtime.rife_error);
     if(s.connected && s.desired.enabled && s.desired.frame_generation==4 && s.runtime.rife_optimizing) {
         const auto& r=s.runtime;const auto now=GetTickCount64();
         return !r.pending && r.applied_revision==s.revision && r.generation_state!=GenerationState::paused &&
@@ -1580,7 +1590,7 @@ bool interface_generation_active(const Snapshot& s) noexcept {
 bool interface_afw_only_active(const Snapshot& s,std::uint64_t now) noexcept {
     const auto& r=s.runtime;
     return s.connected && r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000 &&
-        s.desired.afw_mode!=0 && r.afw_running &&
+        !(s.desired.ofr_enabled && s.desired.enabled) && s.desired.afw_mode!=0 && r.afw_running &&
         (!s.desired.enabled || r.pacing_mode==kAfwOnlyPacingMode) && !r.pending && r.applied_revision==s.revision;
 }
 std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) noexcept {
@@ -1592,7 +1602,7 @@ std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) no
 }
 std::string_view interface_reconstruction_text(const Snapshot& s,std::uint64_t now_ms) noexcept {
     const auto& r=s.runtime;
-
+    if(s.desired.ofr_enabled && s.desired.enabled)return "OSR/AFW off, using AER Frame Gen";
     if(!s.connected || s.desired.afw_mode==0)return "OSR: Off";
     const bool osr=normalize_osr_reconstruction(s.desired.luke_osr)==2;
     const bool active=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000 &&

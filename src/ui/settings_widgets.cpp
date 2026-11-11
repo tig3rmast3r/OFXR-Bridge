@@ -844,7 +844,7 @@ void session_swapchain_budget(Panel& p) {
 }
 
 bool framewarp(Panel& p) {
-    auto& draft=p.ui.draft;
+    auto draft=p.ui.draft;
     const auto& state=p.state;
     // Which source of eyes is attached and what reconstruction does with it,
     // as the headset meter reports them.
@@ -852,24 +852,26 @@ bool framewarp(Panel& p) {
     const auto now=GetTickCount64();
     const bool fresh=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
     const bool osr=draft.luke_osr==2;
+    const bool aer=draft.ofr_enabled && draft.enabled;
     const char* source=!state.connected ? "No active game" : r.luke_detected ? "Luke Ross detected" :
         r.uevr_osr ? "UEVR Alternating detected" : "None detected";
-    const bool active=state.connected && fresh && draft.afw_mode!=0 && r.afw_running && !r.afw_flat_scene;
-    const char* activity=draft.ofr_enabled&&draft.enabled ? "AER framegen" : draft.afw_mode==0 ? "Off" : active ? "Active" :
+    const bool active=!aer && state.connected && fresh && draft.afw_mode!=0 && r.afw_running && !r.afw_flat_scene;
+    const char* activity=aer ? "Off (AER Frame Gen)" : draft.afw_mode==0 ? "Off" : active ? "Active" :
         state.connected&&fresh&&r.afw_flat_scene ? "2D scene (no stereo source)" : reconstruction_source(r)?"Waiting":"N/A";
     const float right=right_edge();
     title(p,"Reconstruction");state_pill(p,active?Tone::ok:Tone::idle,activity,right);
     row(p,"Source",{},text_width(face_sans,p.m.body,source));
     ImGui::AlignTextToFramePadding();ImGui::TextDisabled("%s",source);
     bool changed=false;
+    if(aer)notice(p,Tone::idle,"OSR/AFW off, using AER Frame Gen. Saved reconstruction preferences resume when AER Frame Gen is off.");
+    ImGui::BeginDisabled(aer);
     int reconstruction=draft.afw_mode==0?0:osr?1:2;
     if(segmented(p,"Method","Reconstruction",reconstruction,{{"Off",false,kHelpMethod},{"OSR",false,kHelpOsr},{"AFW",false,kHelpAfw}},kHelpMethod)) {
         if(reconstruction==0)draft.afw_mode=0;
         else {draft.luke_osr=reconstruction==1?2:0;if(draft.afw_mode==0)draft.afw_mode=3;}
         changed=true;
     }
-    if(draft.ofr_enabled&&draft.enabled)notice(p,Tone::idle,"AER framegen is enabled under Frame generation. OSR/AFW preferences are retained and resume when it is off.");
-    if(draft.afw_mode!=0 && draft.luke_osr!=2 && r.uevr_osr)
+    if(!aer && draft.afw_mode!=0 && draft.luke_osr!=2 && r.uevr_osr)
         notice(p,Tone::warn,"UEVR is reconstructed by OSR only: select OSR to reconstruct its missing eye.");
     changed|=toggle_row(p,"Frame Reconstruction only","Frame Reconstruction only",draft.afw_only,kHelpOnly,false,"Restart game");
     if(state.connected && (state.runtime.pacing_mode==kAfwOnlyPacingMode)!=draft.afw_only)
@@ -930,13 +932,17 @@ bool framewarp(Panel& p) {
         }
         changed|=was_open!=draft.luke_advanced;
     }
-    if(state.connected) {
+    if(state.connected && !aer) {
         char line[96];
         std::snprintf(line,sizeof(line),"Ready frames: %llu / projections: %llu",
             static_cast<unsigned long long>(state.runtime.afw_ready_frames),
             static_cast<unsigned long long>(state.runtime.afw_projection_frames));
         reason(p,line);
     }
+    ImGui::EndDisabled();
+    // Ignore queued navigation activations as well as ordinary disabled input.
+    if(aer)return false;
+    p.ui.draft=draft;
     return changed;
 }
 
@@ -1347,7 +1353,7 @@ std::string section_summary(const Panel& p,int index,bool& live,bool& alert) {
         return text;
     }
     case 1: {
-
+        if(draft.ofr_enabled && draft.enabled)return "Off / AER Frame Gen";
         live=state.connected && draft.afw_mode!=0 && state.runtime.afw_running && !state.runtime.afw_flat_scene;
         if(draft.afw_mode==0)return "Off";
         std::string text=draft.luke_osr==2 ? "OSR" : "AFW";

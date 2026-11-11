@@ -727,6 +727,7 @@ void aer_framegen_widgets() {
     auto saved=snapshot().desired;auto settings=saved;
     settings.frame_generation=4;settings.enabled=true;settings.advanced_mode=false;
     settings.ofr_enabled=false;settings.ofr_swap=true;settings.rife_multiplier=4;
+    settings.afw_mode=3;settings.luke_osr=2;
     require(!sanitize(settings).ofr_swap,"Basic clears an Advanced-only saved Swap");
     require(request(settings),"AER UI basic setup");
     for(bool compact:{false,true}) {
@@ -744,6 +745,17 @@ void aer_framegen_widgets() {
         require(snapshot().desired.rife_multiplier==multiplier && generation_multiplier(snapshot().desired)==2,"AER disables higher multiplier buttons: before="+std::to_string(multiplier)+" after="+std::to_string(snapshot().desired.rife_multiplier)+" aer="+std::to_string(snapshot().desired.ofr_enabled)+" fg="+std::to_string(snapshot().desired.frame_generation));
         view.select_tab("Reconstruction");view.draw(true);
         require(view.rendered_text.find("OFR")==std::string::npos && view.rendered_text.find("OFR size")==std::string::npos,"Reconstruction no longer contains separate OFR method");
+        require(view.rendered_text.find("OSR/AFW off, using AER Frame Gen")!=std::string::npos,
+            "desktop and VR explain why reconstruction is disabled");
+        view.choose("Reconstruction",0,"Off","/Framewarp_");
+        view.activate("/Framewarp_","Frame Reconstruction only");view.draw();view.draw();
+        require(snapshot().desired.afw_mode==3 && snapshot().desired.luke_osr==2 &&
+            snapshot().desired.afw_only==settings.afw_only,"AER locks reconstruction controls without erasing preferences: mode="+
+            std::to_string(snapshot().desired.afw_mode)+" osr="+std::to_string(snapshot().desired.luke_osr)+
+            " only="+std::to_string(snapshot().desired.afw_only)+" expected_only="+std::to_string(settings.afw_only));
+        auto resume=snapshot().desired;resume.ofr_enabled=false;require(request(resume),"disable AER to restore reconstruction");
+        view.draw();view.choose("Reconstruction",0,"Off","/Framewarp_");
+        require(snapshot().desired.afw_mode==0,"reconstruction controls work again after AER is disabled");
         settings.advanced_mode=false;settings.ofr_enabled=false;settings.ofr_swap=false;require(request(settings),"reset AER UI pass");
     }
     require(request(saved),"restore AER UI fixture settings");
@@ -805,6 +817,7 @@ int main(int argc, char** argv) {
         else if (argc == 2 && std::strcmp(argv[1], "--desktop-header") == 0) desktop_header_is_not_a_headset_control();
         else if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--route-multiplier") == 0) route_multiplier_widgets();
+        else if (argc == 2 && std::strcmp(argv[1], "--aer-priority") == 0) aer_framegen_widgets();
         else { desktop_header_is_not_a_headset_control(); rebase_and_publish(); rife_catalog();rife_widgets();release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); aer_framegen_widgets();aer_native_guide_widgets(); }
         std::filesystem::remove(configuration_path());
         std::filesystem::remove(profile/L"dlssg-profile-selection.ini");
