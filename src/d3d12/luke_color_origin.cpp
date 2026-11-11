@@ -977,7 +977,10 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
         }
         for(unsigned i=0;i<images.size();++i) {
             const auto& image=images[i];auto& result=results[i];
-            if(result.token||result.ambiguous||!image.rgb_fallback||offsets[i]==offsets[i+1])continue;
+            // A stronger luminance fit may now recover a token even when the
+            // chromatic channels disagree. Check their full CRC identities as
+            // well, rather than letting luminance mask that conflict.
+            if(result.ambiguous||!image.rgb_fallback||offsets[i]==offsets[i+1])continue;
             const bool rgba=image.format==DXGI_FORMAT_R8G8B8A8_UNORM||image.format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB||image.format==DXGI_FORMAT_R8G8B8A8_TYPELESS;
             const bool bgra=image.format==DXGI_FORMAT_B8G8R8A8_UNORM||image.format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB||image.format==DXGI_FORMAT_B8G8R8A8_TYPELESS;
             if(!rgba&&!bgra)continue;
@@ -1022,7 +1025,7 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
                 run_last=scan_row;
                 if(best_first<0||run_last-run_first>=best_last-best_first) {best_first=run_first;best_last=run_last;}
             }
-            result.first_row=best_first;result.last_row=best_last;
+            if(best_first>=0) {result.first_row=best_first;result.last_row=best_last;}
         }
     } catch(...) {for(auto& result:results)result={0,true};}
 }

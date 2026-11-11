@@ -120,9 +120,9 @@ inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) 
         // frame, Uncharted at night). The pitch from two cells is too rough
         // for the far sync bits (a 0.3 px edge error is 7% of the span), so
         // the pitch comes from bit14's rising or bit15's falling edge near
-        // its predicted place, as before. No rigid scale grid, guessed
-        // publication or partial-prefix identity: every sync bit and the CRC
-        // still decide.
+        // its predicted place, as before. Local refinements below remain
+        // anchored to this sync fit: every sync bit and the full CRC still
+        // decide identity, never a guessed publication.
         for (std::size_t first = 0; first < edges.size(); ++first) {
             if (!edges[first].falling) continue;
             const double x0 = edges[first].x;
@@ -152,25 +152,45 @@ inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) 
                         double cell = length / (2. * anchor), origin = x0 - 2. * start * cell;
                         if (cell < .7 || cell > 4.05) continue;
                         if (!prefix_matches(origin, cell) || !fit_edges(origin, cell, 16, true, 15, first)) continue;
-                        fit_edges(origin, cell, kLukeOriginBits, false, 64, first);
-                        std::uint16_t checksum{}; std::uint32_t token{}; bool valid = true;
-                        for (unsigned bit = 0; bit < kLukeOriginBits; ++bit) {
-                            const double difference = sample(origin + (2. * bit - .5) * cell)
-                                - sample(origin + (2. * bit + .5) * cell);
-                            if (!std::isfinite(difference) || std::abs(difference) < bit_contrast) { valid = false; break; }
-                            const unsigned value = difference > 0 ? 1 : 0;
-                            if (bit < 16) {
-                                if (value != ((0xd3a5U >> (15 - bit)) & 1)) { valid = false; break; }
-                            } else if (bit < 48) token = (token << 1) | value;
-                            else checksum = static_cast<std::uint16_t>((checksum << 1) | value);
+                        // Postprocessing can blend a midpoint into the scene.
+                        // Requiring all 64 edges then leaves the short sync fit
+                        // extrapolating the wrong pitch over the payload. Keep
+                        // the original fit first; on failure try a partial fit
+                        // and bounded local phase/pitch seeds around that sync.
+                        // Every candidate still needs all sync/payload bits and
+                        // the full CRC. No publication is inferred from a miss.
+                        const double sync_origin=origin,sync_cell=cell;
+                        constexpr unsigned phase_seeds=5,pitch_seeds=9;
+                        constexpr unsigned refinements=2+phase_seeds*pitch_seeds;
+                        for(unsigned refinement=0;refinement<refinements;++refinement) {
+                            origin=sync_origin;cell=sync_cell;
+                            if(refinement>=2) {
+                                const auto seed=refinement-2;
+                                // Search at most half a cell in phase and 2% in pitch.
+                                origin+=(static_cast<int>(seed%phase_seeds)-2)*.25*sync_cell;
+                                cell*=1.+(static_cast<int>(seed/phase_seeds)-4)*.005;
+                            }
+                            fit_edges(origin,cell,kLukeOriginBits,false,refinement?48:64,first);
+                            std::uint16_t checksum{}; std::uint32_t token{}; bool valid = true;
+                            for (unsigned bit = 0; bit < kLukeOriginBits; ++bit) {
+                                const double difference = sample(origin + (2. * bit - .5) * cell)
+                                    - sample(origin + (2. * bit + .5) * cell);
+                                if (!std::isfinite(difference) || std::abs(difference) < bit_contrast) { valid = false; break; }
+                                const unsigned value = difference > 0 ? 1 : 0;
+                                if (bit < 16) {
+                                    if (value != ((0xd3a5U >> (15 - bit)) & 1)) { valid = false; break; }
+                                } else if (bit < 48) token = (token << 1) | value;
+                                else checksum = static_cast<std::uint16_t>((checksum << 1) | value);
+                            }
+                            if (!valid || !token || checksum != luke_origin_crc(token)) continue;
+                            if (result.token && result.token != token) result.ambiguous = true;
+                            result.token = token;
+                            const int left=static_cast<int>(std::floor(origin-cell));
+                            const int right=static_cast<int>(std::ceil(origin+127*cell));
+                            result.first_column=result.first_column<0?left:std::min(result.first_column,left);
+                            result.last_column=std::max(result.last_column,right);
+                            break; // Other spatial anchors still detect conflicting tokens.
                         }
-                        if (!valid || !token || checksum != luke_origin_crc(token)) continue;
-                        if (result.token && result.token != token) result.ambiguous = true;
-                        result.token = token;
-                        const int left=static_cast<int>(std::floor(origin-cell));
-                        const int right=static_cast<int>(std::ceil(origin+127*cell));
-                        result.first_column=result.first_column<0?left:std::min(result.first_column,left);
-                        result.last_column=std::max(result.last_column,right);
                     }
                 }
             }

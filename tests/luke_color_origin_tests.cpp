@@ -1,5 +1,6 @@
 
 #include "xrfg/luke_color_origin.hpp"
+#include "gta_origin_rows.hpp"
 #include "xrfg/luke_origin_inset.hpp"
 #include "xrfg/luke_afw_source.hpp"
 #include <dxgi1_6.h>
@@ -33,6 +34,23 @@ void stamp(std::vector<float>& row, double start, double scale, std::uint32_t to
         const auto a=static_cast<int>(std::floor(source));
         row[x]=static_cast<float>(original(a)+(original(a+1)-original(a))*(source-a));
     }
+}
+void gta_captured_row_tests() {
+    const auto decode=[](auto& bytes,std::uint32_t expected) {
+        std::vector<float> row;
+        for(auto value:bytes)row.push_back(value/255.F);
+        const auto result=xrfg::decode_luke_origin_row(row);
+        require(result.token==expected && !result.ambiguous,"captured GTA full-CRC token lost");
+    };
+    decode(gta_origin_rows::token_1008,1008);
+    decode(gta_origin_rows::token_4365,4365);
+    decode(gta_origin_rows::token_5413,5413);
+    decode(gta_origin_rows::token_6732,6732);
+    decode(gta_origin_rows::token_7530,7530);
+    std::vector<float> conflicting;
+    for(auto value:gta_origin_rows::token_1008)conflicting.push_back(value/255.F);
+    for(auto value:gta_origin_rows::token_6732)conflicting.push_back(value/255.F);
+    require(xrfg::decode_luke_origin_row(conflicting).ambiguous,"captured conflicting GTA identities accepted");
 }
 void codec_tests() {
     {
@@ -1075,7 +1093,8 @@ void gta_protected_gpu_test() {
     xrfg::LukeColorOriginImage chromatic_image{chromatic.data(),DXGI_FORMAT_R8G8B8A8_UNORM,800,4,3200};
     xrfg::LukeColorOriginDecode decoded{};
     xrfg::decode_luke_origin_images(std::span(&chromatic_image,1),std::span(&decoded,1));
-    require(!decoded.token&&!decoded.ambiguous,"chromatic fixture unexpectedly retained a luminance CRC");
+    require(!decoded.ambiguous && (!decoded.token || decoded.token==8118),
+        "chromatic luminance fabricated a different CRC identity");
     chromatic_image.rgb_fallback=true;
     xrfg::decode_luke_origin_images(std::span(&chromatic_image,1),std::span(&decoded,1));
     require(decoded.token==8118&&!decoded.ambiguous,"RGB recovery did not preserve exact full token/CRC");
@@ -1229,11 +1248,12 @@ int captured_decode_benchmark(char** argv) {
 }
 int main(int argc,char** argv) {
     try { if((argc==6||argc==7)&&std::string_view(argv[1])=="search-capture")return search_capture(argv,argc==6||std::string_view(argv[6])!="luma");
+        if(argc==2&&std::string_view(argv[1])=="gta-captured-rows") {gta_captured_row_tests();std::cout<<"Captured GTA rows: "<<checks<<" checks PASS\n";return 0;}
         if(argc==2&&std::string_view(argv[1])=="recovery") {recovery_tests();return 0;}
         if(argc==2 && std::string_view(argv[1])=="doom-hdr") {bright_hdr_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="rdr2-hdr") {bright_hdr_gpu_test(false,true);return 0;}
         if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="gta-protected") {gta_protected_gpu_test();return 0;}
-        if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();windowed_decode_tests();rgb_windowed_decode_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
+        if(argc==3)return captured_decode_benchmark(argv);gta_captured_row_tests();cpu_batch_tests();windowed_decode_tests();rgb_windowed_decode_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
     catch(const std::exception& e) {std::cerr<<"Compact origin FAIL: "<<e.what()<<"\n";return 1;}
 }
