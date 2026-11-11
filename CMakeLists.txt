@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.980.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.981.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -600,6 +600,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         src/vulkan/vulkan_session_bridge.cpp
         src/d3d11/d3d11_color_identity.cpp
         src/d3d12/d3d12_guide_composer.cpp
+        src/d3d12/aer_motion_interval.cpp
         src/d3d12/d3d12_rife.cpp
         src/d3d12/d3d12_history.cpp
         src/d3d12/d3d12_fsr_frame_generator.cpp
@@ -650,6 +651,13 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_UEVR_OSR_GUIDE_HEADER}"
         "${XRFG_VULKAN_D24_DECODE_HEADER}"
         "${XRFG_D3D11_DEPTH_UNPACK_HEADER}")
+    set(XRFG_AER_INTERVAL_HEADER "${XRFG_GENERATED_SHADER_DIR}/aer_motion_interval_shader.hpp")
+    add_custom_command(OUTPUT "${XRFG_AER_INTERVAL_HEADER}"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E Classify /O3 /WX /Ges
+            /Qstrip_debug /Qstrip_reflect /Fh "${XRFG_AER_INTERVAL_HEADER}" /Vn g_xrfg_aer_motion_interval_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/aer_motion_interval.hlsl"
+        DEPENDS src/d3d12/aer_motion_interval.hlsl VERBATIM)
+    target_sources(xrfg_d3d12_history PRIVATE "${XRFG_AER_INTERVAL_HEADER}")
     foreach(stage decide compose)
         set(header "${XRFG_GENERATED_SHADER_DIR}/guide_composer_${stage}_shader.hpp")
         if(stage STREQUAL "decide")
@@ -2744,6 +2752,7 @@ endif()
 
 if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
     add_test(NAME xrfg_aer_native_guide_cache COMMAND xrfg_private_runtime_layer_tests aer-native-guide-cache)
+    add_test(NAME xrfg_aer_variable_motion_interval COMMAND xrfg_private_runtime_layer_tests aer-motion-interval)
     add_test(NAME xrfg_aer_native_guide_join_gpu COMMAND xrfg_private_runtime_layer_tests aer-native-guide-join)
     set_tests_properties(xrfg_aer_native_guide_join_gpu PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
     set_tests_properties(xrfg_aer_native_guide_cache PROPERTIES TIMEOUT 15)

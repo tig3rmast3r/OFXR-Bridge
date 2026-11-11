@@ -260,6 +260,7 @@ int main(int argc,char** argv) {
     const bool aer_path=route.starts_with("aer-");if(aer_path)route.erase(0,4);
     const bool aer_swap=aer_path&&route.starts_with("swap-");if(aer_swap)route.erase(0,5);
     if(route=="native-guide-cache")return aer_native_guide_cache_test();
+    if(route=="motion-interval")return aer_motion_interval_gpu_test();
     if(route=="native-guide-join")return aer_native_guide_join_test();
     if(route=="rife-memory-recovery") {
         xrfg_fixture::ControlProfile profile;Fixture f(true);f.unblock();

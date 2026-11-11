@@ -75,6 +75,24 @@ int aer_native_guide_cache_test() {
     previous->epoch=3;previous->serial=18;
     check(!aer_native_same_eye_history(current),"missing same-eye generation cannot be bridged by a guessed older receipt");
 
+    // Captured RDR2: same-eye serial48 follows47, while the intervening
+    // stream has its own serial47. Global publications95/94/93 prove A/B/A.
+    previous->serial=47;previous->publication=93;current.serial=48;current.previous_serial=47;
+    current.publication=95;current.raw_motion_native_span=1;current.luke_interleaved_history=true;
+    middle->stream=5;middle->serial=47;middle->publication=94;middle->raw_motion_native_span_confirmed=true;
+    for(auto* f:{&current,previous.get(),middle.get()}) {
+        f->raw_motion_native_span=1;f->raw_motion_native_span_confirmed=true;
+        f->camera_frame_token_valid=f->camera_data_valid=f->camera_matrices_valid=true;
+        f->motion_width=f->motion_height=128;f->output_width=f->output_height=256;
+        f->source_clock_owner=88;f->source_clock_sequence=f->publication;
+        f->camera_frame_token=static_cast<std::uint32_t>(f->publication);
+    }
+    previous->native_production_sequence=47;middle->native_production_sequence=47;current.native_production_sequence=48;
+    current.previous_opposite_guide=middle;
+    check(aer_native_same_eye_history(current),"verified RDR2 A/B/A must retain independent SR serial counters");
+    ++middle->source_clock_owner;
+    check(!aer_native_same_eye_history(current),"interleaving cannot join another producer clock");
+
     session->nvidia_options.ofr=true;session->luke_afw_enabled=true;session->menu_enabled=true;
     session->nvidia_options.rife_model=-1;session->frame_generation_mode=xrfg::D3D12FrameGenerationMode::fsr3;
     check(aer_native_guides_requested(*session),"native AER consumer requests exact guide ingress");
@@ -102,6 +120,86 @@ public:
         if(out)*out=nullptr;return E_OUTOFMEMORY;
     }
 };
+
+int aer_motion_interval_gpu_test() {
+    Fixture f(true);f.transport->stop();f.transport.reset();
+    constexpr unsigned size=128;
+    const auto texture=[&](DXGI_FORMAT format,const std::array<float,4>& color,bool motion=false) {
+        D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=size;d.Height=size;
+        d.DepthOrArraySize=d.MipLevels=d.SampleDesc.Count=1;d.Format=format;d.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        ComPtr<ID3D12Resource> r;ok(f.device12->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&d,
+            D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&r)),"interval texture");
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=1;
+        ComPtr<ID3D12DescriptorHeap> heap;ok(f.device12->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&heap)),"interval RTV");
+        auto cpu=heap->GetCPUDescriptorHandleForHeapStart();f.device12->CreateRenderTargetView(r.Get(),nullptr,cpu);
+        f.commands([&](ID3D12GraphicsCommandList* list){
+            D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition={r.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_RENDER_TARGET};
+            list->ResourceBarrier(1,&b);list->ClearRenderTargetView(cpu,color.data(),0,nullptr);
+            b.Transition.StateBefore=D3D12_RESOURCE_STATE_RENDER_TARGET;
+            b.Transition.StateAfter=motion?D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE:D3D12_RESOURCE_STATE_COMMON;list->ResourceBarrier(1,&b);
+        });return r;
+    };
+    auto motion=texture(DXGI_FORMAT_R32G32_FLOAT,{0,0,0,0},true);
+    auto red=texture(DXGI_FORMAT_R8G8B8A8_UNORM,{1,0,0,1});
+    auto blue=texture(DXGI_FORMAT_R8G8B8A8_UNORM,{0,0,1,1});
+    auto grey=texture(DXGI_FORMAT_R8G8B8A8_UNORM,{.5F,.5F,.5F,1});
+    for(unsigned expected:{1U,2U,0U}) {
+        xrfg::AerMotionInterval classifier;
+        std::array<std::shared_ptr<xrfg::DlssMotionVectorFrame>,3> frames;
+        for(unsigned n=0;n<3;++n){auto& g=frames[n];g=std::make_shared<xrfg::DlssMotionVectorFrame>();
+            g->color_origin_token=101+n;g->motion_vectors=motion;g->motion_width=g->motion_height=size;
+            g->output_width=g->output_height=size;g->scale_x=g->scale_y=1;
+            if(n==2){g->previous_same_guide=frames[0];g->previous_opposite_guide=frames[1];}}
+        for(unsigned n=0;n<3;++n) {
+            xrfg::AerMotionInterval::Result result;ComPtr<ID3D12Fence> fence;std::uint64_t value{};
+            auto* color=n==0?red.Get():n==1?blue.Get():expected==1?blue.Get():expected==2?red.Get():grey.Get();
+            ok(classifier.observe(f.device12.Get(),f.queue.Get(),n%2,color,*frames[n],*frames[n],
+                result,fence.GetAddressOf(),&value),"actual GPU interval observation");
+            check(fence&&value&&fence->GetCompletedValue()>=value,"interval result requires exact GPU completion");
+            check(result.interval==(n<2?0:expected),"colour vote confused N1, N2 or ambiguous input");
+            if(n==2){check(result.middle_interval==0,"unclassified middle must not authorize N1 composition");
+                const auto previous=result.interval;fence.Reset();value=0;
+                ok(classifier.observe(f.device12.Get(),f.queue.Get(),0,color,*frames[n],*frames[n],
+                    result,fence.GetAddressOf(),&value),"held interval reuse");
+                check(result.interval==previous&&!fence&&!value,"held exact token must not record another classifier pass");}
+        }
+    }
+    const auto pattern=[&](int shift) {
+        auto image=texture(DXGI_FORMAT_R8G8B8A8_UNORM,{0,0,0,1});
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=1;
+        ComPtr<ID3D12DescriptorHeap> heap;ok(f.device12->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&heap)),"pattern RTV");
+        const auto handle=heap->GetCPUDescriptorHandleForHeapStart();f.device12->CreateRenderTargetView(image.Get(),nullptr,handle);
+        f.commands([&](ID3D12GraphicsCommandList* list) {
+            D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition={image.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_RENDER_TARGET};
+            list->ResourceBarrier(1,&b);
+            for(int x=-32;x<int(size);x+=4) {
+                D3D12_RECT rect{std::max(0,x+shift),0,std::min(int(size),x+shift+4),int(size)};
+                if(rect.left>=rect.right)continue;
+                const float value=float(((x+32)/4*7)%13)/12.F;
+                const float c[]{value,1-value,value*.5F,1};list->ClearRenderTargetView(handle,c,1,&rect);
+            }
+            b.Transition.StateBefore=D3D12_RESOURCE_STATE_RENDER_TARGET;b.Transition.StateAfter=D3D12_RESOURCE_STATE_COMMON;list->ResourceBarrier(1,&b);
+        });return image;
+    };
+    std::array<ComPtr<ID3D12Resource>,3> patterns{pattern(0),pattern(8),pattern(16)};
+    for(unsigned span:{1U,2U}) {
+        auto moved=texture(DXGI_FORMAT_R32G32_FLOAT,{-8.F*span,0,0,0},true);
+        xrfg::AerMotionInterval classifier;std::array<std::shared_ptr<xrfg::DlssMotionVectorFrame>,3> frames;
+        for(unsigned n=0;n<3;++n) {
+            auto& g=frames[n];g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->color_origin_token=201+n;
+            g->motion_vectors=moved;g->motion_width=g->motion_height=g->output_width=g->output_height=size;g->scale_x=g->scale_y=1;
+            if(n==2){g->previous_same_guide=frames[0];g->previous_opposite_guide=frames[1];}
+            xrfg::AerMotionInterval::Result result;ComPtr<ID3D12Fence> fence;std::uint64_t value{};
+            ok(classifier.observe(f.device12.Get(),f.queue.Get(),n%2,patterns[n].Get(),*g,*g,result,
+                fence.GetAddressOf(),&value),"translated interval colour vote");
+            if(n==2)check(result.interval==span,"moving textured scene chose the wrong native interval");
+        }
+    }
+    std::puts("AER variable motion: actual GPU N1/N2/ambiguous and translated-texture votes, exact fences and held-token reuse PASS");return 0;
+}
 
 int aer_native_guide_join_test() {
     Fixture f(true);f.transport->stop();f.transport.reset();
@@ -158,7 +256,8 @@ int aer_native_guide_join_test() {
       if(placement==2)snapshot.layers.push_back(fixed_projection);
       for(std::size_t i=0;i<snapshot.layers.size();++i)snapshot.layers[i].layer_index=i;
       for(auto& mapping:mappings)mapping.views[0].projection_index=placement==1?1:0;
-      for(unsigned span:{2U,1U}) {
+      for(unsigned test_case:{0U,1U,2U}) {
+        const bool interleaved=test_case==2;const unsigned span=test_case==0?2:1;
         xrfg::configure_dlss_motion_vector_tracking(false);xrfg::retire_disabled_dlss_motion_vector_resources();
         xrfg::configure_dlss_motion_vector_tracking(true);state->aer_native_guide_cache.reset();
         std::array<std::uint32_t,2> expected{};
@@ -167,11 +266,15 @@ int aer_native_guide_join_test() {
             ComPtr<ID3D12GraphicsCommandList> recorded;
             f.commands([&](ID3D12GraphicsCommandList* list) {
                 recorded=list;xrfg::DlssMotionVectorPublication p;
-                p.stream=92900+span;p.output=colors[eye].Get();p.motion_vectors=motion.Get();p.depth=depth.Get();
+                p.stream=interleaved?93000+eye:92900+span;p.output=colors[eye].Get();p.motion_vectors=motion.Get();p.depth=depth.Get();
                 p.producer_queue=f.queue.Get();p.producer_command_list=list;
                 p.output_width=p.motion_width=p.depth_width=width;p.output_height=p.motion_height=p.depth_height=height;
                 p.resource_state=p.depth_resource_state=D3D12_RESOURCE_STATE_COMMON;
                 p.protect_snapshot_lifetime=true;p.raw_motion_native_span=span;p.raw_motion_native_span_confirmed=true;
+                if(interleaved) {
+                    p.native_production_sequence=(n+1)/2;p.source_clock_owner=77;p.source_clock_sequence=n;
+                    p.camera_frame_token=n;p.camera_frame_token_valid=p.camera_data_valid=p.camera_matrices_valid=true;
+                }
                 auto frame=xrfg::publish_dlss_motion_vectors(p);check(frame && frame->color_origin_token,"join protected native publication");
                 expected[eye]=frame->color_origin_token;
                 ok(xrfg::mark_luke_color_origin(list,colors[eye].Get(),expected[eye],D3D12_RESOURCE_STATE_COMMON,
@@ -182,7 +285,7 @@ int aer_native_guide_join_test() {
             ok(chains[eye]->d3d12_history->capture(0,&capture),"join release-bound capture");
             ok(chains[eye]->d3d12_history->commit(capture),"join commit capture");
             chains[eye]->last_released_capture=capture;
-            if(n<4)continue;
+            if(n<(interleaved?6U:4U))continue;
             record_projection_capture_order(snapshot,mappings);f.gpu_wait();
             // Exact captured inputs and guide receipts are already complete.
             // A newer unrelated ingress wait must not block the marker reader.

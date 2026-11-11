@@ -17,6 +17,8 @@
 #include "xrfg/diagnostic_ring_sink.hpp"
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/luke_aer_guide_geometry.hpp"
+#include "xrfg/aer_motion_interval.hpp"
+#include "xrfg/luke_interleaved_history.hpp"
 #include "xrfg/luke_execution_owner.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"

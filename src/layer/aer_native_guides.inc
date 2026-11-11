@@ -20,11 +20,13 @@ struct AerNativeGuideCache {
         }
     };
     std::array<Eye,2> eyes;
+    xrfg::AerMotionInterval interval;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> read_queue;
     xrfg::LukeColorOriginReadReceipt pending;
     unsigned pending_mask{};
     bool poisoned{};
     std::uint64_t queue_retry_after{};
+    std::uint64_t next_guide_report{};
     ~AerNativeGuideCache() {
         pending={};
         xrfg::retire_luke_color_origin_reader(read_queue.Get());
@@ -50,6 +52,10 @@ bool aer_native_same_eye_history(const xrfg::DlssMotionVectorFrame& frame) noexc
     // An original N1 field must traverse the exact intervening publication.
     // Merely accepting its same-eye key would feed opposite-eye motion to FG.
     const auto& middle=frame.previous_opposite_guide;
+    if(frame.luke_interleaved_history && middle &&
+        xrfg::luke_interleaved_history_matches(xrfg::dlss_native_camera_history(frame),
+            xrfg::dlss_native_camera_history(*middle),xrfg::dlss_native_camera_history(*previous)))
+        return middle->raw_motion_native_span_confirmed && middle->raw_motion_native_span==1;
     return frame.raw_motion_native_span==1 && middle &&
         middle->stream==frame.stream && middle->epoch==frame.epoch &&
         middle->serial==previous->serial+1 && frame.serial==middle->serial+1 &&
@@ -204,8 +210,72 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
             }
             if(!item.guides && item.token && !item.epoch_rejected) {
                 auto frame=xrfg::resolve_luke_guide_token(item.token,cache.read_queue.Get(),session->d3d12_device.Get());
+                if(GetTickCount64()>=cache.next_guide_report &&
+                    (!frame || !aer_native_same_eye_history(*frame))) {
+                    cache.next_guide_report=GetTickCount64()+1000;
+                    const auto& previous=frame?frame->previous_same_guide:nullptr;
+                    const auto& middle=frame?frame->previous_opposite_guide:nullptr;
+                    auto& log=xrfg::bridge_flight_logger();
+                    // Identity receipts only: no admission, queue or wait change.
+                    const unsigned flags=(frame?1U:0U)|(previous?2U:0U)|(middle?4U:0U)|
+                        (frame&&frame->raw_motion_native_span_confirmed?8U:0U)|
+                        (frame&&frame->raw_motion_variable_interval?16U:0U)|
+                        (frame&&frame->luke_interleaved_history?32U:0U);
+                    log.event(xrfg::BridgeFlightOperation::luke_afw_stage,eye,1442,item.token,flags);
+                    if(frame) {
+                        log.event(xrfg::BridgeFlightOperation::luke_afw_stage,frame->raw_motion_native_span,1443,
+                            frame->serial,frame->previous_serial);
+                        log.event(xrfg::BridgeFlightOperation::luke_afw_stage,eye,1444,frame->stream,frame->epoch);
+                        log.event(xrfg::BridgeFlightOperation::luke_afw_stage,eye,1445,
+                            previous?previous->stream:0,previous?previous->epoch:0);
+                        log.event(xrfg::BridgeFlightOperation::luke_afw_stage,eye,1446,
+                            middle?middle->stream:0,middle?middle->epoch:0);
+                        log.event(xrfg::BridgeFlightOperation::luke_afw_stage,eye,1447,
+                            previous?previous->serial:0,middle?middle->serial:0);
+                        log.event(xrfg::BridgeFlightOperation::luke_afw_stage,eye,1448,
+                            frame->publication,previous?previous->publication:0);
+                        log.event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                            middle?middle->raw_motion_native_span:0,1449,middle?middle->publication:0,
+                            middle&&middle->raw_motion_native_span_confirmed?1:0);
+                    }
+                }
                 if(frame && frame->color_origin_token==item.token && frame->publication &&
                     frame->motion_vectors && frame->depth && aer_native_same_eye_history(*frame)) {
+                    if(frame->raw_motion_variable_interval) {
+                        const auto refuse=[&] {std::scoped_lock lock(chains[eye]->mutex);
+                            chains[eye]->last_released_motion_vectors.reset();complete=false;};
+                        const auto& mapping=*std::find_if(mappings.begin(),mappings.end(),[&](const auto& m){
+                            return m.views[0].view_index==eye;});
+                        const auto views=build_reprojection_views(snapshot,mapping);
+                        if(!views||views->size()!=1){refuse();continue;}
+                        const auto& v=views->front();const auto& f=v.fov;
+                        const auto rect=v.image_rect;
+                        const xrfg::DlssEyeView view{std::tan(f.angle_left),std::tan(f.angle_right),std::tan(f.angle_up),
+                            std::tan(f.angle_down),int(rect.offset_x),int(rect.offset_y),rect.width,rect.height};
+                        auto placed=xrfg::place_guide_in_view(*frame,view);if(!placed){refuse();continue;}
+                        xrfg::D3D12HistoryConsumerLease lease;Microsoft::WRL::ComPtr<ID3D12Resource> color;
+                        Microsoft::WRL::ComPtr<ID3D12Fence> producer,retired;std::uint64_t value{};
+                        auto hr=inputs[eye].history->acquire_consumer(inputs[eye].capture,&lease,
+                            color.GetAddressOf(),producer.GetAddressOf(),cache.read_queue.Get());
+                        if(FAILED(hr)){refuse();continue;}
+                        hr=cache.read_queue->Wait(producer.Get(),inputs[eye].capture.fence_value);
+                        xrfg::AerMotionInterval::Result interval;
+                        if(SUCCEEDED(hr))hr=cache.interval.observe(session->d3d12_device.Get(),cache.read_queue.Get(),eye,
+                            color.Get(),*frame,*placed,interval,retired.GetAddressOf(),&value);
+                        if(retired&&value) {
+                            if(FAILED(inputs[eye].history->retire_consumer(lease,retired.Get(),value)))cache.poisoned=true;
+                        }else inputs[eye].history->cancel_consumer(lease);
+                        if(cache.poisoned){clear();return E_FAIL;}
+                        const auto removed=session->d3d12_device->GetDeviceRemovedReason();
+                        if(FAILED(removed)){clear();return removed;}
+                        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                            SUCCEEDED(hr)?interval.interval:hr,1450,frame->publication,
+                            (std::uint64_t(interval.one)<<32)|interval.two);
+                        if(FAILED(hr)||!interval.interval||(interval.interval==1&&interval.middle_interval!=1)){refuse();continue;}
+                        auto classified=std::make_shared<xrfg::DlssMotionVectorFrame>(*frame);
+                        classified->raw_motion_native_span=interval.interval;
+                        classified->raw_motion_native_span_confirmed=true;frame=std::move(classified);
+                    }
                     if(frame->raw_motion_native_span==1) {
                         auto composed=std::make_shared<xrfg::DlssMotionVectorFrame>(*frame);
                         composed->bridge=frame->previous_opposite_guide;
