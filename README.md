@@ -101,9 +101,10 @@ Not working, or not feeling smoother? See [Troubleshooting](#troubleshooting).
 
 1. Extract the complete archive to a writable folder. For an Easy Anti-Cheat
    game, choose the **signed** ZIP from the release assets.
-2. Run `OFXRBridgeTray.exe` and select **Enable**.
-3. For NVIDIA users, install RIFE if you want to use it and add the Neural
-   Rendering model DLL if you want that feature, following the instructions below.
+2. If you want DLSS 5 Neural Rendering on NVIDIA, add its model DLL to the
+   `ofxr` folder as described below.
+3. Run `OFXRBridgeTray.exe` and select **Enable**. For RIFE on NVIDIA, complete
+   [RIFE installation](#rife-installation) before starting the game.
 4. Optional: select **Configure keybinds...** in the tray to change the shortcuts.
 5. Start the game. With injectors such as UEVR, leave OFXR enabled while the
    mod is injected.
@@ -137,10 +138,13 @@ For further installation and cache guidance, see the [RIFE guide](docs/RIFE.md).
 
 ### Neural Rendering installation
 
-For DLSS 5 Neural Rendering on NVIDIA, place your own **`nvngx_dlssnr.dll`**
-model in the extracted package's **`ofxr`** folder, then enable Neural Rendering
-in the settings. The model is not included in the ZIP. It is different from the
-included **`nvngx.dll_dlssnr.dll`** forwarder; keep that file in place.
+Close the game, then place your own **`nvngx_dlssnr.dll`** model in the extracted
+package's **`ofxr`** folder before selecting **Enable** in the tray. If the tray
+is already enabled, select **Disable**, then **Enable** again before launching
+the game. Turn on Neural Rendering in the settings when you want to use it.
+
+The model is not included in the ZIP. It is different from the included
+**`nvngx.dll_dlssnr.dll`** forwarder; keep that file in place.
 
 ## Usage
 
