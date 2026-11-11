@@ -138,10 +138,9 @@ For further installation and cache guidance, see the [RIFE guide](docs/RIFE.md).
 
 ### Neural Rendering installation
 
-Close the game, then place your own **`nvngx_dlssnr.dll`** model in the extracted
-package's **`ofxr`** folder before selecting **Enable** in the tray. If the tray
-is already enabled, select **Disable**, then **Enable** again before launching
-the game. Turn on Neural Rendering in the settings when you want to use it.
+Place your own **`nvngx_dlssnr.dll`** model in the extracted package's **`ofxr`**
+folder **before opening OFXR**. Turn on Neural Rendering in the settings when
+you want to use it.
 
 The model is not included in the ZIP. It is different from the included
 **`nvngx.dll_dlssnr.dll`** forwarder; keep that file in place.

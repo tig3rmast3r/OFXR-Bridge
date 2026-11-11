@@ -5,7 +5,7 @@ not require the game's DLSS motion vectors or depth. Luke Ross **OSR/AFW** and
 **Neural Rendering** retain their own requirements when used alongside RIFE.
 
 Radeon Vulkan support is still being tested. Its installation choice is disabled
-in this release. The [Radeon testing guide](RIFE_VULKAN.md) covers that backend.
+in this release.
 
 ## Install or check RIFE
 
@@ -55,7 +55,7 @@ settings map to the closest available preset.
 The generated colour output remains at the original image resolution. RIFE
 predicts displacement and blending fields at the chosen Quality; OFXR then
 uses them to sample the original full-resolution colour images. It does not
-enlarge a low-resolution generated RGB frame. Real frames remain unchanged.
+enlarge a low-resolution generated RGB frame. In ordinary frame generation, real frames remain unchanged.
 
 **2X** is the default. **3X** and **4X** are supported on the native
 D3D12 route and on compatible Luke Ross routes after OSR/AFW has produced the
