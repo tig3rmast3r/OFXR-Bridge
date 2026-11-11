@@ -109,6 +109,7 @@ struct PrivateOpenXrRuntime::Impl {
         bool adaptive_buffer{};
         bool clean_bypass{};
         bool rife_handoff{};
+        bool aer_optical_handoff{};
         std::uint64_t policy_epoch{};
         bool pair_previous{}; // submit for the previous frame's slot time (pair_next_end_with_previous)
         XrTime content_time{}; // submit for this display time (set_next_end_content_time)
@@ -129,6 +130,7 @@ struct PrivateOpenXrRuntime::Impl {
     std::atomic_bool buffered{};
     std::atomic_bool ready_clock{};
     std::atomic_bool rife_handoff{};
+    std::atomic_bool aer_optical_handoff{};
     std::atomic<std::int64_t> rife_gate_at{},rife_gate_period{};
     std::atomic_bool stable_phase{};
     std::uint64_t policy_epoch{}; // under accept_mutex
@@ -202,6 +204,7 @@ struct PrivateOpenXrRuntime::Impl {
     explicit Impl(Options input):options(std::move(input)),director_enabled(options.director_enabled),clean_bypass(options.clean_bypass),buffered(options.adaptive_buffer && options.capacity==3),stable_phase(options.capacity>=3) {
         ready_clock=options.native_frame_contract && options.native_wait_for_prepared;
         rife_handoff=options.native_frame_contract && options.native_rife_handoff;
+        aer_optical_handoff=options.native_frame_contract && options.native_director_only && options.native_aer_optical_handoff;
         requested_capacity=options.capacity;
         options.capacity=delivery_capacity(requested_capacity,options.director_enabled);stable_phase=options.capacity>=3;
     }
@@ -1184,6 +1187,14 @@ struct PrivateOpenXrRuntime::Impl {
                         if(!sleep_until(std::max(std::int64_t{},deadline-1'250'000),std::min<std::int64_t>(1'250'000,physical/8))) {
                             retire(packet);fifo->retire();break;
                         }
+                    } else if(packet->aer_optical_handoff) {
+                        // Fast optical AER prepares two alternating-eye packets
+                        // before native Wait applies backpressure. Give each
+                        // packet one physical period; rebase late input rather
+                        // than delivering its successor in a catch-up burst.
+                        deadline=std::max(clock_ns(),last_handoff+physical);
+                        if(diagnostic)options.trace(49,packet->sequence,deadline,
+                            std::max(std::int64_t{},deadline-clock_ns()));
                     }
                     // Framework bypass still needs a live native XR cycle.
                     // GPU preparation may outlive the Wait already in flight.
@@ -1268,7 +1279,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // Include the edge guard in this final spin window. A
                     // second tiny timer wait for that2us tail would reintroduce
                     // scheduler jitter instead of preserving the early wakeup.
-                    if((directed || packet->adaptive_buffer || phased) && !sleep_until(deadline+2'000,packet->adaptive_buffer?1'252'000:PrivateOutputSchedule::preparation_lead+2'000)) {
+                    if((directed || packet->adaptive_buffer || phased || packet->aer_optical_handoff) && !sleep_until(deadline+2'000,packet->adaptive_buffer?1'252'000:PrivateOutputSchedule::preparation_lead+2'000)) {
                         retire(packet);fifo->retire();break;
                     }
                     const auto at_end=clock_ns();
@@ -1478,6 +1489,9 @@ void PrivateOpenXrRuntime::set_ready_clock(bool enabled) noexcept {
 void PrivateOpenXrRuntime::set_rife_handoff(bool enabled) noexcept {
     impl_->rife_handoff=enabled && impl_->options.native_frame_contract;
 }
+void PrivateOpenXrRuntime::set_aer_optical_handoff(bool enabled) noexcept {
+    impl_->aer_optical_handoff=enabled && impl_->options.native_frame_contract && impl_->options.native_director_only;
+}
 bool PrivateOpenXrRuntime::ready_clock_enabled() const noexcept {return impl_->ready_clock.load();}
 XrResult PrivateOpenXrRuntime::set_director_enabled(bool enabled) {
     auto& s=*impl_;std::scoped_lock accept(s.accept_mutex);
@@ -1637,6 +1651,7 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
     packet->clean_bypass=s.clean_bypass.load();
     packet->director=!packet->clean_bypass && s.director_enabled.load();
     packet->rife_handoff=!packet->clean_bypass && s.rife_handoff.load();
+    packet->aer_optical_handoff=!packet->clean_bypass && s.aer_optical_handoff.load();
     packet->adaptive_buffer=!packet->clean_bypass && s.buffered.load();packet->policy_epoch=s.policy_epoch;XrResult result;
     const auto paired=s.pair_next.exchange(false);const auto content=s.next_content_time.exchange(0);
     packet->pair_previous=!packet->clean_bypass && paired;

@@ -129,6 +129,7 @@ public:
         // completed. Ordinary OFXR keeps its existing overlap/admission.
         bool native_wait_for_prepared{};
         bool native_rife_handoff{}; // learn native running-start phase; no assumed scanout offset
+        bool native_aer_optical_handoff{}; // one AER optical packet per physical period
         // Luke D11/SteamVR only. Freeze image readiness at Release, not after
         // newer game commands at End. Admission/work budget is selected separately.
         bool d11_release_readiness{};
@@ -152,6 +153,7 @@ public:
     [[nodiscard]] bool clean_bypass_enabled() const noexcept;
     void set_ready_clock(bool) noexcept;
     void set_rife_handoff(bool) noexcept; // SteamVR RIFE physical phase; no effect on other generators
+    void set_aer_optical_handoff(bool) noexcept;
     [[nodiscard]] bool ready_clock_enabled() const noexcept;
     XrResult set_buffer_capacity(std::size_t,bool stabilization_active=true,bool reset_learning=false);
     [[nodiscard]] std::size_t buffer_capacity() const noexcept;

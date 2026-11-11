@@ -93,6 +93,9 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     options.native_wait_for_prepared=original->steamvr_runtime &&
         xrfg::embedded::snapshot().desired.enabled && requested_ordered_multiframe(xrfg::embedded::snapshot().desired);
     const auto initial_presentation=xrfg::embedded::snapshot().desired;
+    options.native_aer_optical_handoff=state->luke_afw_enabled && initial_presentation.enabled &&
+        initial_presentation.ofr && !initial_presentation.hybrid &&
+        initial_presentation.frame_generation==0 && initial_presentation.rife_model<0;
     options.native_rife_handoff=xrfg::rife_native_handoff_required(original->steamvr_runtime,
         initial_presentation.enabled,initial_presentation.rife_model,initial_presentation.ofr);
     options.real={original->instance,state->handle,original->wait_frame,original->begin_frame,original->end_frame,

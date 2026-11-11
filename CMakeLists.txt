@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.975.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.976.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2696,6 +2696,8 @@ if(TARGET xrfg_private_openxr_runtime_tests)
 endif()
 
 if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_openxr_runtime_tests)
+    add_test(NAME xrfg_aer_optical_handoff_gpu COMMAND xrfg_private_openxr_runtime_tests aer-optical-handoff)
+    set_tests_properties(xrfg_aer_optical_handoff_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
     add_test(NAME xrfg_aer_held_virtual_gpu COMMAND xrfg_private_openxr_runtime_tests held-aer)
     set_tests_properties(xrfg_aer_held_virtual_gpu PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
 endif()

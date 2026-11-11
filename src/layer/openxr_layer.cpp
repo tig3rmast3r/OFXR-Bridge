@@ -17109,6 +17109,10 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         state->private_runtime->set_ready_clock(state->menu_enabled && ordered_multiframe(*state));
         state->private_runtime->set_rife_handoff(xrfg::rife_native_handoff_required(
             state->dispatch->steamvr_runtime,state->menu_enabled,state->nvidia_options.rife_model,state->nvidia_options.ofr));
+        state->private_runtime->set_aer_optical_handoff(state->luke_afw_enabled && state->menu_enabled &&
+            state->nvidia_options.ofr && !state->hybrid_requested &&
+            state->frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr &&
+            state->nvidia_options.rife_model<0);
         const auto buffer=state->private_runtime->set_buffer_capacity(control.desired.increase_buffer?3:2,state->menu_enabled,true);
         if(XR_FAILED(buffer)) {result=E_FAIL;state->menu_enabled=false;}
         const auto policy=state->private_runtime->set_director_enabled(
