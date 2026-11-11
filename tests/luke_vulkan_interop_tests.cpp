@@ -15,6 +15,7 @@
 #include "xrfg/native_ingress/contracts/rc_Shader_Vk.h"
 #include "xrfg/native_ingress/contracts/VulkanCopyFormat.h"
 #include "xrfg/luke_color_origin.hpp"
+#include "xrfg/luke_origin_demand.hpp"
 #include <array>
 #include <iostream>
 #include <stdexcept>
@@ -25,6 +26,16 @@ void check(HRESULT value) { if (FAILED(value)) throw std::runtime_error("D3D12 H
 void vkcheck(VkResult value) { if (value != VK_SUCCESS) throw std::runtime_error("Vulkan result " + std::to_string(value)); }
 
 void submit_contracts() {
+    for(int osr:{0,1,2,3})for(bool enabled:{false,true})for(bool aer:{false,true}) {
+        for(int mode:{0,1,2})for(bool hybrid:{false,true}) {
+            const bool active_aer=enabled&&aer;
+            const bool expected=active_aer?(mode!=0||hybrid):osr!=0;
+            expect(xrfg::luke_origin_marker_requested(enabled,aer,osr,mode,hybrid,-1)==expected,
+                "Vulkan marker demand must follow the active consumer independently of saved OSR");
+            expect(xrfg::luke_origin_marker_requested(enabled,aer,osr,mode,hybrid,2)==(!active_aer&&osr!=0),
+                "RIFE cannot request native guides; global-off must retain OSR marker demand");
+        }
+    }
     struct MotionSource {
         NVSDK_NGX_Resource_VK* resource{};
         NVSDK_NGX_Result Get(const char*,void** value) const {
@@ -391,7 +402,12 @@ struct Gpu {
         check(d3dQueue->Wait(externalFence.Get(),captured));check(allocator->Reset());check(list->Reset(allocator.Get(),nullptr));
         xrfg::configure_luke_color_origin_extent(width,height);
         const uint32_t token=0x12340000+static_cast<uint32_t>(generation);
-        check(xrfg::mark_luke_color_origin(list.Get(),color.Get(),token,D3D12_RESOURCE_STATE_COMMON,d3d.Get(),{0,0,width,height}));
+        // OSR is off for this real GPU round trip. Alternate Hybrid, FSR and
+        // DLSS-G consumers; each still needs a CRC on the exact output image.
+        const int mode=static_cast<int>(generation%3);
+        const bool marker=xrfg::luke_origin_marker_requested(true,true,0,mode,mode==0,-1);
+        expect(marker,"AER consumer lost marker demand with OSR off");
+        if(marker)check(xrfg::mark_luke_color_origin(list.Get(),color.Get(),token,D3D12_RESOURCE_STATE_COMMON,d3d.Get(),{0,0,width,height}));
         check(list->Close());ID3D12CommandList* lists[]{list.Get()};d3dQueue->ExecuteCommandLists(1,lists);check(d3dQueue->Signal(externalFence.Get(),ready));
         const vulkan_interop::Handoff h{commands[0],commands[1],commands[2],texture,copied,copied,captured,ready,copyDone,completed};
         if(submit2) {

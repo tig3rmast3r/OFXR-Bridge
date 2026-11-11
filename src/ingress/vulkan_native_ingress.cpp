@@ -5,6 +5,7 @@
 #include "xrfg/neural_rendering.hpp"
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/luke_color_origin.hpp"
+#include "xrfg/luke_origin_demand.hpp"
 #include "xrfg/luke_vulkan_scope.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/ngx_feature_metadata.hpp"
@@ -1417,8 +1418,12 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         // does not wait for D3D12. Guides keep their own producer fence.
         LukeColorOriginPatch native_patch{};
         const auto output_description=s->surfaces[output].texture->GetDesc();
+        const auto generation=embedded::snapshot().desired;
+        const auto reconstruction=embedded::afw_snapshot().desired;
+        const bool origin_requested=luke_origin_marker_requested(generation.enabled,reconstruction.ofr,
+            reconstruction.mode,generation.frame_generation,generation.hybrid,generation.rife_model);
         const bool native_marker=original_capture&&!nr_enabled&&!depth_probe&&!native_color_probe&&
-            embedded::afw_snapshot().desired.mode!=0&&ensure_marker_upload(*d,*s)&&
+            origin_requested&&ensure_marker_upload(*d,*s)&&
             luke_color_origin_patch_layout(static_cast<UINT>(output_description.Width),output_description.Height,
                 {g.output_x,g.output_y,g.output_width,g.output_height},&native_patch);
         if(((pre_nr||original_capture)&&FAILED(begin_d12(*s,1)))||
@@ -1458,7 +1463,7 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         if(nr_enabled)neural_rendering::after_sr(identity,list,&final_parameters,d->queue.Get());
         bool marker=true;
         LukeColorOriginRect written_rectangle{};
-        if(frame&&g.protect_snapshot_lifetime&&embedded::afw_snapshot().desired.mode!=0) {
+        if(frame&&g.protect_snapshot_lifetime&&origin_requested) {
             if(original_capture)marker=PublicFeatureInvocationScope::mark_original(native_marker?nullptr:list,g.output,frame,d->owner.Get(),
                 {g.output_x,g.output_y,g.output_width,g.output_height},&written_rectangle);
             else mark_luke_color_origin(list,g.output,frame->color_origin_token,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,d->owner.Get(),
@@ -1473,7 +1478,8 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         // Keep the full incoming image/snapshots, but return only that rectangle.
         const bool marker_only=original_capture&&marker&&!nr_enabled&&written_rectangle.width&&written_rectangle.height;
         if(frame&&(frame->native_production_sequence<=8||frame->native_production_sequence%300==0))
-            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,(marker_only?1:0)|(native_marker?2:0),1191,
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                (marker_only?1:0)|(native_marker?2:0)|(origin_requested?4:0),1191,
                 marker_only?std::uint64_t(written_rectangle.width)*written_rectangle.height*pixel_bytes(s->surfaces[output].footprint.Footprint.Format):0,
                 std::uint64_t(s->surfaces[output].source.Width)*s->surfaces[output].source.Height*pixel_bytes(s->surfaces[output].footprint.Footprint.Format));
         if(!native_marker)copy_d12(list,s->surfaces[output],true,marker_only?&written_rectangle:nullptr);
