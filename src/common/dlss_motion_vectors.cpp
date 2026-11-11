@@ -6,6 +6,7 @@
 #include "xrfg/luke_motion_format.hpp"
 #include "xrfg/two_frame_capture.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
+#include "xrfg/d3d12_guide_ownership.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -2777,14 +2778,14 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
         const auto compatible = [&](const auto& frame) {
             // Only the owned snapshots enter AFW. The original SR output is
             // metadata for its color key, not a resource sampled by AFW.
-            if (!same_identity(frame->motion_snapshot_device.Get(),
-                    canonical_consumer_device)) {
+            if (!guide_resource_on_device(canonical_consumer_device,*frame,
+                    frame->motion_vectors.Get(),true)) {
                 report_luke_token_refusal(frame==current?9:10,color_origin_token,state,owner,owner_stream,
                     current.get(),previous.get(),consumer_queue,canonical_consumer_device,S_OK,frame->publication);
                 return false;
             }
-            if (frame->depth && !same_identity(frame->depth_snapshot_device.Get(),
-                    canonical_consumer_device)) {
+            if (frame->depth && !guide_resource_on_device(canonical_consumer_device,*frame,
+                    frame->depth.Get(),true)) {
                 report_luke_token_refusal(11,color_origin_token,state,owner,owner_stream,current.get(),previous.get(),
                     consumer_queue,canonical_consumer_device,S_OK,frame->publication);
                 return false;
@@ -2796,7 +2797,7 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
                     consumer_queue,canonical_consumer_device,S_OK,frame->publication);
                 return false;
             }
-            if (!same_identity(frame->producer_fence_device.Get(),
+            if (!d3d_owner::same(frame->producer_fence_device.Get(),
                     canonical_consumer_device)) {
                 report_luke_token_refusal(13,color_origin_token,state,owner,owner_stream,current.get(),previous.get(),
                     consumer_queue,canonical_consumer_device,S_OK,frame->publication);
@@ -2853,7 +2854,7 @@ bool luke_native_stream_reset(std::uint64_t stream,std::uint64_t accepted_epoch,
         if(found==state.streams.end())return false;
         const auto& s=found->second;
         return s.latest&&s.latest->camera_frame_token_valid&&s.latest->epoch>accepted_epoch&&
-            same_identity(s.latest->motion_snapshot_device.Get(),device);
+            guide_resource_on_device(device,*s.latest,s.latest->motion_vectors.Get(),true);
     }catch(...){return false;}
 }
 std::optional<LukeNativeOriginMetadata> luke_native_origin_metadata(
@@ -2864,7 +2865,8 @@ std::optional<LukeNativeOriginMetadata> luke_native_origin_metadata(
         std::optional<LukeNativeOriginMetadata> result;
         for(const auto& [id,s]:state.streams)
             for(const auto& f:s.luke_origin_history)if(f->color_origin_token==token) {
-                if(result||!f->camera_frame_token_valid||!same_identity(f->motion_snapshot_device.Get(),device))return {};
+                if(result||!f->camera_frame_token_valid||
+                    !guide_resource_on_device(device,*f,f->motion_vectors.Get(),true))return {};
                 result=LukeNativeOriginMetadata{id,f->epoch,f->publication,f->serial};
             }
         return result;

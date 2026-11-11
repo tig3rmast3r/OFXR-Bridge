@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.972.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.973.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2700,6 +2700,8 @@ if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_openxr_runtime_tests)
     set_tests_properties(xrfg_aer_held_virtual_gpu PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
 endif()
 if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_d3d12_history_tests)
+    add_test(NAME xrfg_luke_producer_factories_gpu COMMAND xrfg_d3d12_history_tests luke-producer-probe)
+    set_tests_properties(xrfg_luke_producer_factories_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
     add_executable(xrfg_luke_aer_guide_geometry_tests tests/luke_aer_guide_geometry_tests.cpp)
     target_compile_features(xrfg_luke_aer_guide_geometry_tests PRIVATE cxx_std_20)
     target_compile_definitions(xrfg_luke_aer_guide_geometry_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

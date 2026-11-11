@@ -1,5 +1,6 @@
 #include "xrfg/native_ingress.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
+#include "xrfg/luke_producer_probe.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/neural_rendering.hpp"
 #include "xrfg/two_frame_capture.hpp"
@@ -28,7 +29,7 @@ struct Hooks {
     std::uintptr_t execute_game_entry{}; // a second implementation found on the producer device
     bool execute_probe_active{};
     ULONGLONG execute_probe_retry_at{};
-    std::array<std::uintptr_t,8> probed_devices{}; // producer devices already checked for their own entry
+    std::array<ComPtr<ID3D12Device>,8> probed_devices{}; // pin observed factories, not their allocation aliases
     using Execute=void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*,UINT,ID3D12CommandList* const*);
     using CreateQueue=HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*,const D3D12_COMMAND_QUEUE_DESC*,REFIID,void**);
     using ResetList=HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,ID3D12CommandAllocator*,ID3D12PipelineState*);
@@ -218,10 +219,9 @@ void configure_queue(ID3D12CommandQueue* input) noexcept {
 void install_device(ID3D12Device* input) noexcept {
     bool probing=false,second_probe=false;
     try {
-        IUnknown* native{};ComPtr<ID3D12Device> device;
-        if(!d3d_native::get_borrowed(input,&native)||FAILED(native->QueryInterface(IID_PPV_ARGS(&device))))return;
-        auto& s=hooks();Hooks::CreateQueue create{};
-        const auto identity=reinterpret_cast<std::uintptr_t>(device.Get());
+        ComPtr<ID3D12Device> device;
+        if(FAILED(d3d_native::allocation_owner(input,device)))return;
+        auto& s=hooks();
         {
             std::scoped_lock lock(s.mutex);
             if(!s.create_queue) {
@@ -237,13 +237,13 @@ void install_device(ID3D12Device* input) noexcept {
             const bool unmatched=s.execute && luke_detected() &&
                 !has_luke_context.load(std::memory_order_acquire) &&
                 pending_luke_lists.load(std::memory_order_acquire)!=0 &&
-                std::find(s.probed_devices.begin(),s.probed_devices.end(),identity)==s.probed_devices.end();
+                std::none_of(s.probed_devices.begin(),s.probed_devices.end(),
+                    [&](const auto& known){return known.Get()==input;});
             if((!s.execute || unmatched) && !s.execute_probe_active) {
                 const auto now=GetTickCount64();
                 if(now>=s.execute_probe_retry_at) {
                     probing=s.execute_probe_active=true;second_probe=bool(s.execute);
                     s.execute_probe_retry_at=now+1000;
-                    create=s.make_queue;
                 }
             }
         }
@@ -251,16 +251,19 @@ void install_device(ID3D12Device* input) noexcept {
             // Discover the existing native implementation through a temporary
             // queue on the proven SR device, not another D3D12CreateDevice.
             // No lists are executed; the probe is not retained or published.
-            D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
-            ComPtr<ID3D12CommandQueue> probe,canonical;
-            HRESULT result=create?create(device.Get(),&desc,IID_PPV_ARGS(&probe)):
-                device->CreateCommandQueue(&desc,IID_PPV_ARGS(&probe));
-            IUnknown* borrowed{};
-            if(SUCCEEDED(result)) {
-                if(!d3d_native::get_borrowed(probe.Get(),&borrowed))result=E_NOINTERFACE;
-                else result=borrowed->QueryInterface(IID_PPV_ARGS(&canonical));
+            ComPtr<ID3D12CommandQueue> canonical;
+            HRESULT result=probe_luke_producer_queue(device.Get(),canonical);
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,result,1497,
+                reinterpret_cast<std::uintptr_t>(input),reinterpret_cast<std::uintptr_t>(device.Get()));
+            ComPtr<ID3D12CommandQueue> observed;
+            const bool observed_factory=input!=device.Get();
+            HRESULT observed_result=S_FALSE;
+            if(observed_factory) {
+                observed_result=probe_luke_producer_queue(input,observed,LukeProducerQueueFactory::observed);
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,observed_result,1503,
+                    reinterpret_cast<std::uintptr_t>(input),reinterpret_cast<std::uintptr_t>(observed.Get()));
             }
-            std::uintptr_t hooked{},probed{};
+            std::uintptr_t hooked{},probed{},observed_entry{};
             {
                 std::scoped_lock lock(s.mutex);
                 if(SUCCEEDED(result)) {
@@ -268,11 +271,16 @@ void install_device(ID3D12Device* input) noexcept {
                     if(second_probe)result=install_game_execute_hook(s,canonical.Get());
                     else if(!install_execute_hook(s,canonical.Get()))result=E_FAIL;
                 }
-                if(second_probe && result!=E_FAIL) {
-                    // Checked once per producer device, whatever the outcome.
-                    auto slot=std::find(s.probed_devices.begin(),s.probed_devices.end(),std::uintptr_t{});
+                if(SUCCEEDED(result) && observed) {
+                    observed_entry=reinterpret_cast<std::uintptr_t>((*reinterpret_cast<void***>(observed.Get()))[10]);
+                    observed_result=install_game_execute_hook(s,observed.Get());
+                }
+                if(second_probe && SUCCEEDED(result) && SUCCEEDED(observed_result)) {
+                    // Cache a completed check, not a transient probe failure.
+                    auto slot=std::find_if(s.probed_devices.begin(),s.probed_devices.end(),
+                        [](const auto& known){return !known;});
                     if(slot==s.probed_devices.end())slot=s.probed_devices.begin();
-                    *slot=identity;
+                    *slot=input;
                 }
                 hooked=s.execute_entry;
                 s.execute_probe_active=false;probing=false;
@@ -283,6 +291,8 @@ void install_device(ID3D12Device* input) noexcept {
             if(second_probe)bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,result,963,hooked,probed);
             else bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,result,961,
                 reinterpret_cast<std::uintptr_t>(device.Get()),0);
+            if(observed_factory)bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                observed_result,1504,hooked,observed_entry);
         }
         if(scene_camera_wanted())luke_scene_camera::install(device.Get());
     }catch(...) {

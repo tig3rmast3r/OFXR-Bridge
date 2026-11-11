@@ -1,5 +1,7 @@
 #include "xrfg/fsr_guide_geometry.hpp"
 #include "xrfg/luke_aer_guide_geometry.hpp"
+#include "xrfg/luke_execution_owner.hpp"
+#include "xrfg/luke_producer_probe.hpp"
 #include "xrfg/d3d12_history.hpp"
 #include "xrfg/d3d12_rife.hpp"
 #include <thread>
@@ -1801,8 +1803,14 @@ void test_public_video_allocation_owner(D3D12WarpFixture& fixture) {
     ComPtr<ID3D12Device> rejected=hardware;
     require(xrfg::d3d_native::allocation_owner(wrong_backing.Get(),rejected)==E_INVALIDARG&&!rejected,
         "public video interface on a different backing device was accepted");
+    ComPtr<ID3D12CommandQueue> refused_probe;
+    require(xrfg::probe_luke_producer_queue(wrong_backing.Get(),refused_probe)==E_INVALIDARG && !refused_probe,
+        "producer probe accepted a public video owner on another backing device");
+    require(xrfg::probe_luke_producer_queue(wrong_backing.Get(),refused_probe,
+        xrfg::LukeProducerQueueFactory::observed)==E_INVALIDARG && !refused_probe,
+        "observed factory probe admitted another allocation backing");
     ComPtr<ID3D12CommandQueue> execution;
-    require_hresult(owner->CreateCommandQueue(&desc,IID_PPV_ARGS(&execution)),"unproxied private execution");
+    require_hresult(xrfg::probe_luke_producer_queue(proxy.Get(),execution),"unproxied native producer probe");
     require(proxy->intercepted_queues==1,"private creation still entered wrapper");
     ComPtr<ID3D12Device> execution_owner;
     require_hresult(execution->GetDevice(IID_PPV_ARGS(&execution_owner)),"private queue device");
@@ -2107,9 +2115,20 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
             alias_join->motion_snapshot_device.Get() == fixture.device() &&
             alias_join->depth_snapshot_device.Get() == fixture.device(),
             "reported proxy identity rejected the explicit native snapshot owner");
-        require(!xrfg::resolve_luke_guide_token(exact_frame->color_origin_token, queue_alias.Get(), device_alias.Get()) &&
+        const auto backed_join=xrfg::resolve_luke_guide_token(exact_frame->color_origin_token,queue_alias.Get(),device_alias.Get());
+        require(backed_join && backed_join->publication==exact_frame->publication &&
+            backed_join->previous_opposite_guide->publication==alias_join->previous_opposite_guide->publication,
+            "verified consumer alias rejected the exact current/previous token snapshots");
+        class UnprovedOriginOwner final:public ReportedDeviceAlias {
+        public:
+            using ReportedDeviceAlias::ReportedDeviceAlias;
+            HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID,UINT*,void*) override {return DXGI_ERROR_NOT_FOUND;}
+            HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID,UINT,const void*) override {return S_OK;}
+        };
+        ComPtr<UnprovedOriginOwner> unproved;unproved.Attach(new UnprovedOriginOwner(fixture.device()));
+        require(!xrfg::resolve_luke_guide_token(exact_frame->color_origin_token,queue_alias.Get(),unproved.Get()) &&
             !xrfg::resolve_luke_guide_token(exact_frame->color_origin_token, queue_alias.Get(), nullptr),
-            "different SAME-adapter device identity or missing explicit owner admitted snapshots");
+            "unproved SAME-adapter device or missing explicit owner admitted snapshots");
         require(queue_alias->device_queries() == queries_before,
             "exact-origin resolver queried the unreliable reported queue device");
         require_readback_matches(fixture, alias_join->motion_vectors.Get(), make_pattern(156),
@@ -6263,6 +6282,100 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 #include "rife_switch_lifecycle.inc"
 
 int main(int argc, char** argv) {
+
+    if(argc>1 && std::string_view(argv[1])=="luke-token-owner") {
+        try {
+            D3D12WarpFixture fixture;
+            test_protected_guide_snapshots(fixture);
+            fixture.require_no_debug_errors();
+            return 0;
+        } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
+    }
+    if(argc>1 && std::string_view(argv[1])=="luke-producer-probe") {
+        try {
+            D3D12WarpFixture fixture;
+            class ProducerFactory final:public ReportedDeviceAlias {
+                ID3D12Device* real_;
+            public:
+                unsigned calls{};
+                explicit ProducerFactory(ID3D12Device* device,bool video=false):ReportedDeviceAlias(device,false,video),real_(device){}
+                HRESULT STDMETHODCALLTYPE CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC* desc,REFIID iid,void** out) override {
+                    ++calls;
+                    ComPtr<ID3D12CommandQueue> real;
+                    const auto hr=real_->CreateCommandQueue(desc,IID_PPV_ARGS(&real));
+                    if(FAILED(hr))return hr;
+                    ComPtr<ID3D12CommandQueue> wrapped;
+                    wrapped.Attach(new QueueWithReportedDeviceAlias(real.Get(),this));
+                    return wrapped->QueryInterface(iid,out);
+                }
+            };
+            ComPtr<ProducerFactory> producer;producer.Attach(new ProducerFactory(fixture.device()));
+            D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+            ComPtr<ID3D12CommandQueue> bridge;
+            require_hresult(fixture.device()->CreateCommandQueue(&desc,IID_PPV_ARGS(&bridge)),"old bridge factory probe");
+            const auto entry=[](ID3D12CommandQueue* queue){return (*reinterpret_cast<void***>(queue))[10];};
+            require(producer->calls==0,"cached bridge factory must reproduce bypass of producer dispatch");
+            ComPtr<ID3D12CommandQueue> probe;
+            require_hresult(xrfg::probe_luke_producer_queue(producer.Get(),probe),"producer factory discovery");
+            require(producer->calls==1 && entry(probe.Get())!=entry(bridge.Get()),
+                "probe reused the bridge Execute implementation instead of the producer factory");
+            ComPtr<ID3D12Device> hardware;
+            require_hresult(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&hardware)),"wrapped producer hardware");
+            ComPtr<ProducerFactory> wrapped;wrapped.Attach(new ProducerFactory(hardware.Get(),true));
+            ComPtr<ID3D12CommandQueue> allocation_probe,observed_probe,hardware_queue;
+            require_hresult(hardware->CreateCommandQueue(&desc,IID_PPV_ARGS(&hardware_queue)),"allocation factory control");
+            require_hresult(xrfg::probe_luke_producer_queue(wrapped.Get(),allocation_probe),"canonical allocation probe");
+            require(wrapped->calls==0 && entry(allocation_probe.Get())==entry(hardware_queue.Get()),
+                "allocation-only discovery must reproduce the missing wrapped producer entry");
+            require_hresult(xrfg::probe_luke_producer_queue(wrapped.Get(),observed_probe,
+                xrfg::LukeProducerQueueFactory::observed),"observed wrapper factory probe");
+            require(wrapped->calls==1 && entry(observed_probe.Get())!=entry(allocation_probe.Get()),
+                "wrapped producer Execute entry was lost behind its public video allocation owner");
+            ComPtr<ID3D12Fence> observed_fence;
+            require_hresult(hardware->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&observed_fence)),"observed probe real fence");
+            require_hresult(observed_probe->Signal(observed_fence.Get(),1),"observed probe same backing GPU signal");
+            HANDLE ready=CreateEventW(nullptr,FALSE,FALSE,nullptr);require(ready!=nullptr,"observed probe event");
+            const auto signaled=observed_fence->SetEventOnCompletion(1,ready);
+            const auto waited=SUCCEEDED(signaled)?WaitForSingleObject(ready,5000):WAIT_FAILED;CloseHandle(ready);
+            require(waited==WAIT_OBJECT_0,"observed producer probe did not retain real backing");
+            ComPtr<ID3D12CommandQueue> absent;
+            require(FAILED(xrfg::probe_luke_producer_queue(nullptr,absent))&&!absent,"missing producer device admitted");
+            test_public_video_allocation_owner(fixture);
+            fixture.require_no_debug_errors();
+            std::cout<<"Producer probe: allocation-only regression reproduced; both factory/Execute entries and real GPU fence, invalid-owner negatives PASS\n";
+            return 0;
+        } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
+    }
+    if(argc>1 && std::string_view(argv[1])=="luke-owner-rebuild") {
+        try {
+            D3D12WarpFixture fixture(true);
+            ComPtr<ReportedDeviceAlias> native;native.Attach(new ReportedDeviceAlias(fixture.device()));
+            auto source=create_source_texture(fixture);
+            const std::array<ID3D12Resource*,1> images{source.Get()};
+            xrfg::D3D12SwapchainHistory rejected;
+            xrfg::D3D12HistoryInitializationStage stage{};
+            require(rejected.initialize(native.Get(),fixture.queue(),images,D3D12_RESOURCE_STATE_RENDER_TARGET,&stage)==E_INVALIDARG &&
+                stage==xrfg::D3D12HistoryInitializationStage::arguments,"old split identity must reproduce the history refusal");
+            for(unsigned round=0;round<3;++round) {
+                ComPtr<ID3D12Device> owner;
+                require_hresult(xrfg::luke_execution_owner(native.Get(),fixture.queue(),&owner),"select verified capture owner");
+                require(owner.Get()==fixture.device(),"native discovery must retain the queue's allocation identity");
+                xrfg::D3D12SwapchainHistory history;
+                require_hresult(history.initialize(owner.Get(),fixture.queue(),images,D3D12_RESOURCE_STATE_RENDER_TARGET),"rebuild Luke history");
+                xrfg::D3D12HistoryCaptureTicket capture{};
+                require_hresult(history.capture(0,&capture),"capture after Luke history rebuild");
+                require(capture.serial!=0,"re-enabled history must produce a capture ticket");
+                require_hresult(history.wait_for_idle(),"retire rebuilt history");
+            }
+            ComPtr<UnprovedSameAdapterAlias> unrelated;unrelated.Attach(new UnprovedSameAdapterAlias(fixture.device()));
+            ComPtr<ID3D12Device> refused;
+            require(FAILED(xrfg::luke_execution_owner(unrelated.Get(),fixture.queue(),&refused)) && !refused,
+                "same adapter without backing proof must remain refused");
+            test_guide_device_ownership(fixture);
+            std::cout<<"Luke execution owner: old refusal reproduced; three capture rebuilds and ownership negatives PASS\n";
+            return 0;
+        } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
+    }
     if(argc>1 && (std::string_view(argv[1])=="aer-guide-alias" || std::string_view(argv[1])=="aer-guide-opaque")) {
         try {
             D3D12WarpFixture fixture(true);

@@ -17,6 +17,7 @@
 #include "xrfg/diagnostic_ring_sink.hpp"
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/luke_aer_guide_geometry.hpp"
+#include "xrfg/luke_execution_owner.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/fsr_guide_geometry.hpp"
@@ -4111,7 +4112,7 @@ create_d3d11_frame_generation_swapchains(
             xrfg::bridge_flight_logger().gpu_instrumentation_enabled(),
             xrfg::luke_primary_generation_mode(session->luke_afw_enabled,
                 synthesis_options.ofr,session->frame_generation_mode),
-            (session->graphics_binding_capabilities & 8ULL) != 0, session->luke_afw_enabled);
+            session->luke_afw_enabled, session->luke_afw_enabled);
         xrfg::bridge_flight_logger().end(
             initialize_token,
             xrfg::BridgeFlightOperation::synthesis_initialize,
@@ -4277,9 +4278,17 @@ void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) 
             if(FAILED(queue_result)){session->luke_context_failed_queue=queue.Get();return;}
         }
         std::shared_ptr<xrfg::LukeAfwSynthesizer> afw;
+        Microsoft::WRL::ComPtr<ID3D12Device> execution_owner;
+        const auto owner_result=xrfg::luke_execution_owner(device.Get(),execution_queue.Get(),
+            execution_owner.GetAddressOf());
+        if(FAILED(owner_result)) {
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                owner_result,960,handle_value(device.Get()),handle_value(execution_queue.Get()));
+            session->luke_context_failed_queue=queue.Get();return;
+        }
         if(afw_needed) {
             afw=std::make_shared<xrfg::LukeAfwSynthesizer>();
-            const auto result=afw->initialize(device.Get(),execution_queue.Get(),luke_bootstrap_provider());
+            const auto result=afw->initialize(execution_owner.Get(),execution_queue.Get(),luke_bootstrap_provider());
             xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::synthesis_initialize,
                 result,0xAF023245ULL,session->luke_afw_odd_serial_is_left?1ULL:0ULL,1);
             if(FAILED(result)){session->luke_context_failed_queue=queue.Get();return;}
@@ -4292,16 +4301,15 @@ void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) 
         if(!active_history && !native_ready) {
             session->d3d12_queue=std::move(execution_queue);
         }
-        // Active color history may retain a REAL VR device alias. The backing
-        // challenge above proves the same owner; keep its queue/resources but
-        // use the confirmed native allocation identity for strict AFW guides.
+        // Keep allocation identity paired with the retained execution queue.
+        // Native guide ownership is admitted through verified backing receipts.
         if (!active_history && !native_ready && session->luke_synthesis_queue) {
             // The old device may be a verified REAL VR alias of the native
             // allocation device, while its queue still reports that alias.
             // Synthesis requires exact COM ownership, not shared backing.
             Microsoft::WRL::ComPtr<IUnknown> target_identity, queue_identity;
             Microsoft::WRL::ComPtr<ID3D12Device> queue_owner;
-            const bool compatible = SUCCEEDED(device.As(&target_identity)) &&
+            const bool compatible = SUCCEEDED(execution_owner.As(&target_identity)) &&
                 SUCCEEDED(session->luke_synthesis_queue->GetDevice(IID_PPV_ARGS(&queue_owner))) &&
                 SUCCEEDED(queue_owner.As(&queue_identity)) && target_identity == queue_identity;
             if (!compatible) {
@@ -4310,7 +4318,7 @@ void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) 
                 session->luke_synthesis_queue.Reset();
             }
         }
-        session->d3d12_device=std::move(device);
+        session->d3d12_device=std::move(execution_owner);
         if(auto monitor=xrfg::neural_rendering::observe_device_removal(session->d3d12_device.Get()))
             session->gpu_crash_monitors.push_back(std::move(monitor));
         session->luke_afw=std::move(afw);
@@ -16892,7 +16900,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             chain->generation_refusal_detail = 0;
         }
         if (changed && valid_projection_source && chain->generation_declined &&
-            chain->generation_refusal == SwapchainEligibilityReason::synthesis_initialize_failed &&
+            (chain->generation_refusal == SwapchainEligibilityReason::synthesis_initialize_failed ||
+             chain->generation_refusal == SwapchainEligibilityReason::history_initialize_failed) &&
             !state->generation_budget_exhausted.load(std::memory_order_acquire)) {
             // This refusal belongs to the previous provider attempt, not to
             // the application's images. Retry once for this control revision,
