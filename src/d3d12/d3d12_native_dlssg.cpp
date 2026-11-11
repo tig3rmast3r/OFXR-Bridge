@@ -498,7 +498,11 @@ UINT recover_direct(ID3D12Device* device, NVSDK_NGX_Parameter* private_caps) {
                 // Require the snippet's actual device answer. Never manufacture
                 // availability or assume RTX 40/50 capabilities from the model name.
                 if (NVSDK_NGX_SUCCEED(result) && NVSDK_NGX_SUCCEED(private_caps->Get(
-                        NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax, &frames)) && frames > 0 && frames <= 3) {
+                        NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax, &frames)) && frames > 0) {
+                    // Newer providers can advertise more outputs than our
+                    // descriptor/transport arrays support. That is additional
+                    // capability, not absence of frame generation.
+                    frames=std::min(frames,kMaxOutputs);
                     bridge_flight_logger().event(BridgeFlightOperation::native_dlssg_provider,
                         static_cast<unsigned>(result),7,frames,1);
                 } else frames = 0;
@@ -544,7 +548,7 @@ std::uint32_t query_generated_frames(ID3D12Device* device) {
     const auto recovered = !available && static_cast<NVSDK_NGX_Result>(init_result) == NVSDK_NGX_Result_FAIL_FeatureNotFound
         && !needs_driver ? recover_direct(device, caps) : 0U;
     NVSDK_NGX_D3D12_DestroyParameters(caps);
-    return available ? std::max(frames, 1U) : recovered;
+    return available ? std::min(std::max(frames,1U),kMaxOutputs) : recovered;
 }
 bool same_adapter(const LUID &x, const LUID &y) {
     return x.LowPart == y.LowPart && x.HighPart == y.HighPart;

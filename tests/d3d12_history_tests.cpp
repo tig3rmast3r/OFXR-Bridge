@@ -6428,7 +6428,9 @@ int main(int argc, char** argv) {
             if(!native_test_has_supported_nvidia_adapter())return 77;
             D3D12WarpFixture fixture(true);
             require(xrfg::native_dlssg_lifetime_snapshot().shared_initializations==0,"isolated test must start before any shared NGX init");
-            require(xrfg::native_dlssg_max_generated_frames(fixture.device(),true)>0,"private provider capability probe without shared NGX init");
+            const auto frames=xrfg::native_dlssg_max_generated_frames(fixture.device(),true);
+            require(frames>0 && frames<=xrfg::D3D12NativeFrameResult::kMaxOutputs,
+                "private provider capability must retain supported outputs without exceeding transport capacity");
             for(bool n1:{false,true})test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::native_dlss,n1);
             require(xrfg::native_dlssg_lifetime_snapshot().shared_initializations==0,"Luke capability/create/evaluate entered shared NGX initialization");
             fixture.require_no_debug_errors();
