@@ -30,7 +30,7 @@ public:
     [[nodiscard]] std::shared_ptr<const DlssMotionVectorSet> compose(
         ID3D12GraphicsCommandList* list, UINT slot,
         const std::shared_ptr<const DlssMotionVectorSet>& set,
-        std::span<const D3D12ReprojectionView> views) noexcept;
+        std::span<const D3D12ReprojectionView> views,bool reject_occlusions=false) noexcept;
 
     // Pairs composed, for diagnostics: the vectors were given a bridge and the
     // passes were recorded (the GPU still decides whether to follow it).

@@ -19,8 +19,8 @@ in this release.
 5. Choose **RIFE > Check RIFE...** again. Confirm that it reports a ready runtime
    and identifies the GPU and available backend. If it reports a problem, use the
    displayed log path and the [troubleshooting guide](TROUBLESHOOTING.md).
-6. In Frame generation settings, select **RIFE**. Start with model **4.4**,
-   **Medium** Quality and **2X**.
+6. In Frame generation settings, select **RIFE**. Start with **Medium** Quality
+   and **2X**.
 
 The runtime is installed in **`%LOCALAPPDATA%\ofxr-bridge\RIFE\runtime`**.
 NVIDIA RIFE uses about **8 GB** installed and needs at least **14 GB free** during
@@ -30,21 +30,18 @@ an Internet connection.
 Use **RIFE > Reinstall RIFE...** if you need to reinstall the runtime. To prepare
 TensorRT engines ahead of play, first open each game once so OFXR records its
 resolution, then close the games and select **RIFE > Pre-compile TensorRT for
-found games...**. See the [pre-compilation guide](V863_RIFE_PRECOMPILE.md).
+found games...**.
 
 **Check RIFE** verifies the installation and runs a small RIFE 4.4 inference.
 If the GPU is busy, unsupported or out of memory, or the check times out, close
 other GPU applications and retry as appropriate. Use the reported log when
 requesting help; a busy check does not necessarily mean reinstallation is needed.
 
-## Models, Quality and multipliers
+## Quality and multipliers
 
-Normal mode always uses **4.4**, with optional TensorRT acceleration, and has
-no model dropdown. **Advanced mode** exposes the installed compatible versions
-found in the runtime's `models` folder: **4.6**, **4.4** and **4.3**, when their
-weights are present. The list refreshes when opening the menu. Unknown or retired
-Lite networks are not offered. Turning Advanced mode off immediately returns
-to **4.4**, including for profiles which previously saved another model.
+RIFE uses **4.4**. TensorRT optimization runs automatically when available.
+Start with **Medium** Quality and **2X**, then compare the Quality presets and
+supported multipliers in your game.
 
 **Quality** offers **Potato**, **Low**, **Medium**, **High**, **Very high**,
 **Ultra** and **Godlike**, with **Medium** as the default. It controls the resolution used to
@@ -78,8 +75,8 @@ Engines are reused from
 **`%LOCALAPPDATA%\ofxr-bridge\RIFECache`**. Changing Quality, image dimensions or
 model code can require a new engine or CUDA graph warm-up. First use can take
 longer than later launches. TensorRT unavailability, a failed compilation or
-an invalid engine cache leaves the PyTorch fallback available. Other RIFE
-models use PyTorch. A valid AppData runtime can use the PyTorch fallback.
+an invalid engine cache leaves the PyTorch fallback available. A valid AppData runtime can use the
+PyTorch fallback.
 
 The two eyes share model weights while retaining separate image histories.
 Reusing a runtime or cache does not mix the eyes or game sessions. Cache files

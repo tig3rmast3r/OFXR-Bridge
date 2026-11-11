@@ -4619,6 +4619,8 @@ void test_guide_composer(D3D12WarpFixture& fixture) {
     require(composer.composed() == 3, "the composer's count did not follow the bridged eyes");
 }
 
+#include "guide_composer_occlusion.inc"
+
 void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
     xrfg::configure_dlss_motion_vector_tracking(true);
     constexpr UINT width = 64;
@@ -6376,6 +6378,30 @@ int main(int argc, char** argv) {
             return 0;
         } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
     }
+    if(argc>1 && std::string_view(argv[1])=="aer-hybrid-capture") {
+        try {
+            D3D12WarpFixture fixture(true);
+            auto& capture=xrfg::manager();capture.session=std::make_shared<xrfg::Session>();capture.active_frame=1;
+            const auto session=capture.session;
+            test_aer_split_eye_guide_endpoints(fixture,xrfg::D3D12FrameGenerationMode::ofxr,false,false,true);
+            for(int eye:{0,1})for(const char* stage:{"hybrid_previous_eye","hybrid_current_eye","hybrid_generated_eye",
+                    "hybrid_same_eye_motion","hybrid_guide_depth"}) {
+                const auto found=std::find_if(session->shots.begin(),session->shots.end(),[&](const auto& shot){
+                    return shot->info.eye==eye && std::string_view(shot->info.stage)==stage;});
+                require(found!=session->shots.end(),std::string("missing actual Hybrid F8 image: ")+stage);
+                const auto& shot=**found;require(SUCCEEDED(shot.status)&&shot.fence&&shot.fence_value&&
+                    shot.fence->GetCompletedValue()>=shot.fence_value,"Hybrid readback lacks exact GPU completion");
+                if(std::string_view(stage)=="hybrid_generated_eye") {
+                    void* pixels{};D3D12_RANGE range{0,SIZE_T(shot.bytes)};
+                    require_hresult(shot.readback->Map(0,&range,&pixels),"Hybrid output readback");
+                    const auto red=static_cast<const unsigned char*>(pixels)[0];D3D12_RANGE empty{};shot.readback->Unmap(0,&empty);
+                    require(eye?red>150:red<100,"Hybrid output readback mixed the physical eyes");
+                }
+            }
+            capture.active_frame=0;capture.session.reset();fixture.require_no_debug_errors();
+            std::cout<<"Hybrid F8: both eyes, actual generated pixels, exact input guides and submission fences PASS\n";return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1 && (std::string_view(argv[1])=="aer-guide-alias" || std::string_view(argv[1])=="aer-guide-opaque")) {
         try {
             D3D12WarpFixture fixture(true);
@@ -6442,6 +6468,11 @@ int main(int argc, char** argv) {
 #endif
     if(argc>1&&std::string_view(argv[1])=="rife-switch-lifecycle") {
         try {D3D12WarpFixture fixture(true);test_rife_switch_lifecycle(fixture);fixture.require_no_debug_errors();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+    if(argc>1&&std::string_view(argv[1])=="aer-guide-occlusion") {
+        try {D3D12WarpFixture fixture(true);test_guide_composer(fixture);test_guide_composer_occlusion(fixture);
+            fixture.require_no_debug_errors();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
     }
     if(argc>1&&std::string_view(argv[1])=="aer-native-compose") {

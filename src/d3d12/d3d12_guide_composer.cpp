@@ -14,7 +14,7 @@ using Microsoft::WRL::ComPtr;
 // The guide snapshots' state, in which consumers find the composed vectors too.
 constexpr D3D12_RESOURCE_STATES kReadState =
     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-constexpr UINT kDescriptorsPerEye = 4;
+constexpr UINT kDescriptorsPerEye = 6;
 
 // guide_composer.hlsl's Params.
 struct Params {
@@ -31,8 +31,21 @@ struct Params {
     float tangents_r[4];
     float minimum_offset;
     UINT force_compose;
+    UINT depth_padding[2]{};
+    float depth_b[4]{},depth_r[4]{},planes[4]{};
+    UINT depth_flags{},reject_occlusions{},depth_slice_b{},depth_slice_r{};
 };
-static_assert(sizeof(Params) == 26 * 4);
+static_assert(sizeof(Params) == 44 * 4);
+
+DXGI_FORMAT depth_format(DXGI_FORMAT format) noexcept {
+    switch(format) {
+    case DXGI_FORMAT_R32_TYPELESS:case DXGI_FORMAT_D32_FLOAT:return DXGI_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_R16_TYPELESS:case DXGI_FORMAT_D16_UNORM:return DXGI_FORMAT_R16_UNORM;
+    case DXGI_FORMAT_R24G8_TYPELESS:case DXGI_FORMAT_D24_UNORM_S8_UINT:return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    case DXGI_FORMAT_R32_FLOAT:case DXGI_FORMAT_R16_UNORM:case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:return format;
+    default:return DXGI_FORMAT_UNKNOWN;
+    }
+}
 
 DXGI_FORMAT readable(DXGI_FORMAT format) noexcept {
     return format == DXGI_FORMAT_R16G16_TYPELESS   ? DXGI_FORMAT_R16G16_FLOAT
@@ -71,7 +84,7 @@ HRESULT D3D12GuideComposer::initialize(ID3D12Device* device) noexcept {
         if (device == nullptr) return E_INVALIDARG;
         device_ = device;
         D3D12_DESCRIPTOR_RANGE ranges[2]{};
-        ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0};
+        ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 0, 0};
         ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0, 0};
         D3D12_ROOT_PARAMETER parameters[3]{};
         for (UINT i = 0; i < 2; ++i) {
@@ -116,7 +129,7 @@ HRESULT D3D12GuideComposer::initialize(ID3D12Device* device) noexcept {
 std::shared_ptr<const DlssMotionVectorSet> D3D12GuideComposer::compose(
     ID3D12GraphicsCommandList* list, UINT slot,
     const std::shared_ptr<const DlssMotionVectorSet>& set,
-    std::span<const D3D12ReprojectionView> views) noexcept {
+    std::span<const D3D12ReprojectionView> views,bool reject_occlusions) noexcept {
     try {
         if (!set || !list || !root_ || slot >= kSlots || views.empty()) return set;
         bool any = false;
@@ -189,6 +202,22 @@ std::shared_ptr<const DlssMotionVectorSet> D3D12GuideComposer::compose(
                 view.Texture2DArray.ArraySize = frame->motion_vectors->GetDesc().DepthOrArraySize;
                 device_->CreateShaderResourceView(frame->motion_vectors.Get(), &view, next());
             }
+            const auto valid_depth=[](const DlssMotionVectorFrame& g) {
+                if(!g.depth||!g.depth_width||!g.depth_height||!std::isfinite(g.camera_near)||g.camera_near<=0)return false;
+                const auto d=g.depth->GetDesc();
+                return d.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.SampleDesc.Count==1 &&
+                    depth_format(d.Format)!=DXGI_FORMAT_UNKNOWN &&
+                    std::uint64_t(g.depth_x)+g.depth_width<=d.Width && std::uint64_t(g.depth_y)+g.depth_height<=d.Height &&
+                    (g.depth_infinite||(std::isfinite(g.camera_far)&&g.camera_far>g.camera_near));
+            };
+            const bool depth_check=reject_occlusions && valid_depth(*b) && valid_depth(r);
+            for(const auto* frame:{b.get(),&r}) {
+                D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Format=depth_check?depth_format(frame->depth->GetDesc().Format):DXGI_FORMAT_R32_FLOAT;
+                view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2DARRAY;view.Texture2DArray.MipLevels=1;
+                view.Texture2DArray.ArraySize=depth_check?frame->depth->GetDesc().DepthOrArraySize:1;
+                device_->CreateShaderResourceView(depth_check?frame->depth.Get():nullptr,&view,next());
+            }
             D3D12_UNORDERED_ACCESS_VIEW_DESC texture_view{};
             texture_view.Format = DXGI_FORMAT_R16G16_FLOAT;
             texture_view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -220,6 +249,15 @@ std::shared_ptr<const DlssMotionVectorSet> D3D12GuideComposer::compose(
             p.tangents_r[0] = -t[1]; p.tangents_r[1] = -t[0]; p.tangents_r[2] = t[2]; p.tangents_r[3] = t[3];
             p.minimum_offset = 16.0F;
             p.force_compose = b->raw_motion_native_span_confirmed && b->raw_motion_native_span==1;
+            p.reject_occlusions=depth_check;
+            if(depth_check) {
+                p.depth_b[0]=float(b->depth_x);p.depth_b[1]=float(b->depth_y);p.depth_b[2]=float(b->depth_width);p.depth_b[3]=float(b->depth_height);
+                p.depth_r[0]=float(r.depth_x);p.depth_r[1]=float(r.depth_y);p.depth_r[2]=float(r.depth_width);p.depth_r[3]=float(r.depth_height);
+                p.planes[0]=b->camera_near;p.planes[1]=b->camera_far;p.planes[2]=r.camera_near;p.planes[3]=r.camera_far;
+                p.depth_flags=(b->depth_inverted?1u:0u)|(r.depth_inverted?2u:0u)|(b->depth_infinite?4u:0u)|(r.depth_infinite?8u:0u);
+                p.depth_slice_b=b->depth->GetDesc().DepthOrArraySize==1?0:b->output_slice;
+                p.depth_slice_r=r.depth->GetDesc().DepthOrArraySize==1?0:r.output_slice;
+            }
             if (p.scale_b[0] == 0.0F || p.scale_b[1] == 0.0F) continue;
 
             auto gpu = heaps_[slot]->GetGPUDescriptorHandleForHeapStart();
@@ -229,7 +267,7 @@ std::shared_ptr<const DlssMotionVectorSet> D3D12GuideComposer::compose(
             list->ResourceBarrier(1, &barrier);
             list->SetComputeRootDescriptorTable(0, gpu);
             auto uavs = gpu;
-            uavs.ptr += 2ULL * increment_;
+            uavs.ptr += 4ULL * increment_;
             list->SetComputeRootDescriptorTable(1, uavs);
             list->SetComputeRoot32BitConstants(2, sizeof(Params) / 4, &p, 0);
             list->SetPipelineState(decide_.Get());
@@ -237,7 +275,16 @@ std::shared_ptr<const DlssMotionVectorSet> D3D12GuideComposer::compose(
             const auto decided = uav_barrier(resources.decision.Get());
             list->ResourceBarrier(1, &decided);
             list->SetPipelineState(compose_.Get());
+            std::array<D3D12_RESOURCE_BARRIER,2> depth_barriers{};UINT depth_count=0;
+            if(depth_check)for(const auto* frame:{b.get(),&r}) {
+                if(frame->depth_resource_state==kReadState ||
+                    (frame==&r && r.depth.Get()==b->depth.Get()))continue;
+                depth_barriers[depth_count++]=transition(frame->depth.Get(),frame->depth_resource_state,kReadState);
+            }
+            if(depth_count)list->ResourceBarrier(depth_count,depth_barriers.data());
             list->Dispatch((b->motion_width + 7) / 8, (b->motion_height + 7) / 8, 1);
+            for(UINT n=0;n<depth_count;++n)std::swap(depth_barriers[n].Transition.StateBefore,depth_barriers[n].Transition.StateAfter);
+            if(depth_count)list->ResourceBarrier(depth_count,depth_barriers.data());
             const std::array<D3D12_RESOURCE_BARRIER, 2> after{
                 transition(resources.texture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kReadState),
                 uav_barrier(resources.decision.Get())};

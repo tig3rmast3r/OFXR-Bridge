@@ -7,7 +7,6 @@
 ## V 0.1.1 (2026/09/06)
 
 - [new] In-headset FPS counter shows whether frame generation is active.
-- [new] Faster NVIDIA optical-flow preset.
 
 ## V 0.2.0 (2026/09/07)
 
@@ -70,9 +69,9 @@
 - [new] Reassign keyboard shortcuts from the tray.
 - [new] Select and edit individual game profiles from the desktop settings window.
 - [new] CPU usage, GPU usage and memory information in the information overlay.
-- [changed] Clearer Basic and Advanced controls simplify everyday setup.
 - [changed] Benchmarks prioritize steady full-refresh output when choosing settings.
 - [changed] Cleaner frame delivery when all image-processing features are disabled.
+- [fix] Reduced Hybrid ghosting around occlusion edges with AER framegen.
 - [fix] Corrected OSR eye alignment and output at smaller working resolutions.
 - [fix] More reliable Luke Ross reconstruction across rendering resolutions and dark scenes.
 - [fix] Static projection layers no longer block frame generation.

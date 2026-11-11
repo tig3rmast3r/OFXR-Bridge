@@ -14,6 +14,8 @@
 // point into the other eye, and copies them otherwise.
 Texture2DArray<float2> MotionB : register(t0);
 Texture2DArray<float2> MotionR : register(t1);
+Texture2DArray<float> DepthB : register(t2);
+Texture2DArray<float> DepthR : register(t3);
 RWTexture2D<float2> Composed : register(u0);
 RWByteAddressBuffer Decision : register(u1);
 
@@ -35,7 +37,20 @@ cbuffer Params : register(b0) {
     // motion, and leave the vectors as they are.
     float MinimumOffset;
     uint ForceCompose;
+    uint2 DepthPadding;
+    float4 DepthRectB;
+    float4 DepthRectR;
+    float4 NearFar;
+    uint DepthFlags;
+    uint RejectOcclusions;
+    uint DepthSliceB;
+    uint DepthSliceR;
 };
+
+float view_depth(float depth,float near_z,float far_z,bool inverted,bool infinite) {
+    return infinite?near_z/max(inverted?depth:1-depth,1.e-8):
+        near_z*far_z/max(inverted?near_z+depth*(far_z-near_z):far_z-depth*(far_z-near_z),1.e-8);
+}
 
 static const uint kGrid = 8;
 groupshared uint g_cross;
@@ -81,6 +96,19 @@ void Compose(uint3 id : SV_DispatchThreadID) {
     }
     float2 b = raw * ScaleB;
     float2 u = (float2(id.xy) + 0.5) / float2(SizeB) + b / Output;
+    if(RejectOcclusions) {
+        bool valid=all(isfinite(raw)) && all(u>=0) && all(u<1);
+        float db=DepthB.Load(int4(int2(DepthRectB.xy+(float2(id.xy)+.5)/SizeB*DepthRectB.zw),DepthSliceB,0));
+        float dr=DepthR.Load(int4(int2(DepthRectR.xy+saturate(u)*DepthRectR.zw),DepthSliceR,0));
+        float zb=view_depth(db,NearFar.x,NearFar.y,(DepthFlags&1)!=0,(DepthFlags&4)!=0);
+        float zr=view_depth(dr,NearFar.z,NearFar.w,(DepthFlags&2)!=0,(DepthFlags&8)!=0);
+        valid=valid && isfinite(db) && isfinite(dr) && db>=0 && db<=1 && dr>=0 && dr<=1 &&
+            max(zb,zr)<=1.25*min(zb,zr)+.01;
+        if(!valid) {
+            // Hybrid-only invalid correspondence, never a fabricated vector.
+            Composed[id.xy]=asfloat(uint2(0x7fc00000,0x7fc00000));return;
+        }
+    }
     uint2 r_texel = OriginR + uint2(clamp(u * float2(SizeR), 0.0, float2(SizeR) - 1.0));
     float2 r = load_r(r_texel);
     Composed[id.xy] = (b + r) / ScaleB;

@@ -624,6 +624,7 @@ void write_session(const std::shared_ptr<Session>& session) {
     summary << "AFW capture focus: later upstream NGX images omitted="
         << session->suppressed_upstream_images
         << "; exact consumed guides remain in afw_ngx_*_before_crop.\n";
+    summary << "Hybrid AER mono-eye stages: hybrid_previous_eye / hybrid_current_eye / hybrid_generated_eye plus hybrid_same_eye_motion, hybrid_native_motion (when composed) and hybrid_guide_depth. One pair per physical eye, up to two; recorded before AER endpoint selection. hybrid_pair contracts and hybrid_motion_crop/hybrid_depth_crop timeline rows carry the exact consumed guides/crop (packed float32 xy/wh).\n";
     summary << "V576 DLSS-G stages: aligned_previous / packed_current / packed_motion / packed_depth -> ngx_generated -> composed_output.\n"
         << "One pair per stream, at most two streams. Native stage swapchain is resource identity, not XR handle.\n"
         << "native_dlssg_pair: original A/B pose/projection. native_dlssg_output_camera: B -> output-to-B quaternion, mode = output index.\n";

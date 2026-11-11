@@ -60,7 +60,7 @@ Not working, or not feeling smoother? See [Troubleshooting](#troubleshooting).
 
 **Frame generation**
 
-- Optical flow: **NVIDIA** (Fast, Medium, Slow) at 100%, 75%, 50% or 25%
+- Optical flow: **NVIDIA** (Slow, Medium) at 100%, 75%, 50% or 25%
   flow resolution, or **AMD FidelityFX**.
 - **RIFE** neural frame interpolation using NVIDIA CUDA/TensorRT.
 - **Hybrid** combines optical flow with the game's motion vectors.
@@ -130,7 +130,7 @@ and at least **14 GB free** during setup. Optimization caches need additional sp
    If it reports a problem, follow its message and check the reported log or
    consult the [RIFE guide](docs/RIFE.md) before selecting RIFE.
 6. Start the game, select **RIFE** under Frame generation and begin with
-   **RIFE 4.4**, **Medium** Quality and **2X**.
+   **Medium** Quality and **2X**.
 
 The first use of a new resolution or Quality can take longer while TensorRT
 optimization completes. The information overlay shows **Optimizing, please wait**.
@@ -280,13 +280,9 @@ including strafing or turning with a gamepad. Check the observations below.
 keeping OSR/AFW stereo reconstruction. It can improve performance when the game
 already reaches the required refresh rate. Restart the game after changing it.
 
-For AFW quality controls, start with **1x1** and try **2x2** if its cost is too
-high at your resolution. **Depth dilation** trades sharper object outlines for
-less ghosting or shimmer. These AFW controls are available when AFW is selected.
-
 #### AER framegen
 
-Select your generator, turn on **Advanced mode**, then enable **AER framegen**.
+Select your generator and enable **AER framegen** under **Frame generation**.
 Leave **Frame Reconstruction only** off; restart the game if you changed it.
 AER framegen uses the generator to reconstruct the other eye at the correct
 point in time, rather than providing the usual full-stereo FPS multiplication.
@@ -299,8 +295,7 @@ best balance of HUD clarity, smoothness and performance.
 For the games below, compatible DLSS guides also make **Hybrid**, **FSR 3.1** and
 **DLSS-G** available with AER framegen. **Hybrid** is the recommended starting
 point. Use the AER state in the information overlay to check that reconstruction
-is active. **Swap**, also in Advanced mode, reverses the assumed temporal phase
-if the eyes appear out of step.
+is active.
 
 #### Compatible Luke Ross games
 
@@ -336,8 +331,8 @@ best performance in the tested configurations.
 
 There is also **partial AER framegen support** for UEVR's **Alternating / AFR**
 rendering method. Use plain alternating-eye output without additional AER
-reconstruction or interpolation fixes, then enable **AER framegen** in OFXR's
-Advanced settings. Results depend on the game and mod configuration.
+reconstruction or interpolation fixes, then enable **AER framegen** under
+**Frame generation** in OFXR. Results depend on the game and mod configuration.
 
 ### REFramework and MUTAR
 
@@ -345,7 +340,7 @@ For REFramework games running in **stereo**, use ordinary OFXR frame generation.
 
 For MUTAR's **AER** modes, turn off the mod's interpolation, warp and other AER
 reconstruction fixes so that it supplies plain AER. Then enable **AER framegen**
-in OFXR's Advanced settings and choose your generator. Aim to reach the headset's
+under **Frame generation** in OFXR and choose your generator. Aim to reach the headset's
 refresh rate for the best results. The difference can be subtle in a quiet scene;
 turning the camera makes the temporal alignment easier to judge.
 
