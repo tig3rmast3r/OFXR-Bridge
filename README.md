@@ -305,7 +305,7 @@ overlay icons may double while moving, strafing or rotating with a gamepad.
 
 | Game | HUD observations |
 | --- | --- |
-| Avatar: Frontiers of Pandora | |
+| Avatar: Frontiers of Pandora | HUD correct |
 | Crimson Desert | HUD correct; overlay icons double |
 | Cyberpunk 2077 | HUD correct |
 | Dead Space (2023) | HUD double; overlay icons correct |
@@ -319,8 +319,8 @@ overlay icons may double while moving, strafing or rotating with a gamepad.
 | Marvel's Spider-Man: Miles Morales | HUD correct |
 | Red Dead Redemption 2 | HUD correct |
 | Star Wars Outlaws | HUD double |
-| The Last of Us Part I | |
-| Uncharted: Legacy of Thieves Collection | |
+| The Last of Us Part I | HUD double |
+| Uncharted: Legacy of Thieves Collection | HUD double |
 
 ### UEVR
 

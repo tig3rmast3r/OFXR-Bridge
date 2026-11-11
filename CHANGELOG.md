@@ -24,55 +24,57 @@
 
 ## V 0.3.0 (2026/10/25)
 
-- [new] Change settings in VR with F10 while the game runs.
-- [new] NVIDIA OFXR 0.3.0 and Djules optical-flow routes.
-- [new] Hybrid frame generation for games using DLSS.
-- [new] FSR 3.1 and DLSS Frame Generation.
-- [new] AFW stereo reconstruction for selected Luke Ross games.
-- [new] Optional DLSS 5 Neural Rendering.
-- [new] Information overlay and latency meters.
-- [new] Automated benchmarks help find suitable settings for each game.
-- [new] SteamVR Director pacing.
-- [changed] Improved NVIDIA OFXR 0.2.1 frame generation.
+- [new] In-game settings and on-the-fly changes (**F10**)
+- [new] Added Djules' OFXR 0.2.13 route
+- [new] New OFXR 0.3.0 route
+- [new] Added Elliottate's vector-based Hybrid route (requires DLSS)
+- [new] New FSR 3.1 Frame Generation route (requires DLSS)
+- [new] Added Elliottate's DLSS Frame Generation integration
+- [new] Added Elliottate's on-screen display
+- [new] AFW support for selected Luke Ross games
+- [new] Optional **DLSS 5 Neural Rendering**, applied before Super Resolution (**pre-SR**)
+- [new] Latency meters
+- [new] Automated benchmarks
+- [new] New unified SteamVR Director
+- [changed] Improved OFXR 0.2.1 route
+- [fix] Countless minor fixes
 
 ## V 0.3.1 (2026/10/26)
 
-- [new] Luke Ross AFW support for Spider-Man Remastered, Miles Morales and Dead Space.
-- [new] Preliminary Luke Ross AFW support for Grand Theft Auto V Enhanced.
-- [changed] Steadier VDXR frame rates near headset refresh.
-- [fix] Restored performance in configurations affected by severe frame-rate loss.
+- [new] Added Luke Ross AFW support for Spider-Man and Miles Morales
+- [new] Added Luke Ross AFW Support for Dead Space
+- [new] Added Luke Ross AFW Support for GTA5E (not fully working yet)
+- [changed] improved VDXR route, it now maintains steadier fps once you reach headset refresh
+- [fix] fixed an issue that may kill performance on almost all games with some configurations
 
 ## V 0.3.2 (2026/11/02)
 
-- [new] Signed builds support Star Citizen through Easy Anti-Cheat.
-- [new] OSR stereo reconstruction for Luke Ross games.
-- [new] Luke Ross support for Cyberpunk 2077, Avatar: Frontiers of Pandora, The Last of Us Part I and Uncharted: Legacy of Thieves Collection.
-- [new] Motion-vector support for Ready or Not and MSFS 2024 with foveated rendering.
-- [new] Motion-vector support for Vulkan games.
-- [new] Partial Cheeky Foveated DLSS compatibility outside Luke Ross games.
-- [new] OpenKneeboard panel interpolation.
-- [new] Optional status.json export for AutoFPS and other tools.
-- [changed] OSR is the default reconstruction method, with AFW available as a legacy alternative.
-- [changed] Faster Luke Ross reconstruction and lower VRAM usage.
-- [fix] Corrected Grand Theft Auto V Enhanced support.
-- [fix] Neural Rendering works at reduced working resolutions.
+- [new] **Star Citizen support:** OFXR's files are now digitally signed, so Easy Anti-Cheat lets OFXR load. Optical flow, Hybrid and DLSS-G work, with SteamVR and VDXR. Use at your own risk; see the README.
+- [new] **More Luke Ross games:** fixed Grand Theft Auto V Enhanced support and added support for Cyberpunk 2077, Avatar: Frontiers of Pandora, The Last of Us Part I, and Uncharted: Legacy of Thieves Collection (Uncharted 4 and The Lost Legacy).
+- [new] **New OSR option for Luke Ross:** OFXR Stereo Reconstruction replaces AFW as the default, with less ghosting and better performance. AFW remains available as **AFW (legacy)**.
+- [new] **Motion-vector support for Ready or Not.**
+- [new] **Motion-vector support for Microsoft Flight Simulator 2024 with foveated rendering.**
+- [new] **Compatibility with Cheeky Foveated DLSS**, except in Luke Ross games, which still need a corresponding fix on the Cheeky Foveated DLSS side.
+- [new] **Motion-vector support for Vulkan games.**
+- [new] **AutoFPS support** through the optional `status.json` export.
+- [new] **OpenKneeboard support**, including interpolation of compatible OpenXR panel images and poses.
+- [changed] **Improved performance** with Luke Ross OSR and AFW.
+- [changed] **Lower VRAM usage.**
+- [fix] **Fixed Neural Rendering when using a reduced working resolution.**
 
 ## V 0.3.3 (2026/11/11)
 
-- [new] RIFE neural frame generation for NVIDIA GPUs, with seven quality presets.
-- [new] Install, check and optimize RIFE for your games from the tray.
-- [new] AER framegen reconstructs the other eye with optical flow, RIFE or compatible DLSS-guided generators.
-- [new] Dedicated AER status distinguishes confirmed reconstruction from bypass or missing output.
-- [new] Additional 3X and 4X options on compatible frame-generation routes.
-- [new] Frame generation for compatible 32-bit D3D11 VR games.
-- [new] Attach the information overlay to a VR controller.
-- [new] Reassign keyboard shortcuts from the tray.
-- [new] Select and edit individual game profiles from the desktop settings window.
-- [new] CPU usage, GPU usage and memory information in the information overlay.
-- [changed] Benchmarks prioritize steady full-refresh output when choosing settings.
-- [changed] Cleaner frame delivery when all image-processing features are disabled.
-- [fix] Corrected OSR eye alignment and output at smaller working resolutions.
-- [fix] More reliable Luke Ross reconstruction across rendering resolutions and dark scenes.
-- [fix] Static projection layers no longer block frame generation.
-- [fix] Reduced overlay allocation failures near SteamVR's swapchain limit.
-- [fix] Improved Neural Rendering compatibility with packed HDR game images.
+- [new] RIFE frame generation.
+- [new] New user interface.
+- [new] Configurable keybinds.
+- [new] 3X and 4X frame generation on selected routes.
+- [new] CPU usage meter.
+- [new] Individual game profile selection.
+- [changed] Improved benchmarks.
+- [fix] GTA V Enhanced now works correctly.
+- [fix] Improved OSR visuals and compatibility in almost all games.
+- [fix] Several SteamVR pacing improvements.
+- [fix] Fixed swapchain allocation errors in UEVR.
+- [fix] Fixed Neural Rendering in MSFS 2024, including foveated rendering.
+- [fix] Fixed vector-based frame generation in MSFS 2024 with foveated rendering.
+- [fix] Several other minor fixes.
