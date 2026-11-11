@@ -7742,7 +7742,7 @@ struct D3D12FrameSynthesizer::Impl {
                     slot.guide_composer_inputs = next.motion_vectors;
                     next.motion_vectors = guide_composer.compose(slot.command_list.Get(),
                         static_cast<UINT>(work_slot_index), next.motion_vectors,
-                        {next.views.data(), next.view_count});
+                        {next.views.data(), next.view_count},nvidia_options.ofr && nvidia_options.hybrid);
                 }
                 // AER N1 is admitted only for composition. Allocation/shader
                 // failure must not silently fall through with opposite-eye MV.
@@ -7820,6 +7820,58 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
         const bool aer_retimed=nvidia_options.ofr && (!native_dlss || native_pair_generated);
+        if(nvidia_options.ofr && nvidia_options.hybrid && !native_dlss && !rife &&
+            next.view_count==1 && next.motion_vectors && next.motion_vectors->eyes[0] &&
+            two_frame_capture_images_active()) {
+            const auto& guide=*next.motion_vectors->eyes[0];
+            const auto eye=next.motion_vectors->resolved_eye>=0
+                ?unsigned(next.motion_vectors->resolved_eye):next.views[0].logical_eye;
+            const auto key=guide.stream^(std::uint64_t(eye)<<63);
+            if(two_frame_capture_claim_dlssg_pair(key)) {
+                // The actual composition list, before AER endpoint selection.
+                // Every readback is associated with its existing submission.
+                auto* list=backend==D3D12OpticalFlowBackend::nvidia
+                    ?slot.synthesis_command_list.Get():slot.command_list.Get();
+                const auto shot=[&](const char* stage,ID3D12Resource* image,D3D12_RESOURCE_STATES state) {
+                    if(!image)return;
+                    TwoFrameImageInfo info{};info.stage=stage;info.stream=guide.stream;
+                    info.capture_serial=guide.publication;info.eye=int(eye);
+                    info.width=UINT(image->GetDesc().Width);info.height=image->GetDesc().Height;
+                    info.scale_x=guide.scale_x;info.scale_y=guide.scale_y;
+                    two_frame_capture_record_ng_x(info,device.Get(),list,image,state);
+                };
+                shot("hybrid_previous_eye",previous.resource.Get(),D3D12_RESOURCE_STATE_COMMON);
+                // B stays shader-readable until the deferred current-copy list.
+                shot("hybrid_current_eye",next.resource.Get(),kShaderReadState);
+                shot("hybrid_generated_eye",synthetic_destination,release_state);
+                shot("hybrid_same_eye_motion",guide.motion_vectors.Get(),guide.resource_state);
+                shot("hybrid_guide_depth",guide.depth.Get(),guide.depth_resource_state);
+                const auto& original=slot.guide_composer_inputs;
+                if(original && original->eyes[0])
+                    shot("hybrid_native_motion",original->eyes[0]->motion_vectors.Get(),original->eyes[0]->resource_state);
+                const auto mr=guide_motion_rect(guide),dr=guide_depth_rect(guide);
+                const auto bits=[](float f){std::uint32_t b;std::memcpy(&b,&f,4);return b;};
+                const auto pair=[&](float a,float b){return (std::uint64_t(bits(a))<<32)|bits(b);};
+                two_frame_capture_timeline("hybrid_motion_crop",eye,guide.publication,pair(mr[0],mr[1]),pair(mr[2],mr[3]));
+                two_frame_capture_timeline("hybrid_depth_crop",eye,guide.publication,pair(dr[0],dr[1]),pair(dr[2],dr[3]));
+                TwoFrameGuideContract c{};c.stage="hybrid_pair";c.stream=guide.stream;c.publication=guide.publication;
+                c.serial=guide.serial;c.previous_serial=guide.previous_serial;c.source_eye=c.destination_eye=int(eye);
+                c.motion_width=guide.motion_width;c.motion_height=guide.motion_height;
+                c.depth_width=guide.depth_width;c.depth_height=guide.depth_height;
+                c.output_width=guide.output_width;c.output_height=guide.output_height;
+                c.scale_x=guide.scale_x;c.scale_y=guide.scale_y;c.jitter_x=guide.jitter_x;c.jitter_y=guide.jitter_y;
+                c.view_to_clip=c.camera_view_to_clip=guide.camera_view_to_clip;
+                c.clip_to_view=c.camera_clip_to_view=guide.camera_clip_to_view;
+                c.raw_motion_native_span=guide.raw_motion_native_span;c.color_origin_token=guide.color_origin_token;
+                c.native_production_sequence=guide.native_production_sequence;
+                c.native_same_publication=guide.previous_same_guide?guide.previous_same_guide->publication:0;
+                const auto& a=previous.views[0].pose;const auto& b=next.views[0].pose;
+                c.source_pose={a.position.x,a.position.y,a.position.z};c.destination_pose={b.position.x,b.position.y,b.position.z};
+                c.source_orientation={a.orientation.x,a.orientation.y,a.orientation.z,a.orientation.w};
+                c.destination_orientation={b.orientation.x,b.orientation.y,b.orientation.z,b.orientation.w};
+                two_frame_capture_guide_contract(c);
+            }
+        }
         if(aer_retimed && ofr_paired) {
             auto* list=slot.current_copy_command_list.Get();
             auto barrier=transition_barrier(current_destination,release_state,D3D12_RESOURCE_STATE_COPY_DEST);

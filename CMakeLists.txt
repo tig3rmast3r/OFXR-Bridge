@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.981.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.982.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1903,6 +1903,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         endif()
         add_test(NAME xrfg_d3d12_history_tests COMMAND xrfg_d3d12_history_tests)
         add_test(NAME xrfg_native_dlssg_unsupported COMMAND xrfg_d3d12_history_tests native-unsupported)
+        add_test(NAME xrfg_hybrid_occlusion_wall COMMAND xrfg_d3d12_history_tests aer-guide-occlusion)
+        set_tests_properties(xrfg_hybrid_occlusion_wall PROPERTIES RUN_SERIAL TRUE TIMEOUT 60)
         add_test(NAME xrfg_native_resized_eye COMMAND xrfg_d3d12_history_tests native-resized-eye)
         set_tests_properties(xrfg_native_resized_eye PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
         add_test(NAME xrfg_native_dlssg_output_capture COMMAND xrfg_d3d12_history_tests native-dlssg-capture)

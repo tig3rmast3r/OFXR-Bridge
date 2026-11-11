@@ -805,6 +805,7 @@ float2 game_motion_for_pixel(float2 pixel, uint slice, uint view_index) {
             : (fraction.x < 0.5 ? GameMotionVectors.Load(int4(top_left.x, bottom_right.y, 0, 0))
                                 : GameMotionVectors.Load(int4(bottom_right, 0, 0)));
     }
+    raw=hybrid_layout && !all(isfinite(raw))?float2(0,0):raw;
     float2 result = raw * GameMotionScale + GameMotionJitterDelta;
     float magnitude = length(result);
     return magnitude > 512.0 ? result * (512.0 / magnitude) : result;
@@ -819,7 +820,17 @@ float2 game_motion_texel(float2 pixel) {
     float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
     int2 texel = int2(clamp(GameMotionRect.xy + uv * GameMotionRect.zw,
         GameMotionRect.xy, maximum));
-    return GameMotionVectors.Load(int4(texel, 0, 0)) * GameMotionScale;
+    float2 raw=GameMotionVectors.Load(int4(texel,0,0));
+    raw=hybrid_layout && !all(isfinite(raw))?float2(0,0):raw;
+    return raw * GameMotionScale;
+}
+
+bool hybrid_motion_invalid_at(float2 pixel) {
+    float4 rect=game_motion_output_rect();
+    float2 uv=(pixel-rect.xy+.5)/max(rect.zw,float2(1,1));
+    int2 at=int2(clamp(GameMotionRect.xy+uv*GameMotionRect.zw,GameMotionRect.xy,
+        GameMotionRect.xy+GameMotionRect.zw-1));
+    return !all(isfinite(GameMotionVectors.Load(int4(at,0,0))));
 }
 
 // ---- Hybrid's depth search, 0.2's (V505, V544, V555) at its built-in
@@ -1260,6 +1271,7 @@ bool game_motion_surface_at(float2 pixel, float2 start, out float4 previous_colo
     float2 previous_coordinate = start;
     bool found = true;
     [unroll] for (uint step = 0; step < 3; ++step) {
+        found=found && !(hybrid_layout && hybrid_motion_invalid_at(endpoint));
         float2 backward = game_motion_for_pixel(endpoint, Slice, ViewIndex);
         MappedCoordinate mapped = map_source_to_target(endpoint + backward, PreviousMappings[ViewIndex]);
         found = found && mapped.valid >= 0.5;
@@ -1444,10 +1456,13 @@ float4 synthesize_midpoint(
                     // solve cB = midpoint - 0.5 * (cA(cB) - cB), while mapping
                     // cA through the previous OpenXR camera exactly.
                     float2 current_endpoint = pixel;
-                    MappedCoordinate previous_endpoint;
+                    MappedCoordinate previous_endpoint=(MappedCoordinate)0;
                     // Keep the step count odd: see the covered-background
                     // case below.
                     [unroll] for (uint iteration = 0; iteration < 3; ++iteration) {
+                        if(hybrid_layout && hybrid_motion_invalid_at(current_endpoint)) {
+                            endpoints_valid=false;break;
+                        }
                         raw_backward = repeated_capture_flag() != 0
                             ? float2(0.0, 0.0)
                             : game_motion_for_pixel(
@@ -1464,6 +1479,7 @@ float4 synthesize_midpoint(
                         current_endpoint =
                             pixel - (1.0 - synthesis_fraction()) * target_displacement;
                     }
+                    if(endpoints_valid && hybrid_layout && hybrid_motion_invalid_at(current_endpoint))endpoints_valid=false;
                     if (endpoints_valid) {
                         raw_backward = repeated_capture_flag() != 0
                             ? float2(0.0, 0.0)
@@ -1748,6 +1764,8 @@ float4 SynthesizeGameMotionMidpointPS(FullscreenVertex input) : SV_Target {
 // The vectors keep a tie.
 float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
     hybrid_layout = true;
+    if(hybrid_motion_invalid_at(input.position.xy-.5))
+        return synthesize_midpoint(input,1.0,false,false,false,false,false);
     float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
     float vectors_disagreement = last_disagreement;
     // Where the vectors explain both frames, the flow need not be asked.
@@ -1760,14 +1778,15 @@ float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
 // the Hybrid route: the OFXR engine's flow branch, quality and direction.
 float4 synthesize_hybrid_nvidia(FullscreenVertex input, bool bidirectional, bool fast) {
     hybrid_layout = true;
+    bool invalid_motion=hybrid_motion_invalid_at(input.position.xy-.5);
     float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
     float vectors_disagreement = last_disagreement;
     float4 result = vectors;
     // Where the vectors explain both frames, the flow need not be asked.
-    [branch] if (vectors_disagreement >= 0.02) {
+    [branch] if (invalid_motion || vectors_disagreement >= 0.02) {
         float4 flow = synthesize_midpoint(input, 1.0 / 32.0, true, bidirectional, fast, false,
             (SynthesisFlags & 4u) != 0u);
-        result = lerp(flow, vectors, saturate(1.0 + (last_disagreement - vectors_disagreement) * 8.0));
+        result = invalid_motion?flow:lerp(flow, vectors, saturate(1.0 + (last_disagreement - vectors_disagreement) * 8.0));
     }
     return result;
 }
@@ -1875,6 +1894,7 @@ void BuildDepthSplat(uint3 id : SV_DispatchThreadID) {
     float2 uv = (float2(id.xy) + 0.5) / max(extent, float2(1.0, 1.0));
     float2 pixel = output_rect.xy + uv * output_rect.zw - 0.5;
     float2 motion = game_motion_for_pixel(pixel, Slice, ViewIndex);
+    if(hybrid_motion_invalid_at(pixel))return;
     MappedCoordinate previous = map_source_to_target(pixel + motion, PreviousMappings[ViewIndex]);
     if (previous.valid < 0.5) return;
     float2 displacement = previous.coordinate - pixel;
