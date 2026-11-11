@@ -176,6 +176,7 @@ void rebase_and_publish() {
 
 void route_motion_widgets() {
     auto settings = snapshot().desired;
+    settings.enabled=true;
     settings.frame_generation = 0; settings.backend = 3;
     settings.motion_vectors = 0; settings.triple_frame_gen = false;
     require(request(settings), "initialize OFXR optical-flow selection");
@@ -216,6 +217,7 @@ void route_motion_widgets() {
 }
 void route_multiplier_widgets() {
     auto settings = snapshot().desired;
+    settings.enabled=true;
     settings.frame_generation = 0; settings.backend = 3;
     settings.motion_vectors = 0; settings.triple_frame_gen = false;
     require(request(settings), "initialize independent multipliers");
@@ -261,7 +263,7 @@ void rife_catalog() {
 void rife_widgets() {
     const auto prior=snapshot().desired;
     Context tray(ImVec2(674,861),false),headset(ImVec2(1024,768),true);
-    auto rife=snapshot().desired;select_generation(rife,4,2);rife.advanced_mode=false;rife.rife_model=2;
+    auto rife=snapshot().desired;rife.enabled=true;select_generation(rife,4,2);rife.advanced_mode=false;rife.rife_model=2;
     require(request(rife),"select basic RIFE with an older saved model");
     tray.draw();headset.draw();tray.select_tab("Frame generation");headset.select_tab("Frame generation");tray.draw(true);headset.draw(true);
     require(snapshot().desired.rife_model==3,"basic RIFE uses 4.4");
@@ -334,7 +336,7 @@ void release_controls() {
     desktop.choose("Pacing",2,"Framework+director");require(snapshot().desired.pacing_mode==2,"advanced combined selection works");
 }
 void actual_widgets() {
-    auto advanced=snapshot().desired;advanced.advanced_mode=true;require(request(advanced),"enable advanced-only UI fixture");
+    auto advanced=snapshot().desired;advanced.enabled=true;advanced.advanced_mode=true;require(request(advanced),"enable advanced-only UI fixture");
     Context tray(ImVec2(674, 861), false);
     Context headset(ImVec2(1024, 768), true);
     const auto before = snapshot();
@@ -350,6 +352,11 @@ void actual_widgets() {
     require(headset.widgets.draft.enabled == enabled.desired.enabled,
         "headset reflects hot tray checkbox edit");
     require(enabled.desired.lower_vram == 0, "opening settings preserves Lower VRAM off");
+    // Generation controls require the global switch; reconstruction and NR
+    // remain independent. Restore generation before testing its VRAM controls.
+    tray.activate("/Generation_", "Enable frame generation");tray.draw();tray.draw();
+    require(snapshot().desired.enabled,"re-enable generation controls for VRAM fixture");
+    headset.draw();
     tray.activate("/Generation_", "Fast mode");
     tray.draw(); tray.draw();
     require(snapshot().desired.separate_synthesis == 1 && snapshot().desired.lower_vram == 1,
@@ -565,7 +572,7 @@ void actual_widgets() {
 void offline_preset() {
     using namespace xrfg::standalone;
     report_runtime({});
-    auto desired=snapshot().desired;select_generation(desired,2,desired.backend);
+    auto desired=snapshot().desired;desired.enabled=true;select_generation(desired,2,desired.backend);
     require(request(desired),"select native DLSS-G for offline profile editing");
     const auto selection=configuration_path();
     require(write_configuration_sections(selection,"[dlssg]\nexecutable=\n"),"start without a remembered game");
@@ -753,8 +760,27 @@ void aer_framegen_widgets() {
             snapshot().desired.afw_only==settings.afw_only,"AER locks reconstruction controls without erasing preferences: mode="+
             std::to_string(snapshot().desired.afw_mode)+" osr="+std::to_string(snapshot().desired.luke_osr)+
             " only="+std::to_string(snapshot().desired.afw_only)+" expected_only="+std::to_string(settings.afw_only));
+        view.select_tab("Frame generation");
+        view.activate("/Generation_","Enable frame generation");view.draw();view.draw();
+        const auto disabled=snapshot().desired;
+        require(!disabled.enabled && disabled.ofr_enabled,"global off preserves the saved AER preference: enabled="+std::to_string(disabled.enabled)+" aer="+std::to_string(disabled.ofr_enabled)+" compact="+std::to_string(compact));
+        view.activate("/Generation_","AER framegen");view.draw();view.draw();
+        view.activate("/Generation_","AER Swap");view.draw();view.draw();
+        view.activate("/Generation_","Increase buffer");view.draw();view.draw();
+        require(snapshot().desired==disabled,"disabled generation panel changed saved preferences");
+        view.select_tab("Reconstruction");
+        view.choose("Reconstruction",0,"Off","/Framewarp_");
+        require(snapshot().desired.afw_mode==0,"saved AER blocked reconstruction with global framegen off");
+        view.choose("Reconstruction",1,"OSR","/Framewarp_");
+        require(snapshot().desired.afw_mode==3 && snapshot().desired.luke_osr==2 &&
+            snapshot().desired.ofr_enabled && !snapshot().desired.enabled,
+            "OSR selection must work independently of disabled frame generation");
+        view.select_tab("Frame generation");
+        view.activate("/Generation_","Enable frame generation");view.draw();view.draw();
+        require(snapshot().desired.enabled && snapshot().desired.ofr_enabled,
+            "global on did not restore the selected AER preference");
         auto resume=snapshot().desired;resume.ofr_enabled=false;require(request(resume),"disable AER to restore reconstruction");
-        view.draw();view.choose("Reconstruction",0,"Off","/Framewarp_");
+        view.draw();view.select_tab("Reconstruction");view.choose("Reconstruction",0,"Off","/Framewarp_");
         require(snapshot().desired.afw_mode==0,"reconstruction controls work again after AER is disabled");
         settings.advanced_mode=false;settings.ofr_enabled=false;settings.ofr_swap=false;require(request(settings),"reset AER UI pass");
     }

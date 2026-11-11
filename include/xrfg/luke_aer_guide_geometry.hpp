@@ -5,6 +5,13 @@
 #include <span>
 
 namespace xrfg {
+// A saved AER preference cannot suppress reconstruction guides while global
+// frame generation is off. Callers pass effective AER, not the saved flag.
+constexpr bool luke_guide_capture_requested(bool luke,bool aer,
+    D3D12FrameGenerationMode mode,bool hybrid,bool game_motion) noexcept {
+    return game_motion || mode!=D3D12FrameGenerationMode::ofxr ||
+        (aer && hybrid) || (luke && !aer);
+}
 // AFW's transport/post-reconstruction path remains OFXR. Raw AER framegen
 // must instantiate the selected provider, including at initial eye creation.
 constexpr D3D12FrameGenerationMode luke_primary_generation_mode(bool luke,bool aer,

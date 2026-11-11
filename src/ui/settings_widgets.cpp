@@ -627,11 +627,20 @@ bool generation(Panel& p) {
         return changed;
     }
 
+    // Disabled controls render saved preferences but cannot mutate them,
+    // including through queued navigation or automatic widget normalization.
+    const bool enable_changed=changed;
+    const bool controls_enabled=draft.enabled;
+    const auto saved=draft;
+    ImGui::BeginDisabled(!controls_enabled);
     if(draft.advanced_mode) {
-        changed|=toggle_row(p,"AER framegen","AER framegen",draft.ofr_enabled,kHelpOfr);
+        bool aer=controls_enabled && draft.ofr_enabled;
+        if(toggle_row(p,"AER framegen","AER framegen",aer,kHelpOfr)) {
+            draft.ofr_enabled=aer;changed=true;
+        }
         changed|=toggle_row(p,"Swap","AER Swap",draft.ofr_swap,kHelpOfrSwap,!draft.ofr_enabled);
     }
-    if(draft.ofr_enabled) {
+    if(draft.ofr_enabled && controls_enabled) {
         notice(p,Tone::idle,"AER framegen: 2X only. Uses the selected generator, quality and pacing. OSR/AFW are bypassed while framegen is enabled.");
         if(state.connected) {
             const char* delivery=state.runtime.ofr_delivery==1?"Alternating eye releases":state.runtime.ofr_delivery==2?"Paired releases (phase assumed)":"Learning release cadence";
@@ -799,6 +808,8 @@ bool generation(Panel& p) {
     }
     if(dlssg)dlssg_preset_details(p);
     generation_details(p);
+    ImGui::EndDisabled();
+    if(!controls_enabled) {draft=saved;changed=enable_changed;}
     return changed;
 }
 

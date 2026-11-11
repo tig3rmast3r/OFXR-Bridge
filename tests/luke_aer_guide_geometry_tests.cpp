@@ -9,6 +9,13 @@ static void require(bool value,const char* message) {
 int main() {
     try {
         using namespace xrfg;
+        for(bool enabled:{false,true})for(bool saved_aer:{false,true}) {
+            const bool aer=enabled && saved_aer;
+            require(luke_guide_capture_requested(true,aer,D3D12FrameGenerationMode::ofxr,false,false)==!aer,
+                "global framegen off must restore OSR guides despite saved AER");
+            require(luke_guide_capture_requested(true,aer,D3D12FrameGenerationMode::ofxr,true,false),
+                "OSR or Hybrid must retain guide capture across global enable transitions");
+        }
         for(auto mode:{D3D12FrameGenerationMode::ofxr,D3D12FrameGenerationMode::fsr3,D3D12FrameGenerationMode::native_dlss}) {
             require(luke_primary_generation_mode(true,true,mode)==mode,"Luke AER must create/reconfigure the selected provider");
             require(luke_primary_generation_mode(true,false,mode)==D3D12FrameGenerationMode::ofxr,"ordinary Luke AFW stays OFXR");
