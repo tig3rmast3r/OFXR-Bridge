@@ -359,7 +359,7 @@ part of those images; SteamVR overlays use a separate path.
 
 #### status.json and AutoFPS
 
-Enable **Export status.json** under **Settings / Display** to write OFXR's live
+Enable **Export status.json** under **Settings / Logging** to write OFXR's live
 state once a second, including whether it is enabled or paused, the multiplier,
 game and headset frame rates, and the latency.
 [MSFS AutoFPS](https://github.com/ResetXPDR/MSFS_AutoFPS) can read it to maintain the

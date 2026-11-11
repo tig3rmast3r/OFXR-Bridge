@@ -71,7 +71,6 @@
 - [new] CPU usage, GPU usage and memory information in the information overlay.
 - [changed] Benchmarks prioritize steady full-refresh output when choosing settings.
 - [changed] Cleaner frame delivery when all image-processing features are disabled.
-- [fix] Reduced Hybrid ghosting around occlusion edges with AER framegen.
 - [fix] Corrected OSR eye alignment and output at smaller working resolutions.
 - [fix] More reliable Luke Ross reconstruction across rendering resolutions and dark scenes.
 - [fix] Static projection layers no longer block frame generation.

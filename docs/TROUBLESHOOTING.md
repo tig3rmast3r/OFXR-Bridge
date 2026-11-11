@@ -86,7 +86,7 @@ Find the words shown after **Status:** on the information overlay.
 | **DLSS-G provider unavailable** | DLSS-G needs an RTX 40 or 50-series card and a recent driver. The first time, restart the game once. Otherwise choose another frame generation. |
 | **NGX refused interpolation** or **NGX rejected generation** | The NVIDIA driver declined DLSS-G for these frames. Choose Hybrid or OFXR, and [send a log](#still-stuck-send-a-log). |
 | **FSR provider missing** | A file is missing from the `ofxr` folder. Extract the complete archive again. |
-| **Swapchain allocation refused**, **Overlay swapchain limit reached** | SteamVR ran out of OpenXR swapchains. Turn off OpenXR overlays you don't need (OpenKneeboard, toolkits) and, in UEVR, depth submission. In Luke Ross games, the **Luke Ross** tab shows the swapchain details. |
+| **Swapchain allocation refused**, **Overlay swapchain limit reached** | SteamVR ran out of OpenXR swapchains. Turn off OpenXR overlays you don't need (OpenKneeboard, toolkits) and, in UEVR, depth submission. Open **Logging / Swapchains** for the swapchain details. |
 | **Vulkan game-vector capture suspended** | In this Vulkan game, OFXR cannot use the game's vectors at the moment. Use **OFXR** or **Hybrid**, which fall back to optical flow; FSR 3.1 and DLSS-G show real frames only. |
 | **Paused** | See [Step 1](#step-1-is-ofxr-running-in-your-game). If it pauses and resumes by itself, your game or a mod uses the same key: choose another with **Configure keybinds...** in the tray menu. |
 | Anything else | [Send a log](#still-stuck-send-a-log). |
@@ -164,7 +164,7 @@ both OFXR's use and the game's.
 
 ## Still stuck? Send a log
 
-1. Tick **Diagnostic logging** in the **Display** tab, or press **F9** in the
+1. Tick **Diagnostic logging** in the **Logging** tab, or press **F9** in the
    game. For a problem at start-up, tick it before starting the game.
 2. Reproduce the problem once.
 3. Close the game, so the log is complete.

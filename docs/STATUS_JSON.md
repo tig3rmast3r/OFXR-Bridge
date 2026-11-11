@@ -11,8 +11,8 @@ format and adds `latency_ms`.
 ## Where and when
 
 - **Path:** `%LOCALAPPDATA%\ofxr-bridge\status.json`, next to `tray.ini`.
-- **Opt-in:** enable **Export status.json** in Display, immediately below
-  the headset counter selector. It defaults OFF and follows the active game profile.
+- **Opt-in:** enable **Export status.json** in the **Logging** tab.
+  It defaults OFF and follows the active game profile.
 - **Written by the tray** once a second while enabled, and on arm/pause changes.
   The exporter keeps its own FPS/latency measurement request alive when panels
   are closed. Turning it OFF releases that request and removes the current file;
