@@ -740,13 +740,20 @@ void aer_framegen_widgets() {
     for(bool compact:{false,true}) {
         Context view(compact?ImVec2(1024,768):ImVec2(690,1000),compact);
         view.draw();view.draw(true);
-        require(view.rendered_text.find("AER framegen")==std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"AER and Swap hidden in Basic on desktop and VR");
+        require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"Basic shows AER and hides only Swap on desktop and VR");
+        view.activate("/Generation_","AER framegen");view.draw();view.draw();
+        require(snapshot().desired.ofr_enabled && snapshot().desired.frame_generation==4,"Basic AER toggle works and preserves selected RIFE method");
+        settings=snapshot().desired;
         settings.advanced_mode=true;settings.ofr_swap=false;require(request(settings),"AER Advanced setup");view.draw();view.draw(true);
         require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")!=std::string::npos,"Advanced shows both AER flags");
-        view.activate("/Generation_","AER framegen");view.draw();view.draw();
-        require(snapshot().desired.ofr_enabled && snapshot().desired.frame_generation==4,"AER toggle preserves selected RIFE method");
         view.activate("/Generation_","AER Swap");view.draw();view.draw();
         require(snapshot().desired.ofr_swap,"Swap toggle saved");
+        auto basic=snapshot().desired;basic.advanced_mode=false;
+        require(request(basic),"return enabled AER and Swap to Basic");view.draw();view.draw(true);
+        require(snapshot().desired.ofr_enabled && !snapshot().desired.ofr_swap,"returning to Basic preserves AER and clears Advanced-only Swap");
+        require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"returning to Basic keeps AER visible and hides Swap");
+        settings=snapshot().desired;settings.advanced_mode=true;
+        require(request(settings),"restore Advanced for disabled-control coverage");view.draw();view.draw();
         const auto multiplier=snapshot().desired.rife_multiplier;
         view.choose("RIFE multiplier",1,"3X");
         require(snapshot().desired.rife_multiplier==multiplier && generation_multiplier(snapshot().desired)==2,"AER disables higher multiplier buttons: before="+std::to_string(multiplier)+" after="+std::to_string(snapshot().desired.rife_multiplier)+" aer="+std::to_string(snapshot().desired.ofr_enabled)+" fg="+std::to_string(snapshot().desired.frame_generation));

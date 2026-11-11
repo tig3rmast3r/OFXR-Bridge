@@ -633,11 +633,11 @@ bool generation(Panel& p) {
     const bool controls_enabled=draft.enabled;
     const auto saved=draft;
     ImGui::BeginDisabled(!controls_enabled);
+    bool aer=controls_enabled && draft.ofr_enabled;
+    if(toggle_row(p,"AER framegen","AER framegen",aer,kHelpOfr)) {
+        draft.ofr_enabled=aer;changed=true;
+    }
     if(draft.advanced_mode) {
-        bool aer=controls_enabled && draft.ofr_enabled;
-        if(toggle_row(p,"AER framegen","AER framegen",aer,kHelpOfr)) {
-            draft.ofr_enabled=aer;changed=true;
-        }
         changed|=toggle_row(p,"Swap","AER Swap",draft.ofr_swap,kHelpOfrSwap,!draft.ofr_enabled);
     }
     if(draft.ofr_enabled && controls_enabled) {
