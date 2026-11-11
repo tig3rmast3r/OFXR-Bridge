@@ -26,16 +26,26 @@ int main() {
             check(window&&window->raster_x&&window->raster_y&&window->width==1685&&window->height==1684,"alternating source changed native working grid/history extent");
         }
     }
+    for(bool reverse:{false,true}) {
+        auto a=reverse?right:left,b=reverse?left:right;
+        unsigned sw=reverse?3669:3651,sh=reverse?3671:3653,dw=reverse?3651:3669,dh=reverse?3653:3671;
+        auto c=luke_eye_canvas(sw,sh,dw,dh,a,b,{0,0,sw,sh},{0,0,dw,dh});
+        check(c&&c->width==3669&&c->height==3671,"peer18px canvas rejected");
+        for(unsigned eye=0;eye<2;++eye){auto f=eye?b:a,g=eye?c->destination_fov:c->source_fov;unsigned w=eye?dw:sw,h=eye?dh:sh;
+            for(unsigned x=0;x<w;++x)check(std::abs(ray(f[0],f[1],x,w)-ray(g[0],g[1],x,c->width))<3e-7,"peer horizontal ray moved");
+            for(unsigned y=0;y<h;++y)check(std::abs(ray(f[2],f[3],y,h)-ray(g[2],g[3],y,c->height))<3e-7,"peer vertical ray moved");}
+    }
+    check(!luke_eye_canvas(500,500,506,500,left,right),"relative padding guard bypassed");
     auto same=luke_eye_canvas(3367,3367,3367,3367,left,right);
     check(same&&same->source_fov==left&&same->destination_fov==right,"equal-size FOV changed");
-    for(unsigned dx=0;dx<=4;++dx)for(unsigned dy=0;dy<=4;++dy) {
+    for(unsigned dx=0;dx<=kLukeCanvasMaxPadding;++dx)for(unsigned dy=0;dy<=kLukeCanvasMaxPadding;++dy) {
         unsigned w=7,h=5,cw=w+dx,ch=h+dy;auto copies=luke_canvas_copies(w,h,cw,ch);
         std::vector<unsigned> source(w*h),dest(cw*ch,99999);for(unsigned i=0;i<source.size();++i)source[i]=i;
         for(unsigned i=0;i<copies.count;++i){auto r=copies.regions[i];for(unsigned y=r.top;y<r.bottom;++y)for(unsigned x=r.left;x<r.right;++x)
             dest[(r.y+y-r.top)*cw+r.x+x-r.left]=source[y*w+x];}
         for(unsigned y=0;y<ch;++y)for(unsigned x=0;x<cw;++x)check(dest[y*cw+x]==source[std::min(y,h-1)*w+std::min(x,w-1)],"copy shifted real pixels or left undefined border");
     }
-    check(!luke_eye_canvas(3367,3367,3372,3367,left,right),"large mismatch admitted");
+    check(!luke_eye_canvas(3367,3367,3400,3367,left,right),"large mismatch admitted");
     check(!luke_eye_canvas(3367,3367,3369,3368,left,right,{1,0,3366,3367}),"unknown offset subrect admitted");
     check(!luke_eye_canvas(3367,3367,3369,3368,left,right,{0,0,3366,3367}),"partial subrect admitted");
     auto bad=left;bad[0]=std::numeric_limits<float>::quiet_NaN();check(!luke_eye_canvas(3367,3367,3369,3368,bad,right),"NaN FOV admitted");

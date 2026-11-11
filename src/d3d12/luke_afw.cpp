@@ -2195,18 +2195,25 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         color_source.initial_state = D3D12_RESOURCE_STATE_COMMON;
         D3D12_BOX color_box{0, 0, 0, static_cast<UINT>(color_desc.Width),
             color_desc.Height, 1};
-        if(quality_divisor>1)
-            impl_->color_scale.record(impl_->device.Get(),command_list,source_color,D3D12_RESOURCE_STATE_COMMON,
-                static_cast<UINT>(color_desc.Width),color_desc.Height,input.color.texture,input.color.initial_state,impl_->work_width,impl_->work_height,0);
-        else if(eye_canvas) {
+        const auto pad_color=[&](TextureDesc target) {
             const auto copies=luke_canvas_copies(static_cast<unsigned>(physical_source_desc.Width),
                 physical_source_desc.Height,static_cast<unsigned>(color_desc.Width),color_desc.Height);
             for(unsigned i=0;i<copies.count;++i) {
                 const auto& r=copies.regions[i];
                 const D3D12_BOX box{r.left,r.top,0,r.right,r.bottom,1};
-                copy(impl_->renderer,command_list,input.color,color_source,box,r.x,r.y);
+                copy(impl_->renderer,command_list,target,color_source,box,r.x,r.y);
             }
-        } else copy(impl_->renderer, command_list, input.color, color_source,color_box,0,0);
+        };
+        if(quality_divisor>1) {
+            auto* source=source_color;
+            if(eye_canvas) {
+                TextureDesc padded{};padded.texture=impl_->color_scale.expanded();
+                padded.initial_state=D3D12_RESOURCE_STATE_COMMON;pad_color(padded);source=padded.texture;
+            }
+            impl_->color_scale.record(impl_->device.Get(),command_list,source,D3D12_RESOURCE_STATE_COMMON,
+                static_cast<UINT>(color_desc.Width),color_desc.Height,input.color.texture,input.color.initial_state,impl_->work_width,impl_->work_height,0);
+        } else if(eye_canvas)pad_color(input.color);
+        else copy(impl_->renderer,command_list,input.color,color_source,color_box,0,0);
         report_stage(AfwStage::color_copied, S_OK, source_eye,
             guide.publication);
 

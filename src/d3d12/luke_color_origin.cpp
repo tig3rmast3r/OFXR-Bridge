@@ -1,5 +1,7 @@
 #include "xrfg/luke_color_origin.hpp"
 #include "xrfg/luke_origin_inset.hpp"
+#include "xrfg/luke_origin_brightness.hpp"
+#include "xrfg/luke_origin_dark_marker.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include <wrl/client.h>
 #include <array>
@@ -91,13 +93,61 @@ bool origin_from_bottom() noexcept {
     }();
     return bottom;
 }
+bool origin_float_format(DXGI_FORMAT f) noexcept {
+    return f==DXGI_FORMAT_R16G16B16A16_FLOAT||f==DXGI_FORMAT_R32G32B32A32_FLOAT||
+        f==DXGI_FORMAT_R11G11B10_FLOAT;
+}
+std::mutex g_brightness_mutex;
+LukeOriginBrightness g_brightness;
+void report_brightness(unsigned old,unsigned current,unsigned learned,bool probe,std::uint64_t epoch) noexcept {
+    bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,probe?1:0,1433,
+        (std::uint64_t(old)<<32)|current,(std::uint64_t(learned)<<56)|epoch);
+}
+LukeOriginBrightness::Choice origin_brightness_choice(DXGI_FORMAT format) noexcept {
+    try {
+    if(!origin_float_format(format))return {};
+    unsigned old{},learned{};bool probe{},changed{};LukeOriginBrightness::Choice choice;
+    {std::scoped_lock lock(g_brightness_mutex);old=g_brightness.shift();
+        const bool was=g_brightness.probing();
+        choice=g_brightness.choice(origin_hdr_unit_shift(),GetTickCount64());
+        learned=g_brightness.learned();probe=g_brightness.probing();changed=old!=choice.shift||was!=probe;}
+    if(changed)report_brightness(old,choice.shift,learned,probe,choice.epoch);
+    return choice;
+    } catch(...) {return {origin_float_format(format)?origin_hdr_unit_shift():0,0};}
+}
+void origin_brightness_stamped(DXGI_FORMAT format,std::uint32_t token,LukeOriginBrightness::Choice choice) noexcept {
+    try {
+    if(!origin_float_format(format))return;
+    std::scoped_lock lock(g_brightness_mutex);g_brightness.stamped(token,choice,GetTickCount64());
+    }catch(...) {}
+}
+bool origin_brightness_requires_dark() noexcept {
+    try {std::scoped_lock lock(g_brightness_mutex);return !g_brightness.permits_generic_retry();}
+    catch(...){return true;}
+}
+void origin_brightness_observe(const std::uint32_t* tokens,const HRESULT* results,
+    unsigned count,bool dark_marker) noexcept {
+    try {
+    bool completed=count>0&&count<=2,missing=false;
+    for(unsigned i=0;i<count&&completed;++i) {
+        if(results[i]==HRESULT_FROM_WIN32(ERROR_NOT_FOUND))missing=true;
+        else if(FAILED(results[i])||!tokens[i])completed=false;
+    }
+    unsigned old{},learned{};bool probe{},changed{};LukeOriginBrightness::Choice choice;
+    {std::scoped_lock lock(g_brightness_mutex);old=g_brightness.shift();const bool was=g_brightness.probing();
+        g_brightness.observe(GetTickCount64(),completed,missing,std::span(tokens,count),dark_marker);
+        choice={g_brightness.shift(),g_brightness.epoch()};learned=g_brightness.learned();probe=g_brightness.probing();
+        changed=old!=choice.shift||was!=probe;}
+    if(changed)report_brightness(old,choice.shift,learned,probe,choice.epoch);
+    }catch(...) {}
+}
 using Microsoft::WRL::ComPtr;
 struct Uploads {
     ComPtr<ID3D12Device> device;
     DXGI_FORMAT format{};
     UINT height{};
-    std::array<ComPtr<ID3D12Resource>, 2> colors;        // black, dim white
-    std::array<ComPtr<ID3D12Resource>, 2> bright_colors; // black, full white (float outputs)
+    std::array<std::array<ComPtr<ID3D12Resource>,2>,9> colors;        // black, dim white
+    std::array<std::array<ComPtr<ID3D12Resource>,2>,9> bright_colors; // black, full white (float outputs)
 };
 struct OriginSearchJob {
     struct Image {
@@ -158,6 +208,9 @@ struct Reader {
     UINT64 bytes{}, last_fence{}, next_fence{1};
     HANDLE event{};
     bool poisoned{};
+    std::array<LukeColorOriginDecode,2> dark_anchors{}; // absolute final-eye coordinates
+    std::array<std::uint64_t,2> dark_geometry{};
+    std::uint64_t last_dark_check{},last_dark_report{};
     std::array<LukeOriginRowWindow, 2> windows{}; // per color slot, under mutex
     std::array<LukeOriginSearchPosition,2> positions{};
     std::shared_ptr<OriginSearchJob> search;
@@ -228,7 +281,7 @@ D3D12_RESOURCE_BARRIER transition(ID3D12Resource* color, D3D12_RESOURCE_STATES f
     return barrier;
 }
 HRESULT immutable_upload(ID3D12Device* device, DXGI_FORMAT format, UINT height,
-    bool white, ComPtr<ID3D12Resource>& output, bool bright = false) {
+    bool white, ComPtr<ID3D12Resource>& output, bool bright, unsigned shift) {
     D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_UPLOAD;
     heap.CreationNodeMask = heap.VisibleNodeMask = 1;
     D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -246,28 +299,33 @@ HRESULT immutable_upload(ID3D12Device* device, DXGI_FORMAT format, UINT height,
     const auto pixel_bytes = luke_origin_pixel_bytes(format);
     for (UINT y = 0; y < height; ++y)
         for (UINT x = 0; x < 2; ++x)
-            luke_origin_pixel(bytes + static_cast<UINT64>(y) * 256 + x * pixel_bytes, format, white, bright,origin_hdr_unit_shift());
+            luke_origin_pixel(bytes + static_cast<UINT64>(y) * 256 + x * pixel_bytes, format, white, bright,shift);
     const D3D12_RANGE written{0, static_cast<SIZE_T>(desc.Width)};
     output->Unmap(0, &written);
     return S_OK;
 }
-HRESULT get_uploads(ID3D12Device* device, DXGI_FORMAT format, UINT height,
+HRESULT get_uploads(ID3D12Device* device,DXGI_FORMAT format,UINT height,unsigned shift,
     std::shared_ptr<Uploads>& output) {
-    auto& c = cache(); std::scoped_lock lock(c.mutex);
-    for (const auto& candidate : c.uploads)
-        if (candidate->device.Get() == device && candidate->format == format && candidate->height == height) {
-            output = candidate; return S_OK;
-        }
-    if (c.uploads.size() >= 16) return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
-    auto created = std::make_shared<Uploads>();
-    created->device = device; created->format = format; created->height = height;
-    HRESULT result = immutable_upload(device, format, height, false, created->colors[0]);
-    if (SUCCEEDED(result)) result = immutable_upload(device, format, height, true, created->colors[1]);
-    if (SUCCEEDED(result)) result = immutable_upload(device, format, height, false, created->bright_colors[0], true);
-    if (SUCCEEDED(result)) result = immutable_upload(device, format, height, true, created->bright_colors[1], true);
-    if (FAILED(result)) return result;
-    c.uploads.push_back(created); output = std::move(created);
-    return S_OK;
+    auto& c=cache();std::scoped_lock lock(c.mutex);
+    shift=std::min(shift,LukeOriginBrightness::max_shift);
+    std::shared_ptr<Uploads> found;
+    for(const auto& item:c.uploads)
+        if(item->device.Get()==device&&item->format==format&&item->height==height){found=item;break;}
+    const bool fresh=!found;
+    if(fresh) {
+        if(c.uploads.size()>=16)return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
+        found=std::make_shared<Uploads>();found->device=device;found->format=format;found->height=height;
+    }
+    auto& colors=found->colors[shift];auto& bright=found->bright_colors[shift];
+    HRESULT result=S_OK;
+    // Immutable levels stay owned by the same bounded device/format cache.
+    // Never rewrite uploads already referenced by an in-flight command list.
+    if(!colors[0])result=immutable_upload(device,format,height,false,colors[0],false,shift);
+    if(SUCCEEDED(result)&&!colors[1])result=immutable_upload(device,format,height,true,colors[1],false,shift);
+    if(SUCCEEDED(result)&&!bright[0])result=immutable_upload(device,format,height,false,bright[0],true,shift);
+    if(SUCCEEDED(result)&&!bright[1])result=immutable_upload(device,format,height,true,bright[1],true,shift);
+    if(FAILED(result))return result;
+    if(fresh)c.uploads.push_back(found);output=std::move(found);return S_OK;
 }
 HRESULT get_reader(ID3D12CommandQueue* queue, std::shared_ptr<Reader>& output) {
     auto& c = cache(); std::scoped_lock lock(c.mutex);
@@ -456,10 +514,12 @@ void luke_color_origin_patch_pixels(const LukeColorOriginPatch& patch, DXGI_FORM
     std::uint32_t token, std::byte* pixels) noexcept {
     const auto bytes=luke_origin_pixel_bytes(format);
     if(!pixels||!bytes)return;
+    const auto choice=origin_brightness_choice(format);
     for(unsigned band=0;band<patch.band_count;++band)
         for(unsigned y=0;y<kLukeOriginHeight;++y)
             for(unsigned x=0;x<kLukeOriginWidth;++x,pixels+=bytes)
-                luke_origin_pixel(pixels,format,luke_origin_white(token,(x/2)*2),patch.bright[band],patch.hdr_unit_shift);
+                luke_origin_pixel(pixels,format,luke_origin_white(token,(x/2)*2),patch.bright[band],choice.shift);
+    origin_brightness_stamped(format,token,choice);
 }
 HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* color,
     std::uint32_t token, D3D12_RESOURCE_STATES state, ID3D12Device* native_device,
@@ -498,7 +558,8 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             if (FAILED(result)) return result;
         }
         std::shared_ptr<Uploads> patterns;
-        HRESULT result = get_uploads(device.Get(), format, kLukeOriginHeight, patterns);
+        const auto choice=origin_brightness_choice(format);
+        HRESULT result = get_uploads(device.Get(), format, kLukeOriginHeight, choice.shift, patterns);
         if (FAILED(result)) return result;
         D3D12_TEXTURE_COPY_LOCATION destination{};
         destination.pResource = color; destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -512,7 +573,7 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             for (unsigned cell = 0; cell < kLukeOriginBits * 2; ++cell) {
             const bool white = luke_origin_white(token, cell * 2);
             D3D12_TEXTURE_COPY_LOCATION source{};
-            source.pResource = ((layout.bright[band]||primary_bright) ? patterns->bright_colors : patterns->colors)[white ? 1 : 0].Get();
+            source.pResource = ((layout.bright[band]||primary_bright) ? patterns->bright_colors[choice.shift] : patterns->colors[choice.shift])[white ? 1 : 0].Get();
             source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
             source.PlacedFootprint.Footprint = {format, 2, kLukeOriginHeight, 1, 256};
                 list->CopyTextureRegion(&destination, x + cell * 2, y, 0, &source, nullptr);
@@ -532,6 +593,7 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             auto barrier = transition(color, D3D12_RESOURCE_STATE_COPY_DEST, state);
             list->ResourceBarrier(1, &barrier);
         }
+        origin_brightness_stamped(format,token,choice);
         return S_OK;
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
       catch (...) { return E_FAIL; }
@@ -841,7 +903,39 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             if(changed)bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
                 valid?1:0,1320,inset,left<0?0:static_cast<unsigned>(left));
         }
+        bool missing=false;
+        for(unsigned i=0;i<count;++i)if(plans[i].valid) {
+            if(SUCCEEDED(results[i])&&tokens[i]) {
+                auto anchor=decoded[i];anchor.first_column+=plans[i].layout.scan.x;
+                anchor.last_column+=plans[i].layout.scan.x;anchor.first_row+=plans[i].layout.scan.y;
+                anchor.last_row+=plans[i].layout.scan.y;
+                reader->dark_anchors[i]=anchor;reader->dark_geometry[i]=reader->positions[i].geometry;
+            } else if(results[i]==HRESULT_FROM_WIN32(ERROR_NOT_FOUND))missing=true;
+        }
+        bool observe=true,dark=false;
+        if(missing&&origin_brightness_requires_dark()) {
+            const auto now=GetTickCount64();
+            if(reader->last_dark_check && now-reader->last_dark_check<100)observe=false;
+            else {
+                reader->last_dark_check=now;dark=true;unsigned mask=0;
+                for(unsigned i=0;i<count;++i)if(results[i]==HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) {
+                    auto known=reader->dark_anchors[i];
+                    const auto& scan=plans[i].layout.scan;
+                    known.first_column-=static_cast<int>(scan.x);known.last_column-=static_cast<int>(scan.x);
+                    known.first_row-=static_cast<int>(scan.y);known.last_row-=static_cast<int>(scan.y);
+                    const auto found=classify_luke_dark_marker(image_rows[i],
+                        reader->dark_geometry[i]==reader->positions[i].geometry?&known:nullptr);
+                    dark&=found.recognized;if(found.recognized)mask|=1U<<i;
+                }
+                if(!reader->last_dark_report||now-reader->last_dark_report>=1000) {
+                    reader->last_dark_report=now;
+                    bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,dark?1:0,1434,
+                        mask,static_cast<std::uint64_t>(count));
+                }
+            }
+        }
         const D3D12_RANGE no_write{0,0}; reader->readback->Unmap(0,&no_write);
+        if(observe)origin_brightness_observe(tokens,results,count,dark);
         phase(125,decode_status);
         return S_OK;
         };

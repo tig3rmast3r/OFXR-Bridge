@@ -10,6 +10,10 @@ namespace xrfg {
 // original pixel centres keep their original rays: add storage at right/bottom
 // and extend only those tangent-plane edges by exactly the added pixel pitch.
 // The submitted XR FOV/rect are never changed. Copy out the original peer rect.
+inline constexpr unsigned kLukeCanvasMaxPadding=32;
+inline bool luke_canvas_padding_allowed(unsigned a,unsigned b) noexcept {
+    return std::max(a,b)-std::min(a,b)<=std::min(kLukeCanvasMaxPadding,std::max(4U,std::min(a,b)/100));
+}
 struct LukeEyeCanvas {
     unsigned width{}, height{};
     std::array<float,4> source_fov{}, destination_fov{}; // left,right,up,down
@@ -22,7 +26,7 @@ inline std::optional<LukeEyeCanvas> luke_eye_canvas(unsigned sw,unsigned sh,unsi
     std::array<float,4> source,std::array<float,4> destination,
     std::array<unsigned,4> source_rect={},std::array<unsigned,4> destination_rect={}) noexcept {
     if(!sw||!sh||!dw||!dh || std::max(sw,dw)>16384 || std::max(sh,dh)>8192 ||
-        std::max(sw,dw)-std::min(sw,dw)>4 || std::max(sh,dh)-std::min(sh,dh)>4 ||
+        !luke_canvas_padding_allowed(sw,dw) || !luke_canvas_padding_allowed(sh,dh) ||
         !luke_canvas_full_rect(source_rect,sw,sh)||!luke_canvas_full_rect(destination_rect,dw,dh))return {};
     LukeEyeCanvas out{std::max(sw,dw),std::max(sh,dh),source,destination};
     const auto expand=[&](std::array<float,4>& f,unsigned w,unsigned h) {
@@ -39,10 +43,10 @@ inline std::optional<LukeEyeCanvas> luke_eye_canvas(unsigned sw,unsigned sh,unsi
     return out;
 }
 struct LukeCanvasCopy {unsigned left{},top{},right{},bottom{},x{},y{};};
-struct LukeCanvasCopies {std::array<LukeCanvasCopy,25> regions{};unsigned count{};};
+struct LukeCanvasCopies {std::array<LukeCanvasCopy,(kLukeCanvasMaxPadding+1)*(kLukeCanvasMaxPadding+1)> regions{};unsigned count{};};
 inline LukeCanvasCopies luke_canvas_copies(unsigned w,unsigned h,unsigned cw,unsigned ch) noexcept {
     LukeCanvasCopies out{};
-    if(!w||!h||cw<w||ch<h||cw-w>4||ch-h>4)return out;
+    if(!w||!h||cw<w||ch<h||cw-w>kLukeCanvasMaxPadding||ch-h>kLukeCanvasMaxPadding)return out;
     out.regions[out.count++]={0,0,w,h,0,0};
     for(unsigned x=w;x<cw;++x)out.regions[out.count++]={w-1,0,w,h,x,0};
     for(unsigned y=h;y<ch;++y) {
