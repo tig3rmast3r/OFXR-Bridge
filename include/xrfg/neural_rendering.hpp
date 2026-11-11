@@ -60,6 +60,10 @@ void before_sr(unsigned int native_handle_id, ID3D12GraphicsCommandList* list,
     const NVSDK_NGX_Parameter* parameters, ID3D12CommandQueue* queue = nullptr);
 void after_sr(unsigned int native_handle_id, ID3D12GraphicsCommandList* list,
     const NVSDK_NGX_Parameter* parameters, ID3D12CommandQueue* queue = nullptr);
+// Evaluate under one configuration lock. False guarantees this call skipped
+// post-SR NR without changing Output; true conservatively requires copyback.
+bool after_sr_needs_copyback(unsigned int native_handle_id, ID3D12GraphicsCommandList* list,
+    const NVSDK_NGX_Parameter* parameters, ID3D12CommandQueue* queue = nullptr);
 // Detach BEFORE ExecuteCommandLists, complete AFTER actual submission. The
 // detached recording serial prevents reused list pointers from stealing work.
 std::vector<SubmissionReceipt> take_submission_receipts(unsigned int count,

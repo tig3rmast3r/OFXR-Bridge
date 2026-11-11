@@ -2138,10 +2138,9 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     device->Release();
 }
 
-void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList* cmdList,
+static void EvaluateAfterUpscaleLocked(unsigned int sourceHandleId, ID3D12GraphicsCommandList* cmdList,
                           const NVSDK_NGX_Parameter* params, ID3D12CommandQueue* timingQueue)
 {
-    std::lock_guard<std::mutex> nrLock(g_nrMutex);
     const NrConfiguration& cfg = *NrConfiguration::Instance();
 
     if (cfg.DlssNrRunBeforeSr.value_or_default()) return;
@@ -2775,6 +2774,23 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
 }
 
 
+void EvaluateAfterUpscale(unsigned int handle, ID3D12GraphicsCommandList* list,
+                          const NVSDK_NGX_Parameter* parameters, ID3D12CommandQueue* queue)
+{
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
+    EvaluateAfterUpscaleLocked(handle, list, parameters, queue);
+}
+
+bool EvaluateAfterUpscaleNeedsCopyback(unsigned int handle, ID3D12GraphicsCommandList* list,
+                                     const NVSDK_NGX_Parameter* parameters, ID3D12CommandQueue* queue)
+{
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
+    const NrConfiguration& cfg = *NrConfiguration::Instance();
+    const bool selected = cfg.DlssNrEnabled.value_or_default() && !cfg.DlssNrRunBeforeSr.value_or_default();
+    EvaluateAfterUpscaleLocked(handle, list, parameters, queue);
+    return selected;
+}
+
 bool IsRunning()
 {
     if (g_runtime.failed)
@@ -3026,6 +3042,10 @@ std::shared_ptr<void> observe_device_removal(IUnknown* owner) noexcept {
 void after_sr(unsigned int handle,ID3D12GraphicsCommandList* list,
     const NVSDK_NGX_Parameter* parameters,ID3D12CommandQueue* queue) {
     DlssNr::EvaluateAfterUpscale(handle,list,parameters,queue);
+}
+bool after_sr_needs_copyback(unsigned int handle,ID3D12GraphicsCommandList* list,
+    const NVSDK_NGX_Parameter* parameters,ID3D12CommandQueue* queue) {
+    return DlssNr::EvaluateAfterUpscaleNeedsCopyback(handle,list,parameters,queue);
 }
 std::vector<SubmissionReceipt> take_submission_receipts(unsigned int count,
     ID3D12CommandList* const* lists) {
