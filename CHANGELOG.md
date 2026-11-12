@@ -87,3 +87,7 @@
 - [fix] Pimax OpenXR delivery no longer queues ready generated frames behind later game rendering.
 - [fix] Small DLSS output-alignment differences no longer reject otherwise matching packed stereo guides.
 - [fix] `status.json` reports the effective frame-generation multiplier, including OSR and fallback.
+
+## Nightly V985 (2026/11/12)
+
+- [fix] RIFE installation retries temporary file locks and provides clearer diagnostics when another program prevents activation.
