@@ -370,7 +370,8 @@ namespace {
 // The 0.2 format (schema 1) plus latency_ms. Fields may be added within a
 // schema; none changes meaning or disappears without a new number.
 std::string build_status_json(const StatusInputs& inputs) {
-    const std::uint32_t configured = inputs.settings.triple_frame_gen ? 3U : 2U;
+    const std::uint32_t configured = inputs.configured_multiplier>=2 && inputs.configured_multiplier<=4
+        ? inputs.configured_multiplier : inputs.settings.triple_frame_gen ? 3U : 2U;
     const bool session = inputs.session_present;
     const StatusSession& running = inputs.session;
     std::string json = "{\n";

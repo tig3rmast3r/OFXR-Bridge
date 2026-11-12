@@ -45,6 +45,8 @@ Microsoft::WRL::ComPtr<ID3D11Texture2D> auxiliary_readback;
 bool gpu_pixels_correct = true;
 bool terminal_optical_test = false;
 unsigned terminal_real_reads{}, terminal_synthetic_reads{};
+unsigned terminal_output_factor=2;
+bool terminal_fidelity_cut_output{};
 std::shared_ptr<xrfg::D3D11D3D12SwapchainInterop> inline_publication_bridge;
 std::uint64_t inline_publication_before{};
 std::atomic<bool> inline_early_release{};
@@ -101,14 +103,20 @@ XrResult XRAPI_CALL fake_end(XrSession, const XrFrameEndInfo* info) {
                 const auto* pixel = static_cast<const unsigned char*>(mapped.pData);
                 if (terminal_optical_test) {
                     const auto sequence = packed / 2;
-                    if (!synthetic) {
+                    // This deliberately changing histogram triggers FidelityFX's
+                    // scene-cut fallback. Its synthetic outputs must still carry
+                    // the fresh current packet, never an old/black D11 image.
+                    if (!synthetic || terminal_fidelity_cut_output) {
                         for (unsigned y = 0; y < 128; ++y)
                             for (unsigned x = 0; x < 256; ++x) {
                                 std::uint32_t actual{};
                                 std::memcpy(&actual, pixel + y * mapped.RowPitch + x * 4, sizeof(actual));
-                                gpu_pixels_correct &= actual == terminal_optical_pixel(sequence, eye, x, y);
+                                const auto expected_pixel=terminal_optical_pixel(sequence,eye,x,y);
+                                if(terminal_output_factor>2 && x==0 && y==0 && actual!=expected_pixel)
+                                    std::fprintf(stderr,"OSR_REAL seq=%u eye=%u actual=%08x expected=%08x\n",sequence,eye,actual,expected_pixel);
+                                gpu_pixels_correct &= actual == expected_pixel;
                             }
-                        ++terminal_real_reads;
+                        if(synthetic)++terminal_synthetic_reads;else ++terminal_real_reads;
                     } else {
                         // R is spatially constant but changes by 24 each frame;
                         // B is a checker translated four pixels per production.
@@ -123,9 +131,13 @@ XrResult XRAPI_CALL fake_end(XrSession, const XrFrameEndInfo* info) {
                                 gpu_pixels_correct &= std::abs(static_cast<int>(p[1]) - (eye ? 160 : 80)) <= 1 &&
                                     p[3] == 255;
                             }
-                        const double midpoint_red = sequence * 24.0 - 12.0;
-                        gpu_pixels_correct &= computed > interior * 3 / 4 &&
-                            std::abs(static_cast<double>(red_sum) / interior - midpoint_red) <= 2.0;
+                        unsigned ordinal=1;
+                        for(auto it=presented.rbegin();it!=presented.rend() && it->first==sequence && it->second;++it)++ordinal;
+                        const double midpoint_red = (sequence-1)*24.0 + 24.0*ordinal/terminal_output_factor;
+                        const auto mean_red=static_cast<double>(red_sum)/interior;
+                        if(terminal_output_factor>2 && (computed<=interior*3/4 || std::abs(mean_red-midpoint_red)>2.0))
+                            std::fprintf(stderr,"OSR_SYNTH seq=%u eye=%u ordinal=%u factor=%u mean=%.3f expected=%.3f computed=%u/%u\n",sequence,eye,ordinal,terminal_output_factor,mean_red,midpoint_red,computed,interior);
+                        gpu_pixels_correct &= computed > interior * 3 / 4 && std::abs(mean_red-midpoint_red)<=2.0;
                         ++terminal_synthetic_reads;
                     }
                 } else gpu_pixels_correct &= pixel[0] == packed / 2 && pixel[1] == (eye ? 160 : 80);
@@ -987,7 +999,9 @@ void held_afw_pair_gpu_test(const std::shared_ptr<SessionState>& state,
 #include "luke_fidelity_busy_fixture.inc"
 void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = false, bool luke = false, bool gap = false,
                   bool afw_slot_probe = false, bool post_afw_packet = false, bool missing_afw_guides = false, int private_mode = 0,
-                  bool isolated_lane = false) {
+                  bool isolated_lane = false, unsigned native_osr_factor = 0, bool native_fidelity = false) {
+    terminal_output_factor=native_osr_factor?native_osr_factor:2;
+    terminal_fidelity_cut_output=native_fidelity;
     terminal_optical_test = post_afw_packet;
     terminal_real_reads = terminal_synthetic_reads = 0;
     three_layer_test = with_layers;
@@ -1004,6 +1018,15 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
             const auto desc=state->d3d12_queue->GetDesc();
             check(SUCCEEDED(state->d3d12_device->CreateCommandQueue(&desc,
                 IID_PPV_ARGS(&state->luke_synthesis_queue))),"isolated Luke OFXR lane");
+        }
+        if(native_osr_factor) {
+            state->dispatch->virtual_desktop_runtime=true;state->vdxr_legacy=true;
+            state->luke_afw_enabled=true;state->graphics_binding_capabilities|=8ULL;
+            state->djules_route=false;state->nvidia_options.rife_multiplier=native_osr_factor;
+            if(native_fidelity)state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+            check(native_runtime_multiframe(*state) && rife_frames(*state)==native_osr_factor &&
+                three_slot_generation_session(state),"native OSR D11 has the ordered multi-output worker");
+            state->three_slots.configure(native_osr_factor);
         }
         const auto diagnostic_root=std::filesystem::current_path()/("capture-integration-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64()));
         if(diagnostic) {
@@ -1025,7 +1048,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
         desc.Width = 256; desc.Height = 128; desc.ArraySize = with_layers ? 1 : 2; desc.MipLevels = 1;
         desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.SampleDesc.Count = 1;
         desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, 6> images;
+        std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> images(native_osr_factor==4?7:6);
         for (auto& image : images)
             check(SUCCEEDED(state->d3d11_device->CreateTexture2D(&desc, nullptr, &image)), "texture");
         test_device = state->d3d11_device;
@@ -1056,7 +1079,13 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
         const auto initialize_generation = [&](const auto& generation, const auto& images, unsigned base) {
         ID3D11Texture2D* sources[] = {images[0].Get()};
         ID3D11Texture2D* reals[] = {images[1].Get(), images[2].Get(), images[3].Get()};
-        ID3D11Texture2D* synthetics[] = {images[4].Get(), images[5].Get()};
+        std::vector<ID3D11Texture2D*> synthetics{images[4].Get(), images[5].Get()};
+        if(native_osr_factor==4)synthetics.push_back(images[6].Get());
+        if(native_osr_factor>2) {
+            generation->synthetic_runtime_rings=native_osr_factor-1;
+            generation->direct_extra_outputs=true;
+            for(auto& lease:generation->direct_synthetic_leases)lease=std::make_shared<DirectSyntheticLease>();
+        }
         generation->d3d11_interop = std::make_shared<xrfg::D3D11D3D12SwapchainInterop>();
         auto& interop = generation->d3d11_interop;
         check(SUCCEEDED(interop->initialize(state->d3d11_device.Get(), state->d3d11_context.Get(),
@@ -1073,7 +1102,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
         check(SUCCEEDED(generation->synthesizer->initialize(state->d3d12_device.Get(),
             synthesis_queue, history, interop->current_destination_images(),
             interop->synthetic_destination_images(), desc.Format, D3D12_RESOURCE_STATE_COMMON,
-            state->optical_flow_backend,{},private_mode>0,
+            state->optical_flow_backend,state->nvidia_options,private_mode>0,
             xrfg::D3D12FrameGenerationMode::ofxr,false,post_afw_packet)), "NVIDIA synthesis");
         if(isolated_lane) {
             generation->afw_source_synthesizer=std::make_shared<xrfg::D3D12FrameSynthesizer>();
@@ -1093,7 +1122,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
             check(SUCCEEDED(generation->afw_temporal_synthesizer->initialize(state->d3d12_device.Get(),
                 synthesis_queue, generation->afw_final_history, interop->current_destination_images(),
                 interop->synthetic_destination_images(), desc.Format, D3D12_RESOURCE_STATE_COMMON,
-                xrfg::D3D12OpticalFlowBackend::nvidia, {}, true,
+                state->optical_flow_backend, state->nvidia_options, true,
                 xrfg::D3D12FrameGenerationMode::ofxr,false,true)), "post AFW OFA");
         }
         for (unsigned i = 0; i != 2; ++i) {
@@ -1101,6 +1130,10 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
             generation->synthetic[i].handle = reinterpret_cast<XrSwapchain>(std::uintptr_t(base+0x10+i));
             gpu_outputs[generation->current[i].handle] = reals[i];
             gpu_outputs[generation->synthetic[i].handle] = synthetics[i];
+        }
+        if(native_osr_factor==4) {
+            generation->synthetic[2].handle=reinterpret_cast<XrSwapchain>(std::uintptr_t(base+0x12));
+            gpu_outputs[generation->synthetic[2].handle]=synthetics[2];
         }
         return history;
         };
@@ -1110,7 +1143,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
             publication_receipt_independence_test(state, interop);
             completed_publication_independence_test(state,generation,history,images[0].Get());
         }
-        std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, 6> right_images;
+        std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> right_images(native_osr_factor==4?7:6);
         auto right_generation = std::make_shared<FrameGenerationSwapchainState>();
         std::shared_ptr<xrfg::D3D12SwapchainHistory> right_history;
         if (with_layers) {
@@ -1573,7 +1606,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                 }
                 auto completed = freeze_completed_afw_frame(state, &terminal.info, terminal_snapshot, std::move(packet), n);
                 check(completed && completed->application_serial == n, "completed direct-XR packet freeze");
-                if(n<=2) inline_afw_publication_gpu_test(state,completed->inputs.front(),n);
+                if(n<=2 && !native_osr_factor) inline_afw_publication_gpu_test(state,completed->inputs.front(),n);
                 if (n == 1) {
                     // Reproduce promotion with one eye's inline post-AFW
                     // prime still on the GPU. The ordinary synthesizer is
@@ -1665,7 +1698,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                 "missing AFW guides must select raw OFXR without faking AFW output");
         }
         stop_continuous_presenter(state);
-        if (post_afw_packet) {
+        if (post_afw_packet && !native_fidelity) {
             for (const auto& gen : {generation, right_generation}) {
                 check(SUCCEEDED(gen->afw_temporal_synthesizer->wait_for_idle()), "post AFW optical drain");
                 bool measured_final_pair = false;
@@ -1682,9 +1715,9 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                 }
                 check(measured_final_pair, "post AFW final 7/8 optical pair was not measured");
             }
-            check(terminal_real_reads == 16 && terminal_synthetic_reads == 14,
-                "post AFW optical fixture missed real/synthetic image readback");
         }
+        if(post_afw_packet)check(terminal_real_reads == 16 && terminal_synthetic_reads == 14*terminal_output_factor-14,
+            "post AFW optical fixture missed real/synthetic image readback");
         if(diagnostic) {
             state->frame_capture->shutdown();
             unsigned samples=0,views=0,handoffs=0,submissions=0,consumers=0;
@@ -1703,7 +1736,8 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
         }
         std::vector<std::pair<unsigned, bool>> expected;
         for (unsigned i = 1; i <= 8; ++i) {
-            if (i > 1 && !(transition && (i == 5 || i == 6)) && !(gap && (i==4 || i==6))) expected.emplace_back(i, true);
+            if (i > 1 && !(transition && (i == 5 || i == 6)) && !(gap && (i==4 || i==6)))
+                for(unsigned j=1;j<terminal_output_factor;++j)expected.emplace_back(i, true);
             expected.emplace_back(i, false);
         }
         check(presented == expected && waits == expected.size() && begins == waits && ends == waits, "GPU order/count");
@@ -2368,6 +2402,81 @@ void gta_flat_scene_test() {
     std::cout<<"GTA flat scene: full application BOTH-eye quad despite erased CRC, no staging read or fake FPS; normal status resumes PASS\n";
 }
 
+// Exercise the shipping consumer against a runtime which sometimes returns
+// Wait early, and sometimes spends most of a refresh in Wait. Measure the
+// extra delay after that return, separately from time spent inside End.
+struct NativePacingFixture {
+    using Clock=std::chrono::steady_clock;
+    Clock::time_point waited{},returned{};
+    std::chrono::milliseconds wait_cost{};
+    std::vector<double> after_wait,gaps;
+    unsigned outputs{};
+};
+NativePacingFixture* native_pacing_fixture{};
+XrResult XRAPI_CALL native_pacing_wait(XrSession,const XrFrameWaitInfo*,XrFrameState* out) {
+    auto& f=*native_pacing_fixture;
+    std::this_thread::sleep_for(f.wait_cost);
+    ++waits;next_time+=50'000'000;
+    out->predictedDisplayTime=next_time;out->predictedDisplayPeriod=50'000'000;out->shouldRender=XR_TRUE;
+    f.waited=NativePacingFixture::Clock::now();
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL native_pacing_end(XrSession session_handle,const XrFrameEndInfo* info) {
+    auto& f=*native_pacing_fixture;
+    const auto entered=NativePacingFixture::Clock::now();
+    if(f.outputs++) {
+        f.after_wait.push_back(std::chrono::duration<double,std::milli>(entered-f.waited).count());
+        f.gaps.push_back(std::chrono::duration<double,std::milli>(entered-f.returned).count());
+    }
+    // A stalled End must not make the next output catch up to an old timer.
+    if(f.outputs==4)std::this_thread::sleep_for(std::chrono::milliseconds(75));
+    const auto result=fake_end(session_handle,info);
+    f.returned=NativePacingFixture::Clock::now();
+    return result;
+}
+void native_multiframe_pacing_test() {
+    for(const bool vd:{false,true})for(const int factor:{2,3,4})for(const int cost:{2,35}) {
+        NativePacingFixture timing;timing.wait_cost=std::chrono::milliseconds(cost);
+        native_pacing_fixture=&timing;
+        auto state=session();state->graphics_binding=SessionGraphicsBinding::d3d12;
+        state->dispatch->virtual_desktop_runtime=vd;
+        state->dispatch->wait_frame=native_pacing_wait;state->dispatch->end_frame=native_pacing_end;
+        state->djules_route=false;state->nvidia_options.rife_model=-1;
+        state->nvidia_options.rife_multiplier=factor;state->presenter_display_period=50'000'000;
+        check(native_multiframe_runtime_pacing(*state)==(!vd && factor>2),"native clock route selection");
+        state->pipelined_presenter_mode=true;
+        check(native_frame_multiplier(*state)==2 && !native_multiframe_runtime_pacing(*state),
+            "requested multiframe changed pacing while the active owner still provides 2X");
+        state->pipelined_presenter_mode=false;
+        RegisteredFixtureSession registration(state);
+        const unsigned count=factor*4;
+        for(unsigned i=0;i<count;++i) {
+            auto request=std::make_shared<PresenterSubmission>();request->sequence=i+1;
+            request->owned_frame=frame(i/factor+1,i%factor!=factor-1)->frame;
+            state->presenter_submissions.push_back(std::move(request));
+        }
+        state->outstanding_presenter_submissions=count;
+        const auto old_waits=waits.load(),old_begins=begins.load(),old_ends=ends.load();
+        state->presenter_thread=std::thread(three_slot_director_main,state);
+        const auto result=wait_for_presenter_idle(state);
+        stop_continuous_presenter(state);
+        check(XR_SUCCEEDED(result) && timing.outputs==count,"native clock lost an output");
+        check(waits-old_waits==count && begins-old_begins==count && ends-old_ends==count,
+            "native clock changed Wait/Begin/End ownership");
+        std::sort(timing.after_wait.begin(),timing.after_wait.end());
+        const auto median=timing.after_wait[timing.after_wait.size()/2];
+        const auto minimum=*std::min_element(timing.gaps.begin(),timing.gaps.end());
+        std::printf("NATIVE_PACING vd=%u factor=%d wait_ms=%d post_wait_median_ms=%.3f min_end_return_gap_ms=%.3f\n",
+            vd,factor,cost,median,minimum);
+        if(!vd && factor>2) {
+            check(median<(cost==2?32.0:10.0),"native multiframe added a full independent timer after runtime Wait");
+            check(minimum>=24.0,"native output escaped the half-period floor after End returned");
+        } else if(cost==2)check(median>30.0,"VDXR or 2X lost its existing presentation clock");
+    }
+    native_pacing_fixture=nullptr;
+    std::cout<<"Native multiframe: runtime-paced and early Wait, slow End, VDXR/2X controls PASS\n";
+}
+
 void test_rife_layer_multiframe_contract() {
     auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
     state->dispatch=std::make_shared<Dispatch>();state->dispatch->steamvr_runtime=true;
@@ -2379,6 +2488,7 @@ void test_rife_layer_multiframe_contract() {
     for(int multiplier:{2,3,4})for(int fast:{0,1}){
         state->nvidia_options.rife_multiplier=multiplier;state->lower_vram=fast;state->separate_synthesis=fast;
         check(rife_multiframe_capable(*state),"native private RIFE capability");
+        check(ordered_overlap_guard(*state),"private RIFE retains overlap ownership even at2X");
         check(independent_synthesis_anchor(*state)==(multiplier>2),"RIFE ready real retained until a future source or2X retention changed");
         check(native_frame_multiplier(*state)==multiplier,"RIFE factor lost in layer policy");
         check(multiplier==2 || (native_synthetic_rings(*state)==multiplier-1 && native_current_rings(*state)==2),"RIFE output storage aliases or overallocates");
@@ -2411,20 +2521,35 @@ void test_rife_layer_multiframe_contract() {
     check(first.native_output==0 && second.native_output==1 && third.native_output==2,"RIFE meter output indices crossed");
     for(auto* frame:{&first,&second,&third})check(frame->native_results.size()==1 &&
         frame->native_results[0]->generated(frame->native_output) && frame->direct_synthetic_leases.size()==1,"RIFE native receipts or image leases lost");
-    state->nvidia_options.rife_model=-1;state->djules_route=false;state->djules_triple_requested=false;
+    state->nvidia_options.rife_model=-1;state->nvidia_options.rife_multiplier=2;state->djules_route=false;state->djules_triple_requested=false;
     check(native_frame_multiplier(*state)==2,"RIFE factor leaked to ordinary OFXR");
     check(!independent_synthesis_anchor(*state),"RIFE detached anchor leaked to ordinary Framework");
     state->nvidia_options.rife_model=3;state->private_runtime.reset();
     check(!rife_multiframe_capable(*state),"legacy interop incorrectly claims RIFE multi support");
     check(!independent_synthesis_anchor(*state),"legacy/interop real retention changed");
     state->dispatch->virtual_desktop_runtime=true;state->dispatch->steamvr_runtime=false;state->vdxr_legacy=true;
+    for(bool split:{false,true})for(int factor:{2,3,4}) {
+        state->split_frame_loop=split;state->nvidia_options.rife_multiplier=factor;
+        check(ordered_overlap_guard(*state)==(factor>2),
+            "native RIFE2 keeps legacy overlap admission; only3X/4X suppress promotion");
+    }
+    state->split_frame_loop=false;
     state->nvidia_options.rife_multiplier=3;
-    check(rife_multiframe_capable(*state) && rife_benchmark_max_multiplier(*state)==3,"native VDXR D12 advertises true3X only");
+    check(rife_multiframe_capable(*state) && rife_benchmark_max_multiplier(*state)==4,"native VDXR D12 advertises ordered3X/4X");
     for(int fast:{0,1}){
         state->lower_vram=state->separate_synthesis=fast;
         check(rife_frames(*state)==3 && native_synthetic_rings(*state)==2 && native_current_rings(*state)==2,"native RIFE3 output storage stays distinct under Fast");
         check(three_slot_generation_session(state),"native RIFE3 has the ordered synthesis worker");
     }
+    for(const char* name:{"VirtualDesktopXR","Pimax OpenXR","Other OpenXR"}) {
+        state->dispatch->runtime_name=name;state->dispatch->virtual_desktop_runtime=std::string_view(name)=="VirtualDesktopXR";
+        for(bool legacy:{false,true})for(int factor:{2,3,4}) {
+            state->vdxr_legacy=legacy;state->nvidia_options.rife_multiplier=factor;
+            check(native_runtime_multiframe(*state) && rife_frames(*state)==factor,"native capability must not depend on runtime name or transport preference");
+            check(ordered_overlap_guard(*state)==(factor>2),"all native runtimes retain RIFE2 overlap admission");
+        }
+    }
+    state->vdxr_legacy=true;state->dispatch->virtual_desktop_runtime=true;state->nvidia_options.rife_multiplier=3;
     Microsoft::WRL::ComPtr<ID3D12Device> native_device;
     check(SUCCEEDED(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&native_device))),"native Luke test device");
     D3D12_COMMAND_QUEUE_DESC native_queue{};
@@ -2434,9 +2559,46 @@ void test_rife_layer_multiframe_contract() {
     state->nvidia_options.rife_multiplier=2;
     check(!fresh_luke_director_worker(*state),"native Luke2X route remains unchanged");
     state->nvidia_options.rife_multiplier=3;
-    state->pipelined_presenter_mode=true;check(rife_benchmark_max_multiplier(*state)==2,"native borrowed frame owner cannot promise3X");state->pipelined_presenter_mode=false;
-    state->split_frame_loop=true;check(!rife_multiframe_capable(*state),"split native loop cannot advertise unsupported3X");state->split_frame_loop=false;
+    state->pipelined_presenter_mode=true;check(rife_benchmark_max_multiplier(*state)==4 && !rife_multiframe_capable(*state),"native borrowed owner is retired before ordered3X/4X");state->pipelined_presenter_mode=false;
+    state->split_frame_loop=true;check(!rife_multiframe_capable(*state),"Luke split native loop retains its existing guard");
+    state->luke_afw_enabled=state->luke_fresh_only=false;
+    for(int factor:{3,4}){
+        state->nvidia_options.rife_multiplier=factor;
+        check(rife_multiframe_capable(*state) && rife_frames(*state)==factor && three_slot_generation_session(state),"ordinary split native loop needs ordered3X/4X");
+        check(native_synthetic_rings(*state)==factor-1 && native_current_rings(*state)==2,"native4X outputs or real anchors alias under Fast");
+    }
+    state->nvidia_options.rife_model=-1;
+    state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::ofxr;state->djules_route=false;
+    for(int factor:{2,3,4})for(int fast:{0,1}) {
+        state->nvidia_options.rife_multiplier=factor;state->lower_vram=fast;
+        check(native_optical_batch_overlap(*state)==(factor>2),"only native optical3X/4X prepare ahead of delivery");
+        if(factor>2)check(source_synthetic_rings(*state,false)==2U*(factor-1),"native optical next batch aliases queued synthetic outputs");
+        state->dispatch->steamvr_runtime=true;
+        check(!native_optical_batch_overlap(*state),"native optical overlap leaked to SteamVR");
+        state->dispatch->steamvr_runtime=false;
+        state->luke_afw_enabled=true;
+        check(!native_optical_batch_overlap(*state),"ordinary optical overlap leaked to Luke publication");
+        state->luke_afw_enabled=false;
+        state->nvidia_options.rife_model=3;
+        check(!native_optical_batch_overlap(*state),"native optical overlap changed RIFE policy");
+        state->nvidia_options.rife_model=-1;
+    }
+    state->nvidia_options.rife_multiplier=4;
+    state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::native_dlss;
+    check(!native_optical_batch_overlap(*state),"native optical overlap changed DLSS-G policy");
+    state->native_dlss_generated_frames=3;
+    check(native_multiframe_requested(*state) && rife_frames(*state)==4 && three_slot_generation_session(state),"native DLSS-G4 requires the ordered worker and three generated frames");
+    state->native_dlss_generated_frames=2;
+    check(!native_multiframe_requested(*state),"native DLSS-G4 cannot bypass GPU multi-frame capability");
+    state->split_frame_loop=false;
     state->graphics_binding=SessionGraphicsBinding::d3d11;check(!rife_multiframe_capable(*state),"native D11 does not silently claim3X");
+    state->luke_afw_enabled=true;state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::ofxr;
+    for(int factor:{2,3,4}) {
+        state->nvidia_options.rife_multiplier=factor;
+        check(rife_multiframe_capable(*state) && rife_frames(*state)==factor,"native OSR D11 multiplier capability");
+        state->split_frame_loop=true;check(!rife_multiframe_capable(*state),"native OSR split-loop guard retained");state->split_frame_loop=false;
+        state->single_threaded_d3d11=true;check(!rife_multiframe_capable(*state),"native OSR single-threaded device guard retained");state->single_threaded_d3d11=false;
+    }
     std::cout<<"RIFE layer:2X/3X/4X clocks, Fast on/off pools and all three delivery receipts PASS\n";
 }
 
@@ -2741,6 +2903,7 @@ xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
             if (mode == "native-prediction-clock") { native_prediction_clock_test(); return 0; }
             if (mode == "luke-route-prediction-clock") { luke_route_prediction_clock_test(); return 0; }
             if (mode == "route-handoff") { pipelined_route_handoff_test(); return 0; }
+            if (mode == "native-multiframe-pacing") { native_multiframe_pacing_test(); return 0; }
             if (mode == "route-handoff-steamvr") { pipelined_route_handoff_test(true); return 0; }
             if (mode == "pipeline-preference") { djules_pipeline_preference_test(); return 0; }
             if (mode == "pairing-recovery") { own_time_pairing_recovery_test(); return 0; }
@@ -2759,6 +2922,11 @@ xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
             if(mode == "luke-afw-slot") { gpu_pipeline(true, false, false, false, false, true); return 0; }
             if(mode == "post-afw-packet") { gpu_pipeline(true, false, false, false, false, false, true); return 0; }
             if(mode == "luke-isolated-post-afw") { gpu_pipeline(true,false,false,false,false,false,true,false,0,true); return 0; }
+            if(mode == "native-osr2" || mode == "native-osr3" || mode == "native-osr4" ||
+                mode == "native-osr3-fidelity" || mode == "native-osr4-fidelity") {
+                const unsigned factor=mode.starts_with("native-osr2")?2:mode.starts_with("native-osr3")?3:4;
+                gpu_pipeline(true,false,false,false,false,false,true,false,0,true,factor,mode.ends_with("fidelity"));return 0;
+            }
 
             if(mode == "luke-isolated-raw") { gpu_pipeline(true,false,false,true,false,false,false,false,0,true); return 0; }
             if(mode == "luke-missing-afw-guides") { gpu_pipeline(true, false, false, false, false, false, false, true); return 0; }

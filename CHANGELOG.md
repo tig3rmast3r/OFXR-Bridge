@@ -79,3 +79,11 @@
 - [fix] Fixed Neural Rendering in MSFS 2024, including foveated rendering.
 - [fix] Fixed vector-based frame generation in MSFS 2024 with foveated rendering.
 - [fix] Several other minor fixes.
+
+## Nightly V984 (2026/11/12)
+
+- [fix] 3X and 4X frame generation now activate on compatible native OpenXR sessions, including VDXR and Pimax OpenXR.
+- [fix] Compatible Luke Ross OSR/AFW sessions publish every generated frame at 3X and 4X.
+- [fix] Pimax OpenXR delivery no longer queues ready generated frames behind later game rendering.
+- [fix] Small DLSS output-alignment differences no longer reject otherwise matching packed stereo guides.
+- [fix] `status.json` reports the effective frame-generation multiplier, including OSR and fallback.

@@ -79,7 +79,7 @@ should read those and ignore everything else.
 | `schema` | number | Format version, currently `1`. Fields may be added within a version; a key will not change meaning or disappear without a new number. |
 | `armed` | bool | The tray has OFXR armed: games started now load it. |
 | `paused` | bool | Frame generation is paused from the tray (menu or pause key). |
-| `multiplier` | number | Frames shown per game frame: `2`, or `3` in 3X. With a game running, the mode in it (a Luke Ross R.E.A.L. VR game runs at `2`); otherwise the configured mode. |
+| `multiplier` | number | Effective session output factor: `2`, `3`, or `4`, as reported by the layer, including capability fallback and OSR/AFW. Without a game, the configured per-route multiplier. This is a mode value, not measured scanout delivery. |
 | `generating` | bool or null | Frames were generated in the last second, by OFXR or by AFW alone. `false` while paused and while waiting (loading, focus loss, settings being applied). `null` without a game. |
 | `app_fps` | number or null | The game's own frames per second, one-second average: the settings window's "Real submitted". `null` until measured. |
 | `output_fps` | number or null | The same valid measured Output FPS as the on-screen meter. SteamVR uses observed compositor presents excluding repeats; other runtimes use the available native output receipt. Unknown is `null`, never the sum of real and generated counters. |

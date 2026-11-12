@@ -135,6 +135,9 @@ struct StatusInputs {
     std::string updated;  // ISO 8601 UTC, e.g. 2026-10-17T09:12:03.512Z
     bool session_present{};
     StatusSession session;
+    // Modern per-route configuration, supplied by the tray without a game.
+    // Zero retains the legacy LauncherSettings fallback for older callers.
+    std::uint32_t configured_multiplier{};
     LauncherSettings settings;
 };
 [[nodiscard]] std::string build_status_json(const StatusInputs& inputs);

@@ -195,6 +195,7 @@ struct RuntimeStatus {
     bool ofr_running{}; // confirmed retimed output, not preparation or flag alone
     unsigned ofr_delivery{}; // 0 learning, 1 alternating, 2 paired.
     bool uevr_osr{}; // UEVR Alternating/AFR attached as OSR's eye source, as Luke Ross is
+    unsigned frame_multiplier{2}; // effective session output factor reported by the layer, not capability/request
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
     return !r.vdxr_legacy;

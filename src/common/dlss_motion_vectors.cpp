@@ -2064,9 +2064,11 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         // still taken, a frame from before the switch, and DLSS-G refused
         // it as discontinuous (record 1, detail 5) for good.
         bool packed_stereo = false;
+        bool aligned_packed_stereo = false;
         if (eye_count == 1) {
             const auto newest_publication = state.next_publication - 1;
             std::vector<Candidate> horizontal_eye_candidates;
+            std::vector<Candidate> aligned_eye_candidates;
             horizontal_eye_candidates.reserve(candidates.size());
             for (const auto& candidate : candidates) {
                 if (newest_publication - candidate.frame->publication <=
@@ -2078,6 +2080,20 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                             candidate.frame->output_width) * 2U &&
                     description.Height == candidate.frame->output_height) {
                     horizontal_eye_candidates.push_back(candidate);
+                } else if (description.Width % 2U == 0 &&
+                    newest_publication - candidate.frame->publication <= kMaximumViewPublicationGap &&
+                    candidate.frame->output_x == 0 && candidate.frame->output_y == 0 &&
+                    candidate.frame->motion_width && candidate.frame->motion_height) {
+                    // UE's eye viewport can be two pixels narrower than its
+                    // DLSS output (DI2: 3798 vs 3800). Accept only a round-up
+                    // to four, with two unambiguous recent mono streams.
+                    // Larger/different-sized outputs are not this layout.
+                    const auto rounds_to_four = [](std::uint64_t eye, std::uint64_t output) {
+                        return eye != 0 && output == ((eye + 3U) & ~std::uint64_t{3});
+                    };
+                    if (rounds_to_four(description.Width / 2U, candidate.frame->output_width) &&
+                        rounds_to_four(description.Height, candidate.frame->output_height))
+                        aligned_eye_candidates.push_back(candidate);
                 }
             }
             if (horizontal_eye_candidates.size() >=
@@ -2085,6 +2101,11 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 candidates = std::move(horizontal_eye_candidates);
                 eye_count = kDlssMotionVectorEyeCount;
                 packed_stereo = true;
+            } else if (horizontal_eye_candidates.empty() &&
+                       aligned_eye_candidates.size() == kDlssMotionVectorEyeCount) {
+                candidates = std::move(aligned_eye_candidates);
+                eye_count = kDlssMotionVectorEyeCount;
+                packed_stereo = aligned_packed_stereo = true;
             }
         }
 
@@ -2497,6 +2518,18 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         for (std::uint32_t eye = 0; eye < eye_count; ++eye) {
             if (packed_stereo) {
                 auto frame = std::make_shared<DlssMotionVectorFrame>(*candidates[eye].frame);
+                if (aligned_packed_stereo) {
+                    // The final packed color uses the unpadded eye viewport.
+                    // Crop the same right/bottom fraction of the native guide;
+                    // retaining its whole extent would scale motion incorrectly.
+                    frame->placed = frame->alignment_cropped = true;
+                    frame->placed_motion_rect = {static_cast<float>(frame->motion_x),
+                        static_cast<float>(frame->motion_y),
+                        static_cast<float>(double(frame->motion_width) * (description.Width / 2U) / frame->output_width),
+                        static_cast<float>(double(frame->motion_height) * description.Height / frame->output_height)};
+                    frame->output_width = static_cast<std::uint32_t>(description.Width / 2U);
+                    frame->output_height = description.Height;
+                }
                 // Each mono producer uses local coordinates. Only the resolved
                 // XR join maps color to its half; native input rects stay intact.
                 frame->output_x = eye * frame->output_width;

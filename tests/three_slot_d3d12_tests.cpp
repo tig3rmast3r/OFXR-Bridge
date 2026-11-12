@@ -684,6 +684,7 @@ int main(int argc,char** argv) {
         hr(s->d3d12_device->CreateCommandQueue(&q,IID_PPV_ARGS(&s->d3d12_synthesis_queue)),"synthesis queue");
         if (mode == "runtime-queue-policy") {
             dispatch->steamvr_runtime = true;
+            s->vdxr_legacy = false; // Actual SteamVR session routing, not the Legacy default.
             for (bool separate : {false, true}) for (int backend : {0, 1, 2, 3})
                 for (int generator : {0, 1, 2}) for (bool hybrid : {false, true}) for (bool enabled : {false, true}) {
                     s->steamvr_separate_queue = separate;
@@ -718,8 +719,10 @@ int main(int argc,char** argv) {
                 require(separate ? SUCCEEDED(progress) : progress == HRESULT_FROM_WIN32(ERROR_BUSY), "runtime dependency isolation differs from selected mode");
             }
             dispatch->steamvr_runtime = false; dispatch->virtual_desktop_runtime = true;
+            s->vdxr_legacy = true;
             require(!runtime_binding_queue_requested(*s), "VDXR gained a SteamVR override");
             dispatch->virtual_desktop_runtime = false; dispatch->steamvr_runtime = true;
+            s->vdxr_legacy = false;
             s->luke_afw_enabled = true; s->steamvr_separate_queue = false; s->nvidia_new_route = true;
             require(runtime_binding_queue_requested(*s), "Luke established queue contract changed");
             std::cout << "Explicit native SteamVR queue policy independent of generator; real GPU shared/separate dependency checks PASS\n";

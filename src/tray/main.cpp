@@ -1193,6 +1193,7 @@ void write_status(const AppState& state, bool final = false) {
             now.wMilliseconds);
         inputs.updated = updated;
         const auto current = xrfg::autonomous::snapshot();
+        inputs.configured_multiplier=xrfg::autonomous::generation_multiplier(current.desired);
         if (!final && current.connected && current.runtime.process_id) {
             const auto& runtime = current.runtime;
             const auto& m = runtime.telemetry;
@@ -1213,8 +1214,9 @@ void write_status(const AppState& state, bool final = false) {
             // As the benchmark CSV names it; the control channel carries no
             // runtime name string.
             session.runtime = runtime.vdxr_runtime ? "VDXR" : runtime.steamvr_runtime ? "SteamVR" : "Other";
-            // Luke Ross's R.E.A.L. VR runs at 2X whatever the multiplier asked for.
-            session.multiplier = runtime.luke_detected ? 2U : current.desired.triple_frame_gen ? 3U : 2U;
+            // The layer owns capability fallback and the applied route. OSR,
+            // optical engines, Hybrid, DLSS-G and RIFE can each be 2X/3X/4X.
+            session.multiplier = runtime.frame_multiplier;
             session.deep_pipeline = current.desired.prefer_fps;
             const bool runtime_fresh = runtime.heartbeat_ms && tick >= runtime.heartbeat_ms &&
                 tick - runtime.heartbeat_ms < 2000;

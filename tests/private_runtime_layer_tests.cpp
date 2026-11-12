@@ -42,6 +42,8 @@ static XrResult XRAPI_CALL paced_steamvr_fixture_wait(
     return result;
 }
 
+#include "vdxr_multiframe_test.inc"
+
 static bool framework_session_probe{},vdxr_legacy_probe{};
 static int admission_credit_test() {
     {
@@ -256,6 +258,8 @@ static int panel_metadata_contract() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route=="pimax-ready-queue")return pimax_ready_queue_test();
+    if(route.starts_with("native-vdxr-") || route.starts_with("native-pimax-") || route.starts_with("native-other-") || route.starts_with("steamvr-framework-"))return vdxr_multiframe_test(route);
     if(route.starts_with("aer-alternate-"))return aer_alternate_delivery_test(route);
     const bool aer_path=route.starts_with("aer-");if(aer_path)route.erase(0,4);
     const bool aer_swap=aer_path&&route.starts_with("swap-");if(aer_swap)route.erase(0,5);

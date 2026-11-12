@@ -250,6 +250,9 @@ struct DlssMotionVectorFrame {
     bool raw_motion_native_span_confirmed{};
     bool raw_motion_variable_interval{}; // RDR2: verify original field against both exact eye histories
     bool placed{};
+    // Release-time packed-eye join: the upscaler rounded the eye extent to
+    // four texels. Keep the cropped vector rectangle, not a stretched guide.
+    bool alignment_cropped{};
     std::array<float, 4> placed_motion_rect{};
     std::uint64_t source_clock_owner{},source_clock_sequence{};
     bool osr_native_cabin_motion{};

@@ -4216,6 +4216,71 @@ void test_enlarged_dlss_guides(D3D12WarpFixture& fixture) {
     std::cout << "Enlarged guides: peripheries over both eyes, insets refused, release bound, third refused, single refused, input side, stale refused PASS\n";
 }
 
+// DI2/Pimax: DLSS rounds a 3798-wide eye to 3800, while XR packs two
+// unpadded eyes. Small textures exercise the same crop at visible precision.
+void test_aligned_packed_dlss_guides(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    const auto texture = [&](UINT width, UINT height) {
+        auto d = stereo_texture_description(width, height);
+        d.DepthOrArraySize = 1; d.Flags = D3D12_RESOURCE_FLAG_NONE;
+        auto h = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> r;
+        require_hresult(fixture.device()->CreateCommittedResource(&h, D3D12_HEAP_FLAG_NONE,
+            &d, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&r)), "aligned guide texture");
+        return r;
+    };
+    const auto left = texture(64, 48), right = texture(64, 48), motion = texture(32, 24);
+    const auto publish = [&](unsigned stream, ID3D12Resource* output) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::DlssMotionVectorPublication p{};
+            p.stream = stream; p.output = output; p.motion_vectors = motion.Get();
+            p.output_width = 64; p.output_height = 48; p.motion_width = 32; p.motion_height = 24;
+            p.producer_queue = fixture.queue(); p.producer_command_list = list;
+            p.resource_state = D3D12_RESOURCE_STATE_COMMON;
+            require(bool(xrfg::publish_dlss_motion_vectors(p)), "aligned publication");
+        });
+    };
+    publish(931, left.Get()); publish(932, right.Get());
+    const auto resolve = [&](unsigned w, unsigned h) {
+        const auto xr = texture(w, h);
+        return xrfg::resolve_dlss_motion_vectors(xr.Get(), fixture.queue());
+    };
+    for (const auto dimensions : {std::array<unsigned, 2>{62, 48}, {64, 46}, {61, 45}, {63, 47}}) {
+        const auto set = resolve(dimensions[0] * 2, dimensions[1]);
+        require(set && set->eye_count == 2 && set->eyes[0] && set->eyes[1], "aligned pair missing");
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            const auto& f = *set->eyes[eye];
+            const auto rect = xrfg::guide_motion_rect(f);
+            require(f.alignment_cropped && f.placed && f.stream == 931 + eye &&
+                f.output_x == dimensions[0] * eye && f.output_width == dimensions[0] &&
+                f.output_height == dimensions[1] && rect[0] == 0 && rect[1] == 0 &&
+                std::abs(rect[2] - dimensions[0] / 2.F) < .001F &&
+                std::abs(rect[3] - dimensions[1] / 2.F) < .001F,
+                "padded guide stretched, misordered or mapped across the eye seam");
+        }
+    }
+    const auto exact = resolve(128, 48);
+    require(exact && !exact->eyes[0]->placed && !exact->eyes[0]->alignment_cropped,
+        "exact-size guide path changed");
+    require(!resolve(120, 48) && !resolve(124, 44) && !resolve(126, 49) && !resolve(125, 48),
+        "unrelated size or odd packed width admitted as padding");
+    require(!resolve(62, 48), "mono/UI image admitted as a padded stereo pair");
+    publish(932, right.Get()); publish(931, left.Get());
+    const auto reordered = resolve(124, 48);
+    require(reordered && reordered->eyes[0]->stream == 931 && reordered->eyes[1]->stream == 932,
+        "padded eye identity followed current evaluation order");
+    publish(933, right.Get());
+    require(!resolve(124, 48), "ambiguous third padded stream admitted");
+    xrfg::retire_dlss_motion_vector_stream(933);
+    for (int i = 0; i < 10; ++i) publish(931, left.Get());
+    require(!resolve(124, 48), "stale padded companion admitted");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    std::cout << "Padded packed guides: crop, eye seam/order, exact control, ambiguity and stale rejection PASS\n";
+}
+
 // Star Citizen: a swapchain per eye, two eye-sized streams, both evaluated
 // before either eye is released. Hybrid's strict join has no stream to go by
 // until a join teaches it one; FSR's stays refused.
@@ -7022,6 +7087,12 @@ int main(int argc, char** argv) {
             test_eye_order_measurement_on_gpu(fixture);
             test_view_placed_dlss_guides(fixture);
             test_enlarged_dlss_guides(fixture);
+            fixture.require_no_debug_errors();
+            return 0;
+        }
+        if (argc > 1 && std::string_view(argv[1]) == "aligned-packed-guides") {
+            D3D12WarpFixture fixture;
+            test_aligned_packed_dlss_guides(fixture);
             fixture.require_no_debug_errors();
             return 0;
         }

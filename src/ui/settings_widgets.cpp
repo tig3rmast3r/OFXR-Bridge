@@ -433,7 +433,7 @@ void state_pill(const Panel& p,Tone tone,const char* text,float right) {
 
 // Help text, condensed from the notes the panel used to show permanently.
 constexpr Help kHelpEnable{"Frame generation","Turns generated frames on for this profile. Reconstruction and Neural Rendering stay independent."};
-constexpr Help kHelpMultiplier{"Multiplier","Frames shown per real frame. 3X and 4X need the private SteamVR route and a D3D12 game, Luke Ross included. Native VDXR and Pimax run D3D12 games up to 3X. Other sessions stay at 2X."};
+constexpr Help kHelpMultiplier{"Multiplier","Frames shown per real frame. 3X and 4X need a supported private SteamVR or native OpenXR session, including compatible Luke Ross OSR/AFW sessions. Pimax and VDXR support 3X/4X on compatible sessions. Other sessions stay at 2X."};
 constexpr Help kHelpQuality{"Flow quality","NVIDIA optical flow preset. Slower presets cost more GPU time."};
 constexpr Help kHelpResolution{"Flow resolution","Changes motion estimation only; output stays at full resolution. At high eye resolutions, 25% reduces OFA work with a detail tradeoff."};
 constexpr Help kHelpBidirectional{"Bidirectional flow","Estimates motion in both directions."};
@@ -443,7 +443,7 @@ constexpr Help kHelpPacingAdvanced{"Pacing","Framework bypasses director pacing.
 constexpr Help kHelpBuffer{"Increase buffer","SteamVR: an adaptive timing reserve near full refresh. Framework uses 3 deliveries instead of 2; Director uses 4 instead of 3. Independent of Fast mode. Other private runtimes change capacity only. Changes apply after queued frames complete."};
 constexpr Help kHelpFast{"Fast mode","Lower VRAM and latency, may reduce performance. Uses private synthesis textures and fewer XR swapchains. No effect with Luke Ross. At 3X and 4X it keeps the output capacity they need, so the VRAM saving may be limited."};
 constexpr Help kHelpRifeQuality{"Quality","Motion inference uses this preset; output stays at full resolution."};
-constexpr Help kHelpRifeMultiplier{"Multiplier","3X and 4X require the private route. Luke Ross also requires the isolated post-AFW synthesis queue. Additional intermediates increase GPU work and memory use."};
+constexpr Help kHelpRifeMultiplier{"Multiplier","3X and 4X require supported private or native OpenXR delivery. Luke Ross also requires the isolated post-reconstruction synthesis queue. Additional intermediates increase GPU work and memory use."};
 constexpr Help kHelpRifeModel{"RIFE model","Installed compatible model weights."};
 constexpr Help kHelpDepth{"Depth search","Uses the game's depth to keep thin near objects (bars, poles, wires) solid in generated frames. Costs GPU time at high resolutions."};
 constexpr Help kHelpHud{"HUD fix","Keeps a HUD and cockpit instruments steady in generated frames, instead of smearing or doubling with the scene when you turn. The effect depends on the game: designed first for Star Citizen, and most useful at 3X and 4X. Uses additional GPU time."};
@@ -688,7 +688,7 @@ bool generation(Panel& p) {
             changed=true;
         }
         if(dlssg && multiplier==2)
-            reason(p,"4X needs a GPU with DLSS multi-frame generation and the private SteamVR route with a D3D12 game; otherwise it runs at the highest multiplier the session supports.");
+            reason(p,"4X needs a GPU with DLSS multi-frame generation and a supported session on private SteamVR or native OpenXR, including compatible Luke Ross OSR/AFW; otherwise it runs at the highest multiplier the session supports.");
     } else if(optical_multiplier_route(draft)) {
         // Saved per route: each OFXR engine and Hybrid keep their own.
         int multiplier=draft.ofr_enabled?0:std::clamp(draft.frame_multiplier,2,4)-2;
@@ -696,7 +696,7 @@ bool generation(Panel& p) {
             draft.frame_multiplier=multiplier+2;changed=true;
         }
         if(!draft.ofr_enabled&&draft.frame_multiplier>2)
-            reason(p,"Needs the private SteamVR route and a D3D12 game. VDXR and Pimax stop at 3X.");
+            reason(p,"Needs a supported session on private SteamVR or native OpenXR; compatible Luke Ross OSR/AFW sessions are included.");
     }
 
     bool show_flow=false,nvidia_flow=false;

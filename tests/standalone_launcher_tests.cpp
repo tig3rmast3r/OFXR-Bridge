@@ -17,7 +17,109 @@ namespace {
 
 } // namespace
 
-int main() {
+static int status_json_tests() {
+    using namespace xrfg::standalone;
+
+    {
+        StatusInputs idle;
+        idle.armed = true;
+        idle.build = 735;
+        idle.updated = "2026-10-28T09:12:03.512Z";
+        const std::string without = build_status_json(idle);
+        StatusInputs running = idle;
+        running.paused = true;
+        running.settings.triple_frame_gen = false;
+        running.session_present = true;
+        running.session.pid = 23456;
+        running.session.process = "Flight\"Sim\\2024.exe";
+        running.session.runtime = "SteamVR";
+        running.session.multiplier = 3;
+        running.session.generating = true;
+        running.session.app_fps = 29.84f;
+        running.session.output_fps = 89.36f;
+        running.session.display_hz = 90.0f;
+        running.session.latency_ms = 41.26f;
+        running.session.latency_valid = true;
+        const std::string with = build_status_json(running);
+        StatusInputs unmeasured = running;
+        unmeasured.session.rates_valid = unmeasured.session.output_valid = unmeasured.session.latency_valid = false;
+        const std::string without_rates = build_status_json(unmeasured);
+        if (!contains(without, "\"schema\": 1,") || !contains(without, "\"armed\": true,") ||
+            !contains(without, "\"paused\": false,") ||
+            !contains(without, "\"multiplier\": 2,") ||
+            !contains(without, "\"generating\": null,") ||
+            !contains(without, "\"rife_optimizing\": false,") ||
+            !contains(without, "\"rife_backend\": null,") ||
+            !contains(without, "\"output_fps\": null,") ||
+            !contains(without, "\"latency_ms\": null,") ||
+            !contains(without, "\"build\": 735") ||
+            !contains(without, "\"updated\": \"2026-10-28T09:12:03.512Z\"") ||
+            !contains(with, "\"paused\": true,") || !contains(with, "\"multiplier\": 3,") ||
+            !contains(with, "\"generating\": true,") ||
+            !contains(with, "\"app_fps\": 29.8,") ||
+            !contains(with, "\"output_fps\": 89.4,") ||
+            !contains(with, "\"display_hz\": 90.0,") ||
+            !contains(with, "\"latency_ms\": 41.3,") ||
+            !contains(with, "\"process\": \"Flight\\\"Sim\\\\2024.exe\"") ||
+            !contains(with, "\"pid\": 23456,") ||
+            !contains(without_rates, "\"app_fps\": null,") ||
+            !contains(without_rates, "\"output_fps\": null,") ||
+            !contains(without_rates, "\"latency_ms\": null,") ||
+            !contains(without_rates, "\"display_hz\": 90.0,") ||
+            contains(without, "settings") || contains(with, "settings") ||
+            !contains(without, "\"session\": null\n}\n") ||
+            !contains(with, "\"deep_pipeline\": false\n  }\n}\n")) {
+            std::cerr << "status.json was not as documented\n";
+            return 1;
+        }
+        for(unsigned multiplier:{2U,3U,4U}) {
+            auto configured=idle;configured.configured_multiplier=multiplier;
+            configured.settings.triple_frame_gen=false;
+            if(!contains(build_status_json(configured),"\"multiplier\": "+std::to_string(multiplier)+",")) {
+                std::cerr<<"status.json ignored modern configured multiplier\n";return 1;
+            }
+            auto active=running;active.configured_multiplier=4;active.session.multiplier=multiplier;
+            if(!contains(build_status_json(active),"\"multiplier\": "+std::to_string(multiplier)+",")) {
+                std::cerr<<"status.json ignored actual layer multiplier/fallback\n";return 1;
+            }
+        }
+        auto optimizing = running;
+        optimizing.paused = false;
+        optimizing.session.rife_execution_active = true;
+        optimizing.session.rife_optimizing = true;
+        const auto torch = build_status_json(optimizing);
+        auto optimized = optimizing;
+        optimized.session.rife_optimizing = false;
+        optimized.session.rife_tensorrt = true;
+        const auto tensorrt = build_status_json(optimized);
+        auto unknown = optimized;
+        unknown.session.rife_execution_active = false;
+        unknown.session.rife_optimizing = true; // stale payload cannot invent a backend.
+        const auto missing_receipt = build_status_json(unknown);
+        auto paused = optimized;
+        paused.paused = true;
+        const auto paused_json = build_status_json(paused);
+        auto disconnected = optimized;
+        disconnected.session_present = false;
+        const auto disconnected_json = build_status_json(disconnected);
+        if (!contains(torch, "\"rife_optimizing\": true,") ||
+            !contains(torch, "\"rife_backend\": \"torch\",") ||
+            !contains(tensorrt, "\"rife_optimizing\": false,") ||
+            !contains(tensorrt, "\"rife_backend\": \"tensorrt\",") ||
+            !contains(missing_receipt, "\"rife_optimizing\": false,") ||
+            !contains(missing_receipt, "\"rife_backend\": null,") ||
+            !contains(paused_json, "\"rife_backend\": null,") ||
+            !contains(disconnected_json, "\"rife_backend\": null,")) {
+            std::cerr << "status.json must export only a known active RIFE backend\n";
+            return 1;
+        }
+    }
+    std::cout<<"status.json configured and effective2X/3X/4X, fallback and rates PASS\n";
+    return 0;
+}
+
+int main(int argc,char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="status-json")return status_json_tests();
     using namespace xrfg::standalone;
 
     const LauncherSettings release_defaults;
@@ -579,92 +681,7 @@ int main() {
         return 1;
     }
 
-    // status.json: the top-level keys, null without a session, no settings
-    // section, the running session's multiplier over the setting's, escaping,
-    // null for a rate or latency not measured.
-    {
-        StatusInputs idle;
-        idle.armed = true;
-        idle.build = 735;
-        idle.updated = "2026-10-28T09:12:03.512Z";
-        const std::string without = build_status_json(idle);
-        StatusInputs running = idle;
-        running.paused = true;
-        running.settings.triple_frame_gen = false;
-        running.session_present = true;
-        running.session.pid = 23456;
-        running.session.process = "Flight\"Sim\\2024.exe";
-        running.session.runtime = "SteamVR";
-        running.session.multiplier = 3;
-        running.session.generating = true;
-        running.session.app_fps = 29.84f;
-        running.session.output_fps = 89.36f;
-        running.session.display_hz = 90.0f;
-        running.session.latency_ms = 41.26f;
-        running.session.latency_valid = true;
-        const std::string with = build_status_json(running);
-        StatusInputs unmeasured = running;
-        unmeasured.session.rates_valid = unmeasured.session.output_valid = unmeasured.session.latency_valid = false;
-        const std::string without_rates = build_status_json(unmeasured);
-        if (!contains(without, "\"schema\": 1,") || !contains(without, "\"armed\": true,") ||
-            !contains(without, "\"paused\": false,") ||
-            !contains(without, "\"multiplier\": 2,") ||
-            !contains(without, "\"generating\": null,") ||
-            !contains(without, "\"rife_optimizing\": false,") ||
-            !contains(without, "\"rife_backend\": null,") ||
-            !contains(without, "\"output_fps\": null,") ||
-            !contains(without, "\"latency_ms\": null,") ||
-            !contains(without, "\"build\": 735") ||
-            !contains(without, "\"updated\": \"2026-10-28T09:12:03.512Z\"") ||
-            !contains(with, "\"paused\": true,") || !contains(with, "\"multiplier\": 3,") ||
-            !contains(with, "\"generating\": true,") ||
-            !contains(with, "\"app_fps\": 29.8,") ||
-            !contains(with, "\"output_fps\": 89.4,") ||
-            !contains(with, "\"display_hz\": 90.0,") ||
-            !contains(with, "\"latency_ms\": 41.3,") ||
-            !contains(with, "\"process\": \"Flight\\\"Sim\\\\2024.exe\"") ||
-            !contains(with, "\"pid\": 23456,") ||
-            !contains(without_rates, "\"app_fps\": null,") ||
-            !contains(without_rates, "\"output_fps\": null,") ||
-            !contains(without_rates, "\"latency_ms\": null,") ||
-            !contains(without_rates, "\"display_hz\": 90.0,") ||
-            contains(without, "settings") || contains(with, "settings") ||
-            !contains(without, "\"session\": null\n}\n") ||
-            !contains(with, "\"deep_pipeline\": false\n  }\n}\n")) {
-            std::cerr << "status.json was not as documented\n";
-            return 1;
-        }
-        auto optimizing = running;
-        optimizing.paused = false;
-        optimizing.session.rife_execution_active = true;
-        optimizing.session.rife_optimizing = true;
-        const auto torch = build_status_json(optimizing);
-        auto optimized = optimizing;
-        optimized.session.rife_optimizing = false;
-        optimized.session.rife_tensorrt = true;
-        const auto tensorrt = build_status_json(optimized);
-        auto unknown = optimized;
-        unknown.session.rife_execution_active = false;
-        unknown.session.rife_optimizing = true; // stale payload cannot invent a backend.
-        const auto missing_receipt = build_status_json(unknown);
-        auto paused = optimized;
-        paused.paused = true;
-        const auto paused_json = build_status_json(paused);
-        auto disconnected = optimized;
-        disconnected.session_present = false;
-        const auto disconnected_json = build_status_json(disconnected);
-        if (!contains(torch, "\"rife_optimizing\": true,") ||
-            !contains(torch, "\"rife_backend\": \"torch\",") ||
-            !contains(tensorrt, "\"rife_optimizing\": false,") ||
-            !contains(tensorrt, "\"rife_backend\": \"tensorrt\",") ||
-            !contains(missing_receipt, "\"rife_optimizing\": false,") ||
-            !contains(missing_receipt, "\"rife_backend\": null,") ||
-            !contains(paused_json, "\"rife_backend\": null,") ||
-            !contains(disconnected_json, "\"rife_backend\": null,")) {
-            std::cerr << "status.json must export only a known active RIFE backend\n";
-            return 1;
-        }
-    }
+    if(const int result=status_json_tests())return result;
 
     {
         using namespace xrfg::standalone;
