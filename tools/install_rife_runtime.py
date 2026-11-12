@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import traceback
 import urllib.request
 import uuid
 
@@ -24,6 +26,7 @@ import prepare_rife_runtime as setup
 EXIT = {"ready": 0, "missing": 10, "repair": 11, "unsupported": 12, "busy": 13, "error": 1}
 REQUIRED_FREE = 14_000_000_000
 INSTALLED_BYTES = 7_900_000_000
+RENAME_DELAYS = (0.25, 0.5, 1.0, 2.0, 2.0, 2.0)
 
 
 def normalized(path):
@@ -43,6 +46,129 @@ def log(message):
 
 
 LOG = None
+
+
+def lock_owners(source, destination):
+    """Diagnostic child only: query Restart Manager, never stop/restart apps."""
+    if os.name != "nt":
+        print("Lock-owner query is only available on Windows.")
+        return
+    import ctypes
+    from ctypes import wintypes as w
+
+    class UniqueProcess(ctypes.Structure):
+        _fields_ = [("pid", w.DWORD), ("started", w.FILETIME)]
+
+    class ProcessInfo(ctypes.Structure):
+        _fields_ = [("process", UniqueProcess), ("app", w.WCHAR * 256),
+                    ("service", w.WCHAR * 64), ("kind", ctypes.c_int),
+                    ("status", w.ULONG), ("session", w.DWORD), ("restartable", w.BOOL)]
+
+    samples = ("python/python.exe", "python/python312.dll",
+               "python/Lib/site-packages/torch/lib/torch_cuda.dll",
+               "python/Lib/site-packages/torch/lib/torch_cpu.dll",
+               "python/Lib/site-packages/torch/lib/c10.dll",
+               "backends/tensorrt/tensorrt_libs/nvinfer_10.dll", "app/worker.py")
+    files = [str(Path(directory) / name) for directory in (source, destination)
+             for name in samples if (Path(directory) / name).is_file()]
+    if not files:
+        print("No sampled runtime files exist; lock owner is unknown.")
+        return
+    manager = ctypes.WinDLL("rstrtmgr")
+    manager.RmStartSession.argtypes = [ctypes.POINTER(w.DWORD), w.DWORD, w.LPWSTR]
+    manager.RmRegisterResources.argtypes = [w.DWORD, w.UINT, ctypes.POINTER(w.LPCWSTR),
+        w.UINT, ctypes.POINTER(UniqueProcess), w.UINT, ctypes.POINTER(w.LPCWSTR)]
+    manager.RmGetList.argtypes = [w.DWORD, ctypes.POINTER(w.UINT), ctypes.POINTER(w.UINT),
+        ctypes.POINTER(ProcessInfo), ctypes.POINTER(w.DWORD)]
+    manager.RmEndSession.argtypes = [w.DWORD]
+    for name in ("RmStartSession", "RmRegisterResources", "RmGetList", "RmEndSession"):
+        getattr(manager, name).restype = w.DWORD
+    session = w.DWORD()
+    code = manager.RmStartSession(ctypes.byref(session), 0, ctypes.create_unicode_buffer(33))
+    if code:
+        raise OSError(code, "Restart Manager session failed")
+    try:
+        paths = (w.LPCWSTR * len(files))(*files)
+        code = manager.RmRegisterResources(session, len(files), paths, 0, None, 0, None)
+        if code:
+            raise OSError(code, "Restart Manager resource registration failed")
+        needed, count, reasons = w.UINT(), w.UINT(), w.DWORD()
+        code = manager.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), None, ctypes.byref(reasons))
+        for unused in range(2):
+            if code != 234:
+                break
+            if not 0 < needed.value <= 64:
+                raise RuntimeError("Lock-owner list exceeds the diagnostic limit")
+            entries = (ProcessInfo * needed.value)()
+            count.value = needed.value
+            code = manager.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), entries, ctypes.byref(reasons))
+            if not code:
+                for entry in entries[:count.value]:
+                    print("Sampled-file user: pid=" + str(entry.process.pid) + " app=" +
+                          repr(entry.app) + " service=" + repr(entry.service) + " status=" + str(entry.status))
+        if code:
+            raise OSError(code, "Restart Manager process query failed")
+        if not count.value:
+            print("No applications reported for sampled runtime files.")
+        print("This sample cannot exclude directory handles, filter drivers or access-permission restrictions.")
+    finally:
+        manager.RmEndSession(session)
+
+
+def rename_diagnostics(source, destination, query_owners=True):
+    """Best effort; logging must not replace the original filesystem error."""
+    try:
+        log("Rename diagnostics: installer_pid=" + str(os.getpid()) + " executable=" +
+            str(sys.executable) + " cwd=" + str(Path.cwd()))
+        for label, path in (("source", source), ("destination", destination)):
+            try:
+                status = path.stat()
+                log(label + "=" + str(path) + " exists=True attributes=" +
+                    hex(getattr(status, "st_file_attributes", 0)) + " mode=" + oct(status.st_mode))
+            except OSError as error:
+                log(label + "=" + str(path) + " stat=" + repr(error))
+        if query_owners:
+            # Same single-file patch; isolated child bounds a slow OS query.
+            command = [sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                       "--diagnose-locks", str(source), str(destination)]
+            try:
+                result = subprocess.run(command, capture_output=True, text=True, timeout=3,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                for line in (result.stdout + "\n" + result.stderr).splitlines():
+                    if line.strip():
+                        log("Lock-owner diagnostic: " + line[:2000])
+                log("Lock-owner diagnostic exit=" + str(result.returncode))
+            except subprocess.TimeoutExpired:
+                log("Lock-owner query timed out after 3s; its diagnostic child was stopped. Owner remains unknown.")
+    except Exception as error:
+        print("Additional rename diagnostics unavailable: " + repr(error), file=sys.stderr, flush=True)
+
+
+def rename_runtime(source, destination, phase):
+    source, destination = Path(source), Path(destination)
+    started = time.monotonic()
+    attempts = len(RENAME_DELAYS) + 1
+    log("Runtime rename begin: phase=" + phase + " source=" + str(source) + " destination=" + str(destination))
+    for attempt in range(attempts):
+        try:
+            source.rename(destination)
+        except OSError as error:
+            code = getattr(error, "winerror", None)
+            retry = code in (5, 32, 33) and attempt < len(RENAME_DELAYS)
+            log("Runtime rename failed: phase=" + phase + " attempt=" + str(attempt + 1) +
+                "/" + str(attempts) + " elapsed_s=" + format(time.monotonic() - started, ".3f") +
+                " winerror=" + str(code) + " error=" + repr(error))
+            if attempt == 0 or not retry:
+                rename_diagnostics(source, destination, query_owners=attempt == 0)
+            if not retry:
+                error.add_note("RIFE rename phase=" + phase + "; attempts=" + str(attempt + 1))
+                raise
+            log("Retrying the same rename in " + str(RENAME_DELAYS[attempt]) + "s; no runtime files removed or external applications stopped.")
+            time.sleep(RENAME_DELAYS[attempt])
+        else:
+            log("Runtime rename succeeded: phase=" + phase + " attempt=" + str(attempt + 1) +
+                " elapsed_s=" + format(time.monotonic() - started, ".3f"))
+            return
 
 
 def transaction_path(root):
@@ -82,8 +208,8 @@ def recover_transaction(root):
         if root.exists():
             if stage.exists():
                 raise RuntimeError("Ambiguous recovery directories; original runtime preserved")
-            root.rename(stage)
-        previous.rename(root)
+            rename_runtime(root, stage, "recovery-move-uncommitted")
+        rename_runtime(previous, root, "recovery-restore-previous")
         log("Recovered the previous working RIFE runtime")
     if stage.exists():
         assert stage.resolve().is_relative_to(root.parent.resolve())
@@ -168,8 +294,12 @@ def health(stage, package, output):
                "--root", str(stage), "--package", str(package), "--result", str(output)]
     environment = {k: v for k, v in os.environ.items() if k.upper() in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP", "LOCALAPPDATA")}
     environment["PATH"] = str(stage / "python") + os.pathsep + str(stage / "python/Lib/site-packages/torch/lib") + os.pathsep + str(Path(os.environ["SystemRoot"]) / "System32")
+    started = time.monotonic()
+    log("Validator starting: executable=" + command[0] + " cwd=" + str(stage))
     completed = subprocess.run(command, env=environment, cwd=stage, capture_output=True, text=True,
                                timeout=115, creationflags=subprocess.CREATE_NO_WINDOW)
+    log("Validator process exited: code=" + str(completed.returncode) +
+        " elapsed_s=" + format(time.monotonic() - started, ".3f"))
     if completed.stdout.strip():
         log(completed.stdout.strip())
     if completed.stderr.strip():
@@ -204,6 +334,7 @@ def install(root, cache, crt_source, package=PACKAGE, skip_tensorrt=False, reins
         previous = parent / ("." + root.name + ".previous-" + uuid.uuid4().hex)
         stage.mkdir()
         promoted = False
+        recovery_failed = False
         try:
             log("Installing pinned Python, PyTorch and RIFE models")
             for asset in lock["assets"]:
@@ -247,12 +378,17 @@ def install(root, cache, crt_source, package=PACKAGE, skip_tensorrt=False, reins
             write_transaction(root, stage, previous, "prepared")
             try:
                 if root.exists():
-                    root.rename(previous)
-                stage.rename(root)
+                    rename_runtime(root, previous, "move-previous-runtime")
+                rename_runtime(stage, root, "activate-validated-runtime")
                 promoted = True
                 write_transaction(root, stage, previous, "committed")
-            except BaseException:
-                recover_transaction(root)
+            except BaseException as error:
+                try:
+                    recover_transaction(root)
+                except Exception as recovery_error:
+                    recovery_failed = True
+                    error.add_note("RIFE recovery also failed: " + repr(recovery_error))
+                    log("Recovery failed; runtime directories and journal preserved:\n" + traceback.format_exc())
                 promoted = False
                 raise
             if previous.exists():
@@ -274,9 +410,15 @@ def install(root, cache, crt_source, package=PACKAGE, skip_tensorrt=False, reins
             log("RIFE installation complete: " + str(root))
             return result
         finally:
-            if not promoted and stage.exists():
+            if not promoted and stage.exists() and not recovery_failed:
                 assert stage.resolve().is_relative_to(parent.resolve())
-                shutil.rmtree(stage)
+                active_error = sys.exc_info()[0] is not None
+                try:
+                    shutil.rmtree(stage)
+                except OSError:
+                    log("Staging cleanup failed; directory retained: " + str(stage) + "\n" + traceback.format_exc())
+                    if not active_error:
+                        raise
 
 
 def main():
@@ -293,6 +435,7 @@ def main():
     logs = args.root.parent / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     LOG = logs / ("install-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()) + ".log")
+    log("Installer rename-retry-v1; pid=" + str(os.getpid()) + " executable=" + str(sys.executable))
     result = {"schema": 1, "status": "error", "message": "", "root": str(args.root), "backend": "",
               "installed_bytes": INSTALLED_BYTES, "required_free_bytes": REQUIRED_FREE, "log_path": str(LOG)}
     if args.backend == "vulkan":
@@ -308,6 +451,7 @@ def main():
     except Exception as error:
         result.update(status="error", message="RIFE installation failed: " + str(error))
         log(result["message"])
+        log(traceback.format_exc())
     result["log_path"] = str(LOG)
     args.result.parent.mkdir(parents=True, exist_ok=True)
     args.result.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
@@ -315,4 +459,7 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if len(sys.argv) == 4 and sys.argv[1] == "--diagnose-locks":
+        lock_owners(sys.argv[2], sys.argv[3])
+    else:
+        raise SystemExit(main())

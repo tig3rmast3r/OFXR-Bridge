@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 
 sys.dont_write_bytecode = True
@@ -270,6 +270,175 @@ if(-not (Test-Path -LiteralPath (Join-Path $external 'keep'))){throw 'Cleanup es
                 installer.install(self.root, self.cache, self.directory, package, True)
         self.assertEqual((self.root / "existing-worker.txt").read_text(), "working-runtime")
         self.assertFalse(list(self.directory.glob(".runtime.stage-*")))
+
+    def denied(self, code=5):
+        error = PermissionError("injected Windows lock")
+        error.winerror = code
+        return error
+
+    def test_transient_promotion_lock_retries_without_rebuilding_validated_stage(self):
+        self.old_runtime()
+        package, unused, unused2 = self.fixture()
+        rename = Path.rename
+        failures = []
+        messages = []
+        def temporary_lock(path, target):
+            if ".stage-" in path.name and len(failures) < 2:
+                failures.append(path)
+                raise self.denied()
+            return rename(path, target)
+        with patch.object(installer, "health", return_value={"status": "ready"}) as health, \
+             patch.object(Path, "rename", temporary_lock), patch.object(installer.time, "sleep") as sleep, \
+             patch.object(installer, "rename_diagnostics") as diagnostics, patch.object(installer, "log", messages.append):
+            result = installer.install(self.root, self.cache, self.directory, package, True)
+        self.assertEqual(result["status"], "ready")
+        health.assert_called_once()
+        self.assertEqual(failures[0], failures[1])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.25, 0.5])
+        diagnostics.assert_called_once()
+        self.assertTrue((self.root / "install-receipt.json").is_file())
+        self.assertTrue(any("activate-validated-runtime attempt=3" in line for line in messages))
+
+    def test_persistent_promotion_lock_is_bounded_and_restores_old_runtime(self):
+        self.old_runtime()
+        package, unused, unused2 = self.fixture()
+        rename = Path.rename
+        failures = []
+        original = self.denied()
+        def persistent_lock(path, target):
+            if ".stage-" in path.name:
+                failures.append(path)
+                raise original
+            return rename(path, target)
+        with patch.object(installer, "health", return_value={"status": "ready"}), \
+             patch.object(Path, "rename", persistent_lock), patch.object(installer.time, "sleep") as sleep, \
+             patch.object(installer, "rename_diagnostics") as diagnostics:
+            with self.assertRaises(PermissionError) as caught:
+                installer.install(self.root, self.cache, self.directory, package, True)
+        self.assertIs(caught.exception, original)
+        self.assertEqual(len(failures), 7)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], list(installer.RENAME_DELAYS))
+        self.assertEqual(diagnostics.call_count, 2)
+        self.assertEqual((self.root / "existing-worker.txt").read_text(), "working-runtime")
+        self.assertFalse(list(self.directory.glob(".runtime.stage-*")))
+
+    def test_only_transient_windows_lock_errors_retry(self):
+        for code in (5, 32, 33, 3, 112):
+            original = self.denied(code)
+            with patch.object(Path, "rename", side_effect=original) as rename, \
+                 patch.object(installer.time, "sleep") as sleep, patch.object(installer, "rename_diagnostics"):
+                with self.assertRaises(PermissionError) as caught:
+                    installer.rename_runtime(self.root, self.directory / "other", "fixture")
+            self.assertIs(caught.exception, original)
+            self.assertEqual(rename.call_count, 7 if code in (5, 32, 33) else 1)
+            self.assertEqual(sleep.call_count, 6 if code in (5, 32, 33) else 0)
+
+    def test_validator_exit_is_logged_before_ready_or_promotion(self):
+        output = self.directory / "health.json"
+        output.write_text(json.dumps({"status": "ready"}))
+        messages = []
+        result = subprocess.CompletedProcess([], 0, "RIFE is ready on fixture.\n", "")
+        with patch.object(installer.subprocess, "run", return_value=result) as run, \
+             patch.object(installer, "log", messages.append):
+            installer.health(self.directory, SOURCE, output)
+        self.assertEqual(run.call_args.kwargs["timeout"], 115)
+        self.assertIn("Validator process exited: code=0", messages[1])
+        self.assertEqual(messages[2], "RIFE is ready on fixture.")
+
+    def test_lock_diagnostic_timeout_is_bounded_and_nonfatal(self):
+        messages = []
+        with patch.object(installer.subprocess, "run", side_effect=subprocess.TimeoutExpired("fixture", 3)) as run, \
+             patch.object(installer, "log", messages.append):
+            installer.rename_diagnostics(self.directory, self.root)
+        self.assertEqual(run.call_args.kwargs["timeout"], 3)
+        self.assertTrue(any("Owner remains unknown" in line for line in messages))
+
+    @unittest.skipUnless(os.name == "nt", "Windows Restart Manager query")
+    def test_single_file_diagnostic_child_uses_windows_query_without_runtime(self):
+        (self.root / "python").mkdir(parents=True)
+        (self.root / "python/python.exe").write_bytes(b"fixture, never execute")
+        result = subprocess.run([sys.executable, "-I", "-B", str(SOURCE / "tools/install_rife_runtime.py"),
+            "--diagnose-locks", str(self.root), str(self.directory / "absent")], capture_output=True,
+            text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cannot exclude directory handles", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "Windows ctypes layouts")
+    def test_lock_owner_pid_is_reported_and_query_session_is_closed(self):
+        import ctypes
+        from ctypes import wintypes as w
+        from types import SimpleNamespace
+        (self.root / "app").mkdir(parents=True)
+        (self.root / "app/worker.py").write_text("fixture")
+        api = SimpleNamespace(RmStartSession=Mock(return_value=0), RmRegisterResources=Mock(return_value=0),
+            RmGetList=Mock(), RmEndSession=Mock(return_value=0))
+        def process_list(session, needed, count, entries, reasons):
+            ctypes.cast(needed, ctypes.POINTER(w.UINT))[0] = 1
+            if entries is None:
+                return 234
+            ctypes.cast(count, ctypes.POINTER(w.UINT))[0] = 1
+            item = ctypes.cast(entries, api.RmGetList.argtypes[3])[0]
+            self.assertEqual(ctypes.sizeof(item), 668) # Windows SDK RM_PROCESS_INFO
+            item.process.pid = 4242
+            item.app = "Fixture backup"
+            item.service = "FixtureService"
+            item.status = 1
+            return 0
+        api.RmGetList.side_effect = process_list
+        output = io.StringIO()
+        with patch.object(ctypes, "WinDLL", return_value=api), patch.object(sys, "stdout", output):
+            installer.lock_owners(self.root, self.directory / "absent")
+        self.assertIn("pid=4242 app='Fixture backup' service='FixtureService'", output.getvalue())
+        api.RmEndSession.assert_called_once()
+
+    @unittest.skipUnless(os.name == "nt", "actual Windows directory sharing")
+    def test_actual_windows_directory_handle_released_between_attempts(self):
+        import ctypes
+        from ctypes import wintypes as w
+        stage = self.directory / "locked-stage"
+        stage.mkdir()
+        (stage / "keep.txt").write_text("validated")
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p, w.DWORD, w.DWORD, w.HANDLE]
+        kernel.CreateFileW.restype = w.HANDLE
+        kernel.CloseHandle.argtypes = [w.HANDLE]
+        handle = kernel.CreateFileW(str(stage), 0x80000000, 3, None, 3, 0x02000000, None)
+        self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+        released = False
+        def release_test_handle(*args, **kwargs):
+            nonlocal released
+            self.assertTrue(kernel.CloseHandle(handle))
+            released = True
+        try:
+            with patch.object(installer, "rename_diagnostics", side_effect=release_test_handle) as diagnostic, \
+                 patch.object(installer.time, "sleep") as sleep:
+                installer.rename_runtime(stage, self.root, "real-directory-lock")
+            diagnostic.assert_called_once()
+            sleep.assert_called_once_with(0.25)
+            self.assertEqual((self.root / "keep.txt").read_text(), "validated")
+        finally:
+            if not released:
+                kernel.CloseHandle(handle)
+
+    def test_failed_rollback_preserves_original_error_and_recovery_directories(self):
+        self.old_runtime()
+        package, unused, unused2 = self.fixture()
+        original = self.denied()
+        rename = Path.rename
+        def refuse_activation_and_restore(path, target):
+            if ".stage-" in path.name or ".previous-" in path.name:
+                raise original
+            return rename(path, target)
+        with patch.object(installer, "health", return_value={"status": "ready"}), \
+             patch.object(Path, "rename", refuse_activation_and_restore), patch.object(installer.time, "sleep"), \
+             patch.object(installer, "rename_diagnostics"):
+            with self.assertRaises(PermissionError) as caught:
+                installer.install(self.root, self.cache, self.directory, package, True)
+        self.assertIs(caught.exception, original)
+        self.assertTrue(installer.transaction_path(self.root).is_file())
+        self.assertEqual(len(list(self.directory.glob(".runtime.stage-*"))), 1)
+        previous = next(self.directory.glob(".runtime.previous-*"))
+        self.assertEqual((previous / "existing-worker.txt").read_text(), "working-runtime")
 
     def test_success_promotes_only_validated_stage(self):
         self.old_runtime()
