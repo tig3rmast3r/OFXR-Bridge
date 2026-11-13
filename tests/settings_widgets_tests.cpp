@@ -5,6 +5,7 @@
 #include <fstream>
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "../src/ui/ui_text.hpp"
 
 #include <windows.h>
 #include <cstring>
@@ -78,7 +79,7 @@ struct Context {
         ImGui::SetCurrentContext(context);
         for (auto* window : context->Windows) {
             if (std::strstr(window->Name, child)) {
-                ImGui::ActivateItemByID(window->GetID(label));
+                ImGui::ActivateItemByID(window->GetID(xrfg::ui::label(label).c_str()));
                 return;
             }
         }
@@ -91,7 +92,7 @@ struct Context {
         if (std::strcmp(label, "RIFE model") != 0) {
             for (auto* window : context->Windows) {
                 if (std::strstr(window->Name, child)) {
-                    ImGui::ActivateItemByID(ImHashStr(item, 0, window->GetID(label)));
+                    ImGui::ActivateItemByID(ImHashStr(xrfg::ui::label(item).c_str(), 0, window->GetID(label)));
                     draw();
                     draw();
                     return;
@@ -110,7 +111,7 @@ struct Context {
         if(!popup)throw std::runtime_error(std::string("combo did not open: ")+label+" in "+child+
             " generation="+std::to_string(snapshot().desired.frame_generation)+" backend="+std::to_string(snapshot().desired.backend));
         const auto seed = ImHashData(&index, sizeof(index), popup->IDStack.back());
-        ImGui::ActivateItemByID(ImHashStr(item, 0, seed));
+        ImGui::ActivateItemByID(ImHashStr(xrfg::ui::label(item).c_str(), 0, seed));
         draw();
         draw();
     }
@@ -839,13 +840,36 @@ void aer_native_guide_widgets() {
     require(request(saved),"restore AER native guide UI settings");
 }
 
+void language_switch_widgets() {
+    require(set_ui_language(UiLanguage::english),"select English UI");
+    Context surface({1024,768},false);surface.draw();surface.draw(true);
+    require(surface.rendered_text.find("Frame generation")!=std::string::npos,"English settings are rendered");
+    const auto english_id=ImHashStr(xrfg::ui::label("Normal").c_str());
+    const auto choose_language=[&](const char* choice) {
+        surface.activate("/Rail_","##InterfaceLanguage");surface.draw();surface.draw();
+        ImGuiWindow* popup{};
+        for(auto* window:surface.context->Windows)
+            if(window->Active && (window->Flags&ImGuiWindowFlags_Popup) && std::strstr(window->Name,"##Combo"))popup=window;
+        require(popup!=nullptr,"language chooser opens in the shared settings surface");
+        ImGui::ActivateItemByID(popup->GetID(xrfg::ui::label(choice).c_str()));surface.draw();surface.draw();
+    };
+    choose_language("简体中文");
+    require(ui_language()==UiLanguage::simplified_chinese,"Chinese selected through the real language option");
+    surface.draw();surface.draw(true);
+    require(surface.rendered_text.find("帧生成")!=std::string::npos,"Chinese settings are rendered in the same context");
+    require(english_id==ImHashStr(xrfg::ui::label("Normal").c_str()),"widget identity survives language switch");
+    choose_language("English");
+    require(ui_language()==UiLanguage::english,"English selected through the same language option");
+    surface.draw(true);require(surface.rendered_text.find("Frame generation")!=std::string::npos,"English returns without restarting");
+}
 int main(int argc, char** argv) {
     const auto profile = std::filesystem::temp_directory_path() /
         (L"ofxr-settings-widgets-" + std::to_wstring(GetCurrentProcessId()) +
             L"-" + std::to_wstring(GetTickCount64()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", profile.c_str());
     try {
-        if (argc == 2 && std::strcmp(argv[1], "--aer-framegen") == 0) {aer_framegen_widgets();aer_native_guide_widgets();}
+        if (argc == 2 && std::strcmp(argv[1], "--language-switch") == 0) language_switch_widgets();
+        else if (argc == 2 && std::strcmp(argv[1], "--aer-framegen") == 0) {aer_framegen_widgets();aer_native_guide_widgets();}
         else if (argc == 2 && std::strcmp(argv[1], "--gpu-telemetry") == 0) gpu_telemetry_and_quality();
         else if (argc == 2 && std::strcmp(argv[1], "--desktop-header") == 0) desktop_header_is_not_a_headset_control();
         else if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
@@ -854,12 +878,14 @@ int main(int argc, char** argv) {
         else { desktop_header_is_not_a_headset_control(); rebase_and_publish(); rife_catalog();rife_widgets();release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); aer_framegen_widgets();aer_native_guide_widgets(); }
         std::filesystem::remove(configuration_path());
         std::filesystem::remove(profile/L"dlssg-profile-selection.ini");
+        std::filesystem::remove(profile/L"interface.ini");
         std::filesystem::remove(profile);
         std::cout << checks << " shared settings widget checks passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::filesystem::remove(configuration_path());
         std::filesystem::remove(profile/L"dlssg-profile-selection.ini");
+        std::filesystem::remove(profile/L"interface.ini");
         std::filesystem::remove(profile);
         std::cerr << "settings widgets failed: " << error.what() << '\n';
         return 1;

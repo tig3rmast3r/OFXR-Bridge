@@ -20,6 +20,7 @@
 #include <cfloat>
 #include <mutex>
 #include <chrono>
+#include <cmath>
 
 namespace xrfg {
 namespace {
@@ -383,6 +384,7 @@ struct OverlayMenuRenderer::Impl {
     ImGuiContext* imgui{};
     DXGI_FORMAT format{};
     std::uint32_t width{},height{};
+    float density=1.F;
     std::vector<Image> images;
     std::chrono::steady_clock::time_point previous_frame{};
     bool dx11_ready{},initialized{},frame_open{};
@@ -404,7 +406,7 @@ struct OverlayMenuRenderer::Impl {
     void begin_frame(const OverlayMenuInputFrame& input) {
         const auto now=std::chrono::steady_clock::now();
         auto& io=ImGui::GetIO();
-        io.DisplaySize=ImVec2(float(width),float(height));io.DisplayFramebufferScale=ImVec2(1,1);
+        io.DisplaySize=ImVec2(float(width)/density,float(height)/density);io.DisplayFramebufferScale=ImVec2(density,density);
         const auto delta=previous_frame.time_since_epoch().count()?std::chrono::duration<float>(now-previous_frame).count():1.0F/60.0F;
         io.DeltaTime=std::clamp(delta,1.0F/1000.0F,0.25F);previous_frame=now;
         apply_imgui_input(input);
@@ -442,13 +444,14 @@ OverlayMenuRenderer::~OverlayMenuRenderer() {
     }
 }
 HRESULT OverlayMenuRenderer::initialize(ID3D12Device* device12,ID3D12CommandQueue* queue12,
-    ID3D11Device* device11,DXGI_FORMAT format,std::uint32_t image_count,std::uint32_t width,std::uint32_t height) noexcept {
+    ID3D11Device* device11,DXGI_FORMAT format,std::uint32_t image_count,std::uint32_t width,std::uint32_t height,float density) noexcept {
+    if(!std::isfinite(density)||density<1.F||density>4.F)return E_INVALIDARG;
     if(impl_||!image_count||image_count>64||!width||!height||width>16384||height>16384||
         (!device11&&(!device12||!queue12)))return E_INVALIDARG;
     switch(format){case DXGI_FORMAT_R8G8B8A8_UNORM:case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
         case DXGI_FORMAT_B8G8R8A8_UNORM:case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:break;default:return DXGI_ERROR_UNSUPPORTED;}
     try {
-        auto candidate=std::make_unique<Impl>();candidate->format=format;candidate->width=width;candidate->height=height;
+        auto candidate=std::make_unique<Impl>();candidate->format=format;candidate->width=width;candidate->height=height;candidate->density=density;
         candidate->images.resize(image_count);
         if(device11) {
             candidate->device11=device11;Impl::Ptr<ID3D11DeviceContext> immediate;

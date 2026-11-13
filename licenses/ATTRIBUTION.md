@@ -54,3 +54,8 @@ The NVIDIA RIFE installer package includes the app-local Microsoft.VC143.CRT
 Microsoft license terms from that redistributable accompany them in
 [MSVC_CRT_LICENSE.rtf](MSVC_CRT_LICENSE.rtf). These files are installed only
 inside the per-user portable Python runtime.
+
+Noto Sans SC (optional Chinese UI, embedded static subset): SIL OFL 1.1.
+Source: https://github.com/google/fonts/tree/main/ofl/notosanssc .
+Subset named OFXR UI Chinese Subset; source SHA-256 recorded in
+src/ui/settings_font_zh.inc. License: Noto-Sans-SC-OFL.txt.

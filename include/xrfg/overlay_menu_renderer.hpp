@@ -18,7 +18,7 @@ public:
     OverlayMenuRenderer& operator=(const OverlayMenuRenderer&)=delete;
     HRESULT initialize(ID3D12Device* device12,ID3D12CommandQueue* queue12,
         ID3D11Device* device11,DXGI_FORMAT format,std::uint32_t image_count,
-        std::uint32_t width=1024,std::uint32_t height=768) noexcept;
+        std::uint32_t width=1024,std::uint32_t height=768,float density=1.F) noexcept;
     // Caller has legally acquired/waited this XR image. Its private D12 list is
     // open and the texture is already RENDER_TARGET; it remains in that state.
     // This records immutable per-image mesh/atlas/descriptors, never a frame ring.

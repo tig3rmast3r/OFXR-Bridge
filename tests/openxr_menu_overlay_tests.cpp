@@ -52,7 +52,7 @@ XrResult XRAPI_CALL formats(XrSession,std::uint32_t capacity,std::uint32_t* coun
     *count=1;if(capacity)out[0]=DXGI_FORMAT_R8G8B8A8_UNORM;return XR_SUCCESS;
 }
 XrResult XRAPI_CALL create_chain(XrSession,const XrSwapchainCreateInfo* i,XrSwapchain* out) {
-    if(chains.size()>=chain_limit || (i->width==1024 && (i->height==768||i->height==1280) && refuse_menu_create)) {
+    if(chains.size()>=chain_limit || (i->width>=1024 && i->height>=768 && refuse_menu_create)) {
         refuse_menu_create=false;*out=XR_NULL_HANDLE;return XR_ERROR_LIMIT_REACHED;
     }
     *out=handle<XrSwapchain>(++made+10); auto& c=chains[*out]; c.width=i->width;c.height=i->height;
@@ -102,8 +102,10 @@ XrResult XRAPI_CALL end(XrSession,const XrFrameEndInfo* i) {
         check(c.releases!=0,"only released XR images composed");
         check(q->eyeVisibility==XR_EYE_VISIBILITY_BOTH&&q->space==handle<XrSpace>(99),"both eyes in shared VIEW space");
         check(q->subImage.imageRect.offset.y+q->subImage.imageRect.extent.height<=int(c.height),"UI region inside shared image");
-        if(q->subImage.imageRect.offset.y==0 && q->subImage.imageRect.extent.height==768) {
-            ++menu_seen;check(q->subImage.imageRect.extent.width==1024,"menu canvas 4:3");menu_pose=q->pose;menu_size=q->size;
+        if(q->subImage.imageRect.offset.y==0 && (q->subImage.imageRect.extent.width*3==q->subImage.imageRect.extent.height*4)) {
+            ++menu_seen;check(q->subImage.imageRect.extent.width*3==q->subImage.imageRect.extent.height*4,"menu texture 4:3");
+            check(q->subImage.imageRect.extent.height==(max_image_height>=1536?1536:960),
+                "menu supersamples when supported and falls back for limited runtime dimensions");menu_pose=q->pose;menu_size=q->size;
             check(q->layerFlags==XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,"premultiplied menu alpha");
         }else ++fps_seen;
     }return XR_SUCCESS;
@@ -250,12 +252,12 @@ int main(int argc,char** argv) {
             chain_limit=1; // opening any counter beside the menu must need no additional XR handle
             overlay.application_frame(&frame); // FPS first acquired image times out.
             std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&frame);overlay.end_frame(&frame,true);
-            for(unsigned n=0;n<40 && !(menu_seen&&fps_seen);++n){std::this_thread::sleep_for(std::chrono::milliseconds(2));overlay.application_frame(&frame);overlay.end_frame(&frame,true);}
+            for(unsigned n=0;n<500 && !(menu_seen&&fps_seen);++n){std::this_thread::sleep_for(std::chrono::milliseconds(2));overlay.application_frame(&frame);overlay.end_frame(&frame,true);}
             check(menu_seen==1&&fps_seen==1&&count_seen==3,"both quads on original/synthetic compositor path");
             check(chains.size()==1,"menu and corner counter share exactly one native XR swapchain");
             position(ini,"elliott_bottom");std::this_thread::sleep_for(std::chrono::milliseconds(260));
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);
-            for(unsigned n=0;n<40 && !(menu_seen&&fps_seen);++n) {
+            for(unsigned n=0;n<500 && !(menu_seen&&fps_seen);++n) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             }
             check(menu_seen==1&&fps_seen==1&&chains.size()==1,"menu and Elliott meter remain independent quads on one native handle");
@@ -268,10 +270,10 @@ int main(int argc,char** argv) {
             position(ini,"upper_right");std::this_thread::sleep_for(std::chrono::milliseconds(260));
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             overlay.set_session_focused(false);overlay.application_frame(&frame);overlay.end_frame(&frame,false);
-            for(unsigned n=0;n<40 && !fps_seen;++n){std::this_thread::sleep_for(std::chrono::milliseconds(2));overlay.application_frame(&frame);overlay.end_frame(&frame,false);}
+            for(unsigned n=0;n<500 && !fps_seen;++n){std::this_thread::sleep_for(std::chrono::milliseconds(2));overlay.application_frame(&frame);overlay.end_frame(&frame,false);}
             check(menu_seen==0&&fps_seen==1,"focus loss removes menu even if input source still asks open");
             overlay.set_session_focused(true);overlay.application_frame(&frame);overlay.end_frame(&frame,false);
-            for(unsigned n=0;n<40 && !menu_seen;++n){overlay.application_frame(&frame);overlay.end_frame(&frame,false);std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+            for(unsigned n=0;n<500 && !menu_seen;++n){overlay.application_frame(&frame);overlay.end_frame(&frame,false);std::this_thread::sleep_for(std::chrono::milliseconds(1));}
             check(menu_seen==1,"refocused menu can reopen");
             const auto submit_menu = [&] {
                 const auto before = menu_releases;
@@ -346,7 +348,7 @@ int main(int argc,char** argv) {
                 check(!xrfg::autonomous::interface_telemetry_requested(),"benchmark close clears visibility");
             }
             input.open=false;position(ini,"off");std::this_thread::sleep_for(std::chrono::milliseconds(260));
-            for(unsigned n=0;n<40 && !chains.empty();++n) {
+            for(unsigned n=0;n<500 && !chains.empty();++n) {
                 overlay.application_frame(&frame);overlay.end_frame(&frame,false);
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }

@@ -23,7 +23,8 @@ namespace {
 unsigned checks{};
 void require(bool condition,const char* message){++checks;if(!condition)throw std::runtime_error(message);}
 void hr(HRESULT result,const char* message){require(SUCCEEDED(result),message);}
-constexpr unsigned width=128,height=96;
+unsigned width=128,height=96;
+float density=1.F;
 const DXGI_FORMAT formats[]{DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_B8G8R8A8_UNORM,
     DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
 struct DrawData{ImU32 color{};unsigned calls{};};
@@ -38,6 +39,10 @@ void lifecycle_callback(const ImDrawList*,const ImDrawCmd* command) {
 }
 void lifecycle_draw(void* opaque) {
     auto& state=*static_cast<LifecycleDraw*>(opaque);++state.calls;
+    require(ImGui::GetIO().DisplaySize.x==128.F && ImGui::GetIO().DisplaySize.y==96.F,
+        "supersampling preserves logical layout");
+    require(ImGui::GetIO().DisplayFramebufferScale.x==density,
+        "font rasterization uses physical framebuffer density");
     if(!state.context)state.context=ImGui::GetCurrentContext();
     state.consistent&=ImGui::GetCurrentContext()==state.context;
     auto* background=ImGui::GetBackgroundDrawList();
@@ -48,7 +53,8 @@ void lifecycle_draw(void* opaque) {
     auto* font=ImGui::GetFont();const float size=14.0F+float(state.cycle)*4.0F;
     auto* baked=font->GetFontBaked(size);
     for(unsigned glyph=32;glyph<127;++glyph)baked->FindGlyph(ImWchar(glyph));
-    background->AddText(font,size,{8,72},IM_COL32_WHITE,"Neural Rendering");
+    require(baked->FindGlyphNoFallback(0x4e2d)!=nullptr,"merged font rasterizes a real Chinese glyph");
+    background->AddText(font,size,{8,72},IM_COL32_WHITE,"神经渲染 中文字体");
     ImGui::SetNextWindowPos({0,0});ImGui::SetNextWindowSize({128,96});
     ImGui::Begin("Options lifecycle",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoSavedSettings);
     int route=int(state.cycle%3);ImGui::Combo("Runtime",&route,"Reference\0New\0Djules\0");
@@ -88,7 +94,7 @@ xrfg::OverlayMenuInputFrame input(){xrfg::OverlayMenuInputFrame result{};result.
 void pixels(const std::vector<unsigned char>& data,DXGI_FORMAT format,unsigned channel) {
     const bool bgra=format==DXGI_FORMAT_B8G8R8A8_UNORM||format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     const auto actual=bgra&&channel!=1?2-channel:channel;
-    const auto at=[&](unsigned x,unsigned y,unsigned c){return data[(y*width+x)*4+c];};
+    const auto at=[&](unsigned x,unsigned y,unsigned c){return data[(unsigned(y*density)*width+unsigned(x*density))*4+c];};
     require(at(20,20,actual)>250&&at(20,20,3)>250,"actual ImGui primary-colour rectangle rendered");
     require(at(124,92,0)==0&&at(124,92,1)==0&&at(124,92,2)==0&&at(124,92,3)==0,"render target cleared transparent");
     unsigned cursor{};for(unsigned y=44;y<70;++y)for(unsigned x=68;x<91;++x)if(at(x,y,3)>0)++cursor;
@@ -155,7 +161,7 @@ void d11(bool single_threaded=false) {
     td.BindFlags=D3D11_BIND_SHADER_RESOURCE;hr(device->CreateTexture2D(&td,nullptr,&input_texture),"game input texture");srv.Reset();hr(device->CreateShaderResourceView(input_texture.Get(),nullptr,&srv),"game input SRV");sv=srv.Get();context->PSSetShaderResources(0,1,&sv);debug->ClearStoredMessages();
     UINT64 serial=0;
     for(auto format:formats) {
-        xrfg::OverlayMenuRenderer renderer;hr(renderer.initialize(nullptr,nullptr,device.Get(),format,1,width,height),"D11 renderer init");
+        xrfg::OverlayMenuRenderer renderer;hr(renderer.initialize(nullptr,nullptr,device.Get(),format,1,width,height,density),"D11 renderer init");
         td.Format=format;td.BindFlags=D3D11_BIND_RENDER_TARGET;ComPtr<ID3D11Texture2D> texture;hr(device->CreateTexture2D(&td,nullptr,&texture),"D11 menu texture");
         const auto previous=ImGui::GetCurrentContext();DrawData drawing{IM_COL32(255,0,0,255)};
         hr(renderer.render_d3d11(texture.Get(),0,input(),draw,&drawing),"D11 real isolated-state draw");require(ImGui::GetCurrentContext()==previous,"D11 restores separate ImGui context");
@@ -206,7 +212,7 @@ void d12() {
     ComPtr<ID3D12Fence> fence,blocker;hr(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)),"caller D12 fence");hr(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&blocker)),"private queue blocker");
     UINT64 serial=0;
     for(auto format:formats) {
-        xrfg::OverlayMenuRenderer renderer;hr(renderer.initialize(device.Get(),queue.Get(),nullptr,format,3,width,height),"D12 renderer init");
+        xrfg::OverlayMenuRenderer renderer;hr(renderer.initialize(device.Get(),queue.Get(),nullptr,format,3,width,height,density),"D12 renderer init");
         std::array<ComPtr<ID3D12Resource>,3> textures;std::array<ComPtr<ID3D12CommandAllocator>,3> allocators;std::array<ComPtr<ID3D12GraphicsCommandList>,3> lists;
         D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;desc.Width=width;desc.Height=height;desc.DepthOrArraySize=desc.MipLevels=desc.SampleDesc.Count=1;desc.Format=format;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
@@ -251,7 +257,7 @@ void d12() {
         D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;desc.Width=width;desc.Height=height;
         desc.DepthOrArraySize=desc.MipLevels=desc.SampleDesc.Count=1;desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
-        for(unsigned i=0;i<2;++i){hr(renderers[i].initialize(device.Get(),queue.Get(),nullptr,desc.Format,1,width,height),"concurrent renderer init");
+        for(unsigned i=0;i<2;++i){hr(renderers[i].initialize(device.Get(),queue.Get(),nullptr,desc.Format,1,width,height,density),"concurrent renderer init");
             hr(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&textures[i])),"concurrent target");
             hr(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocators[i])),"concurrent allocator");
             hr(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocators[i].Get(),nullptr,IID_PPV_ARGS(&lists[i])),"concurrent list");}
@@ -269,7 +275,8 @@ void d12() {
 }
 }
 int main(int argc,char** argv){
-    if(argc>2||(argc==2&&strcmp(argv[1],"d11")&&strcmp(argv[1],"d12"))){fprintf(stderr,"Expected d11 or d12 (or no argument for both)\n");return 2;}
+    if(argc>3||(argc>=2&&strcmp(argv[1],"d11")&&strcmp(argv[1],"d12"))){fprintf(stderr,"Expected d11 or d12 (or no argument for both)\n");return 2;}
+    if(argc==3){density=2.F;width*=2;height*=2;}
     auto* foreign=ImGui::CreateContext();ImGui::GetIO().IniFilename=nullptr;try{
     const bool both=argc<2;
     if(both||!strcmp(argv[1],"d11")){
