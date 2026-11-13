@@ -17,7 +17,7 @@ struct MenuPresentationLayout {
     float offset_x{}, offset_y{}, scale{1.F};
 };
 
-// The texture remains 1024 x 768. Normalized offsets move the center by half
+// The logical canvas remains 1024 x 768 (the texture can be supersampled). Normalized offsets move the center by half
 // the common visible FOV span; the whole quad is clamped inside those bounds.
 MenuPresentationLayout calculate_menu_presentation(MenuPresentationFov fov,
     const autonomous::Settings& settings) noexcept;

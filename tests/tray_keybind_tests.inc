@@ -20,11 +20,20 @@ void save_keybind_preview(HWND window) {
 INT_PTR run_keybind_dialog(KeybindDialog& draft,std::function<void(HWND)> script) {
     keybind_dialog_error={};keybind_dialog_script=std::move(script);
     const auto timer=SetTimer(nullptr,0,50,[](HWND,UINT,UINT_PTR timer,DWORD){
-        KillTimer(nullptr,timer);const auto dialog=GetActiveWindow();
+        // Modal setup can pump timers before the dialog becomes active/visible.
+        HWND dialog{};
+        EnumThreadWindows(GetCurrentThreadId(),[](HWND candidate,LPARAM output)->BOOL {
+            if(IsWindowVisible(candidate) && GetDlgItem(candidate,IDC_KEYBIND_STATUS)) {
+                *reinterpret_cast<HWND*>(output)=candidate;return FALSE;
+            }
+            return TRUE;
+        },reinterpret_cast<LPARAM>(&dialog));
+        if(!dialog)return;
+        KillTimer(nullptr,timer);
         try{require(dialog!=nullptr,"own modal dialog exists");keybind_dialog_script(dialog);}
         catch(...){keybind_dialog_error=std::current_exception();EndDialog(dialog,IDCANCEL);}
     });
-    const auto result=DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_KEYBINDS),nullptr,keybind_dialog_procedure,reinterpret_cast<LPARAM>(&draft));
+    const auto result=xrfg::ui::DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_KEYBINDS),nullptr,keybind_dialog_procedure,reinterpret_cast<LPARAM>(&draft));
     KillTimer(nullptr,timer);if(keybind_dialog_error)std::rethrow_exception(keybind_dialog_error);return result;
 }
 void keybind_ui_tests(AppState& app) {

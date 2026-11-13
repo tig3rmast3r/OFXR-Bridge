@@ -9,6 +9,8 @@
 #include "xrfg/dlssg_profile.hpp"
 #include "xrfg/presented_output_rate.hpp"
 #include "resource.h"
+#include "ui_text_win32.hpp"
+#include "imgui_impl_win32.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -216,7 +218,7 @@ void save_settings(const AppState& state) {
 }
 
 void show_error(HWND owner, const std::wstring& error) {
-    MessageBoxW(owner, error.c_str(), kApplicationName, MB_OK | MB_ICONERROR);
+    xrfg::ui::MessageBoxW(owner, error.c_str(), kApplicationName, MB_OK | MB_ICONERROR);
 }
 
 void remove_manifest_file(const std::filesystem::path& manifest) {
@@ -536,7 +538,7 @@ void register_x86_manifest(
         const wchar_t* engines[]{L" - FidelityFX", L" - NVIDIA reference", L" - NVIDIA new", L" - NVIDIA djules"};
         tooltip += engines[std::clamp(desired.backend, 0, 3)];
     }
-    return tooltip;
+    return xrfg::autonomous::ui_translate_wide(tooltip);
 }
 
 void refresh_tray_icon(AppState& state) {
@@ -552,8 +554,8 @@ void show_balloon(
     std::wstring_view title,
     std::wstring_view message,
     DWORD flags = NIIF_INFO) {
-    wcsncpy_s(state.icon.szInfoTitle, std::wstring(title).c_str(), _TRUNCATE);
-    wcsncpy_s(state.icon.szInfo, std::wstring(message).c_str(), _TRUNCATE);
+    wcsncpy_s(state.icon.szInfoTitle, xrfg::autonomous::ui_translate_wide(title).c_str(), _TRUNCATE);
+    wcsncpy_s(state.icon.szInfo, xrfg::autonomous::ui_translate_wide(message).c_str(), _TRUNCATE);
     state.icon.dwInfoFlags = flags;
     state.icon.uFlags = NIF_INFO;
     static_cast<void>(Shell_NotifyIconW(NIM_MODIFY, &state.icon));
@@ -763,9 +765,9 @@ constexpr std::array<const wchar_t*,xrfg::kKeybindCount> kKeybindNames{L"Open in
 
 void show_keybind_row(HWND dialog,KeybindDialog& state,unsigned row) {
     ShowWindow(GetDlgItem(dialog,IDC_KEYBIND_CAPTURE+row),SW_HIDE);
-    SetDlgItemTextW(dialog,IDC_KEYBIND_VALUE+row,key_display(state.settings[row]).c_str());
+    xrfg::ui::SetDlgItemTextW(dialog,IDC_KEYBIND_VALUE+row,key_display(state.settings[row]).c_str());
     ShowWindow(GetDlgItem(dialog,IDC_KEYBIND_VALUE+row),SW_SHOW);
-    SetDlgItemTextW(dialog,IDC_KEYBIND_CHANGE+row,L"Change");
+    xrfg::ui::SetDlgItemTextW(dialog,IDC_KEYBIND_CHANGE+row,L"Change");
 }
 void begin_keybind_capture(HWND dialog,KeybindDialog& state,unsigned row) {
     if(state.capturing>=0)show_keybind_row(dialog,state,unsigned(state.capturing));
@@ -775,8 +777,8 @@ void begin_keybind_capture(HWND dialog,KeybindDialog& state,unsigned row) {
     state.updating=false;
     ShowWindow(GetDlgItem(dialog,IDC_KEYBIND_VALUE+row),SW_HIDE);
     ShowWindow(box,SW_SHOW);SetFocus(box);
-    SetDlgItemTextW(dialog,IDC_KEYBIND_CHANGE+row,L"Listening...");
-    SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,(std::wstring(L"Press a key or combination for ")+kKeybindNames[row]+L".").c_str());
+    xrfg::ui::SetDlgItemTextW(dialog,IDC_KEYBIND_CHANGE+row,L"Listening...");
+    xrfg::ui::SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,(std::wstring(L"Press a key or combination for ")+kKeybindNames[row]+L".").c_str());
 }
 INT_PTR CALLBACK keybind_dialog_procedure(HWND dialog,UINT message,WPARAM wparam,LPARAM lparam) {
     auto* state=reinterpret_cast<KeybindDialog*>(GetWindowLongPtrW(dialog,DWLP_USER));
@@ -807,15 +809,15 @@ INT_PTR CALLBACK keybind_dialog_procedure(HWND dialog,UINT message,WPARAM wparam
             const WORD value=LOWORD(SendDlgItemMessageW(dialog,id,HKM_GETHOTKEY,0,0));
             if(!LOBYTE(value))return TRUE;
             const auto text=xrfg::standalone::hotkey_setting(hotkey_from_control(value));
-            if(!text){SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,L"That key cannot be used. Choose another one.");return TRUE;}
+            if(!text){xrfg::ui::SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,L"That key cannot be used. Choose another one.");return TRUE;}
             state->settings[row]=*text;state->capturing=-1;show_keybind_row(dialog,*state,row);
             SetFocus(GetDlgItem(dialog,IDC_KEYBIND_CHANGE+row));
-            SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,L"Binding captured. Click OK to save all changes.");return TRUE;
+            xrfg::ui::SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,L"Binding captured. Click OK to save all changes.");return TRUE;
         }
         if(id==IDC_KEYBIND_DEFAULTS) {
             xrfg::standalone::LauncherSettings defaults;const auto values=xrfg::standalone::keybind_settings(defaults);
             state->capturing=-1;for(unsigned i=0;i<xrfg::kKeybindCount;++i){state->settings[i]=*values[i];show_keybind_row(dialog,*state,i);}
-            SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,L"Defaults restored. Click OK to save.");return TRUE;
+            xrfg::ui::SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,L"Defaults restored. Click OK to save.");return TRUE;
         }
         if(id==IDCANCEL){EndDialog(dialog,IDCANCEL);return TRUE;}
         if(id==IDOK) {
@@ -823,13 +825,13 @@ INT_PTR CALLBACK keybind_dialog_procedure(HWND dialog,UINT message,WPARAM wparam
             for(unsigned i=0;i<xrfg::kKeybindCount;++i) {
                 keys[i]=xrfg::standalone::parse_hotkey(state->settings[i]).value_or(xrfg::standalone::Hotkey{});
                 for(unsigned j=0;j<i;++j)if(keys[i].key && keys[i]==keys[j]) {
-                    SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,(std::wstring(kKeybindNames[i])+L" and "+kKeybindNames[j]+L" use the same binding. Change or clear one.").c_str());return TRUE;
+                    xrfg::ui::SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,(std::wstring(kKeybindNames[i])+L" and "+kKeybindNames[j]+L" use the same binding. Change or clear one.").c_str());return TRUE;
                 }
             }
             bool available=true;unsigned failed{};
             for(unsigned i=0;i<xrfg::kKeybindCount;++i)if(keys[i].key && !RegisterHotKey(dialog,0x7f01+i,keys[i].modifiers|MOD_NOREPEAT,keys[i].key)){available=false;failed=i;break;}
             for(unsigned i=0;i<xrfg::kKeybindCount;++i)UnregisterHotKey(dialog,0x7f01+i);
-            if(!available){SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,(std::wstring(kKeybindNames[failed])+L": another program uses that combination. Choose another one.").c_str());return TRUE;}
+            if(!available){xrfg::ui::SetDlgItemTextW(dialog,IDC_KEYBIND_STATUS,(std::wstring(kKeybindNames[failed])+L": another program uses that combination. Choose another one.").c_str());return TRUE;}
             EndDialog(dialog,IDOK);return TRUE;
         }
         return FALSE;
@@ -851,7 +853,7 @@ void change_keybinds(AppState& state) {
     INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_HOTKEY_CLASS};InitCommonControlsEx(&controls);
     KeybindDialog dialog;const auto fields=xrfg::standalone::keybind_settings(state.settings);
     for(unsigned i=0;i<xrfg::kKeybindCount;++i)dialog.settings[i]=*fields[i];
-    const auto answer=DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_KEYBINDS),state.window,keybind_dialog_procedure,reinterpret_cast<LPARAM>(&dialog));
+    const auto answer=xrfg::ui::DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_KEYBINDS),state.window,keybind_dialog_procedure,reinterpret_cast<LPARAM>(&dialog));
     xrfg::autonomous::suspend_keybinds(false);
     if(answer==IDOK && !apply_keybinds(state,dialog.settings))show_error(state.window,L"Unable to save the keybinds. The previous bindings are still active.");
     if(state.armed)register_pause_hotkey(state);
@@ -871,12 +873,12 @@ INT_PTR CALLBACK rife_install_dialog_procedure(HWND dialog,UINT message,WPARAM w
     if(message==WM_INITDIALOG) {
         auto* state=reinterpret_cast<RifeInstallDialog*>(lparam);
         SetWindowLongPtrW(dialog,DWLP_USER,lparam);
-        SetDlgItemTextW(dialog,IDC_RIFE_REASON,state->reason.c_str());
-        SetDlgItemTextW(dialog,IDC_RIFE_DESTINATION,state->destination.c_str());
+        xrfg::ui::SetDlgItemTextW(dialog,IDC_RIFE_REASON,state->reason.c_str());
+        ::SetDlgItemTextW(dialog,IDC_RIFE_DESTINATION,state->destination.c_str());
         CheckRadioButton(dialog,IDC_RIFE_NVIDIA,IDC_RIFE_AMD,IDC_RIFE_NVIDIA);
         EnableWindow(GetDlgItem(dialog,IDC_RIFE_AMD),rife_vulkan_installation_available(*state));
         state->vulkan_selected=false;
-        SetDlgItemTextW(dialog,IDC_RIFE_SPACE,L"NVIDIA: about 8 GB installed, 14 GB free for setup. Radeon Vulkan: keep 2 GB free for setup. Per-game caches need additional space.");
+        xrfg::ui::SetDlgItemTextW(dialog,IDC_RIFE_SPACE,L"NVIDIA: about 8 GB installed, 14 GB free for setup. Radeon Vulkan: keep 2 GB free for setup. Per-game caches need additional space.");
         return TRUE;
     }
     if(message==WM_COMMAND) {
@@ -1009,19 +1011,19 @@ void report_rife_completion(AppState& state,const RifeCompletion& completion) {
     if(!log.empty())text+=L"\r\n\r\nLog: "+log.wstring();
     if(result.status==xrfg::rife_setup::Status::ready) {
         if(text.empty())text=L"RIFE is ready.";
-        MessageBoxW(state.window,text.c_str(),completion.precompiling?L"Pre-compile TensorRT":L"Check RIFE",MB_OK|MB_ICONINFORMATION);return;
+        xrfg::ui::MessageBoxW(state.window,text.c_str(),completion.precompiling?L"Pre-compile TensorRT":L"Check RIFE",MB_OK|MB_ICONINFORMATION);return;
     }
     if(!completion.installing&&!completion.updating_overlay&&xrfg::rife_setup::offers_install(result.status)) {
         RifeInstallDialog dialog{xrfg::managed_rife_runtime(),result.message};
         dialog.vulkan_available=std::filesystem::is_regular_file(state.executable_directory/L"rife-vulkan/manifest.json");
-        const auto answer=DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_RIFE_INSTALL),state.window,
+        const auto answer=xrfg::ui::DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_RIFE_INSTALL),state.window,
             rife_install_dialog_procedure,reinterpret_cast<LPARAM>(&dialog));
         if(answer==IDOK) {
             std::wstring error;if(!begin_rife_operation(state,true,&error,false,false,false,dialog.vulkan_selected))show_error(state.window,error);
         }
         return;
     }
-    MessageBoxW(state.window,text.c_str(),completion.precompiling?L"Pre-compile TensorRT":L"Check RIFE",MB_OK|MB_ICONWARNING);
+    xrfg::ui::MessageBoxW(state.window,text.c_str(),completion.precompiling?L"Pre-compile TensorRT":L"Check RIFE",MB_OK|MB_ICONWARNING);
 }
 void poll_rife_operation(AppState& state) {
     if(auto completion=collect_rife_completion(state)) {
@@ -1039,43 +1041,44 @@ void poll_rife_operation(AppState& state) {
 HMENU append_rife_menu(HMENU menu,const AppState& state) {
     const auto child=CreatePopupMenu();if(!child)return nullptr;
     const auto flags=MF_STRING|(state.rife.process?MF_GRAYED:0);
-    AppendMenuW(child,flags,check_rife,L"Check RIFE...");
-    AppendMenuW(child,flags,reinstall_rife,L"Reinstall RIFE...");
+    xrfg::ui::AppendMenuW(child,flags,check_rife,L"Check RIFE...");
+    xrfg::ui::AppendMenuW(child,flags,reinstall_rife,L"Reinstall RIFE...");
     const bool vulkan=std::filesystem::is_regular_file(xrfg::managed_rife_runtime()/L"vulkan/backend.json");
-    AppendMenuW(child,flags,precompile_rife,vulkan?L"Prepare Vulkan for found games...":L"Pre-compile TensorRT for found games...");
-    AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(child),L"RIFE");return child;
+    xrfg::ui::AppendMenuW(child,flags,precompile_rife,vulkan?L"Prepare Vulkan for found games...":L"Pre-compile TensorRT for found games...");
+    xrfg::ui::AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(child),L"RIFE");return child;
 }
 
 void show_context_menu(AppState& state) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
-    AppendMenuW(menu, MF_STRING, show_settings, L"Settings...");
+    xrfg::autonomous::refresh_ui_language(true);
+    xrfg::ui::AppendMenuW(menu, MF_STRING, show_settings, L"Settings...");
     SetMenuDefaultItem(menu, show_settings, FALSE);
     const auto startup_flags=state.startup_arm_pending?MF_GRAYED:0;
-    AppendMenuW(menu, MF_STRING | startup_flags | (state.armed ? MF_CHECKED : MF_UNCHECKED),
+    xrfg::ui::AppendMenuW(menu, MF_STRING | startup_flags | (state.armed ? MF_CHECKED : MF_UNCHECKED),
         toggle_arm, L"Enable");
-    AppendMenuW(menu, MF_STRING | startup_flags | (state.armed ? MF_UNCHECKED : MF_CHECKED),
+    xrfg::ui::AppendMenuW(menu, MF_STRING | startup_flags | (state.armed ? MF_UNCHECKED : MF_CHECKED),
         toggle_arm, L"Disable");
-    AppendMenuW(menu, MF_STRING, configure_keybinds, L"Configure keybinds...");
+    xrfg::ui::AppendMenuW(menu, MF_STRING, configure_keybinds, L"Configure keybinds...");
     append_rife_menu(menu,state);
     HMENU pacing_menu=CreatePopupMenu();
     if(pacing_menu) {
         using xrfg::standalone::RuntimePacing;
-        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::automatic?MF_CHECKED:0),pacing_auto,L"Auto");
-        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::force_vdxr?MF_CHECKED:0),pacing_vdxr,L"Force VDXR");
-        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::force_steamvr?MF_CHECKED:0),pacing_steamvr,L"Force SteamVR");
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(pacing_menu),L"Pacing (restart game)");
+        xrfg::ui::AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::automatic?MF_CHECKED:0),pacing_auto,L"Auto");
+        xrfg::ui::AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::force_vdxr?MF_CHECKED:0),pacing_vdxr,L"Force VDXR");
+        xrfg::ui::AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::force_steamvr?MF_CHECKED:0),pacing_steamvr,L"Force SteamVR");
+        xrfg::ui::AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(pacing_menu),L"Pacing (restart game)");
     }
-    AppendMenuW(menu,MF_STRING | (state.settings.crash_debug ? MF_CHECKED : MF_UNCHECKED),
+    xrfg::ui::AppendMenuW(menu,MF_STRING | (state.settings.crash_debug ? MF_CHECKED : MF_UNCHECKED),
         toggle_crash_debug,L"Crash debug (restart game)");
     if(!state.crash_debug_status.empty())
-        AppendMenuW(menu,MF_STRING | MF_GRAYED,0,state.crash_debug_status.c_str());
-    AppendMenuW(menu,MF_STRING | (xrfg::autonomous::benchmark_enabled() ? MF_CHECKED : MF_UNCHECKED),
+        xrfg::ui::AppendMenuW(menu,MF_STRING | MF_GRAYED,0,state.crash_debug_status.c_str());
+    xrfg::ui::AppendMenuW(menu,MF_STRING | (xrfg::autonomous::benchmark_enabled() ? MF_CHECKED : MF_UNCHECKED),
         toggle_benchmark_mode,L"Enable benchmarks");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, open_logs, L"Open folder");
-    AppendMenuW(menu, MF_STRING, show_about, L"About");
-    AppendMenuW(menu, MF_STRING, exit_application, L"Exit");
+    xrfg::ui::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    xrfg::ui::AppendMenuW(menu, MF_STRING, open_logs, L"Open folder");
+    xrfg::ui::AppendMenuW(menu, MF_STRING, show_about, L"About");
+    xrfg::ui::AppendMenuW(menu, MF_STRING, exit_application, L"Exit");
     POINT cursor{};
     GetCursorPos(&cursor);
     SetForegroundWindow(state.window);
@@ -1308,7 +1311,7 @@ void handle_command(AppState& state, UINT command) {
         RifeInstallDialog dialog{xrfg::managed_rife_runtime(),
             L"Choose the RIFE backend to reinstall. Recorded games are preserved. Radeon Vulkan retains the previous runtime."};
         dialog.vulkan_available=std::filesystem::is_regular_file(state.executable_directory/L"rife-vulkan/manifest.json");
-        if(DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_RIFE_INSTALL),state.window,
+        if(xrfg::ui::DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_RIFE_INSTALL),state.window,
             rife_install_dialog_procedure,reinterpret_cast<LPARAM>(&dialog))==IDOK) {
             std::wstring error;if(!begin_rife_operation(state,true,&error,true,false,false,dialog.vulkan_selected))show_error(state.window,error);
         }
@@ -1419,7 +1422,7 @@ void handle_command(AppState& state, UINT command) {
                 }
                 return S_OK;
             };
-        if (FAILED(TaskDialogIndirect(&dialog, nullptr, nullptr, nullptr))) {
+        if (FAILED(xrfg::ui::TaskDialogIndirect(&dialog, nullptr, nullptr, nullptr))) {
             const std::wstring message = std::wstring(version_label) +
                 L"\r\n\r\nCreated by tig3rmast3r, the original author of OFXR.\r\n"
                 L"Support him: https://ko-fi.com/tig3rmast3r\r\n\r\n"
@@ -1428,7 +1431,7 @@ void handle_command(AppState& state, UINT command) {
                 L"DLSS and Hybrid Framegen Integration by Elliotttate.\r\n\r\n"
                 L"License: LGPL-3.0-or-later\r\n"
                 L"https://github.com/tig3rmast3r/OFXR-Bridge";
-            MessageBoxW(
+            xrfg::ui::MessageBoxW(
                 state.window,
                 message.c_str(),
                 kApplicationName,
@@ -1677,6 +1680,8 @@ LRESULT CALLBACK window_procedure(
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
+    ImGui_ImplWin32_EnableDpiAwareness();
+    xrfg::autonomous::refresh_ui_language(true);
     if (!xrfg::autonomous::initialize_user_configuration()) return EXIT_FAILURE;
     // This entry point displays the panel without creating an activation,
     // changing registrations, writing tray configuration or loading the layer.
@@ -1722,7 +1727,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
         return EXIT_FAILURE;
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(
+        xrfg::ui::MessageBoxW(
             nullptr,
             L"OFXR 0.3.3 is already running in the notification area.",
             kApplicationName,
@@ -1739,7 +1744,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
         std::wstring cleanup_error;
         if (!cleanup_all_owned_registrations(state, &cleanup_error)) {
             log_lifecycle(state.local_directory, L"startup-cleanup", cleanup_error);
-            MessageBoxW(nullptr, cleanup_error.c_str(), kApplicationName, MB_OK | MB_ICONERROR);
+            xrfg::ui::MessageBoxW(nullptr, cleanup_error.c_str(), kApplicationName, MB_OK | MB_ICONERROR);
             CloseHandle(single_instance);
             return EXIT_FAILURE;
         }
@@ -1756,7 +1761,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
                 log_lifecycle(state.local_directory,L"DLSS-G-preference",preset_error);
         }
     } catch (...) {
-        MessageBoxW(
+        xrfg::ui::MessageBoxW(
             nullptr,
             L"OFXR 0.3.3 could not initialize its local configuration.",
             kApplicationName,
@@ -1769,7 +1774,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
     state.disarmed_icon = LoadIconW(
         instance, MAKEINTRESOURCEW(IDI_OFXR_DISARMED));
     if (state.armed_icon == nullptr || state.disarmed_icon == nullptr) {
-        MessageBoxW(
+        xrfg::ui::MessageBoxW(
             nullptr,
             L"OFXR 0.3.3 could not load its notification icons.",
             kApplicationName,

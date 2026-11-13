@@ -2,6 +2,8 @@
 #include "xrfg/settings_widgets.hpp"
 #include "xrfg/desktop_profile_picker.hpp"
 #include "xrfg/benchmark_suite.hpp"
+#include "xrfg/ui_language.hpp"
+#include <algorithm>
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
@@ -34,6 +36,7 @@ struct Window {
     bool dx11_ready{};
     SettingsWidgetState widgets{};
     bool headset_preview{};
+    int caption_language=-1;
 
     ~Window() {
         set_interface_visible(InterfaceSurface::desktop, false);
@@ -86,9 +89,19 @@ struct Window {
         if (!dx11_ready || !target || (present && !IsWindowVisible(handle)) || IsIconic(handle)) {
             finish_edits(); return;
         }
+        refresh_ui_language();
+        if(caption_language!=int(ui_language())) {
+            const auto title=L"OFXR-BRIDGE 0.3.3 (v"+std::to_wstring(XRFG_IMPLEMENTATION_VERSION)+L") - "+ui_translate_wide(L"Settings");
+            SetWindowTextW(handle,title.c_str());caption_language=int(ui_language());
+        }
         ImGui::SetCurrentContext(imgui);
         ImGui_ImplDX11_NewFrame();
+        const float dpi=ImGui_ImplWin32_GetDpiScaleForHwnd(handle);
+        ImGui_ImplWin32_SetMouseCoordinateScale(1.F/dpi);
         ImGui_ImplWin32_NewFrame();
+        auto& io=ImGui::GetIO();
+        io.DisplaySize.x/=dpi;io.DisplaySize.y/=dpi;
+        io.DisplayFramebufferScale=ImVec2(dpi,dpi);
         ImGui::NewFrame();
         const auto size = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -176,9 +189,28 @@ LRESULT CALLBACK procedure(HWND handle, UINT message, WPARAM wparam, LPARAM lpar
     }
     if (state && state->imgui) {
         ImGui::SetCurrentContext(state->imgui);
-        if (ImGui_ImplWin32_WndProcHandler(handle, message, wparam, lparam)) return TRUE;
+        ImGui_ImplWin32_SetMouseCoordinateScale(1.F/ImGui_ImplWin32_GetDpiScaleForHwnd(handle));
+        const auto handled=ImGui_ImplWin32_WndProcHandler(handle, message, wparam, lparam);
+        if (handled) return TRUE;
     }
     switch (message) {
+    case WM_DPICHANGED: {
+        const auto* rect=reinterpret_cast<const RECT*>(lparam);
+        SetWindowPos(handle,nullptr,rect->left,rect->top,rect->right-rect->left,
+            rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);
+        return 0;
+    }
+    case WM_GETMINMAXINFO: {
+        auto* limits=reinterpret_cast<MINMAXINFO*>(lparam);
+        const float dpi=ImGui_ImplWin32_GetDpiScaleForHwnd(handle);
+        limits->ptMinTrackSize={LONG(720*dpi),LONG(540*dpi)};
+        MONITORINFO info{sizeof(info)};
+        if(GetMonitorInfoW(MonitorFromWindow(handle,MONITOR_DEFAULTTONEAREST),&info)) {
+            limits->ptMinTrackSize.x=std::min(limits->ptMinTrackSize.x,info.rcWork.right-info.rcWork.left);
+            limits->ptMinTrackSize.y=std::min(limits->ptMinTrackSize.y,info.rcWork.bottom-info.rcWork.top);
+        }
+        return 0;
+    }
     case WM_TIMER:
         if (state && wparam == kRenderTimer) { tick_benchmark();state->render(); return 0; }
         break;
@@ -204,6 +236,7 @@ LRESULT CALLBACK procedure(HWND handle, UINT message, WPARAM wparam, LPARAM lpar
 bool show_settings_window(HWND owner) noexcept {
     try {
         if (!window) {
+            ImGui_ImplWin32_EnableDpiAwareness();
             WNDCLASSEXW cls{sizeof(cls)};
             cls.lpfnWndProc = procedure;
             cls.hInstance = GetModuleHandleW(nullptr);
@@ -212,9 +245,17 @@ bool show_settings_window(HWND owner) noexcept {
             if (!RegisterClassExW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
             auto candidate = std::make_unique<Window>();
             const auto title=L"OFXR-BRIDGE 0.3.3 (v"+std::to_wstring(XRFG_IMPLEMENTATION_VERSION)+L") - Settings";
-            // The same 1024 x 768 layout as the headset menu.
-            RECT frame{0, 0, 1024, 768};
+            // Initial logical size only; client pixels follow the monitor and window size.
+            const POINT origin{0,0};
+            const auto monitor=MonitorFromPoint(origin,MONITOR_DEFAULTTOPRIMARY);
+            const float dpi=ImGui_ImplWin32_GetDpiScaleForMonitor(monitor);
+            RECT frame{0, 0, LONG(1024*dpi), LONG(768*dpi)};
             AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW);
+            MONITORINFO monitor_info{sizeof(monitor_info)};
+            if(GetMonitorInfoW(monitor,&monitor_info)) {
+                frame.right=std::min(frame.right,frame.left+monitor_info.rcWork.right-monitor_info.rcWork.left);
+                frame.bottom=std::min(frame.bottom,frame.top+monitor_info.rcWork.bottom-monitor_info.rcWork.top);
+            }
             const HWND handle = CreateWindowExW(WS_EX_APPWINDOW, kClassName,
                 title.c_str(), WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT, CW_USEDEFAULT, frame.right - frame.left, frame.bottom - frame.top, owner, nullptr,

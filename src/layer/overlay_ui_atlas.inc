@@ -1,6 +1,6 @@
 // Private UI draw targets feed one real XR atlas. Only this optional UI owner
 // sees the virtual tokens; no application/presenter API receives them.
-static constexpr unsigned ui_atlas_width=1024,ui_status_y=768,ui_atlas_height=1280;
+unsigned ui_atlas_width=1024,ui_status_y=768,ui_atlas_height=1280;
 struct UiSourceImage { ComPtr<ID3D12Resource> d12;ComPtr<ID3D11Texture2D> d11;std::uint64_t read_fence{}; };
 struct UiSource {
     bool menu{},held{},valid{};unsigned width{},height{},next{},index{},published{};

@@ -5,6 +5,7 @@
 #include "xrfg/dlssg_profile.hpp"
 #include "xrfg/benchmark_suite.hpp"
 #include "imgui.h"
+#include "ui_text.hpp"
 #include "imgui_internal.h"
 #include "xrfg/rife_model_catalog.hpp"
 #include "xrfg/rife_runtime_locator.hpp"
@@ -22,6 +23,7 @@
 namespace xrfg::autonomous {
 namespace {
 #include "settings_fonts.inc"
+#include "settings_font_zh.inc"
 #include "settings_icons.inc"
 
 // The panel's design tokens. The headset values lift borders and secondary text
@@ -95,8 +97,11 @@ void apply_settings_style(bool headset) {
     const auto add=[&](const unsigned char* data,std::size_t bytes,const char* name) {
         ImFontConfig config;
         config.FontDataOwnedByAtlas=false;
-        std::snprintf(config.Name,sizeof(config.Name),"%s",name);
+        std::snprintf(config.Name,sizeof(config.Name),xrfg::autonomous::ui_translate("%s"),name);
         fonts.AddFontFromMemoryTTF(const_cast<unsigned char*>(data),int(bytes),m.body,&config);
+        ImFontConfig cjk;cjk.MergeMode=true;cjk.FontDataOwnedByAtlas=false;
+        cjk.OversampleH=2;cjk.OversampleV=2;
+        fonts.AddFontFromMemoryTTF(const_cast<unsigned char*>(kFont_zh),sizeof(kFont_zh),m.body,&cjk);
     };
     add(kFont_sans_regular,sizeof(kFont_sans_regular),"Atkinson Hyperlegible Next");
     add(kFont_sans_semibold,sizeof(kFont_sans_semibold),"Atkinson Hyperlegible Next SemiBold");
@@ -140,7 +145,7 @@ Icon tone_icon(Tone tone) {
 float right_edge() {return ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x;}
 float text_width(Face id,float size,const char* text) {
     FaceScope scope(id,size);
-    return ImGui::CalcTextSize(text,nullptr,true).x;
+    return ui::CalcTextSize(text,nullptr,true).x;
 }
 void dashed_rect(ImDrawList* list,ImVec2 min,ImVec2 max,ImU32 color,float thickness) {
     constexpr float dash=7,gap=5;
@@ -158,7 +163,7 @@ void reason(const Panel& p,const char* text) {
     FaceScope scope(face_sans,p.m.label);
     ImGui::PushStyleColor(ImGuiCol_Text,p.c.muted);
     ImGui::PushTextWrapPos();
-    ImGui::TextUnformatted(text);
+    ui::TextUnformatted(text);
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
 }
@@ -166,13 +171,13 @@ void group_title(const Panel& p,const char* text) {
     ImGui::Dummy(ImVec2(0,2));
     FaceScope scope(face_semibold,p.m.label);
     ImGui::PushStyleColor(ImGuiCol_Text,p.c.muted);
-    ImGui::TextUnformatted(text);
+    ui::TextUnformatted(text);
     ImGui::PopStyleColor();
 }
 void notice(const Panel& p,Tone tone,const char* text) {
     FaceScope scope(face_sans,p.m.label);
     const float width=ImGui::GetContentRegionAvail().x,inner=width-48;
-    const auto height=ImGui::CalcTextSize(text,nullptr,false,inner).y+16;
+    const auto height=ui::CalcTextSize(text,nullptr,false,inner).y+16;
     const auto position=ImGui::GetCursorScreenPos();
     const auto color=tone==Tone::warn ? p.c.warn : tone==Tone::danger ? p.c.danger : tone==Tone::ok ? p.c.ok : p.c.ink;
     const auto fill=tone==Tone::warn ? p.c.warn_soft : tone==Tone::danger ? p.c.danger_soft : p.c.raised;
@@ -182,7 +187,7 @@ void notice(const Panel& p,Tone tone,const char* text) {
     ImGui::SetCursorScreenPos({position.x+38,position.y+8});
     ImGui::PushStyleColor(ImGuiCol_Text,color);
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+inner);
-    ImGui::TextUnformatted(text);
+    ui::TextUnformatted(text);
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
     ImGui::SetCursorScreenPos({position.x,position.y+height});
@@ -190,22 +195,22 @@ void notice(const Panel& p,Tone tone,const char* text) {
 }
 void badge(const Panel& p,const char* text,ImVec2 position) {
     FaceScope scope(face_sans,p.m.label);
-    const auto size=ImGui::CalcTextSize(text);
+    const auto size=ui::CalcTextSize(text);
     const float height=24,icon=14,width=size.x+icon+20;
     position.y-=height*.5F;
     auto* list=ImGui::GetWindowDrawList();
     list->AddRectFilled(position,{position.x+width,position.y+height},p.c.warn_soft,4);
     draw_icon(list,{position.x+7,position.y+5},icon,p.c.warn,Icon::restart);
     ImGui::PushStyleColor(ImGuiCol_Text,p.c.warn);
-    ImGui::RenderText({position.x+icon+12,position.y+(height-size.y)*.5F},text);
+    ui::RenderText({position.x+icon+12,position.y+(height-size.y)*.5F},text);
     ImGui::PopStyleColor();
 }
 // Left-hand label of a row, then the cursor placed for a right-aligned control.
 void row(Panel& p,const char* label,Help help,float control_width,bool disabled=false,const char* note=nullptr) {
     const float right=right_edge();
     ImGui::AlignTextToFramePadding();
-    if(disabled)ImGui::TextDisabled("%s",label);
-    else ImGui::TextUnformatted(label);
+    if(disabled)ui::TextDisabled("%s",label);
+    else ui::TextUnformatted(label);
     label_help(p,help,ImGui::GetItemRectMin(),ImGui::GetItemRectMax());
     if(note) {
         const auto max=ImGui::GetItemRectMax();
@@ -242,7 +247,7 @@ bool segmented(Panel& p,const char* label,const char* id,int& value,std::initial
         ImGui::BeginDisabled(locked);
         {
             FaceScope scope(selected?face_semibold:face_sans,p.m.body);
-            if(ImGui::Button(option.text,ImVec2(widths[index],p.m.control)) && !selected && !locked) {value=index;changed=true;}
+            if(ui::Button(option.text,ImVec2(widths[index],p.m.control)) && !selected && !locked) {value=index;changed=true;}
         }
         ImGui::EndDisabled();
         ImGui::PopStyleColor(5);
@@ -257,7 +262,7 @@ bool segmented(Panel& p,const char* label,const char* id,int& value,std::initial
 // The control is the full row height, so the target is larger than what it shows.
 bool switch_control(Panel& p,const char* id,bool& value,Help help,bool disabled=false) {
     ImGui::BeginDisabled(disabled);
-    const bool pressed=ImGui::InvisibleButton(id,ImVec2(kSwitchWidth,p.m.control));
+    const bool pressed=ui::InvisibleButton(id,ImVec2(kSwitchWidth,p.m.control));
     ImGui::EndDisabled();
     const auto min=ImGui::GetItemRectMin();
     const float top=min.y+(p.m.control-kSwitchHeight)*.5F,radius=kSwitchHeight*.5F;
@@ -283,8 +288,8 @@ bool toggle_box(Panel& p,const char* label,const char* id,bool& value,Help help,
     ImGui::GetWindowDrawList()->AddRectFilled(position,{position.x+width,position.y+p.m.control},p.c.raised,kCardRadius);
     ImGui::SetCursorScreenPos({position.x+12,position.y});
     ImGui::AlignTextToFramePadding();
-    if(disabled)ImGui::TextDisabled("%s",label);
-    else ImGui::TextUnformatted(label);
+    if(disabled)ui::TextDisabled("%s",label);
+    else ui::TextUnformatted(label);
     label_help(p,help,ImGui::GetItemRectMin(),ImGui::GetItemRectMax());
     ImGui::SameLine();
     ImGui::SetCursorScreenPos({position.x+width-12-kSwitchWidth,position.y});
@@ -299,7 +304,7 @@ bool cards(Panel& p,const char* id,int& value,std::span<const Card> options) {
     float tag_height=0;
     {
         FaceScope scope(face_sans,p.m.label);
-        for(const auto& option:options)tag_height=std::max(tag_height,ImGui::CalcTextSize(option.tag,nullptr,false,inner).y);
+        for(const auto& option:options)tag_height=std::max(tag_height,ui::CalcTextSize(option.tag,nullptr,false,inner).y);
     }
     const float name_height=p.m.body*1.25F,height=std::max(p.m.control+16,name_height+tag_height+16);
     ImGui::PushID(id);
@@ -309,19 +314,19 @@ bool cards(Panel& p,const char* id,int& value,std::span<const Card> options) {
     for(const auto& option:options) {
         if(index)ImGui::SameLine(0,gap);
         const bool selected=index==value;
-        if(ImGui::InvisibleButton(option.name,ImVec2(width,height)) && !selected) {value=index;changed=true;}
+        if(ui::InvisibleButton(option.name,ImVec2(width,height)) && !selected) {value=index;changed=true;}
         const auto min=ImGui::GetItemRectMin(),max=ImGui::GetItemRectMax();
         list->AddRectFilled(min,max,selected ? p.c.accent_soft : ImGui::IsItemHovered() ? p.c.hover : p.c.control,kCardRadius);
         list->AddRect(min,max,selected ? p.c.accent : p.c.line,kCardRadius,0,p.m.border);
         const float top=min.y+(height-name_height-tag_height)*.5F;
         {
             FaceScope scope(face_semibold,p.m.body);
-            ImGui::RenderText({min.x+8,top},option.name);
+            ui::RenderText({min.x+8,top},option.name);
         }
         {
             FaceScope scope(face_sans,p.m.label);
             ImGui::PushStyleColor(ImGuiCol_Text,option.warn ? p.c.warn : selected ? p.c.ink : p.c.muted);
-            ImGui::RenderTextWrapped({min.x+8,top+name_height},option.tag,nullptr,inner);
+            ui::RenderTextWrapped({min.x+8,top+name_height},option.tag,nullptr,inner);
             ImGui::PopStyleColor();
         }
         ImGui::RenderNavCursor(ImRect(min,max),ImGui::GetItemID());
@@ -356,19 +361,19 @@ template<class Draw> bool slider_frame(Panel& p,const char* label,Help help,floa
     hover_help(p,help);
     {
         FaceScope scope(face_mono,p.m.body*.9F);
-        const auto size=ImGui::CalcTextSize(text);
-        list->AddText({max.x+value_width-size.x,middle-size.y*.5F},p.c.ink,text);
+        const auto size=ui::CalcTextSize(text);
+        ui::AddText(list,{max.x+value_width-size.x,middle-size.y*.5F},p.c.ink,text);
     }
     return changed;
 }
 bool slider(Panel& p,const char* label,const char* id,float& value,float low,float high,const char* format,Help help) {
     char text[32];std::snprintf(text,sizeof(text),format,value);
-    char hidden[80];std::snprintf(hidden,sizeof(hidden),"##%s",id);
+    char hidden[80];std::snprintf(hidden,sizeof(hidden),xrfg::autonomous::ui_translate("##%s"),id);
     return slider_frame(p,label,help,(value-low)/(high-low),text,[&]{return ImGui::SliderFloat(hidden,&value,low,high,format);});
 }
 bool slider_int(Panel& p,const char* label,const char* id,int& value,int low,int high,const char* format,Help help) {
     char text[32];std::snprintf(text,sizeof(text),format,value);
-    char hidden[80];std::snprintf(hidden,sizeof(hidden),"##%s",id);
+    char hidden[80];std::snprintf(hidden,sizeof(hidden),xrfg::autonomous::ui_translate("##%s"),id);
     return slider_frame(p,label,help,float(value-low)/float(high-low),text,[&]{return ImGui::SliderInt(hidden,&value,low,high,format);});
 }
 
@@ -379,7 +384,7 @@ bool disclosure(Panel& p,const char* title,const char* summary,Help help={},bool
     const auto key=ImGui::GetID(title);
     const int stored=storage->GetInt(key,-1);
     bool open=bound ? *bound : stored<0 ? open_by_default : stored!=0;
-    if(ImGui::InvisibleButton(title,ImVec2(ImGui::GetContentRegionAvail().x,p.m.control))) {
+    if(ui::InvisibleButton(title,ImVec2(ImGui::GetContentRegionAvail().x,p.m.control))) {
         open=!open;
         storage->SetInt(key,open?1:0);
         if(bound)*bound=open;
@@ -395,13 +400,13 @@ bool disclosure(Panel& p,const char* title,const char* summary,Help help={},bool
         draw_icon(list,{x,middle-10},20,p.c.ink,*icon);
         x+=28;
     }
-    ImGui::RenderText({x,middle-ImGui::GetFontSize()*.5F},title);
+    ui::RenderText({x,middle-ImGui::GetFontSize()*.5F},title);
     ImGui::RenderNavCursor(ImRect(min,max),ImGui::GetItemID());
     hover_help(p,help);
     if(summary && *summary) {
         FaceScope scope(face_sans,p.m.label);
-        const auto size=ImGui::CalcTextSize(summary);
-        list->AddText({max.x-size.x-12,middle-size.y*.5F},p.c.muted,summary);
+        const auto size=ui::CalcTextSize(summary);
+        ui::AddText(list,{max.x-size.x-12,middle-size.y*.5F},p.c.muted,summary);
     }
     if(open)ImGui::Indent(12);
     return open;
@@ -411,12 +416,12 @@ void disclosure_end() {ImGui::Unindent(12);}
 void title(const Panel& p,const char* text) {
     FaceScope scope(face_semibold,p.m.title);
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(text);
+    ui::TextUnformatted(text);
 }
 // Right-aligned state with its icon, on the current line. right is in window coordinates.
 void state_pill(const Panel& p,Tone tone,const char* text,float right) {
     FaceScope scope(face_semibold,p.m.body);
-    const auto size=ImGui::CalcTextSize(text);
+    const auto size=ui::CalcTextSize(text);
     constexpr float icon=20;
     const float x=right-size.x-icon-6;
     ImGui::SameLine();
@@ -427,7 +432,7 @@ void state_pill(const Panel& p,Tone tone,const char* text,float right) {
     ImGui::SetCursorPosX(x+icon+6);
     ImGui::AlignTextToFramePadding();
     ImGui::PushStyleColor(ImGuiCol_Text,tone_color(p,tone));
-    ImGui::TextUnformatted(text);
+    ui::TextUnformatted(text);
     ImGui::PopStyleColor();
 }
 
@@ -564,7 +569,7 @@ void dlssg_preset_details(Panel& p) {
     if(!disclosure(p,"Preset details",""))return;
     if (!ui.dlssg_executable.empty()) reason(p,("Game: "+utf8(ui.dlssg_executable.filename().wstring())).c_str());
     reason(p,ui.dlssg_profile_status.c_str());
-    if (ImGui::Button("Refresh preset profile")) dlssg_preset_refresh(ui,p.state,p.compact,true);
+    if (ui::Button("Refresh preset profile")) dlssg_preset_refresh(ui,p.state,p.compact,true);
     disclosure_end();
 }
 
@@ -576,10 +581,10 @@ void generation_details(Panel& p) {
     const auto& telemetry = state.runtime.telemetry;
     char line[160];
     if (state.connected && telemetry.updated_ms && GetTickCount64()-telemetry.updated_ms<2000 && telemetry.cpu_valid)
-        std::snprintf(line,sizeof(line),"OpenXR Begin-to-End interval: %.1f ms",telemetry.cpu_render_ms);
-    else std::snprintf(line,sizeof(line),"OpenXR Begin-to-End interval: N/A");
+        std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("OpenXR Begin-to-End interval: %.1f ms"),telemetry.cpu_render_ms);
+    else std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("OpenXR Begin-to-End interval: N/A"));
     reason(p,line);
-    std::snprintf(line,sizeof(line),"Requested %llu / applied %llu",
+    std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("Requested %llu / applied %llu"),
         static_cast<unsigned long long>(state.revision),
         static_cast<unsigned long long>(state.runtime.applied_revision));
     reason(p,line);
@@ -591,13 +596,13 @@ void generation_details(Panel& p) {
             reason(p,"Upscaler inputs: no native DLSS SR/RR evaluation observed.");
         else {
             const auto age=GetTickCount64()-runtime.upscaler_last_seen_ms;
-            std::snprintf(line,sizeof(line),"Native DLSS SR/RR: %s. Motion vectors: %s. Depth: %s.",
+            std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("Native DLSS SR/RR: %s. Motion vectors: %s. Depth: %s."),
                 age<5000 ? "receiving inputs" : "last seen more than 5 seconds ago",
                 runtime.upscaler_motion ? "present" : "missing",
                 runtime.upscaler_depth ? "present" : "missing");
             reason(p,line);
         }
-        std::snprintf(line,sizeof(line),"Owned guides: %llu published / %llu XR matches / %llu uses",
+        std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("Owned guides: %llu published / %llu XR matches / %llu uses"),
             static_cast<unsigned long long>(runtime.guide_publications),
             static_cast<unsigned long long>(runtime.guide_matches),
             static_cast<unsigned long long>(runtime.guide_uses));
@@ -722,7 +727,7 @@ bool generation(Panel& p) {
             const float width=240;
             row(p,"RIFE model",kHelpRifeModel,width);
             ImGui::SetNextItemWidth(width);
-            if(ImGui::BeginCombo("##RIFE model",name.c_str())) {
+            if(ui::BeginCombo("##RIFE model",name.c_str())) {
                 // The only automatic location is managed AppData. Honor a
                 // deliberately configured development override, never scan.
                 wchar_t override_path[32768]{};
@@ -733,13 +738,13 @@ bool generation(Panel& p) {
                 int model_index=0;
                 for(const auto& model:models) {
                     ImGui::PushID(model_index++);
-                    if(ImGui::Selectable(model.name.c_str(),draft.rife_model==model.id)) {
+                    if(ui::Selectable(model.name.c_str(),draft.rife_model==model.id)) {
                         draft.rife_model=model.id;changed=true;
                     }
                     if(draft.rife_model==model.id)ImGui::SetItemDefaultFocus();
                     ImGui::PopID();
                 }
-                if(models.empty())ImGui::TextDisabled("No supported model weights installed");
+                if(models.empty())ui::TextDisabled("No supported model weights installed");
                 ImGui::EndCombo();
             }
             hover_help(p,kHelpRifeModel);
@@ -785,7 +790,7 @@ bool generation(Panel& p) {
     }
     if(state.runtime.luke_detected)reason(p,"Fast mode has no effect with Luke Ross.");
     if(state.connected && state.runtime.buffer_capacity) {
-        char line[64];std::snprintf(line,sizeof(line),"Active bridge buffer: %u deliveries",state.runtime.buffer_capacity);
+        char line[64];std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("Active bridge buffer: %u deliveries"),state.runtime.buffer_capacity);
         reason(p,line);
     }
 
@@ -794,8 +799,8 @@ bool generation(Panel& p) {
         constexpr const char* qualities[]{"Slow","Medium","Fast"};
         constexpr const char* resolutions[]{"100%","75%","50%","25%"};
         char summary[64];
-        std::snprintf(summary,sizeof(summary),"%s%s%s%s",nvidia_flow ? qualities[std::clamp(draft.preset,0,2)] : "",nvidia_flow ? ", " : "",
-            resolutions[std::clamp(draft.scale,0,3)],nvidia_flow&&draft.backward ? ", bidirectional" : "");
+        std::snprintf(summary,sizeof(summary),xrfg::autonomous::ui_translate("%s%s%s%s"),nvidia_flow ? ui_translate(qualities[std::clamp(draft.preset,0,2)]) : "",nvidia_flow ? ", " : "",
+            resolutions[std::clamp(draft.scale,0,3)],nvidia_flow&&draft.backward ? ui_translate(", bidirectional") : "");
         if(disclosure(p,"Flow tuning",summary,kHelpResolution,nullptr,false,Icon::flow)) {
             if(nvidia_flow) {
                 if(draft.advanced_mode)changed|=segmented(p,"Flow quality","Flow quality",draft.preset,{{"Slow"},{"Medium"},{"Fast"}},kHelpQuality);
@@ -829,10 +834,10 @@ void session_swapchain_budget(Panel& p) {
         reason(p,"Waiting for a current session inventory.");return;
     }
     char line[96];
-    std::snprintf(line,sizeof(line),"Total swapchains: %u",b.total);reason(p,line);
-    std::snprintf(line,sizeof(line),"OFXR: %u",b.current+b.synthetic+b.auxiliary_outputs+b.fps+b.meter+b.menu);reason(p,line);
-    std::snprintf(line,sizeof(line),"Game: %u",b.application);reason(p,line);
-    if(b.unassigned_native) {std::snprintf(line,sizeof(line),"Other / unclassified: %u",b.unassigned_native);reason(p,line);}
+    std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("Total swapchains: %u"),b.total);reason(p,line);
+    std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("OFXR: %u"),b.current+b.synthetic+b.auxiliary_outputs+b.fps+b.meter+b.menu);reason(p,line);
+    std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("Game: %u"),b.application);reason(p,line);
+    if(b.unassigned_native) {std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("Other / unclassified: %u"),b.unassigned_native);reason(p,line);}
     if (const auto warning=swapchain_budget_warning(b);!warning.empty())
         notice(p,Tone::warn,std::string(warning).c_str());
     // Draw actual lines only. Empty/padded rows must not reserve a large
@@ -872,7 +877,7 @@ bool framewarp(Panel& p) {
     const float right=right_edge();
     title(p,"Reconstruction");state_pill(p,active?Tone::ok:Tone::idle,activity,right);
     row(p,"Source",{},text_width(face_sans,p.m.body,source));
-    ImGui::AlignTextToFramePadding();ImGui::TextDisabled("%s",source);
+    ImGui::AlignTextToFramePadding();ui::TextDisabled("%s",source);
     bool changed=false;
     if(aer)notice(p,Tone::idle,"OSR/AFW off, using AER Frame Gen. Saved reconstruction preferences resume when AER Frame Gen is off.");
     ImGui::BeginDisabled(aer);
@@ -929,7 +934,7 @@ bool framewarp(Panel& p) {
                 if(state.connected && state.runtime.afw_shading_rate>=0 &&
                     state.runtime.afw_shading_rate!=draft.afw_shading_rate) {
                     char line[96];
-                    std::snprintf(line,sizeof(line),"Quality change pending the next successful AFW evaluation. Current index: %d",state.runtime.afw_shading_rate);
+                    std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("Quality change pending the next successful AFW evaluation. Current index: %d"),state.runtime.afw_shading_rate);
                     reason(p,line);
                 }
             }
@@ -945,7 +950,7 @@ bool framewarp(Panel& p) {
     }
     if(state.connected && !aer) {
         char line[96];
-        std::snprintf(line,sizeof(line),"Ready frames: %llu / projections: %llu",
+        std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("Ready frames: %llu / projections: %llu"),
             static_cast<unsigned long long>(state.runtime.afw_ready_frames),
             static_cast<unsigned long long>(state.runtime.afw_projection_frames));
         reason(p,line);
@@ -1053,7 +1058,7 @@ bool overlay(Panel& p) {
     for(int i=0;i<6;++i) {
         if(i)ImGui::SameLine(0,gap);
         const bool selected=draft.overlay_position==i+1;
-        if(ImGui::InvisibleButton(positions[i].name,ImVec2(width,height)) && !selected) {draft.overlay_position=i+1;changed=true;}
+        if(ui::InvisibleButton(positions[i].name,ImVec2(width,height)) && !selected) {draft.overlay_position=i+1;changed=true;}
         const auto min=ImGui::GetItemRectMin(),max=ImGui::GetItemRectMax();
         list->AddRectFilled(min,max,selected ? p.c.accent_soft : ImGui::IsItemHovered() ? p.c.hover : p.c.control,kCardRadius);
         list->AddRect(min,max,selected ? p.c.accent : p.c.line,kCardRadius,0,p.m.border);
@@ -1066,8 +1071,8 @@ bool overlay(Panel& p) {
         } else meter_tile(list,p.c,map_min,i==4);
         {
             FaceScope scope(face_sans,p.m.label);
-            const auto size=ImGui::CalcTextSize(positions[i].name,nullptr,false,width-8);
-            ImGui::RenderTextWrapped({min.x+(width-std::min(size.x,width-8))*.5F,map_max.y+4},positions[i].name,nullptr,width-8);
+            const auto size=ui::CalcTextSize(positions[i].name,nullptr,false,width-8);
+            ui::RenderTextWrapped({min.x+(width-std::min(size.x,width-8))*.5F,map_max.y+4},positions[i].name,nullptr,width-8);
         }
         ImGui::RenderNavCursor(ImRect(min,max),ImGui::GetItemID());
         hover_help(p,kHelpCounter);
@@ -1092,7 +1097,7 @@ bool logging(Panel& p) {
     changed|=toggle_row(p,"Export status.json","Export status.json",draft.status_json,kHelpJson);
     char total[32]{};
     if(state.connected && state.runtime.swapchains.updated_ms)
-        std::snprintf(total,sizeof(total),"Total %u",state.runtime.swapchains.total);
+        std::snprintf(total,sizeof(total),xrfg::autonomous::ui_translate("Total %u"),state.runtime.swapchains.total);
     if(disclosure(p,"Swapchains",total)) {
         session_swapchain_budget(p);
         disclosure_end();
@@ -1107,12 +1112,12 @@ bool suite(Panel& p,const char* name,const char* id,std::size_t count,bool disab
     ImGui::SetCursorScreenPos({position.x+12,position.y+(height-p.m.body*1.25F-p.m.label*1.25F)*.5F});
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(8,1));
     ImGui::BeginGroup();
-    ImGui::TextUnformatted(name);
+    ui::TextUnformatted(name);
     {
         const int minutes=std::max(1,int(std::ceil(double(count)*double(kBenchmarkDurationMs)/60000.0)));
-        char detail[64];std::snprintf(detail,sizeof(detail),"Up to %zu tests, about %d min",count,minutes);
+        char detail[64];std::snprintf(detail,sizeof(detail),xrfg::autonomous::ui_translate("Up to %zu tests, about %d min"),count,minutes);
         FaceScope scope(face_sans,p.m.label);
-        ImGui::TextDisabled("%s",detail);
+        ui::TextDisabled("%s",detail);
     }
     ImGui::EndGroup();
     ImGui::PopStyleVar();
@@ -1123,7 +1128,7 @@ bool suite(Panel& p,const char* name,const char* id,std::size_t count,bool disab
         ImGui::PushStyleColor(ImGuiCol_Button,IM_COL32_BLACK_TRANS);
         ImGui::PushStyleColor(ImGuiCol_Text,p.c.muted);
     }
-    const bool run=ImGui::Button(id,ImVec2(button,p.m.control));
+    const bool run=ui::Button(id,ImVec2(button,p.m.control));
     if(disabled)ImGui::PopStyleColor(2);
     ImGui::EndDisabled();
     hover_help(p,kHelpSuite);
@@ -1148,16 +1153,16 @@ bool tests(Panel& p) {
             ? std::max(0.0,double(kBenchmarkDurationMs)/1000.0-double(GetTickCount64()-b.started_ms)/1000.0)
             : double(kBenchmarkDurationMs)/1000.0;
         char line[192];
-        std::snprintf(line,sizeof(line),"%u / %u: %s (%s, %.1f s)",b.index+1,b.count,b.label,
+        std::snprintf(line,sizeof(line),xrfg::autonomous::ui_translate("%u / %u: %s (%s, %.1f s)"),b.index+1,b.count,b.label,
             b.phase==BenchmarkPhase::applying ? "applying" : "running",remaining);
-        ImGui::TextUnformatted(line);
+        ui::TextUnformatted(line);
         const auto position=ImGui::GetCursorScreenPos();
         const float width=ImGui::GetContentRegionAvail().x,share=b.count ? float(b.index+1)/float(b.count) : 0;
         auto* list=ImGui::GetWindowDrawList();
         list->AddRectFilled(position,{position.x+width,position.y+10},p.c.control,5);
         list->AddRectFilled(position,{position.x+width*share,position.y+10},p.c.accent,5);
         ImGui::Dummy(ImVec2(0,10));
-        if(ImGui::Button("Stop###Stop tests",ImVec2(84,p.m.control)))stop_benchmark();
+        if(ui::Button("Stop###Stop tests",ImVec2(84,p.m.control)))stop_benchmark();
     }
     if(state.benchmark.message[0])reason(p,state.benchmark.message);
     if(state.benchmark.csv_path[0]) reason(p,(std::string("CSV: ")+state.benchmark.csv_path).c_str());
@@ -1200,14 +1205,14 @@ void status_line(const Panel& p,Tone tone,std::string_view text) {
     const auto position=ImGui::GetCursorScreenPos();
     draw_icon(ImGui::GetWindowDrawList(),{position.x,position.y+2},16,tone_color(p,tone),tone_icon(tone));
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+22);
-    ImGui::TextUnformatted(text.data(),text.data()+text.size());
+    ui::TextUnformatted(text.data(),text.data()+text.size());
 }
 
 void value_cell(const Panel& p,const char* label,float number,bool valid,bool rate,float x,float y) {
     ImGui::SetCursorPos({x,y});
     {
         FaceScope scope(face_sans,p.m.label);
-        ImGui::TextDisabled("%s",label);
+        ui::TextDisabled("%s",label);
     }
     ImGui::SetCursorPosX(x);
     char text[32]="N/A";
@@ -1215,13 +1220,13 @@ void value_cell(const Panel& p,const char* label,float number,bool valid,bool ra
     if(shown)std::snprintf(text,sizeof(text),rate ? "%.0f" : "%.1f",number);
     {
         FaceScope scope(face_mono,p.m.value);
-        ImGui::TextUnformatted(text);
+        ui::TextUnformatted(text);
     }
     if(shown && !rate) {
         ImGui::SameLine(0,2);
         FaceScope scope(face_sans,p.m.label);
         ImGui::SetCursorPosY(ImGui::GetCursorPosY()+(p.m.value-p.m.label)*.6F);
-        ImGui::TextDisabled("ms");
+        ui::TextDisabled("ms");
     }
 }
 
@@ -1232,10 +1237,10 @@ void resource_bar(const Panel& p,const char* label,const std::string& text,doubl
     FaceScope scope(face_sans,p.m.label);
     const float label_width=48,value_width=48,height=p.m.label*1.3F;
     ImGui::PushStyleColor(ImGuiCol_Text,p.c.muted);
-    ImGui::RenderText(position,label);
+    ui::RenderText(position,label);
     ImGui::PopStyleColor();
-    const auto size=ImGui::CalcTextSize(value.c_str());
-    ImGui::RenderText({position.x+width-size.x,position.y},value.c_str());
+    const auto size=ui::CalcTextSize(value.c_str());
+    ui::RenderText({position.x+width-size.x,position.y},value.c_str());
     auto* list=ImGui::GetWindowDrawList();
     const ImVec2 a{position.x+label_width,position.y+height*.5F-5},b{position.x+width-value_width-6,position.y+height*.5F+5};
     list->AddRectFilled(a,b,p.c.control,5);
@@ -1254,14 +1259,14 @@ void status_pane(Panel& p) {
     ImGui::SetCursorPos({left,y});
     {
         FaceScope scope(face_sans,p.m.label);
-        ImGui::TextDisabled("%s",state.runtime.luke_detected ? "New submitted FPS" : "Output FPS");
+        ui::TextDisabled("%s",state.runtime.luke_detected ? "New submitted FPS" : "Output FPS");
     }
     ImGui::SetCursorPosX(left);
     {
         FaceScope scope(face_mono,p.m.metric);
         char text[32]="N/A";
-        if(current && output_rate_valid(m) && std::isfinite(m.output_fps))std::snprintf(text,sizeof(text),"%.0f",m.output_fps);
-        ImGui::TextUnformatted(text);
+        if(current && output_rate_valid(m) && std::isfinite(m.output_fps))std::snprintf(text,sizeof(text),xrfg::autonomous::ui_translate("%.0f"),m.output_fps);
+        ui::TextUnformatted(text);
     }
     const float hero=label+p.m.metric*1.2F+8;
     label_help(p,state.runtime.luke_detected ? kHelpLukeOutput : kHelpOutput,{base.x+left,base.y+y},{base.x+left+width,base.y+y+hero});
@@ -1278,14 +1283,13 @@ void status_pane(Panel& p) {
     value_cell(p,"Cycle min",m.cycle_estimated_ms,current && m.cycle_estimated_valid,false,left+cell,y);
     {
         const auto format=[](char* out,std::size_t size,bool valid,float value) {
-            if(valid && std::isfinite(value))std::snprintf(out,size,"%.1f ms",value);
-            else std::snprintf(out,size,"N/A");
+            if(valid && std::isfinite(value))std::snprintf(out,size,xrfg::autonomous::ui_translate("%.1f ms"),value);
+            else std::snprintf(out,size,xrfg::autonomous::ui_translate("N/A"));
         };
         char ofxr[16],cycle[16];
         format(ofxr,sizeof(ofxr),current && m.ofxr_time_valid,m.ofxr_time_ms);
         format(cycle,sizeof(cycle),current && m.cycle_valid,m.cycle_length_ms);
-        std::snprintf(ui.help_buffer,sizeof(ui.help_buffer),
-            "Observed source cycle through real runtime End completion, bounded below by one refresh per confirmed generated output. AER framegen includes the earlier same-eye input needed for interpolation; no fixed refresh penalty is added. OFXR time %s (CPU wall time inside intercepted OpenXR calls). Source cycle %s. This is not measured headset scanout or motion-to-photon latency.",ofxr,cycle);
+        std::snprintf(ui.help_buffer,sizeof(ui.help_buffer),xrfg::autonomous::ui_translate("Observed source cycle through real runtime End completion, bounded below by one refresh per confirmed generated output. AER framegen includes the earlier same-eye input needed for interpolation; no fixed refresh penalty is added. OFXR time %s (CPU wall time inside intercepted OpenXR calls). Source cycle %s. This is not measured headset scanout or motion-to-photon latency."),ofxr,cycle);
         cell_help(left+cell,y,{"Cycle minimum",ui.help_buffer});
     }
     y+=row_height;
@@ -1306,14 +1310,14 @@ void status_pane(Panel& p) {
     ImGui::PushTextWrapPos(kStatusWidth-kPad);
     const auto heading=[&](const char* text) {
         FaceScope semibold(face_semibold,p.m.body);
-        ImGui::TextUnformatted(text);
+        ui::TextUnformatted(text);
     };
     if(ui.help_title) {
         const auto position=ImGui::GetCursorScreenPos();
         draw_icon(ImGui::GetWindowDrawList(),{position.x,position.y+1},18,p.c.ink,Icon::help);
         ImGui::SetCursorPosX(ImGui::GetCursorPosX()+24);
         heading(ui.help_title);
-        ImGui::TextUnformatted(ui.help_body);
+        ui::TextUnformatted(ui.help_body);
     } else {
         heading("Status");
         // Problems first, because a long list clips at the bottom of the pane.
@@ -1387,14 +1391,14 @@ std::string section_summary(const Panel& p,int index,bool& live,bool& alert) {
 void rail(Panel& p,float width) {
     auto& ui=p.ui;
     const bool narrow=width<kRailWidth;
-    const float pad=8,height=p.compact?60.F:54.F,item=width-pad*2;
+    const float pad=8,height=p.compact?60.F:54.F,item=ImGui::GetContentRegionAvail().x-pad*2;
     auto* list=ImGui::GetWindowDrawList();
     ImGui::SetCursorPosY(pad);
     for(int i=0;i<int(kSections.size());++i) {
         ImGui::SetCursorPosX(pad);
         const auto& section=kSections[i];
         const bool selected=ui.section==i;
-        if(ImGui::InvisibleButton(section.name,ImVec2(item,height)))ui.section=i;
+        if(ui::InvisibleButton(section.name,ImVec2(item,height)))ui.section=i;
         bool live=false,alert=false;
         const auto summary=section_summary(p,i,live,alert);
         const auto min=ImGui::GetItemRectMin(),max=ImGui::GetItemRectMax();
@@ -1408,12 +1412,23 @@ void rail(Panel& p,float width) {
             const float line=p.m.label*1.25F,x=min.x+44,top=min.y+(height-line*2)*.5F;
             {
                 FaceScope scope(face_semibold,p.m.label);
-                list->AddText({x,top},p.c.ink,section.name);
+                ui::AddText(list,{x,top},p.c.ink,section.name);
             }
             FaceScope scope(face_sans,p.m.label);
-            list->AddText({x,top+line},alert ? p.c.danger : live ? p.c.ok : selected ? p.c.ink : p.c.muted,summary.c_str());
+            ui::AddText(list,{x,top+line},alert ? p.c.danger : live ? p.c.ok : selected ? p.c.ink : p.c.muted,summary.c_str());
         }
         ImGui::RenderNavCursor(ImRect(min,max),ImGui::GetItemID());
+    }
+    ImGui::SetCursorPosX(pad);
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY()+8.F,ImGui::GetWindowHeight()-66.F));
+    ui::TextDisabled(narrow?"EN/中":"Language");
+    ImGui::SetCursorPosX(pad);ImGui::SetNextItemWidth(item);
+    const auto selected_language=ui_language();
+    const char* preview=selected_language==UiLanguage::english?(narrow?"EN":"English"):(narrow?"中":"简体中文");
+    if(ui::BeginCombo("##InterfaceLanguage",preview)) {
+        if(ui::Selectable("English",selected_language==UiLanguage::english) && !set_ui_language(UiLanguage::english))ui.save_failed=true;
+        if(ui::Selectable("简体中文",selected_language==UiLanguage::simplified_chinese) && !set_ui_language(UiLanguage::simplified_chinese))ui.save_failed=true;
+        ImGui::EndCombo();
     }
 }
 
@@ -1431,13 +1446,13 @@ void header(Panel& p,SettingsWidgetOptions& options,std::optional<Snapshot>& sel
     {
         FaceScope scope(face_semibold,p.m.body);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("OFXR");
+        ui::TextUnformatted("OFXR");
     }
     ImGui::SameLine();
     {
         FaceScope scope(face_sans,p.m.label);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("0.3.3 (v%d)",XRFG_IMPLEMENTATION_VERSION);
+        ui::TextDisabled("0.3.3 (v%d)",XRFG_IMPLEMENTATION_VERSION);
     }
     ImGui::SameLine();
     ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX()+8,kRailWidth+kPad));
@@ -1452,7 +1467,8 @@ void header(Panel& p,SettingsWidgetOptions& options,std::optional<Snapshot>& sel
         draw_icon(ImGui::GetWindowDrawList(),{position.x,position.y+(line-20)*.5F},20,p.c.ink,Icon::gamepad);
         ImGui::SetCursorPosX(ImGui::GetCursorPosX()+28);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(text.c_str());
+        if(profile==global_configuration_path())ui::TextUnformatted(text.c_str());
+        else ImGui::TextUnformatted(text.c_str()); // User-supplied file names are opaque.
     }
     const auto text=interface_state_text(state);
     const std::string label(text);
@@ -1507,12 +1523,12 @@ bool render_reset_defaults(SettingsWidgetState& ui) {
     constexpr double confirm_seconds=4;
     const auto now=ImGui::GetTime();
     const bool armed=ui.reset_armed_until>now;
-    const ImVec2 size{ImGui::CalcTextSize("Click again to reset").x+ImGui::GetStyle().FramePadding.x*2,0};
+    const ImVec2 size{ui::CalcTextSize("Click again to reset").x+ImGui::GetStyle().FramePadding.x*2,0};
     if(armed) {
         ImGui::PushStyleColor(ImGuiCol_Text,kHeadsetPalette.danger);
         ImGui::PushStyleColor(ImGuiCol_Button,kHeadsetPalette.danger_soft);
     }
-    const bool pressed=ImGui::Button(armed ? "Click again to reset###Reset defaults" : "Reset defaults###Reset defaults",size);
+    const bool pressed=ui::Button(armed ? "Click again to reset###Reset defaults" : "Reset defaults###Reset defaults",size);
     if(armed)ImGui::PopStyleColor(2);
     if(!pressed)return false;
     if(!armed) {ui.reset_armed_until=now+confirm_seconds;return false;}
@@ -1532,6 +1548,7 @@ void show_settings_help(SettingsWidgetState& ui,const char* title,const char* bo
 
 bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& initial,
     SettingsWidgetOptions options) {
+    refresh_ui_language();
     set_interface_visible(options.compact ? InterfaceSurface::headset : InterfaceSurface::desktop, true);
     synchronize_settings_widgets(ui, initial);
     ui.scale_editing = false;
@@ -1564,7 +1581,7 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& initial,
     const float main_width=std::max(120.F,region.x-rail_width-kStatusWidth);
     ImGui::SetCursorScreenPos({origin.x,origin.y+kHeaderHeight});
     ImGui::PushStyleColor(ImGuiCol_ChildBg,c.raised);
-    ImGui::BeginChild("Rail",ImVec2(rail_width,content),ImGuiChildFlags_None,fixed);
+    ImGui::BeginChild("Rail",ImVec2(rail_width,content));
     ImGui::PopStyleColor();
     rail(current,rail_width);
     ImGui::EndChild();
@@ -1589,7 +1606,7 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& initial,
 
     ImGui::SetCursorScreenPos({origin.x+rail_width+main_width,origin.y+kHeaderHeight});
     ImGui::PushStyleColor(ImGuiCol_ChildBg,c.raised);
-    ImGui::BeginChild("Status",ImVec2(kStatusWidth,content),ImGuiChildFlags_None,fixed);
+    ImGui::BeginChild("Status",ImVec2(kStatusWidth,content));
     ImGui::PopStyleColor();
     status_pane(current);
     ImGui::EndChild();
@@ -1604,10 +1621,10 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& initial,
         list->AddLine({origin.x,bottom},{origin.x+region.x,bottom},c.soft,divider);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(10,5));
         FaceScope scope(face_sans,m.label);
-        const float width=ImGui::CalcTextSize("Click again to reset").x+20;
+        const float width=ui::CalcTextSize("Click again to reset").x+20;
         ImGui::SetCursorScreenPos({origin.x+12,bottom+6});
         ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("Changes apply as you make them");
+        ui::TextDisabled("Changes apply as you make them");
         ImGui::SetCursorScreenPos({origin.x+region.x-width-12,bottom+6});
         render_reset_defaults(ui);
         ImGui::PopStyleVar();
