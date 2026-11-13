@@ -95,3 +95,7 @@
 ## Nightly V986 (2026/11/13)
 
 - [fix] Reduced output-buffer VRAM use for native OpenXR OFXR/Hybrid 3X and 4X, including Pimax OpenXR and VDXR, while retaining batch overlap and the existing pacing rules. SteamVR keeps its existing allocation path.
+
+## Nightly V987 (2026/11/13)
+
+- [fix] Neural Rendering accepts padded DLSS output textures, including DetNoir with UEVR.

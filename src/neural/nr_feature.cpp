@@ -1554,13 +1554,22 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     const unsigned motionX=origin(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X);
     const unsigned motionY=origin(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y);
     const bool lowMotion=(createFlags&NVSDK_NGX_DLSS_Feature_Flags_MVLowRes)!=0;
-    const unsigned motionWidth=lowMotion?width:unsigned(srOutput?srOutput->GetDesc().Width:width);
-    const unsigned motionHeight=lowMotion?height:unsigned(srOutput?srOutput->GetDesc().Height:height);
+    const auto outputDesc=srOutput?srOutput->GetDesc():desc;
+    unsigned declaredOutputWidth{},declaredOutputHeight{};
+    params->Get(NVSDK_NGX_Parameter_OutWidth,&declaredOutputWidth);
+    params->Get(NVSDK_NGX_Parameter_OutHeight,&declaredOutputHeight);
+    const auto display=DlssNr::DeclaredOutputExtent({declaredOutputWidth,declaredOutputHeight},
+        {unsigned(outputDesc.Width),outputDesc.Height});
+    const unsigned outputX=origin(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X);
+    const unsigned outputY=origin(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y);
+    const unsigned motionWidth=lowMotion?width:display.width;
+    const unsigned motionHeight=lowMotion?height:display.height;
     const std::array<unsigned,6> origins{colorX,colorY,depthX,depthY,motionX,motionY};
     if(!nr.inputOriginsKnown || nr.inputOrigins!=origins) {nr.reset=true;nr.inputOrigins=origins;nr.inputOriginsKnown=true;}
     const auto guide2D=[](const D3D12_RESOURCE_DESC& d){return d.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.DepthOrArraySize>=1 && d.SampleDesc.Count==1;};
     if(!separate2D(desc) || !guide2D(depthDesc) || !guide2D(motionDesc) ||
         (desc.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) ||
+        !DlssNr::GuideFits({outputX,outputY,display.width,display.height},outputDesc.Width,outputDesc.Height) ||
         !DlssNr::GuideFits({colorX,colorY,width,height},desc.Width,desc.Height) ||
         !DlssNr::GuideFits({depthX,depthY,width,height},depthDesc.Width,depthDesc.Height) ||
         !DlssNr::GuideFits({motionX,motionY,motionWidth,motionHeight},motionDesc.Width,motionDesc.Height)) {
@@ -1618,7 +1627,6 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         return;
     }
 
-    const auto outputDesc = srOutput != nullptr ? srOutput->GetDesc() : desc;
     // WorkingScale is now relative to the active render extent, not the display extent.
     float workScale = cfg.DlssNrWorkingScale.value_or_default();
     workScale = workScale < 0.25f ? 0.25f : (workScale > 1.0f ? 1.0f : workScale);
@@ -1928,7 +1936,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
 
     MatchedNrGuides matchedGuides;
     unsigned modelGuideWidth{},modelGuideHeight{};float modelScaleX{},modelScaleY{};
-    if(!MatchPrivateNrGuides(nr,device,cmdList,params,guideWidth,guideHeight,(unsigned)(srOutput?srOutput->GetDesc().Width:width),(unsigned)(srOutput?srOutput->GetDesc().Height:height),
+    if(!MatchPrivateNrGuides(nr,device,cmdList,params,guideWidth,guideHeight,display.width,display.height,
         workWidth,workHeight,createFlags,reduced,depthIn,motionIn,modelGuideWidth,modelGuideHeight,
         modelScaleX,modelScaleY,matchedGuides)) {
         g_runtime.reason="the private NR guide regions could not be matched";

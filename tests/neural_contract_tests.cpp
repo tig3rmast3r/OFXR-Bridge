@@ -22,6 +22,14 @@ int main() {
     auto partial=BeforeSrExtent({1280,0},false,{1600,900},{1920,1080});
     check(partial.width==1600&&partial.height==900,"partial subrect does not invent dimensions");
     check(!FitsBeforeSr({1921,1080},1920,1080),"out of allocation extent rejected");
+    const auto display=DeclaredOutputExtent({3276,3000},{3280,3000});
+    check(display.width==3276 && display.height==3000 && GuideFits({0,0,display.width,display.height},3276,3000),
+        "DetNoir full-resolution motion follows declared output,not four-pixel padding");
+    check(DeclaredOutputExtent({0,3000},{3280,3000}).width==3280,
+        "partial output declaration falls back as a pair");
+    const auto invalidDisplay=DeclaredOutputExtent({3281,3000},{3280,3000});
+    check(!GuideFits({0,0,invalidDisplay.width,invalidDisplay.height},3280,3000),
+        "invalid complete output declaration remains refused,never silently clipped");
     check(NrResetWithSource(true,true,0),"source zero cannot clear local reset");
     check(NrResetWithSource(false,true,1),"source reset preserved");
     check(!NrResetWithSource(false,false,1),"unavailable source reset not fabricated");

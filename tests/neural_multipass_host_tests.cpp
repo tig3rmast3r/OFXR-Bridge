@@ -132,6 +132,58 @@ int __cdecl evaluate(ID3D12GraphicsCommandList* list,void* handle,void*,ID3D12Re
 struct Eye {unsigned id;Params params;ComPtr<ID3D12Resource> color,output;};
 }
 
+void padded_output_run(nr_test::Gpu& gpu,float scale) {
+    using namespace nr_test;
+    constexpr auto state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    // DetNoir-shaped: two input ROIs in one padded atlas, a padded SR output,
+    // and separate per-eye full-resolution motion with NO output padding.
+    auto color=gpu.texture(208,80,DXGI_FORMAT_R32G32B32A32_FLOAT,state);
+    auto depth=gpu.texture(208,80,DXGI_FORMAT_R32_FLOAT,state);
+    auto output=gpu.texture(204,160,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    gpu.fill(color.Get(),state,{.03f,.03f,.03f,.6f});
+    gpu.fill(depth.Get(),state,{.9f,0,0,0});
+    gpu.fill(output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,{.7f,.7f,.7f,1.f});
+    std::array<Eye,2> eyes{{{501},{502}}};
+    std::array<ComPtr<ID3D12Resource>,2> motions;
+    for(unsigned i=0;i<2;++i) {
+        auto& e=eyes[i];e.color=color;e.output=output;const unsigned x=i*104;
+        motions[i]=gpu.texture(200,160,DXGI_FORMAT_R32G32_FLOAT,state);
+        gpu.fill(motions[i].Get(),state,{.01f*(i+1),.02f*(i+1),0,0});
+        gpu.fill(depth.Get(),state,{.1f*(i+1),0,0,0},x,0,100,80);
+        e.params.Set(NVSDK_NGX_Parameter_Color,color.Get());e.params.Set(NVSDK_NGX_Parameter_Output,output.Get());
+        e.params.Set(NVSDK_NGX_Parameter_Depth,depth.Get());e.params.Set(NVSDK_NGX_Parameter_MotionVectors,motions[i].Get());
+        e.params.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width,100U);e.params.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height,80U);
+        e.params.Set(NVSDK_NGX_Parameter_OutWidth,200U);e.params.Set(NVSDK_NGX_Parameter_OutHeight,160U);
+        e.params.Set(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X,x);e.params.Set(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X,x);
+        e.params.Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,0U);
+        e.params.Set(NVSDK_NGX_Parameter_MV_Scale_X,200.f);e.params.Set(NVSDK_NGX_Parameter_MV_Scale_Y,160.f);
+    }
+    xrfg::neural_rendering::Settings settings;settings.enabled=true;settings.before_sr=true;settings.second_pass=true;settings.working_scale=scale;
+    settings.transfer_strength=settings.colour_strength=1;settings.max_ratio=8;
+    xrfg::neural_rendering::configure(settings);
+    const auto record=[&] {for(unsigned i=0;i<2;++i) {
+        gpu.fill(color.Get(),state,{.1f*(i+1),.2f,.3f,.6f},i*104,0,100,80);
+        xrfg::neural_rendering::before_sr(eyes[i].id,gpu.list.Get(),&eyes[i].params,gpu.queue.Get());
+    }};
+    record();gpu.submit();need(live.size()==4,"padded SR outputs must not reject full-resolution MV before NR initialization");gpu.reset();
+    record();auto result=gpu.capture(color.Get(),state);auto untouched=gpu.capture(output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);gpu.submit();
+    need(gpu.evaluations.size()==4 && xrfg::neural_rendering::status().running,"both padded stereo views run both NR passes");
+    for(unsigned i=0;i<2;++i) {
+        const auto& e=gpu.evaluations[i*2];
+        need(e.source==eyes[i].id && e.width==unsigned(100*scale) && e.height==unsigned(80*scale),"padded view retains exact identity and working extent");
+        const auto guideX=scale<1.f || i?100*scale:200.f;
+        const auto guideY=scale<1.f || i?80*scale:160.f;
+        need(e.x==guideX && e.y==guideY,"high-resolution motion scales from its supplied guide extent,not padded allocation");
+        need(std::abs(gpu.pixel(e.depthPixels)[0]-.1f*(i+1))<.0001f,"padded input depth ROI remains eye-local");
+        need(std::abs(gpu.pixel(e.motionPixels)[0]-.01f*(i+1))<.0001f,"full-resolution motion remains eye-local");
+        std::printf("NR_PADDED_PIXEL scale=%.2f eye=%u pixel=%.7f expected=%.7f\n",scale,i,gpu.pixel(result,i*104+30,30)[0],.1f*(i+1)+.25f);
+        need(std::abs(gpu.pixel(result,i*104+30,30)[0]-(.1f*(i+1)+.25f))<.0001f,"padded stereo NR output reaches the proper color ROI");
+    }
+    need(gpu.pixel(result,102,30)[0]==.03f && gpu.pixel(result,206,30)[0]==.03f,"atlas gaps/padding stay unchanged");
+    need(gpu.pixel(untouched)[0]==.7f,"pre-SR NR leaves padded native output unchanged");
+    gpu.reset();settings.enabled=false;xrfg::neural_rendering::configure(settings);gpu.submit();
+    std::printf("NR_PADDED_DISPLAY scale=%.2f:two eye ROIs,4px output padding,full-resolution MV,2pass exact guides/scales/output,padding preserved PASS\n",scale);
+}
 void quad_run(nr_test::Gpu& gpu,float scale,bool noUav=false,bool arrayDepth=false) {
     using namespace nr_test;
     constexpr auto state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -240,6 +292,11 @@ int main(int argc,char** argv)try{
     g_runtime.forwarder=LoadLibraryW(L"kernel32.dll");g_runtime.forwarderReady=true;g_runtime.floatSlotKnown=true;
     g_runtime.create=create;g_runtime.evaluate=evaluate;g_runtime.release=release;g_runtime.setContract=contract;g_runtime.setExtras=extras;g_capabilityFloatSlot=1;
     services().initialized=true;services().capability=capabilities;services().destroy=destroy_parameters;
+    if(mode.starts_with("padded-display")) {
+        padded_output_run(gpu,mode=="padded-display-half"?.5f:1.f);
+        if(gpu.messages)for(UINT64 i=0;i<gpu.messages->GetNumStoredMessages();++i){SIZE_T size{};gpu.messages->GetMessage(i,nullptr,&size);std::vector<char> b(size);auto* m=reinterpret_cast<D3D12_MESSAGE*>(b.data());hr(gpu.messages->GetMessage(i,m,&size));need(m->Severity!=D3D12_MESSAGE_SEVERITY_ERROR&&m->Severity!=D3D12_MESSAGE_SEVERITY_CORRUPTION,m->pDescription);}
+        std::filesystem::remove(folder/L"nvngx_dlssnr.dll");std::filesystem::remove(folder);return 0;
+    }
     if(argc>1 && std::string_view(argv[1]).starts_with("quad")){quad_run(gpu,std::string_view(argv[1]).find("half")!=std::string_view::npos?.5f:1.f,std::string_view(argv[1])=="quad-copy",std::string_view(argv[1]).starts_with("quad-array"));
         if(gpu.messages)for(UINT64 i=0;i<gpu.messages->GetNumStoredMessages();++i){SIZE_T size{};gpu.messages->GetMessage(i,nullptr,&size);std::vector<char> b(size);auto* m=reinterpret_cast<D3D12_MESSAGE*>(b.data());hr(gpu.messages->GetMessage(i,m,&size));need(m->Severity!=D3D12_MESSAGE_SEVERITY_ERROR&&m->Severity!=D3D12_MESSAGE_SEVERITY_CORRUPTION,m->pDescription);}
         std::filesystem::remove(folder/L"nvngx_dlssnr.dll");std::filesystem::remove(folder);return 0;}
