@@ -79,6 +79,8 @@ static int vdxr_multiframe_test(std::string route) {
     const bool other=route.starts_with("native-other-");
     const bool publication=route.find("publication")!=std::string::npos;
     const bool batch=route.find("batch")!=std::string::npos;
+    const bool vram=route.find("vram")!=std::string::npos;
+    const bool packed=route.find("packed")!=std::string::npos;
     const bool fast=route.find("fast")!=std::string::npos;
     const bool switch_live=route.find("switch")!=std::string::npos;
     const bool overlap=route.find("overlap")!=std::string::npos;
@@ -97,6 +99,8 @@ static int vdxr_multiframe_test(std::string route) {
     xrfg::autonomous::apply_runtime_settings();
     Fixture f(true);f.transport->stop();f.transport.reset();f.throttled=false;f.unblock();
     f.real_common=true;f.expected_views=2;f.prediction_horizon_ns=period*4;
+    if(vram)f.native_image_count=3;
+    f.reuse_current_real_image=route.find("reuse")!=std::string::npos;
     f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);
     dispatch->steamvr_runtime=steamvr;
@@ -126,8 +130,8 @@ static int vdxr_multiframe_test(std::string route) {
     {std::scoped_lock lock(g_state_mutex);g_instances[dispatch->instance]=dispatch;g_sessions[state->handle]=state;}
     if(steamvr){ok(install_private_runtime(state),"SteamVR Framework private endpoint");f.transport=state->private_runtime;xr_ok(f.transport->start(),"start Framework native delivery");}
     check(bool(state->private_runtime)==steamvr,"test uses the selected native/private transport");
-    XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};ci.width=256;ci.height=128;
-    ci.arraySize=2;ci.faceCount=ci.mipCount=ci.sampleCount=1;ci.format=DXGI_FORMAT_R8G8B8A8_UNORM;
+    XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};ci.width=packed?512:256;ci.height=128;
+    ci.arraySize=packed?1:2;ci.faceCount=ci.mipCount=ci.sampleCount=1;ci.format=DXGI_FORMAT_R8G8B8A8_UNORM;
     ci.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
     XrSwapchain chain{};xr_ok(layer_create_swapchain_impl(state->handle,&ci,&chain),"native application swapchain");
     std::array<XrSwapchainImageD3D12KHR,3> images;for(auto& i:images)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
@@ -192,7 +196,7 @@ static int vdxr_multiframe_test(std::string route) {
             if(hybrid){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
                 for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=source;g->previous_serial=source-1;g->publication=2*source+eye;g->producer_queue=f.queue;g->output=images[index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=256;g->output_height=g->depth_height=g->motion_height=128;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
             std::array<XrCompositionLayerProjectionView,2> views;
-            for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=float(source)-.032F;v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=chain;v.subImage.imageRect.extent={256,128};v.subImage.imageArrayIndex=eye;}
+            for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=float(source)-.032F;v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=chain;v.subImage.imageRect.extent={256,128};v.subImage.imageArrayIndex=packed?0:eye;v.subImage.imageRect.offset.x=packed?eye*256:0;}
             XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};layer.space=reinterpret_cast<XrSpace>(9);layer.viewCount=2;layer.views=views.data();
             auto* content=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
             XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&content;
@@ -226,6 +230,29 @@ static int vdxr_multiframe_test(std::string route) {
         check(delivered>=1+(per_phase-4)*factor,"native phase lost generated outputs");
         if(factor>2 && !switch_live && !overlap)check(delivered==2+(per_phase-2)*factor,"native steady batch lost or duplicated a real/generated output");
         check(bool(state->private_runtime)==steamvr,"live control changed the selected native/private transport");
+        if(!steamvr && factor>2 && !reference) {
+            const auto source_chain=find_swapchain(chain);
+            const auto generation=source_chain->frame_generation;
+            check(generation && generation->pooled_native_outputs,"native optical batch must use pooled XR sinks");
+            check(f.chains.size()==3,"one application chain plus one real and one synthetic sink per source");
+            check(generation->current[0].handle!=generation->synthetic[0].handle,"real and generated sinks cannot alias");
+            std::uint64_t bytes{};unsigned native_images{},work_images{};
+            auto allocation=[&](ID3D12Resource* image) {
+                const auto description=image->GetDesc();
+                return f.device12->GetResourceAllocationInfo(0,1,&description).SizeInBytes;
+            };
+            for(const auto& [handle,physical]:f.chains)if(handle!=chain)for(const auto& image:physical.d12) {
+                bytes+=allocation(image.Get());++native_images;
+            }
+            for(const auto& stage:generation->current_staging)if(stage){bytes+=allocation(stage->resource.Get());++work_images;}
+            for(const auto& stage:generation->synthetic_staging)if(stage){bytes+=allocation(stage->resource.Get());++work_images;}
+            check(native_images==2*f.native_image_count && work_images==2+2*(factor-1),"native allocation retains both complete work banks");
+            const auto per_image=allocation(generation->current_staging[0]->resource.Get());
+            const auto old_bytes=(2+2*(factor-1))*f.native_image_count*per_image;
+            check(bytes==per_image*(native_images+work_images) && bytes<old_bytes,"actual GPU output allocation must improve on direct runtime banks");
+            std::printf("NATIVE_VRAM factor=%u fast=%u runtime_images=%u work_images=%u output_bytes=%llu direct_bank_bytes=%llu PASS\n",
+                factor,fast,native_images,work_images,bytes,old_bytes);
+        }
         prior_outputs=f.real_ends.load();
     }
     stop_continuous_presenter(state);
@@ -233,6 +260,7 @@ static int vdxr_multiframe_test(std::string route) {
     if(!steamvr)check(!f.empty_ends && !f.discarded_clocks,"native path emitted empty frames or discarded a begun cycle");
     check(std::is_sorted(f.positions.begin(),f.positions.end()),"native generated camera order crossed");
     check(f.pixels.size()==f.positions.size(),"native pixel/metadata receipt lost");
+    check(f.right_pixels==f.pixels,"native publication lost right-eye content");
     for(unsigned n=1;n<=source;++n){
         const auto target=float(n)-.032F;
         bool found=false;
@@ -252,6 +280,7 @@ static int vdxr_multiframe_test(std::string route) {
     std::fprintf(stderr,"MIN_NATIVE_GAP=%.6fms\n",min_gap);
     if(!steamvr)check(f.real_waits==f.real_begins && f.real_begins==f.real_ends,"native Wait/Begin/End calls are unbalanced");
     xr_ok(layer_destroy_swapchain_impl(chain),"native chain cleanup");
+    check(f.chains.empty(),"native output sinks leaked after source destruction");
     {std::scoped_lock lock(g_state_mutex);g_sessions.clear();g_instances.clear();}
     std::puts("Native VDXR split-loop: real GPU outputs, native call order, image ownership and live multipliers PASS");
     return 0;

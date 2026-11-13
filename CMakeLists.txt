@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.985.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.986.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2832,5 +2832,14 @@ if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
             add_test(NAME xrfg_native_${pub_runtime}_${pub_case} COMMAND xrfg_private_runtime_layer_tests native-${pub_runtime}-${pub_case})
             set_tests_properties(xrfg_native_${pub_runtime}_${pub_case} PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
         endforeach()
+    endforeach()
+endif()
+
+# Native optical publication budget: exercise three-image runtime sinks,
+# forced image-index reuse, packed stereo, and both work-bank widths.
+if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
+    foreach(vram_case 3-vram 4-vram 3-fast-vram-reuse 4-fast-vram-reuse 3-vram-packed 4-vram-packed)
+        add_test(NAME xrfg_native_pimax_${vram_case} COMMAND xrfg_private_runtime_layer_tests native-pimax-${vram_case})
+        set_tests_properties(xrfg_native_pimax_${vram_case} PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
     endforeach()
 endif()

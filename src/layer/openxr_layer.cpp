@@ -2242,13 +2242,16 @@ struct DirectOutputPublication;
 struct FrameGenerationSwapchainState {
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> panel_queue;
     bool staged_outputs{};
+    // Native optical batches keep their work banks, but publish through one
+    // real and one synthetic XR sink per source. Counts below still name work slots.
+    bool pooled_native_outputs{};
     std::uint32_t current_runtime_rings{2}, synthetic_runtime_rings{2};
     std::uint32_t current_runtime_images_per_ring{}, synthetic_runtime_images_per_ring{};
     std::uint32_t staging_stride{1};
     // Independent synthetic banks retain a complete batch per admitted source.
     std::uint32_t synthetic_batch_width{1};
     std::array<std::shared_ptr<DjulesOutputStaging>,2> current_staging;
-    std::array<std::shared_ptr<DjulesOutputStaging>,4> synthetic_staging;
+    std::array<std::shared_ptr<DjulesOutputStaging>,6> synthetic_staging;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> current_runtime_images, synthetic_runtime_images;
     Microsoft::WRL::ComPtr<ID3D12Fence> handover_fence;
     std::array<CompositionCopy12,8> handover_copies;
@@ -3512,7 +3515,7 @@ void destroy_frame_generation_swapchains(
         }
 
         const auto& dispatch = state->session->dispatch;
-        if(generation->staged_outputs)
+        if(generation->staged_outputs || generation->pooled_native_outputs)
             static_cast<void>(wait_composition_fence(generation->handover_fence.Get(),generation->handover_serial));
         for (PrivateSwapchainState& image : generation->synthetic) {
             static_cast<void>(
@@ -3811,6 +3814,7 @@ create_d3d12_frame_generation_swapchains(
 
         auto generation = std::make_shared<FrameGenerationSwapchainState>();
         generation->staged_outputs = staged_native_outputs(*state->session);
+        generation->pooled_native_outputs = native_optical_batch_overlap(*state->session);
         const auto output_slots = native_current_rings(*state->session);
         // Banked sources alternate complete output sets; each bank retains
         // its existing per-descriptor and per-image reuse waits.
@@ -3828,7 +3832,8 @@ create_d3d12_frame_generation_swapchains(
             XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
         XrResult refusal = XR_SUCCESS;
         if (!create_current_ring(state, private_info, &current, &refusal,
-                state->session->luke_afw_enabled ? kCurrentSlotCount + 1 : output_slots)) {
+                state->session->luke_afw_enabled ? kCurrentSlotCount + 1 :
+                    generation->pooled_native_outputs ? 1U : output_slots)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::current_private_swapchain_failed;
@@ -3842,7 +3847,7 @@ create_d3d12_frame_generation_swapchains(
         }
         log_video_memory(*state->session, VideoMemoryStage::current_ring, handle_value(state->handle));
         if (!create_current_ring(state, private_info, &synthetic, &refusal,
-                generation->synthetic_runtime_rings)) {
+                generation->pooled_native_outputs ? 1U : generation->synthetic_runtime_rings)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::synthetic_private_swapchain_failed;
@@ -3859,7 +3864,7 @@ create_d3d12_frame_generation_swapchains(
         log_video_memory(*state->session, VideoMemoryStage::synthetic_ring, handle_value(state->handle));
         generation->current_runtime_images_per_ring = current.images_per_slot;
         generation->synthetic_runtime_images_per_ring = synthetic.images_per_slot;
-        if (generation->staged_outputs) {
+        if (generation->staged_outputs || generation->pooled_native_outputs) {
             for(auto* image:current.d3d12_resources) generation->current_runtime_images.emplace_back(image);
             for(auto* image:synthetic.d3d12_resources) generation->synthetic_runtime_images.emplace_back(image);
             auto description = current.d3d12_resources.front()->GetDesc();
@@ -3876,7 +3881,9 @@ create_d3d12_frame_generation_swapchains(
                 if(SUCCEEDED(created)) destinations.push_back(stage->resource.Get());
             };
             for(auto& stage:generation->current_staging) make_stage(stage,current.d3d12_resources);
-            for(std::size_t i=0; i<kSyntheticSlotCount*generation->staging_stride; ++i)
+            const auto synthetic_work_count = generation->pooled_native_outputs
+                ? generation->synthetic_runtime_rings : kSyntheticSlotCount*generation->staging_stride;
+            for(std::size_t i=0; i<synthetic_work_count; ++i)
                 make_stage(generation->synthetic_staging[i],synthetic.d3d12_resources);
             if(FAILED(created)) {
                 if(failure_detail) *failure_detail=static_cast<std::uint64_t>(created);
@@ -3951,7 +3958,7 @@ create_d3d12_frame_generation_swapchains(
             // synthesis lists already starts and ends at this state, and a
             // resource in COMMON is implicitly promoted on first use, so a
             // runtime that wants it as a render target still gets one.
-            (generation->staged_outputs || generation->panel_queue || state->session->d3d12_synthesis_queue)
+            (generation->staged_outputs || generation->pooled_native_outputs || generation->panel_queue || state->session->d3d12_synthesis_queue)
                 ? D3D12_RESOURCE_STATE_COMMON
                 : D3D12_RESOURCE_STATE_RENDER_TARGET,
             backend,
@@ -3985,6 +3992,10 @@ create_d3d12_frame_generation_swapchains(
         if(generation->staged_outputs) {
             generation->current_images_per_slot=1;
             generation->synthetic_images_per_slot=generation->staging_stride;
+        }
+        if(generation->pooled_native_outputs) {
+            generation->current_images_per_slot=1;
+            generation->synthetic_images_per_slot=1;
         }
         generation->synthesizer = std::move(synthesizer);
         if (failure_reason != nullptr) {
@@ -9100,6 +9111,7 @@ struct DirectOutputPublication {
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
     xrfg::D3D12FrameSynthesisTicket ticket;
     PrivateSwapchainState* image{};
+    std::shared_ptr<DjulesOutputStaging> staging;
     std::atomic_bool* busy{};
     bool synthetic{}, published{}, active{true};
     bool publish() noexcept {
@@ -9113,11 +9125,27 @@ struct DirectOutputPublication {
             xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_source,
                 5530,handle_value(image->handle),value,synthetic);
         }
+        if(staging) {
+            // The consumer is inside this output's existing begun XR frame.
+            // Acquire only its final sink, then copy on the runtime binding queue.
+            if(!acquire_and_wait_private_image(owner.get(),owner->dispatch,*image)) return false;
+            auto& images=synthetic?generation->synthetic_runtime_images:generation->current_runtime_images;
+            if(image->acquired_index>=images.size()) return false;
+            auto& copy=generation->handover_copies[generation->handover_copy_slot++ % generation->handover_copies.size()];
+            const auto copied=copy_composition12(owner->d3d12_device.Get(),runtime_queue(*owner),
+                generation->handover_fence.Get(),generation->handover_serial,copy,
+                images[image->acquired_index].Get(),D3D12_RESOURCE_STATE_COMMON,
+                staging->resource.Get(),D3D12_RESOURCE_STATE_COMMON);
+            if(FAILED(copied)) return false;
+            staging->last_handover_copy.store(generation->handover_serial,std::memory_order_release);
+        }
         if(!release_private_image(owner.get(),owner->dispatch,*image)) return false;
         published=true;return true;
     }
     void finish() noexcept {
-        if(!active || !publish()) return;
+        // A discarded staged descriptor never acquired an XR image. Do not
+        // copy it over a sink owned by an unrelated live output during teardown.
+        if(!active || ((!staging || published) && !publish())) return;
         active=false;busy->store(false,std::memory_order_release);
         if(const auto owner=session.lock()) owner->presenter_condition.notify_all();
     }
@@ -13115,11 +13143,11 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             ? 0 : generation->synthetic_slot;
         const auto current_runtime_slot = defer_d3d11_publication ? current_slot : current_slot % generation->current_runtime_rings;
         const auto synthetic_runtime_slot = synthetic_slot % generation->synthetic_runtime_rings;
-        const bool late_direct_publication=!generation->staged_outputs &&
+        const bool late_direct_publication=generation->pooled_native_outputs || (!generation->staged_outputs &&
             ((!worker_submission && defer_native_direct_publication(*state->session)) ||
-             (worker_submission && native_optical_batch_overlap(*state->session)));
-        PrivateSwapchainState& current_image = generation->current[current_runtime_slot];
-        PrivateSwapchainState& synthetic_image = generation->synthetic[synthetic_runtime_slot];
+             (worker_submission && native_optical_batch_overlap(*state->session))));
+        PrivateSwapchainState& current_image = generation->current[generation->pooled_native_outputs ? 0 : current_runtime_slot];
+        PrivateSwapchainState& synthetic_image = generation->synthetic[generation->pooled_native_outputs ? 0 : synthetic_runtime_slot];
         if (current_image.handle == XR_NULL_HANDLE ||
             synthetic_image.handle == XR_NULL_HANDLE ||
             generation->current_images_per_slot == 0 ||
@@ -13152,8 +13180,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                  !(native_runtime_multiframe(*state->session) ||
                    (state->session->private_runtime && comparison_delivery_runtime(*state->session))));
         };
-        auto& extra_image = generation->synthetic[(synthetic_slot + (generation->synthetic_batch_width==1 && generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings];
-        auto& third_image=generation->synthetic[(synthetic_slot+2)%generation->synthetic_runtime_rings];
+        auto& extra_image = generation->synthetic[generation->pooled_native_outputs ? 0 : (synthetic_slot + (generation->synthetic_batch_width==1 && generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings];
+        auto& third_image=generation->synthetic[generation->pooled_native_outputs ? 0 : (synthetic_slot+2)%generation->synthetic_runtime_rings];
         if(request_extra && !generation->staged_outputs) {
             const auto lease_base=generation->synthetic_batch_width>1?synthetic_runtime_slot:0;
             std::unique_lock lock(state->session->presenter_mutex);
@@ -13209,21 +13237,38 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             if(publication_stopping() || XR_FAILED(state->session->presenter_failure)) {
                 output.reason=GenerationPrepareReason::synthesis_busy;return output;
             }
-            auto claim=[&](PrivateSwapchainState& image,std::atomic_bool& busy,bool synthetic) {
+            auto claim=[&](PrivateSwapchainState& image,std::atomic_bool& busy,bool synthetic,unsigned slot) {
                 auto publication=std::make_shared<DirectOutputPublication>();
                 publication->session=state->session;publication->generation=generation;
                 publication->synthesizer=synthesizer;publication->image=&image;
                 publication->busy=&busy;publication->synthetic=synthetic;
+                if(generation->pooled_native_outputs) publication->staging=synthetic
+                    ? generation->synthetic_staging[slot] : generation->current_staging[slot];
                 busy.store(true,std::memory_order_release);return publication;
             };
-            output.direct_current_publication=claim(current_image,current_busy,false);
-            if(request_pair) output.direct_synthetic_publication=claim(synthetic_image,synthetic_busy,true);
+            output.direct_current_publication=claim(current_image,current_busy,false,current_runtime_slot);
+            if(request_pair) output.direct_synthetic_publication=claim(synthetic_image,synthetic_busy,true,synthetic_runtime_slot);
             if(request_extra)output.direct_extra_publication=claim(extra_image,
-                generation->synthetic_publication_busy[(synthetic_runtime_slot+1)%generation->synthetic_runtime_rings],true);
+                generation->synthetic_publication_busy[(synthetic_runtime_slot+1)%generation->synthetic_runtime_rings],true,
+                (synthetic_runtime_slot+1)%generation->synthetic_runtime_rings);
             if(request_third)output.direct_third_publication=claim(third_image,
-                generation->synthetic_publication_busy[(synthetic_runtime_slot+2)%generation->synthetic_runtime_rings],true);
+                generation->synthetic_publication_busy[(synthetic_runtime_slot+2)%generation->synthetic_runtime_rings],true,
+                (synthetic_runtime_slot+2)%generation->synthetic_runtime_rings);
         }
-        if (!generation->staged_outputs && !late_luke_publication && !acquire_and_wait_private_image(
+        if(generation->pooled_native_outputs) {
+            // The same work-slot leases still bound CPU ownership. Join only
+            // this slot's previous publication copy before the GPU overwrites it.
+            auto* queue=state->session->d3d12_synthesis_queue ? state->session->d3d12_synthesis_queue.Get()
+                : state->session->d3d12_queue.Get();
+            for(const auto& publication:{output.direct_current_publication,output.direct_synthetic_publication,
+                    output.direct_extra_publication,output.direct_third_publication}) {
+                if(publication && FAILED(queue->Wait(generation->handover_fence.Get(),
+                        publication->staging->last_handover_copy.load(std::memory_order_acquire)))) {
+                    output.reason=GenerationPrepareReason::synthesis_failed;return output;
+                }
+            }
+        }
+        if (!generation->staged_outputs && !generation->pooled_native_outputs && !late_luke_publication && !acquire_and_wait_private_image(
                 state->session.get(),
                 state->session->dispatch,
                 current_image)) {
@@ -13235,7 +13280,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             return output;
         }
 
-        if (request_pair && !generation->staged_outputs && !late_luke_publication &&
+        if (request_pair && !generation->staged_outputs && !generation->pooled_native_outputs && !late_luke_publication &&
             !acquire_and_wait_private_image(
                 state->session.get(),
                 state->session->dispatch,
@@ -13255,7 +13300,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         // write on the queue the application supplied, which is not the one
         // about to write them, so carry that guarantee across before any
         // synthesis is queued.
-        if (request_extra && !generation->staged_outputs && !acquire_and_wait_private_image(
+        if (request_extra && !generation->staged_outputs && !generation->pooled_native_outputs && !acquire_and_wait_private_image(
                 state->session.get(), state->session->dispatch, extra_image)) {
             static_cast<void>(release_private_image(state->session.get(), state->session->dispatch, synthetic_image));
             static_cast<void>(release_private_image(state->session.get(), state->session->dispatch, current_image));
@@ -13264,13 +13309,13 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             return output;
         }
 
-        if(request_third && !acquire_and_wait_private_image(state->session.get(),state->session->dispatch,third_image)){
+        if(request_third && !generation->pooled_native_outputs && !acquire_and_wait_private_image(state->session.get(),state->session->dispatch,third_image)){
             release_private_image(state->session.get(),state->session->dispatch,extra_image);
             release_private_image(state->session.get(),state->session->dispatch,synthetic_image);
             release_private_image(state->session.get(),state->session->dispatch,current_image);
             output.reason=GenerationPrepareReason::synthetic_private_acquire_failed;return output;
         }
-        if (!generation->staged_outputs && (generation->panel_queue || state->session->d3d12_synthesis_queue)) {
+        if (!generation->staged_outputs && !generation->pooled_native_outputs && (generation->panel_queue || state->session->d3d12_synthesis_queue)) {
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
             static_cast<void>(
                 synthesizer->synchronize_producer_queue(
@@ -13280,11 +13325,11 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         const std::uint32_t current_destination_index =
             static_cast<std::uint32_t>(generation->staged_outputs ? current_slot : current_runtime_slot) *
                 generation->current_images_per_slot +
-            (generation->staged_outputs || late_luke_publication ? 0 : current_image.acquired_index);
+            (generation->staged_outputs || generation->pooled_native_outputs || late_luke_publication ? 0 : current_image.acquired_index);
         const std::uint32_t synthetic_destination_index =
             static_cast<std::uint32_t>(generation->staged_outputs ? synthetic_slot : synthetic_runtime_slot) *
                 generation->synthetic_images_per_slot +
-            (generation->staged_outputs || late_luke_publication ? 0 : synthetic_image.acquired_index);
+            (generation->staged_outputs || generation->pooled_native_outputs || late_luke_publication ? 0 : synthetic_image.acquired_index);
 
         xrfg::D3D12FrameSynthesisTicket ticket{};
         const auto debug_marker = !panel_input && request_pair && state->session->fsr_cadence.marker_enabled() &&
@@ -13372,8 +13417,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                                           interpolation_fraction, presentation_transform,
                                           request_extra ? std::optional<xrfg::D3D12ExtraSynthetic>{
                                               xrfg::D3D12ExtraSynthetic{generation->staged_outputs ? synthetic_destination_index+1 :
-                                                  static_cast<std::uint32_t>((synthetic_runtime_slot+1)%generation->synthetic_runtime_rings) * generation->synthetic_images_per_slot + extra_image.acquired_index,
-                                                  extra_fraction, extra_views,request_third?static_cast<UINT>((synthetic_runtime_slot+2)%generation->synthetic_runtime_rings)*generation->synthetic_images_per_slot+third_image.acquired_index:UINT32_MAX,
+                                                  static_cast<std::uint32_t>((synthetic_runtime_slot+1)%generation->synthetic_runtime_rings) * generation->synthetic_images_per_slot + (generation->pooled_native_outputs?0:extra_image.acquired_index),
+                                                  extra_fraction, extra_views,request_third?static_cast<UINT>((synthetic_runtime_slot+2)%generation->synthetic_runtime_rings)*generation->synthetic_images_per_slot+(generation->pooled_native_outputs?0:third_image.acquired_index):UINT32_MAX,
                                                   third_fraction,third_views}} : std::nullopt,
                                           !synthetic_views.empty(), aer_fresh_mask);
                 } else {
@@ -13552,8 +13597,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             output.worker_fence_value=ticket.fence_value;
             output.current_destination = current_destination_index;
             output.synthetic_destination = synthetic_destination_index;
-            if(request_extra)output.extra_destination=static_cast<std::uint32_t>((synthetic_runtime_slot+1)%generation->synthetic_runtime_rings)*generation->synthetic_images_per_slot+extra_image.acquired_index;
-            if(request_third)output.third_destination=static_cast<std::uint32_t>((synthetic_runtime_slot+2)%generation->synthetic_runtime_rings)*generation->synthetic_images_per_slot+third_image.acquired_index;
+            if(request_extra)output.extra_destination=static_cast<std::uint32_t>((synthetic_runtime_slot+1)%generation->synthetic_runtime_rings)*generation->synthetic_images_per_slot+(generation->pooled_native_outputs?0:extra_image.acquired_index);
+            if(request_third)output.third_destination=static_cast<std::uint32_t>((synthetic_runtime_slot+2)%generation->synthetic_runtime_rings)*generation->synthetic_images_per_slot+(generation->pooled_native_outputs?0:third_image.acquired_index);
             output.current_slot = current_slot;
             output.synthetic_slot = synthetic_slot;
             output.current_handle = current_image.handle;
@@ -14314,8 +14359,15 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 native_current_rings(*state) >= 2 && !prepared.resources.empty() &&
                 std::all_of(prepared.resources.begin(), prepared.resources.end(), [](const auto& resource) {
                     const auto& generation = resource.generation.worker_generation;
-                    return generation && generation->current_runtime_rings >= 2 &&
-                        generation->current[0].handle != XR_NULL_HANDLE &&
+                    if(!generation || generation->current_runtime_rings<2) return false;
+                    if(generation->pooled_native_outputs) {
+                        // The independent work images, not the final XR sinks,
+                        // prove that preparing C cannot overwrite retained B.
+                        const auto& a=generation->current_staging[0];
+                        const auto& b=generation->current_staging[1];
+                        return a && b && a->resource && b->resource && a->resource!=b->resource;
+                    }
+                    return generation->current[0].handle != XR_NULL_HANDLE &&
                         generation->current[1].handle != XR_NULL_HANDLE &&
                         generation->current[0].handle != generation->current[1].handle;
                 });
@@ -16401,8 +16453,12 @@ struct InternalCycleResult {
                 const auto& output=resource.generation;
                 if(output.staging_generation) pending.pending_outputs.push_back({output.staging_generation,
                     output.staging_generation->current_staging[output.current_slot],output.synthesizer,output.staging_ticket,false});
+                if(output.direct_current_publication && output.direct_current_publication->staging)
+                    pending.direct_publications.push_back(output.direct_current_publication);
             }
         }
+        for(const auto& publication:owned_output?owned_output->direct_publications:pending.direct_publications)
+            if(publication->staging && !publication->publish()) return XR_ERROR_RUNTIME_FAILURE;
         if(!handover_djules_outputs(state.get(),owned_output?owned_output->pending_outputs:pending.pending_outputs))
             return XR_ERROR_RUNTIME_FAILURE;
         report_native_frame_content(state.get(),owned_output);
@@ -19292,8 +19348,11 @@ XrResult layer_end_frame_impl(
         join_runtime_queue_to_application(state.get(), generated_release_value);
         result = with_runtime_entry(state, [&] {
             log_luke_physical_boundary(state, submitted_end_info, frame_serial, 4, &prepared);
-            if(submitted_end_info==&first_generated.info &&
-               !handover_djules_outputs(state.get(),first_generated.pending_outputs)) return XR_ERROR_RUNTIME_FAILURE;
+            if(submitted_end_info==&first_generated.info) {
+                for(const auto& publication:first_generated.direct_publications)
+                    if(publication->staging && !publication->publish()) return XR_ERROR_RUNTIME_FAILURE;
+                if(!handover_djules_outputs(state.get(),first_generated.pending_outputs)) return XR_ERROR_RUNTIME_FAILURE;
+            }
             report_native_frame_content(state.get(),&first_generated);
             return state->fps_overlay
                 ? state->fps_overlay->end_frame(physical_end, pair_ready || ofr_single,first_generated.new_content,native_frame_results(&first_generated),first_generated.native_output, first_generated.interface_stamp)
