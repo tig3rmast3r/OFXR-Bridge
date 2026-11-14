@@ -21,7 +21,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .local/ofxr-autonomous-deps
-          key: windows-2022-ofxr-v773-deps-v1-${{ hashFiles('ffx_private_build.cmake', 'ffx_private_symbols.h') }}
+          key: windows-2022-ofxr-v983-deps-v1-${{ hashFiles('ffx_private_build.cmake', 'ffx_private_symbols.h') }}
       - name: Prepare pinned dependencies
         if: steps.dependencies.outputs.cache-hit != 'true'
         shell: pwsh
@@ -45,8 +45,8 @@ jobs:
           Copy-Item "$deps/Streamline-source/include/*" "$deps/Streamline" -Recurse
           New-Item -ItemType Directory -Force "$deps/OpenVR/include" | Out-Null
           Invoke-WebRequest 'https://raw.githubusercontent.com/ValveSoftware/openvr/v2.5.1/headers/openvr.h' -OutFile "$deps/OpenVR/include/openvr.h"
-          Invoke-Native gh @('release', 'download', 'v0.3.2', '--repo', 'tig3rmast3r/OFXR-Bridge', '--pattern', 'OFXR-BRIDGE-0.3.2-v773.zip', '--dir', $deps)
-          Expand-Archive "$deps/OFXR-BRIDGE-0.3.2-v773.zip" "$deps/official"
+          Invoke-Native gh @('release', 'download', 'v0.3.3', '--repo', 'tig3rmast3r/OFXR-Bridge', '--pattern', 'OFXR-BRIDGE-0.3.3-v983.zip', '--dir', $deps)
+          Expand-Archive "$deps/OFXR-BRIDGE-0.3.3-v983.zip" "$deps/official"
           foreach ($provider in @(
             @('ofxr_amd_fidelityfx_framegeneration_dx12.dll', 'fsr-optiscaler'),
             @('PDAFWPlugin.dll', 'afw-beta6'))) {
@@ -90,12 +90,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $deps = Join-Path $env:GITHUB_WORKSPACE '.local/ofxr-autonomous-deps'
-          gh release download v0.3.3 --repo tig3rmast3r/OFXR-Bridge --pattern 'OFXR-BRIDGE-0.3.3-v983.zip' --dir "$deps/release-033"
-          if ($LASTEXITCODE) { throw 'Official 0.3.3 package download failed' }
-          $archives = @(Get-ChildItem "$deps/release-033" -File -Filter '*.zip')
-          if ($archives.Count -ne 1) { throw 'Official 0.3.3 archive is ambiguous' }
-          Expand-Archive $archives[0].FullName "$deps/official-033"
-          $tray = @(Get-ChildItem "$deps/official-033" -Recurse -File -Filter OFXRBridgeTray.exe)
+          $tray = @(Get-ChildItem "$deps/official" -Recurse -File -Filter OFXRBridgeTray.exe)
           if ($tray.Count -ne 1) { throw 'Official package root is ambiguous' }
           Copy-Item $tray[0].Directory.FullName candidate -Recurse
           Copy-Item build/Release/OFXRBridgeTray.exe candidate/OFXRBridgeTray.exe -Force
