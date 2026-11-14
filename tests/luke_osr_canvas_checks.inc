@@ -1,5 +1,5 @@
 namespace quality {
-void osr_canvas_checks(ID3D12Device* device,ID3D12CommandQueue* queue) {
+void osr_canvas_checks(ID3D12Device* device,ID3D12CommandQueue* queue,bool unequal_height,unsigned first_eye) {
     constexpr UINT guide_size=64,output_size=128;
     const auto texture=[&](UINT width,UINT height,DXGI_FORMAT format) {
         D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
@@ -11,7 +11,7 @@ void osr_canvas_checks(ID3D12Device* device,ID3D12CommandQueue* queue) {
         return out;
     };
     std::array colors{texture(65,64,DXGI_FORMAT_R8G8B8A8_TYPELESS),
-        texture(63,64,DXGI_FORMAT_R8G8B8A8_TYPELESS)};
+        texture(63,unequal_height?63:64,DXGI_FORMAT_R8G8B8A8_TYPELESS)};
     auto depth=texture(guide_size,guide_size,DXGI_FORMAT_R32_FLOAT);
     auto motion=texture(guide_size,guide_size,DXGI_FORMAT_R16G16_FLOAT);
     ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> list;
@@ -54,9 +54,11 @@ void osr_canvas_checks(ID3D12Device* device,ID3D12CommandQueue* queue) {
     };
     wait(1);
     xrfg::LukeAfwSynthesizer synth;check(synth.initialize(device,queue,{}),"canvas native initialization");
+    xrfg::bridge_flight_logger().flush();
+    const auto log_offset=std::filesystem::file_size(xrfg::bridge_flight_logger().log_path());
     std::vector<std::shared_ptr<DlssMotionVectorFrame>> frames;
     for(unsigned n=1;n<=10;++n) {
-        const unsigned eye=(n-1)%2;
+        const unsigned eye=((n-1)%2)^first_eye;
         const auto current=camera(n,scenes[0]);
         auto frame=std::make_shared<DlssMotionVectorFrame>();auto& guide=*frame;
         guide.stream=guide.epoch=1;guide.serial=guide.publication=n;
@@ -83,9 +85,10 @@ void osr_canvas_checks(ID3D12Device* device,ID3D12CommandQueue* queue) {
         source.pose.position.x=eye?float(baseline*.5):float(-baseline*.5);
         destination.pose.position.x=-source.pose.position.x;
         const std::array horizontal{std::atan(65.F/output_size),std::atan(63.F/output_size)};
-        const float vertical=std::atan(64.F/output_size);
-        source.fov={-horizontal[eye],horizontal[eye],vertical,-vertical};
-        destination.fov={-horizontal[1-eye],horizontal[1-eye],vertical,-vertical};
+        const std::array vertical{std::atan(64.F/output_size),
+            std::atan((unequal_height?63.F:64.F)/output_size)};
+        source.fov={-horizontal[eye],horizontal[eye],vertical[eye],-vertical[eye]};
+        destination.fov={-horizontal[1-eye],horizontal[1-eye],vertical[1-eye],-vertical[1-eye]};
         xrfg::embedded::AfwSettings settings{};settings.mode=3;
         settings.osr=static_cast<int>(xrfg::OsrReconstruction::full);
         std::cerr<<"Native padded-canvas publication="<<n<<" eye="<<eye<<'\n';
@@ -93,6 +96,28 @@ void osr_canvas_checks(ID3D12Device* device,ID3D12CommandQueue* queue) {
             destination,eye,static_cast<float>(baseline),settings),"native padded-canvas synthesis");
         wait(n+1);
     }
-    std::cout<<"Eight alternating native padded-canvas submissions PASS\n";
+    xrfg::bridge_flight_logger().flush();
+    std::ifstream flight(xrfg::bridge_flight_logger().log_path());require(flight.good(),"canvas flight log");
+    flight.seekg(static_cast<std::streamoff>(log_offset));
+    unsigned histories{},adaptations{};
+    for(std::string line;std::getline(flight,line);) {
+        if(line.find("op=luke_afw_stage ")==std::string::npos)continue;
+        if(line.find(" a=1340 ")!=std::string::npos)++adaptations;
+        if(line.find(" a=1310 ")==std::string::npos)continue;
+        std::map<std::string,std::string> fields;std::istringstream record(line);
+        for(std::string field;record>>field;) {
+            const auto separator=field.find('=');
+            if(separator!=std::string::npos)fields.emplace(field.substr(0,separator),field.substr(separator+1));
+        }
+        const auto publication=std::stoull(fields.at("b"));
+        if(publication>=5) {
+            require((std::stoul(fields.at("result"))&1)!=0&&std::stoull(fields.at("c"))==publication-1,
+                "padded-canvas OSR lost primed image history");
+            ++histories;
+        }
+    }
+    require(adaptations==8&&histories==6,"missing canvas or history observations");
+    std::cout<<"Eight padded-canvas submissions; six primed histories; unequal_height="
+        <<unequal_height<<" first_eye="<<first_eye<<" PASS\n";
 }
 }

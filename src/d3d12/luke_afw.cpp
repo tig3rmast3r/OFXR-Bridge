@@ -2769,8 +2769,10 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             OsrFullWarp::Inputs in{};
             in.source_depth = input.depth.texture;
             in.source_depth_state = input.depth.initial_state;
-            in.source_color = source_color;
-            in.source_color_state = D3D12_RESOURCE_STATE_COMMON;
+            // The canvas FOV and history copy cover the padded extent, not
+            // the smaller application texture. Keep equal-size input unchanged.
+            in.source_color = eye_canvas ? input.color.texture : source_color;
+            in.source_color_state = eye_canvas ? input.color.initial_state : D3D12_RESOURCE_STATE_COMMON;
             in.source_motion = impl_->motion_resource.Get(); // composed same-eye motion, COMMON after compose_motion
             in.source_motion_state = D3D12_RESOURCE_STATE_COMMON;
             in.source_eye = source_eye;

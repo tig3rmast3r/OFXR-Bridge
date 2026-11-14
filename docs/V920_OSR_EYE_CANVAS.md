@@ -30,3 +30,20 @@ Focused tests replay both directions of the observed pair, verify every original
 pixel-centre ray horizontally and vertically, stable1685x1684 guide grids, exact
 pixel preservation/clamped borders, equal-size identity and invalid-input refusal.
 These are geometry/copy-plan checks, not an owner/headset acceptance claim.
+
+## Fork follow-up: full OSR must consume the canvas
+
+The 0.3.3 implementation prepared the padded color image but still passed the
+original application texture to full OSR. Its history copy used the larger
+canvas extent against that smaller source. A native WARP replay reproduces
+`COPYTEXTUREREGION_SRCREGIONOUTOFBOUNDS`, followed by `Close` returning
+`0x80070057`. Subsequent `Reset` calls on that invalid command list return the
+same error before reconstruction starts.
+
+The fork passes the already-padded private color texture and its resource state
+to full OSR for unequal-eye inputs. Equal-size inputs retain their original path.
+There is no resampling, additional GPU pass, or change to submitted XR FOVs.
+`xrfg_luke_osr_canvas_gpu` exercises typeless unequal-width and unequal-height
+inputs with either eye first, requires successful native submissions and
+retained image history after priming, and rejects D3D12 validation errors.
+This supersedes the older fork's common-raster resampling candidate.

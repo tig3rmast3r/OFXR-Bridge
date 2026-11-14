@@ -244,7 +244,8 @@ int main(int argc,char** argv) {try {
         check(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)),"canvas device");
         ComPtr<ID3D12CommandQueue> queue;D3D12_COMMAND_QUEUE_DESC q{};
         check(device->CreateCommandQueue(&q,IID_PPV_ARGS(&queue)),"canvas queue");
-        osr_canvas_checks(device.Get(),queue.Get());
+        for(bool unequal_height:{false,true})for(unsigned first_eye:{0u,1u})
+            osr_canvas_checks(device.Get(),queue.Get(),unequal_height,first_eye);
         ComPtr<ID3D12InfoQueue> messages;check(device.As(&messages),"canvas debug messages");
         for(UINT64 i=0;i<messages->GetNumStoredMessages();++i) {
             SIZE_T size{};check(messages->GetMessage(i,nullptr,&size),"canvas message size");
