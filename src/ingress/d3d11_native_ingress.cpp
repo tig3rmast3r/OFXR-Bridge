@@ -187,6 +187,7 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     auto& t=*f->transport;
     auto color=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Color));
     auto output=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Output));
+    if(output)clear_d3d11_guide_receipt(output.Get());
     auto motion=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_MotionVectors));
     auto depth_texture=native(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Depth));
     // Depth is optional (0.2 V505): vectors alone drive Hybrid, as in Ready
@@ -256,13 +257,16 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     note(!frame?9:g.depth?10:11,depth_result,describe(depth_texture.Get()));
     nr_guides(t,true);
     barrier(t,D3D11GuideTransport::output,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    neural_rendering::after_sr(f->identity,t.list(),&shadow,queue.Get());
+    const bool output_may_change=neural_rendering::after_sr_needs_copyback(f->identity,t.list(),&shadow,queue.Get());
     barrier(t,D3D11GuideTransport::output,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
     nr_guides(t,false);
     if(frame&&g.protect_snapshot_lifetime&&embedded::afw_snapshot().desired.mode!=0&&!nested_evaluation)
         mark_luke_color_origin(t.list(),g.output,frame->color_origin_token,D3D12_RESOURCE_STATE_COMMON,
             device.Get(),{g.output_x,g.output_y,g.output_width,g.output_height});
-    if(SUCCEEDED(t.submit())&&SUCCEEDED(t.copy_back(D3D11GuideTransport::output,output.Get()))&&frame) {
+    // Keep the original stages and every output that may carry NR or origin
+    // writes. Otherwise SR already produced the same pixels on the game device.
+    const bool copyback=output_may_change || g.protect_snapshot_lifetime || nested_evaluation || luke_detected();
+    if(SUCCEEDED(t.submit())&&(!copyback||SUCCEEDED(t.copy_back(D3D11GuideTransport::output,output.Get())))&&frame) {
         set_d3d11_guide_receipt(output.Get(),{generation,g.stream,frame->publication,g.output_width,g.output_height});
         (void)claim_d3d11_guides(game_device.Get(),generation);
     }
