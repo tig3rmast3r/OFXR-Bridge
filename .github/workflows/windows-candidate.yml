@@ -1,0 +1,139 @@
+name: Windows test candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/ghost-osr-033]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache prepared vendor dependencies
+        id: dependencies
+        uses: actions/cache/restore@v4
+        with:
+          path: .local/ofxr-autonomous-deps
+          key: windows-2022-ofxr-v773-deps-v1-${{ hashFiles('ffx_private_build.cmake', 'ffx_private_symbols.h') }}
+      - name: Prepare pinned dependencies
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Invoke-Native([string]$Program, [string[]]$Arguments) {
+            & $Program @Arguments
+            if ($LASTEXITCODE) { throw "$Program failed with exit code $LASTEXITCODE" }
+          }
+          function Checkout-Dependency([string]$Repository, [string]$Revision, [string]$Destination, [string[]]$Paths) {
+            Invoke-Native git @('clone', '--filter=blob:none', '--no-checkout', "https://github.com/$Repository.git", $Destination)
+            Invoke-Native git (@('-C', $Destination, 'sparse-checkout', 'set') + $Paths)
+            Invoke-Native git @('-C', $Destination, 'checkout', $Revision)
+          }
+          $deps = Join-Path $env:GITHUB_WORKSPACE '.local/ofxr-autonomous-deps'
+          New-Item -ItemType Directory -Force $deps | Out-Null
+          Checkout-Dependency 'GPUOpen-LibrariesAndSDKs/FidelityFX-SDK' 'c6efa6bf7f2027b3ec94f28578bb5965eabb9e55' "$deps/FidelityFX" @('sdk', 'ffx-api')
+          Checkout-Dependency 'NVIDIA/DLSS' '374959484e79a640feaba44c93ac8cfb0a03f5b5' "$deps/DLSS" @('include', 'lib/Windows_x86_64')
+          Checkout-Dependency 'NVIDIAGameWorks/Streamline' '625db07d4bca5abc67d781c42af7e7fb0761f1b6' "$deps/Streamline-source" @('include')
+          New-Item -ItemType Directory -Force "$deps/Streamline" | Out-Null
+          Copy-Item "$deps/Streamline-source/include/*" "$deps/Streamline" -Recurse
+          New-Item -ItemType Directory -Force "$deps/OpenVR/include" | Out-Null
+          Invoke-WebRequest 'https://raw.githubusercontent.com/ValveSoftware/openvr/v2.5.1/headers/openvr.h' -OutFile "$deps/OpenVR/include/openvr.h"
+          Invoke-Native gh @('release', 'download', 'v0.3.2', '--repo', 'tig3rmast3r/OFXR-Bridge', '--pattern', 'OFXR-BRIDGE-0.3.2-v773.zip', '--dir', $deps)
+          Expand-Archive "$deps/OFXR-BRIDGE-0.3.2-v773.zip" "$deps/official"
+          foreach ($provider in @(
+            @('ofxr_amd_fidelityfx_framegeneration_dx12.dll', 'fsr-optiscaler'),
+            @('PDAFWPlugin.dll', 'afw-beta6'))) {
+            $files = @(Get-ChildItem "$deps/official" -Recurse -File -Filter $provider[0])
+            if ($files.Count -ne 1) { throw "Expected exactly one $($provider[0]) in official archive" }
+            $destination = "$deps/runtime/$($provider[1])"
+            New-Item -ItemType Directory -Force $destination | Out-Null
+            Copy-Item $files[0].FullName $destination
+          }
+          Invoke-Native cmake @('-S', "$deps/FidelityFX/sdk", '-B', "$deps/FidelityFX-build",
+            '-G', 'Visual Studio 17 2022', '-A', 'x64', '-DFFX_API_BACKEND=DX12_X64',
+            '-DFFX_OF=ON', '-DFFX_BUILD_AS_DLL=OFF',
+            "-DCMAKE_PROJECT_INCLUDE=$env:GITHUB_WORKSPACE/ffx_private_build.cmake")
+          Invoke-Native cmake @('--build', "$deps/FidelityFX-build", '--config', 'Release',
+            '--target', 'ffx_opticalflow_x64', 'ffx_backend_dx12_x64', '--parallel', '2')
+      - name: Save prepared dependencies
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .local/ofxr-autonomous-deps
+          key: ${{ steps.dependencies.outputs.cache-primary-key }}
+      - name: Configure and build candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $deps = Join-Path $env:GITHUB_WORKSPACE '.local/ofxr-autonomous-deps'
+          $fxc = Get-ChildItem 'C:/Program Files (x86)/Windows Kits/10/bin/*/x64/fxc.exe' |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK fxc.exe not found' }
+          cmake -S . -B build -G 'Visual Studio 17 2022' -A x64 "-DXRFG_DEPENDENCY_ROOT=$deps" "-DXRFG_FXC_EXECUTABLE=$($fxc.FullName)" -DXRFG_BUILD_TESTS=ON
+          if ($LASTEXITCODE) { throw "Configure failed: $LASTEXITCODE" }
+          cmake --build build --config Release --target OFXRBridgeTray xrfg_luke_kcd_quality_tests xrfg_luke_eye_canvas_tests xrfg_optical_flow_tests --parallel 2
+          if ($LASTEXITCODE) { throw "Build failed: $LASTEXITCODE" }
+      - name: Run focused regression tests on WARP
+        shell: pwsh
+        run: |
+          ctest --test-dir build -C Release -R '^xrfg_(luke_osr_canvas_gpu|luke_eye_canvas_tests|optical_flow_tests)$' --output-on-failure --timeout 120
+          if ($LASTEXITCODE) { throw "Regression tests failed: $LASTEXITCODE" }
+      - name: Package unsigned test candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $deps = Join-Path $env:GITHUB_WORKSPACE '.local/ofxr-autonomous-deps'
+          gh release download v0.3.3 --repo tig3rmast3r/OFXR-Bridge --pattern 'OFXR-BRIDGE-0.3.3-v983.zip' --dir "$deps/release-033"
+          if ($LASTEXITCODE) { throw 'Official 0.3.3 package download failed' }
+          $archives = @(Get-ChildItem "$deps/release-033" -File -Filter '*.zip')
+          if ($archives.Count -ne 1) { throw 'Official 0.3.3 archive is ambiguous' }
+          Expand-Archive $archives[0].FullName "$deps/official-033"
+          $tray = @(Get-ChildItem "$deps/official-033" -Recurse -File -Filter OFXRBridgeTray.exe)
+          if ($tray.Count -ne 1) { throw 'Official package root is ambiguous' }
+          Copy-Item $tray[0].Directory.FullName candidate -Recurse
+          Copy-Item build/Release/OFXRBridgeTray.exe candidate/OFXRBridgeTray.exe -Force
+          Copy-Item build/Release/ofxr/*.dll candidate/ofxr -Force
+          Copy-Item LICENSE candidate/LICENSE -Force
+          Copy-Item licenses candidate -Recurse -Force
+          @"
+          Experimental unsigned Ghost of Tsushima OSR candidate based on 0.3.3.
+          Source: https://github.com/${{ github.repository }}/commit/${{ github.sha }}
+          WARP regression tests passed; actual game/headset validation is still required.
+          Extract separately and keep the official installation as a rollback.
+          "@ | Set-Content candidate/CANDIDATE.txt
+          $checksums = @(Get-ChildItem candidate -Recurse -File |
+            Where-Object Name -ne 'SHA256SUMS.txt' | ForEach-Object {
+            "$( (Get-FileHash $_.FullName -Algorithm SHA256).Hash )  $($_.FullName.Substring((Resolve-Path candidate).Path.Length + 1))"
+          })
+          $checksums | Set-Content candidate/SHA256SUMS.txt
+      - name: Diagnose native OSR test failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $debugger = 'C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe'
+          if ((Test-Path $debugger) -and (Test-Path build/Release/xrfg_luke_kcd_quality_tests.exe)) {
+            Set-Location build
+            & $debugger -c '.symfix; .reload; sxe av; g; .ecxr; kv; q' Release/xrfg_luke_kcd_quality_tests.exe --osr-canvas-only
+            if ($LASTEXITCODE) { Write-Host "Debugger exit code: $LASTEXITCODE" }
+          }
+      - name: Upload candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: OFXR-Ghost-033-${{ github.run_number }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-test-diagnostics-${{ github.run_number }}
+          path: build/Testing/Temporary/
+          if-no-files-found: ignore
