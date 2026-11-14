@@ -71,6 +71,7 @@
 - [new] CPU usage meter.
 - [new] Individual game profile selection.
 - [new] Added Red Dead Redemption 2 compatibility.
+- [new] 2 Pass Neural Rendering
 - [changed] Improved benchmarks.
 - [fix] GTA V Enhanced now works correctly.
 - [fix] Improved OSR visuals and compatibility in almost all games.
