@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.24)
 project(XRFrameGenerationBridge VERSION 0.983.0 LANGUAGES CXX)
 
 if(MSVC)
+    add_compile_options(/utf-8)
     # The standalone layer is injected into hosts that
     # can preload an older game-local MSVCP140.dll. Initialize mutex/CV storage
     # through that loaded runtime instead of relying on the newer toolset's

@@ -10,3 +10,7 @@ include/xrfg/native_ingress/streamline1/*.h -text
 
 # Keep the vendor RTF license consistent across Windows checkouts.
 licenses/MSVC_CRT_LICENSE.rtf text eol=crlf
+
+# Generated interface assets are reviewed through their generators/catalog.
+src/ui/settings_font_zh.inc linguist-generated=true
+src/common/ui_translations.inc linguist-generated=true

@@ -10,6 +10,7 @@
 #include "xrfg/overlay_menu_renderer.hpp"
 #include "xrfg/settings_widgets.hpp"
 #include "xrfg/menu_presentation.hpp"
+#include "xrfg/ui_resolution.hpp"
 #include "imgui.h"
 #include <openxr/openxr_platform.h>
 #include <windows.h>
@@ -201,6 +202,8 @@ struct OpenXrFpsOverlay::Impl {
     }
 
     static constexpr std::uint32_t menu_width = 1024, menu_height = 768;
+    std::uint32_t menu_pixel_width=menu_width,menu_pixel_height=menu_height,menu_eye_width{};
+    float menu_density=1.F;
     bool menu_enabled{}, menu_attempted{}, menu_initialized{}, menu_open{}, menu_valid{}, menu_focused{true};
     bool menu_acquired{}, menu_waited{};
     XrSwapchain menu_swapchain{};
@@ -303,7 +306,7 @@ struct OpenXrFpsOverlay::Impl {
         info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
         info.format = format;
         info.sampleCount = info.faceCount = info.arraySize = info.mipCount = 1;
-        info.width = menu_width; info.height = menu_height;
+        info.width = menu_pixel_width; info.height = menu_pixel_height;
         const auto created = create_swapchain(session, &info, &menu_swapchain,true);
         menu_event(1, created);
         if(XR_SUCCEEDED(created) || created==XR_ERROR_LIMIT_REACHED)
@@ -340,12 +343,12 @@ struct OpenXrFpsOverlay::Impl {
             }
         }
         if (FAILED(menu_renderer.initialize(device12.Get(), queue12.Get(), device11.Get(), format,
-                count, menu_width, menu_height))) return false;
+                count, menu_pixel_width, menu_pixel_height, menu_density))) return false;
         menu_quad.space = space;
         menu_quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
         menu_quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         menu_quad.subImage.swapchain = menu_swapchain;
-        menu_quad.subImage.imageRect.extent = {menu_width, menu_height};
+        menu_quad.subImage.imageRect.extent = {static_cast<int>(menu_pixel_width), static_cast<int>(menu_pixel_height)};
         menu_quad.pose.orientation.w = 1;
         menu_initialized = true;
         return true;
@@ -535,6 +538,10 @@ struct OpenXrFpsOverlay::Impl {
         XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
         if (XR_FAILED(system_properties(instance, system, &properties))) return false;
         max_layers = std::min(properties.graphicsProperties.maxLayerCount, 128u);
+        const auto resolution=menu_resolution(menu_eye_width,properties.graphicsProperties.maxSwapchainImageWidth,
+            properties.graphicsProperties.maxSwapchainImageHeight);
+        if(resolution.width){menu_pixel_width=resolution.width;menu_pixel_height=resolution.height;menu_density=resolution.density;}
+        ui_atlas_width=std::max(1024u,menu_pixel_width);ui_status_y=menu_pixel_height;ui_atlas_height=ui_status_y+512;
         ui_atlas_supported=properties.graphicsProperties.maxSwapchainImageWidth>=ui_atlas_width &&
             properties.graphicsProperties.maxSwapchainImageHeight>=ui_atlas_height;
         if (max_layers < 2) return false;
@@ -1045,6 +1052,7 @@ struct OpenXrFpsOverlay::Impl {
             }
         }
         if (!eye_width) return;
+        if(!initialized)menu_eye_width=eye_width;
         placement = overlay_placement(position, left, right, down, up);
         placement_valid = true;
         if (!initialize()) { close_menu(); return; }
@@ -1062,7 +1070,7 @@ struct OpenXrFpsOverlay::Impl {
                 if (!menu_layout.valid) { close_menu(); return; }
                 render_menu();
                 // UI edits take effect on this same composed frame. The
-                // framebuffer stays fixed, preserving pointer/hit coordinates.
+                // logical canvas stays stable, preserving pointer/hit coordinates.
                 menu_layout = calculate_menu_presentation(menu_fov, menu_widgets.draft);
                 menu_quad.pose.position = {menu_layout.x, menu_layout.y, menu_layout.z};
                 menu_quad.size = {menu_layout.width, menu_layout.height};

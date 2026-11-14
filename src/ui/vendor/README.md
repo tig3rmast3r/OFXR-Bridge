@@ -20,3 +20,8 @@ OptiInput cursor/raw/masking/DirectInput ownership rules to a foreground-owned
 OpenXR menu and one framebuffer cursor. The adaptations have their own WARP,
 Win32/DirectInput and fake-OpenXR fixtures; borrowing accepted source is not
 treated as headset validation.
+
+The Win32 backend also exposes a per-context mouse coordinate scale for the
+standalone DPI-aware window. Positions are converted before ImGui deduplicates
+input, and navigation warps use the inverse scale. Default 1.0 retains existing
+backend behavior. The native DPI input test covers 150% and 200% scaling.

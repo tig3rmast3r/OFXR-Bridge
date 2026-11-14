@@ -32,10 +32,10 @@ void atlas_policy_fixture(const std::filesystem::path& ini,const XrFrameEndInfo&
         check(chains.size()==1&&menu_seen==0,"unknown count cannot allocate the second UI speculatively");
         available=true;
         pump(overlay,[&]{return menu_seen==1&&fps_seen==1&&chains.size()==1;},"projected14 converts without a spare second native handle");
-        check(chains.begin()->second.height==1280,"projected14 selects shared atlas");
+        check(chains.begin()->second.height==2048,"projected14 selects shared atlas");
         const auto high_reads=reads;external=0;
         for(unsigned n=0;n<5;++n){overlay.application_frame(&frame);overlay.end_frame(&frame,false);}
-        check(reads==high_reads&&chains.size()==1&&chains.begin()->second.height==1280,"shared decision does not undo itself after saving a handle");
+        check(reads==high_reads&&chains.size()==1&&chains.begin()->second.height==2048,"shared decision does not undo itself after saving a handle");
         input.open=false;
         pump(overlay,[&]{return menu_seen==0&&fps_seen==1&&chains.size()==1&&chains.begin()->second.height<512;},"closing pair releases atlas and restores compact counter");
         chain_limit=2;input.open=true;

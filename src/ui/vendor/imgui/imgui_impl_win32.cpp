@@ -120,6 +120,7 @@ static void ImGui_ImplWin32_UpdateMonitors();
 
 struct ImGui_ImplWin32_Data
 {
+    float       MouseCoordinateScale = 1.0f; // OFXR: standalone logical pixels, per context.
     HWND                        hWnd;
     HWND                        MouseHwnd;
     int                         MouseTrackedArea;   // 0: not tracked, 1: client area, 2: non-client area
@@ -138,7 +139,7 @@ struct ImGui_ImplWin32_Data
     PFN_XInputGetState          XInputGetState;
 #endif
 
-    ImGui_ImplWin32_Data()      { memset((void*)this, 0, sizeof(*this)); }
+    ImGui_ImplWin32_Data()      { memset((void*)this, 0, sizeof(*this)); MouseCoordinateScale = 1.0f; }
 };
 
 // Backend data stored in io.BackendPlatformUserData to allow support for multiple Dear ImGui contexts
@@ -357,7 +358,7 @@ static void ImGui_ImplWin32_UpdateMouseData(ImGuiIO& io, ImGuiPlatformIO& platfo
         // When multi-viewports are enabled, all Dear ImGui positions are same as OS positions.
         if (io.WantSetMousePos)
         {
-            POINT pos = { (int)io.MousePos.x, (int)io.MousePos.y };
+            POINT pos = { (int)(io.MousePos.x / bd->MouseCoordinateScale), (int)(io.MousePos.y / bd->MouseCoordinateScale) };
             if ((io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) == 0)
                 ::ClientToScreen(focused_window, &pos);
             ::SetCursorPos(pos.x, pos.y);
@@ -374,7 +375,7 @@ static void ImGui_ImplWin32_UpdateMouseData(ImGuiIO& io, ImGuiPlatformIO& platfo
             POINT mouse_pos = mouse_screen_pos;
             if (!(io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable))
                 ::ScreenToClient(bd->hWnd, &mouse_pos);
-            io.AddMousePosEvent((float)mouse_pos.x, (float)mouse_pos.y);
+            io.AddMousePosEvent((float)mouse_pos.x * bd->MouseCoordinateScale, (float)mouse_pos.y * bd->MouseCoordinateScale);
         }
     }
 
@@ -478,6 +479,15 @@ static void ImGui_ImplWin32_UpdateMonitors()
     ImGui::GetPlatformIO().Monitors.resize(0);
     ::EnumDisplayMonitors(nullptr, nullptr, ImGui_ImplWin32_UpdateMonitors_EnumFunc, 0);
     bd->WantUpdateMonitors = false;
+}
+
+// OFXR standalone adapter. Convert BEFORE ImGui's duplicate-event filter.
+// Existing users retain physical coordinates with the default scale of 1.
+void ImGui_ImplWin32_SetMouseCoordinateScale(float scale)
+{
+    IM_ASSERT(scale > 0.0f);
+    if (ImGui_ImplWin32_Data* bd = ImGui_ImplWin32_GetBackendData())
+        bd->MouseCoordinateScale = scale;
 }
 
 void    ImGui_ImplWin32_NewFrame()
@@ -745,7 +755,7 @@ IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandlerEx(HWND hwnd, UINT msg, WPA
         if (msg == WM_NCMOUSEMOVE && !want_absolute_pos) // WM_NCMOUSEMOVE are absolute coordinates.
             ::ScreenToClient(hwnd, &mouse_pos);
         io.AddMouseSourceEvent(mouse_source);
-        io.AddMousePosEvent((float)mouse_pos.x, (float)mouse_pos.y);
+        io.AddMousePosEvent((float)mouse_pos.x * bd->MouseCoordinateScale, (float)mouse_pos.y * bd->MouseCoordinateScale);
         return 0;
     }
     case WM_MOUSELEAVE:

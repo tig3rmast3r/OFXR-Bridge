@@ -2,6 +2,9 @@
 
 **Smoother VR with the graphics card you already have.**
 
+Settings support English and 简体中文 through the **Language** selector.
+See [interface language and display scaling](docs/INTERFACE.md).
+
 OFXR-BRIDGE adds extra frames between the ones your game draws. Your headset
 gets the smooth frame rate it needs while your graphics card does less of the
 work. Play smoothly on a less powerful PC, or turn up the graphics without

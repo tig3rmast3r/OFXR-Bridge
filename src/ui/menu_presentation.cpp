@@ -1,5 +1,6 @@
 #include "xrfg/menu_presentation.hpp"
 #include "imgui.h"
+#include "ui_text.hpp"
 #include "imgui_internal.h"
 
 #include <algorithm>
@@ -146,25 +147,25 @@ bool render_menu_footer(autonomous::SettingsWidgetState& widgets,
     const auto chord = autonomous::keybinds().bindings[KeybindAction::open_interface];
     char key[16] = "Menu key";
     if (!chord.modifiers && chord.key >= 0x70 && chord.key <= 0x87)
-        std::snprintf(key, sizeof(key), "F%u", chord.key - 0x6F);
+        std::snprintf(key, sizeof(key),xrfg::autonomous::ui_translate("F%u"), chord.key - 0x6F);
     ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("%s menu, Esc close, drag empty space to move", key);
+    ui::TextDisabled("%s menu, Esc close, drag empty space to move", key);
     const auto text_width = [&](const char* text) {
-        return ImGui::CalcTextSize(text).x + style.FramePadding.x * 2;
+        return ui::CalcTextSize(text).x + style.FramePadding.x * 2;
     };
     const float button = ImGui::GetFrameHeight();
-    const float group = text_width("Click again to reset") + ImGui::CalcTextSize("Size").x +
-        button * 2 + ImGui::CalcTextSize("0.00x").x + text_width(reset_label) + spacing * 5;
+    const float group = text_width("Click again to reset") + ui::CalcTextSize("Size").x +
+        button * 2 + ui::CalcTextSize("0.00x").x + text_width(reset_label) + spacing * 5;
     const float right = ImGui::GetWindowWidth() - 12.F;
     ImGui::SameLine();
     ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), right - group));
     bool changed = autonomous::render_reset_defaults(widgets);
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted("Size");
+    ui::TextUnformatted("Size");
     const auto resize = [&](const char* label, float direction) {
         ImGui::SameLine();
-        const bool pressed = ImGui::Button(label, ImVec2(button, button));
+        const bool pressed = ui::Button(label, ImVec2(button, button));
         if (ImGui::IsItemHovered()) autonomous::show_settings_help(widgets, "Interface size", size_help);
         if (!pressed) return;
         const float steps = std::round(widgets.draft.menu_scale / step) + direction;
@@ -173,13 +174,13 @@ bool render_menu_footer(autonomous::SettingsWidgetState& widgets,
     };
     resize("-###Smaller size", -1);
     char scale[16];
-    std::snprintf(scale, sizeof(scale), "%.2fx", widgets.draft.menu_scale);
+    std::snprintf(scale, sizeof(scale),xrfg::autonomous::ui_translate("%.2fx"), widgets.draft.menu_scale);
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(scale);
+    ui::TextUnformatted(scale);
     resize("+###Larger size", 1);
     ImGui::SameLine();
-    if (ImGui::Button(reset_label)) {
+    if (ui::Button(reset_label)) {
         widgets.draft.menu_scale = autonomous::kDefaultMenuScale;
         widgets.draft.menu_offset_x = widgets.draft.menu_offset_y = 0.F;
         changed = true;

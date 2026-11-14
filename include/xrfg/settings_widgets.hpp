@@ -31,7 +31,7 @@ struct SettingsWidgetState {
     const char* help_body{};
     const char* footer_help_title{}; // from the headset footer, which draws after the panel
     const char* footer_help_body{};
-    char help_buffer[420]{};
+    char help_buffer[2048]{};
 };
 
 struct SettingsWidgetOptions {

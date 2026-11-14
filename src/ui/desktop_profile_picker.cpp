@@ -1,5 +1,6 @@
 #include "xrfg/desktop_profile_picker.hpp"
 #include "imgui.h"
+#include "ui_text.hpp"
 #include <windows.h>
 #include <algorithm>
 namespace xrfg::autonomous {
@@ -15,11 +16,11 @@ std::string label(const std::filesystem::path& file) {
 bool render_desktop_profile_picker(DesktopProfiles& profiles,SettingsWidgetState& ui,ScopedConfigurationSelection& selection) {
     bool changed{};
     ImGui::SetNextItemWidth(280.F);
-    if(ImGui::BeginCombo("##Settings",label(profiles.selected()).c_str())) {
+    if(ui::BeginCombo("##Settings",label(profiles.selected()).c_str())) {
         if(ImGui::IsWindowAppearing())profiles.refresh();
         const auto choose=[&](const std::filesystem::path& file) {
             const auto name=label(file);const bool selected=same_profile_file(file,profiles.selected());
-            if(ImGui::Selectable(name.c_str(),selected)) {
+            if(ui::Selectable(name.c_str(),selected)) {
                 finish_settings_widget_edits(ui);
                 const auto previous=profiles.selected();
                 if(!ui.save_failed && profiles.choose(file)) {
