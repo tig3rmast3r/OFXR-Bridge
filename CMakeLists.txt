@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.989.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.990.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1404,6 +1404,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(xrfg_luke_fresh_pacing PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_luke_inline_diagnostic COMMAND xrfg_three_slot_director_tests luke-inline-diagnostic)
         add_test(NAME xrfg_luke_afw_output_slot COMMAND xrfg_three_slot_director_tests luke-afw-slot)
+        add_test(NAME xrfg_osr_inactive_fsr_release COMMAND xrfg_three_slot_director_tests osr-inactive-fsr-release)
+        set_tests_properties(xrfg_osr_inactive_fsr_release PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_luke_post_afw_director_packet COMMAND xrfg_three_slot_director_tests post-afw-packet)
         add_test(NAME xrfg_luke_isolated_post_afw COMMAND xrfg_three_slot_director_tests luke-isolated-post-afw)
         add_test(NAME xrfg_hfw_director COMMAND xrfg_private_runtime_layer_tests hfw-solo-luke-d11-new)

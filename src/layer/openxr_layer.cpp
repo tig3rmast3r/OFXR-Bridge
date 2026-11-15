@@ -8649,7 +8649,11 @@ XrResult release_swapchain_image_locked(
         // Native AER resolves exact token guides AFTER the release-bound
         // colour capture; suppressing that capture until a guide exists would
         // prevent the token join from ever bootstrapping.
-        const bool skip_capture = !state->session->nvidia_options.ofr &&
+        // OSR needs this exact color ticket and fresh-eye receipt before it
+        // resolves guides by marker at EndFrame. A saved but inactive FSR
+        // selection must not discard that producer input (R1002 owner log).
+        const bool skip_capture = state->session->menu_enabled &&
+            !state->session->nvidia_options.ofr &&
             should_skip_luke_fsr_capture(
                 luke_split_eye,
                 state->session->frame_generation_mode,
@@ -18454,7 +18458,7 @@ XrResult layer_end_frame_impl(
     // Native FG has the same exact stereo guide requirement as FSR. Refuse
     // missing guides before private image acquisition, priming or worker handoff.
     // Continue submitting the whole real frame through its existing XR owner.
-    if (!afw_selected && state->frame_generation_mode == xrfg::D3D12FrameGenerationMode::native_dlss &&
+    if (state->menu_enabled && !afw_selected && state->frame_generation_mode == xrfg::D3D12FrameGenerationMode::native_dlss &&
         (!state->nvidia_options.ofr || !generation_arming_pending) &&
         (!stereo_projection || resource_mappings.ready())) {
         const auto reason = stereo_projection ? classify_fsr_stereo_guides(current_snapshot, projection_mappings)
@@ -18464,7 +18468,9 @@ XrResult layer_end_frame_impl(
             return bypass_generation(GenerationPrepareReason::native_stereo_unavailable, true);
         }
     }
-    if (state->frame_generation_mode == xrfg::D3D12FrameGenerationMode::fsr3 &&
+    // A retained provider selection is not an active FG request. OSR-only
+    // must reach its producer even if FSR was the last framegen selected.
+    if (state->menu_enabled && state->frame_generation_mode == xrfg::D3D12FrameGenerationMode::fsr3 &&
         (!stereo_projection || (resource_mappings.ready() && !generation_arming_pending))) {
         auto& admission = state->fsr_stereo_admission;
         const auto previous_reason = admission.reason;
@@ -18487,7 +18493,7 @@ XrResult layer_end_frame_impl(
         }
         if (previous_reason != FsrStereoGuideReason::ready)
             xrfg::report_fsr_frame_generation_status(xrfg::FsrFrameGenerationStatus::waiting_for_guides);
-    } else if (state->frame_generation_mode != xrfg::D3D12FrameGenerationMode::fsr3) {
+    } else if (!state->menu_enabled || state->frame_generation_mode != xrfg::D3D12FrameGenerationMode::fsr3) {
         state->fsr_stereo_admission = {};
     }
     if (!resource_mappings.ready() || generation_arming_pending || panel_arming_pending) {

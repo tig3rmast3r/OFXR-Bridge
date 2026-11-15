@@ -1001,7 +1001,8 @@ void held_afw_pair_gpu_test(const std::shared_ptr<SessionState>& state,
 #include "luke_fidelity_busy_fixture.inc"
 void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = false, bool luke = false, bool gap = false,
                   bool afw_slot_probe = false, bool post_afw_packet = false, bool missing_afw_guides = false, int private_mode = 0,
-                  bool isolated_lane = false, unsigned native_osr_factor = 0, bool native_fidelity = false) {
+                  bool isolated_lane = false, unsigned native_osr_factor = 0, bool native_fidelity = false,
+                  bool inactive_fsr_release = false) {
     terminal_output_factor=native_osr_factor?native_osr_factor:2;
     terminal_fidelity_cut_output=native_fidelity;
     terminal_optical_test = post_afw_packet;
@@ -1215,6 +1216,31 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
           g_swapchains[chain->handle] = chain; g_sessions[state->handle] = state;
           if (with_layers) g_swapchains[right_chain->handle] = right_chain;
           for (const auto& a : auxiliary) if (a) g_swapchains[a->handle] = a; }
+        if(inactive_fsr_release) {
+            auto desired=xrfg::autonomous::snapshot().desired;
+            desired.enabled=false;desired.frame_generation=1;desired.afw_mode=3;desired.luke_osr=2;desired.ofr_enabled=false;
+            check(xrfg::autonomous::request(desired),"request isolated OSR-only FSR selection");
+            xrfg::autonomous::apply_runtime_settings();
+            state->menu_enabled=false;state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::fsr3;
+            state->graphics_binding=SessionGraphicsBinding::d3d11;state->graphics_binding_capabilities|=8ULL;
+            state->luke_afw_enabled=true;state->dlss_motion_vectors=true;
+            unsigned eye{};
+            for(const auto& c:{chain,right_chain}) {
+                c->dlss_logical_eye_count=2;c->dlss_logical_eye_index=eye;
+                c->acquired_indices.push_back(0);c->waited_count=1;
+                XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                check(XR_SUCCEEDED(release_swapchain_with_identity(c,&release,std::nullopt)),"OSR-only actual release");
+                check(c->last_released_capture && c->last_released_capture->serial &&
+                    !c->last_released_motion_vectors && state->luke_afw_released_eye==eye,
+                    "inactive FSR selection discarded OSR color capture or fresh-eye receipt");
+                check(SUCCEEDED(c->frame_generation->d3d11_interop->wait_for_idle()),"OSR-only capture GPU completion");
+                ++eye;
+            }
+            {std::scoped_lock lock(g_state_mutex);g_swapchains.clear();g_sessions.clear();}
+            gpu_outputs.clear();readback.Reset();auxiliary_readback.Reset();readback_context.Reset();
+            std::cout<<"OSR-only retained FSR: both split-eye release captures and fresh-eye receipts survive without pre-resolved guides PASS\n";
+            return;
+        }
         if(private_mode==1 || private_mode==2 || private_mode==5) {
             if(private_mode==5)luke_fidelity_busy_probe(state,chain);
             else luke_private_inline_probe(state,{chain,right_chain},private_mode==1);
@@ -2928,6 +2954,7 @@ xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
 #endif
             if(mode == "depth-history") { depth_history_test(); return 0; }
             if(mode == "luke-afw-slot") { gpu_pipeline(true, false, false, false, false, true); return 0; }
+            if(mode == "osr-inactive-fsr-release") { gpu_pipeline(true,false,false,false,false,false,false,false,0,false,0,false,true);return 0; }
             if(mode == "post-afw-packet") { gpu_pipeline(true, false, false, false, false, false, true); return 0; }
             if(mode == "luke-isolated-post-afw") { gpu_pipeline(true,false,false,false,false,false,true,false,0,true); return 0; }
             if(mode == "native-osr2" || mode == "native-osr3" || mode == "native-osr4" ||
