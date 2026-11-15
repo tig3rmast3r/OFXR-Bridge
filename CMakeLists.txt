@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.988.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.989.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2083,6 +2083,10 @@ if(TARGET xrfg_three_slot_director_tests AND TARGET xrfg_sl_fixture_legacy)
         optiscaler-gta-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
     set_tests_properties(xrfg_optiscaler_gta_capture PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
+    add_test(NAME xrfg_optiscaler_ghost_capture COMMAND xrfg_three_slot_director_tests
+        optiscaler-ghost-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+        "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+    set_tests_properties(xrfg_optiscaler_ghost_capture PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
     add_test(NAME xrfg_gta_enhanced_ngx_actual_capture COMMAND xrfg_three_slot_director_tests
         gta-enhanced-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")

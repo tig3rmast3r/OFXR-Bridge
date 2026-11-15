@@ -1198,7 +1198,13 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     if(observed_motion_span) {g.raw_motion_native_span=observed_motion_span;g.raw_motion_native_span_confirmed=true;}
     g.osr_native_cabin_motion=luke && cyberpunk_process() &&
         observed_motion_span==1 && g.raw_motion_native_span_confirmed;
-    g.compose_native_object_history=luke && (gta_enhanced_process() || g.osr_native_cabin_motion) && g.raw_motion_native_span==1;
+    // Stock OptiScaler consumes the original public DLSS guides. Ghost's
+    // R1000 F8s fit adjacent-eye N-1 (<.6px), not the NVIDIA-only N-2 title
+    // contract (up to39px). Reuse the depth/camera-aware N-1 history path;
+    // do not apply the replacement contract to NVIDIA's native DLSS body.
+    const bool replacement_motion=OptiscalerEvaluationScope::observing() && observed_motion_span==1;
+    g.compose_native_object_history=luke &&
+        (gta_enhanced_process() || g.osr_native_cabin_motion || replacement_motion) && g.raw_motion_native_span==1;
     if(luke&&gta_enhanced_process())
         g.gta_headlock=query_luke_gta_headlock(bridge_flight_logger().enabled());
     // Scoped camera values replace apply_camera's camera read, while its Luke
@@ -1825,7 +1831,7 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
             production_sequence,native_list_identity.Get(),native_device_identity.Get(),frame);
         if(!public_transaction&&(!logical_production || production_sequence))frame=capture(list,h,p,production_sequence,guide_stream,
             kcd_production?&invocation_camera:nullptr,public_production,nullptr,nullptr,nullptr,
-            original_public?1U:0U);
+            (original_public||replacement.outermost())?1U:0U);
         if(!delegate_nr&&!replacement.active())neural_rendering::before_sr(identity,list,p,queue.Get());
     }catch(...){log("native_pre_sr_exception");}
     if(original_public&&gta_enhanced_process())

@@ -832,6 +832,18 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                 state().modules[5].evaluate=&actual_optiscaler_original;
             }
         }
+        else if(test_optiscaler_replacement) {
+            // Ghost's stock SR writes the caller output directly. Unlike the
+            // GTA wrapper fixture above, there is no post-SR composite that
+            // can overwrite the marker after the exact SDK completion.
+            state().modules[5].replacement_implementation=true;
+            actual_optiscaler_forward=state().modules[3].evaluate;
+            state().modules[5].evaluate=&actual_optiscaler_original;
+            state().modules[3].evaluate=[](ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
+                const NVSDK_NGX_Parameter* parameters,void* callback) {
+                return evaluate<5>(list,handle,parameters,callback);
+            };
+        }
         if(test_unlisted_typed_dispatch) {
             // Public generic call outside, REAL VR in between, typed SR inside.
             state().modules[0].typed_implementation=true;
@@ -1160,9 +1172,12 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             require(set_constants(constants,n,0)&&evaluate_sl(reinterpret_cast<sl1::CommandBuffer*>(list.Get()),sl1::eFeatureDLSS,n,0),
                 "actual capture original Streamline results");
             if(context.frame && !scene_camera)require(
-                context.frame->raw_motion_native_span==((dead_space || test_ghost_native_motion ||
-                    test_horizon_native_motion||test_unlisted_motion_swap)?2u:1u),
+                context.frame->raw_motion_native_span==(!test_optiscaler_replacement &&
+                    (dead_space || test_ghost_native_motion || test_horizon_native_motion||test_unlisted_motion_swap)?2u:1u),
                 "actual title/runtime capture used the wrong native motion interval");
+            if(context.frame && test_optiscaler_replacement)
+                require(context.frame->raw_motion_native_span_confirmed && context.frame->compose_native_object_history,
+                    "stock OptiScaler lost its confirmed original N-1 motion/history contract");
             if(context.frame && test_cyberpunk_native_motion) {
                 std::cout<<"Cyberpunk receipt frame="<<n<<" original="<<original_public_guides
                     <<" span="<<context.frame->raw_motion_native_span
@@ -1649,6 +1664,12 @@ int run_optiscaler_gta_capture_test(const wchar_t* realvr,const wchar_t* streaml
     const auto result=run_gta_enhanced_ngx_capture_test(realvr,streamline);
     if(!result)std::cout<<"OptiScaler replacement SR: original game guides, exact final color and native-completion ownership PASS\n";
     return result;
+}
+int run_optiscaler_ghost_capture_test(const wchar_t* realvr,const wchar_t* streamline) {
+    test_optiscaler_replacement=true;
+    test_ghost_native_motion=true;
+    set_ngx_capture_steamvr_runtime(true);
+    return run_actual_ngx_capture_pipeline(realvr,streamline,false);
 }
 int run_dead_space_ingress_diagnostics_test(const wchar_t* realvr,const wchar_t* streamline) {
     const auto root=std::filesystem::temp_directory_path()/

@@ -10,6 +10,7 @@
 namespace xrfg {int run_luke_ngx_dispatch_test(const wchar_t*,bool);}
 namespace xrfg {int run_dead_space_ngx_capture_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_optiscaler_gta_capture_test(const wchar_t*,const wchar_t*);}
+namespace xrfg {int run_optiscaler_ghost_capture_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_gta_enhanced_ngx_capture_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_cyberpunk_ngx_capture_test(const wchar_t*,const wchar_t*,bool,bool);}
 namespace xrfg {int run_dead_space_ingress_diagnostics_test(const wchar_t*,const wchar_t*);}
@@ -2768,6 +2769,10 @@ xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
     if(argc>3 && (std::string_view(argv[1])=="horizon-steamvr-capture"||std::string_view(argv[1])=="horizon-vdxr-capture")) {
         std::filesystem::path wr(argv[2]),ws(argv[3]);
         return xrfg::run_horizon_ngx_capture_test(wr.c_str(),ws.c_str(),std::string_view(argv[1])=="horizon-steamvr-capture");
+    }
+    if(argc>3 && std::string_view(argv[1])=="optiscaler-ghost-capture") {
+        const std::filesystem::path vr(argv[2]),sl(argv[3]);
+        return xrfg::run_optiscaler_ghost_capture_test(vr.c_str(),sl.c_str());
     }
     if(argc>3 && (std::string_view(argv[1])=="ghost-steamvr-capture"||std::string_view(argv[1])=="ghost-vdxr-capture")) {
         const std::string realvr=argv[2],streamline=argv[3];
