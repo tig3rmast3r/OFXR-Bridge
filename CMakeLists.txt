@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.990.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.991.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2585,6 +2585,8 @@ if(WIN32 AND XRFG_BUILD_TESTS)
  target_compile_definitions(xrfg_osr_current_motion_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
  target_link_libraries(xrfg_osr_current_motion_tests PRIVATE d3d12 dxgi)
  add_dependencies(xrfg_osr_current_motion_tests xrfg_d3d12_history)
+ add_test(NAME xrfg_osr_owned_gap_gpu COMMAND xrfg_osr_current_motion_tests owned-gap)
+ set_tests_properties(xrfg_osr_owned_gap_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
  add_test(NAME xrfg_osr_current_motion_gpu COMMAND xrfg_osr_current_motion_tests)
  set_tests_properties(xrfg_osr_current_motion_gpu PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
  add_test(NAME xrfg_osr_rdr2_classified_history COMMAND xrfg_osr_current_motion_tests classified-history)

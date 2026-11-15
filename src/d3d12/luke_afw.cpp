@@ -2763,9 +2763,24 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             const auto& history = impl_->osr_full.history(peer_eye);
             const bool gap_background = guide.raw_motion_variable_interval && effective_mode == 1 &&
                 (settings.mode == 2 || settings.mode == 3);
-            const bool history_usable = osr_full_history_usable(gap_background ? settings.mode : effective_mode,
+            // Original N1 OSR can reproject an OWNED recent peer history
+            // through its exact camera/depth after a skipped production. Do
+            // not inherit AFW's two-prime colour protocol and flash between
+            // history-first and the all-current warp for these short gaps.
+            const bool owned_history = !guide.raw_motion_variable_interval &&
+                guide.raw_motion_native_span_confirmed && guide.raw_motion_native_span==1 &&
+                osr_full_owned_history_usable(settings.mode,
+                    {guide.publication,guide.stream,guide.epoch},
+                    {history.publication,history.stream,history.epoch},
+                    {impl_->previous_source_publication[peer_eye],impl_->previous_source_stream[peer_eye],impl_->previous_source_epoch[peer_eye]},
+                    have_previous_camera && guide.camera_data_valid && guide.camera_matrices_valid,guide.reset);
+            const bool history_usable = owned_history || osr_full_history_usable(gap_background ? settings.mode : effective_mode,
                 guide.publication, history.publication,
                 peer_retained?middle->publication:impl_->previous_source_publication[peer_eye]);
+            const bool history_adjacent=history.publication && history.publication+1==guide.publication;
+            if(owned_history && effective_mode==1)
+                bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,history_adjacent?3:1,
+                    1352,guide.publication,history.publication);
             OsrFullWarp::Inputs in{};
             in.source_depth = input.depth.texture;
             in.source_depth_state = input.depth.initial_state;
@@ -2791,7 +2806,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             in.reset_history = guide.reset;
             // The history frame's own motion needs that eye's frame before it
             // for the camera's share: the two publications back it points to.
-            in.use_history_motion = history_usable && !gap_background && history.has_motion &&
+            in.use_history_motion = history_usable && (!owned_history || history_adjacent) &&
+                !gap_background && history.has_motion &&
                 (!guide.raw_motion_variable_interval || history.classified_motion) &&
                 history.previous_publication != 0 && history.previous_publication + (history.native_motion?1:2) == history.publication;
             in.use_classified_history_motion=guide.raw_motion_variable_interval && history.classified_motion &&

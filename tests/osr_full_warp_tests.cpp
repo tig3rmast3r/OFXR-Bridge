@@ -42,6 +42,18 @@ int main() {
         check(!xrfg::osr_full_adjacent_motion_usable(cur,peer,peer,1,true,false,false),"missing native cameras reject direct");
         check(!xrfg::osr_full_adjacent_motion_usable(cur,peer,peer,1,true,true,true),"reset rejects direct");
     }
+    {
+        using I=xrfg::OsrFullFrameIdentity;
+        const I current{11960,22,4},stored{11957,11,3};
+        check(xrfg::osr_full_owned_history_usable(3,current,stored,stored,true,false),"N1 gap retains exact owned peer history at original publication");
+        check(!xrfg::osr_full_owned_history_usable(3,current,stored,{11957,11,5},true,false),"gap never relabels old peer epoch");
+        check(!xrfg::osr_full_owned_history_usable(3,current,stored,{11957,22,3},true,false),"gap never borrows another eye producer");
+        check(!xrfg::osr_full_owned_history_usable(3,current,stored,{11958,11,3},true,false),"gap rejects history copy not matching accepted colour");
+        check(!xrfg::osr_full_owned_history_usable(3,current,stored,stored,false,false),"gap requires valid current camera domain");
+        check(!xrfg::osr_full_owned_history_usable(3,current,stored,stored,true,true),"scene reset must still discard owned history");
+        check(!xrfg::osr_full_owned_history_usable(1,current,stored,stored,true,false),"requested alternate-only never gains history");
+        check(!xrfg::osr_full_owned_history_usable(3,{11962,22,4},stored,stored,true,false),"no unbounded stale history across long outage");
+    }
     check(!xrfg::osr_full_current_motion_usable(103,100,101,101,2,true,false,true), "peer gap rejects current pull");
     check(!xrfg::osr_full_current_motion_usable(103,102,99,99,2,true,false,true), "native gap rejects current pull");
     check(!xrfg::osr_full_current_motion_usable(103,102,101,99,2,true,false,true), "native camera identity must match stored depth");

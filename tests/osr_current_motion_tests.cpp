@@ -6,6 +6,7 @@
 #include <bit>
 #include <cmath>
 #include <string_view>
+#include "xrfg/luke_afw_continuity.hpp"
 #include "rdr2_camera_phase_pass.hpp"
 
 namespace {
@@ -133,6 +134,39 @@ void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=fa
     }
     std::printf("current history eye=%u lower=%u old_z=%.3f invalid=%u static=%u hard_near=%u PASS\n",eye,low,native_z,invalid_native,zero,hard_near);
 }
+void owned_gap_history(unsigned eye,bool low) {
+    Fixture f;std::vector<UINT> previous(width*height),current(width*height);
+    for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
+        previous[y*width+x]=grey(60+(x*7+y*11)%90);
+        current[y*width+x]=previous[y*width+std::max(0,int(x)-2)]^0x00100000u;
+    }
+    warm(f,previous);
+    using Id=xrfg::OsrFullFrameIdentity;
+    const Id accepted{11957,11,3};save(f,1-eye,previous,.2F,nullptr,accepted);
+    for(unsigned age:{3u,4u}) {
+        auto in=inputs(f,eye);in.lower_quality=low;
+        const auto& stored=f.warp.history(1-eye);
+        const auto legacy_mode=xrfg::luke_afw_effective_mode(3,accepted.publication+age,
+            accepted.publication,eye,1-eye,accepted.publication-1);
+        check(!xrfg::osr_full_history_usable(legacy_mode,accepted.publication+age,
+            stored.publication,accepted.publication),"regression must reproduce old all-current prime after this actual gap");
+        in.use_history=xrfg::osr_full_owned_history_usable(3,{accepted.publication+age,22,4},
+            {stored.publication,stored.stream,stored.epoch},accepted,true,false);
+        // No current or historical vector is extrapolated across a missing
+        // endpoint. Camera/depth transport keeps the actual old receipt.
+        in.use_history_motion=false;in.use_current_history_motion=false;
+        in.forward_history[12]=4.F/float(width);in.backward_history[12]=-4.F/float(width);
+        const auto output=render_with_inputs(f,in,current,std::vector<float>(width*height,.2F));
+        unsigned matched{},count{};
+        for(UINT y=8;y<height-8;++y)for(UINT x=8;x<width-8;++x) {
+            ++count;matched+=output[y*width+x]==previous[y*width+x-2];
+        }
+        if(matched!=count)std::fprintf(stderr,"gap eye=%u low=%u age=%u own-history pixels=%u/%u\n",eye,low,age,matched,count);
+        check(matched==count,"N1 skipped production flashes to current warp instead of owned history at its own camera");
+        check(f.warp.history(1-eye).publication==accepted.publication,"gap relabeled retained history as new");
+    }
+}
+
 void transported_depth(unsigned eye,bool low) {
     Fixture f;std::vector<UINT> previous(width*height),current(width*height),zero(width*height,0),motion(width*height,0x4400u);
     std::vector<float> now(width*height),native(width*height),peer(width*height);
@@ -687,6 +721,11 @@ void unclassified_history(unsigned eye,bool low) {
 }
 #include "rdr2_next_targets.inc"
 int main(int argc,char** argv) {
+    if(argc==2&&std::string_view(argv[1])=="owned-gap") {
+        for(unsigned eye:{0u,1u})for(bool low:{false,true})owned_gap_history(eye,low);
+        std::puts("OSR owned gap: both eyes/qualities retain own camera/depth colour across skipped original publications PASS");return 0;
+    }
+
     if(argc==2&&std::string_view(argv[1])=="camera-phase") {
         rdr2_phase_cpu();rdr2_phase_gpu(DXGI_FORMAT_R8G8B8A8_UNORM);rdr2_phase_gpu(DXGI_FORMAT_B8G8R8A8_UNORM);return 0;
     }

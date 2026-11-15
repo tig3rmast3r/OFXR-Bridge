@@ -168,6 +168,18 @@ inline bool osr_full_history_usable(int effective_mode, std::uint64_t publicatio
     return publication - history_publication <= max_age;
 }
 
+// Full OSR owns colour/depth/camera for each accepted eye. A short missing
+// native production does not invalidate that exact receipt. The pinned AFW
+// provider still requires contiguous A/B/A and must keep its separate prime.
+inline bool osr_full_owned_history_usable(int requested, OsrFullFrameIdentity current,
+    OsrFullFrameIdentity stored, OsrFullFrameIdentity accepted,
+    bool current_camera_valid, bool reset) noexcept {
+    if(reset || !current_camera_valid || !current.stream || !current.epoch ||
+        !stored.stream || !stored.epoch || stored.stream!=accepted.stream ||
+        stored.epoch!=accepted.epoch) return false;
+    return osr_full_history_usable(requested,current.publication,stored.publication,accepted.publication);
+}
+
 // Flags handed to the shaders (OsrFullConstants::flags).
 constexpr std::uint32_t kOsrFullFlagDebug = 1u;
 constexpr std::uint32_t kOsrFullFlagHistory = 2u;

@@ -428,7 +428,11 @@ struct BridgeFlightLogger::Impl {
         const bool allocation_failure=record.operation==BridgeFlightOperation::swapchain_eligibility && record.result==13;
         const bool hybrid_guide_receipt=record.operation==BridgeFlightOperation::luke_afw_stage &&
             ((record.a==1496 && record.result>=0) || (record.a>=1490 && record.a<=1492));
-        const bool benchmark = record.operation==BridgeFlightOperation::vram_usage || hybrid_guide_receipt || allocation_failure || ui_progress || control_transition || rife_dependency || pacing_receipt || rife_timing || eye_changed || fsr_description ||
+        // Preserve rare OSR gap transitions in the non-rolling diagnostic log:
+        // the owner cannot capture a one-frame flash on demand.
+        const bool osr_continuity = record.operation==BridgeFlightOperation::luke_afw_stage &&
+            (record.a==1352 || (record.a==1310 && record.result>=256 && record.result<512));
+        const bool benchmark = osr_continuity || record.operation==BridgeFlightOperation::vram_usage || hybrid_guide_receipt || allocation_failure || ui_progress || control_transition || rife_dependency || pacing_receipt || rife_timing || eye_changed || fsr_description ||
             record.operation==BridgeFlightOperation::generation_prepare ||
             record.operation==BridgeFlightOperation::continuity_reset ||
             record.operation==BridgeFlightOperation::fsr_recovery ||
