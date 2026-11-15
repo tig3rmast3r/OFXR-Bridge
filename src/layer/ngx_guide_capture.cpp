@@ -1,4 +1,5 @@
 #include "xrfg/ngx_guide_capture.hpp"
+#include "xrfg/reshade_dxgi_compat.hpp"
 #include "xrfg/upscaler_observation.hpp"
 #ifdef XRFG_NATIVE_DLSSG
 #include "xrfg/dlss_motion_vectors.hpp"
@@ -2003,8 +2004,26 @@ void poll_optiscaler() {
         if(state().modules[5].retained){log("optiscaler_sr_hook_installed",5);return;}
     }
 }
+void poll_optiscaler_reshade_compat() {
+    if(!capture_steamvr_runtime.load(std::memory_order_relaxed))return;
+    static std::atomic_bool ready{};
+    if(!ready.load(std::memory_order_acquire)) {
+        if(!GetModuleHandleW(L"ReShade64.dll")&&!GetModuleHandleW(L"ReShade32.dll"))return;
+        for(const auto* name:{L"winmm.dll",L"OptiScaler.dll",L"dxgi.dll",L"version.dll",L"d3d12.dll",L"dbghelp.dll"}) {
+            if(optiscaler_module_valid(GetModuleHandleW(name))&&ensure_reshade_dxgi_compat()) {
+                if(!ready.exchange(true,std::memory_order_acq_rel))log("optiscaler_reshade_dxgi_compat");
+                break;
+            }
+        }
+    }
+    static std::atomic<std::uint64_t> reported{};
+    const auto count=reshade_dxgi_unwrapped_factories();
+    if(count&&reported.exchange(count,std::memory_order_relaxed)!=count)
+        log("optiscaler_reshade_internal_factory",count);
+}
 void install_feature_hooks() {
     poll_optiscaler_ffx();poll_optiscaler();
+    poll_optiscaler_reshade_compat();
     install_dispatch<0>(GetModuleHandleW(L"nvngx_dlss.dll"));
     install_dispatch<1>(GetModuleHandleW(L"nvngx_dlssd.dll"));
     install_dispatch<2>(GetModuleHandleW(L"_nvngx.dll"));
@@ -2121,6 +2140,9 @@ void prepare_ngx_feature_discovery(const wchar_t* directory) noexcept {
 }
 void configure_ngx_guide_capture(ID3D12CommandQueue* queue,bool enabled) noexcept {
     try {
+        // Synchronous before the private SteamVR consumer can enter its first
+        // Begin/End. The monitor also handles ReShade loaded later in a session.
+        if(queue)poll_optiscaler_reshade_compat();
         ComPtr<ID3D12Device> luke_device;ComPtr<ID3D12CommandQueue> luke_queue;
         if(queue && native_ingress::query_luke_context(luke_device.GetAddressOf(),luke_queue.GetAddressOf()))
             queue=luke_queue.Get();
