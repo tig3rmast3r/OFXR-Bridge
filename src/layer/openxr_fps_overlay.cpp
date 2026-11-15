@@ -270,7 +270,7 @@ struct OpenXrFpsOverlay::Impl {
             xr_handle_bits(menu_swapchain), menu_index);
     }
     bool menu_failure(unsigned stage, std::int64_t result) noexcept {
-        menu_event(stage, result); close_menu(); return false;
+        ui_stage(2,stage,result);menu_event(stage, result); close_menu(); return false;
     }
 
     static void draw_menu(void* user) {

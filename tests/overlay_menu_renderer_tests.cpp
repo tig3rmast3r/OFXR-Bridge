@@ -1,4 +1,6 @@
 #include "xrfg/overlay_menu_renderer.hpp"
+#include "xrfg/d3d12_native_binding.hpp"
+#include "d3d12_reported_device_alias.hpp"
 #include "xrfg/overlay_menu_input.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -197,11 +199,18 @@ void d11(bool single_threaded=false) {
     for(UINT64 i=0;i<debug->GetNumStoredMessages();++i){SIZE_T size{};debug->GetMessage(i,nullptr,&size);std::vector<char> bytes(size);auto* message=reinterpret_cast<D3D11_MESSAGE*>(bytes.data());debug->GetMessage(i,message,&size);
         require(message->Severity!=D3D11_MESSAGE_SEVERITY_ERROR&&message->Severity!=D3D11_MESSAGE_SEVERITY_CORRUPTION,"zero D11 validation errors");}
 }
-void d12() {
+void d12(bool reshade_proxy=false) {
     ComPtr<ID3D12Debug> debug;hr(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)),"D12 debug");debug->EnableDebugLayer();
     ComPtr<IDXGIFactory4> factory;ComPtr<IDXGIAdapter> warp;hr(CreateDXGIFactory1(IID_PPV_ARGS(&factory)),"DXGI factory");hr(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)),"D12 WARP adapter");
     ComPtr<ID3D12Device> device;hr(D3D12CreateDevice(warp.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)),"WARP D12 device");
     ComPtr<ID3D12InfoQueue> validation;device.As(&validation);validation->ClearStoredMessages();
+    // Proxy QI and raw resource/fence owners deliberately have different COM
+    // addresses while referring to the same exact underlying WARP device.
+    // Keep foreign-device rejections and all actual draw/readback checks.
+    if(reshade_proxy) {
+        const auto native=device;
+        device.Attach(new ReportedDeviceAlias(native.Get(),true,false,nullptr,xrfg::d3d_native::reshade_unwrapped_guid));
+    }
     ComPtr<ID3D12CommandQueue> queue;D3D12_COMMAND_QUEUE_DESC q{};hr(device->CreateCommandQueue(&q,IID_PPV_ARGS(&queue)),"D12 queue");
     ComPtr<ID3D12Fence> fence,blocker;hr(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)),"caller D12 fence");hr(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&blocker)),"private queue blocker");
     UINT64 serial=0;
@@ -269,14 +278,14 @@ void d12() {
 }
 }
 int main(int argc,char** argv){
-    if(argc>2||(argc==2&&strcmp(argv[1],"d11")&&strcmp(argv[1],"d12"))){fprintf(stderr,"Expected d11 or d12 (or no argument for both)\n");return 2;}
+    if(argc>2||(argc==2&&strcmp(argv[1],"d11")&&strcmp(argv[1],"d12")&&strcmp(argv[1],"d12-reshade"))){fprintf(stderr,"Expected d11, d12 or d12-reshade (or no argument for both)\n");return 2;}
     auto* foreign=ImGui::CreateContext();ImGui::GetIO().IniFilename=nullptr;try{
     const bool both=argc<2;
     if(both||!strcmp(argv[1],"d11")){
         auto before=checks;d11();printf("D3D11 WARP draw/state/retirement: %u checks passed\n",checks-before);
         before=checks;d11(true);printf("D3D11 SINGLETHREADED WARP draw/state/retirement: %u checks passed\n",checks-before);
     }
-    if(both||!strcmp(argv[1],"d12")){const auto before=checks;d12();printf("D3D12 WARP draw/immutable lifetime/concurrency: %u checks passed\n",checks-before);}
+    if(both||!strcmp(argv[1],"d12")||!strcmp(argv[1],"d12-reshade")){const auto before=checks;d12(argc==2&&!strcmp(argv[1],"d12-reshade"));printf("D3D12 WARP draw/immutable lifetime/concurrency: %u checks passed\n",checks-before);}
     require(ImGui::GetCurrentContext()==foreign,"foreign ImGui context survives both renderer APIs");
     ImGui::DestroyContext(foreign);printf("Overlay menu renderer WARP: %u checks passed\n",checks);return 0;
 }catch(const std::exception& error){fprintf(stderr,"FAIL after %u checks: %s\n",checks,error.what());return 1;}}

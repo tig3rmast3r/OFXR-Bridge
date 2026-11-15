@@ -5,6 +5,7 @@
 // V441 replaces borrowed game-list state/hooks with a caller-private RT list
 // and exact per-image submission receipts. No sequential upload ring is used.
 #include "xrfg/overlay_menu_renderer.hpp"
+#include "xrfg/d3d12_native_binding.hpp"
 #include "xrfg/settings_widgets.hpp"
 #include "xrfg/overlay_menu_input.hpp"
 #include "imgui.h"
@@ -56,13 +57,13 @@ class ImmutableMenuDraw12
 
     static ComPtr<IUnknown> Identity(IUnknown* object)
     {
-        // Streamline forwards resource/list methods but can return a proxy device.
-        // Compare native COM identity, not the address of two different wrappers.
-        constexpr GUID nativeGuid{0xadec44e2,0x61f0,0x45c3,{0xad,0x9f,0x1b,0x37,0x37,0x92,0x84,0xff}};
-        ComPtr<IUnknown> native, identity;
-        if (SUCCEEDED(object->QueryInterface(nativeGuid, reinterpret_cast<void**>(native.GetAddressOf()))))
-            object=native.Get();
-        object->QueryInterface(IID_PPV_ARGS(&identity));
+        // Resource/list/fence owners may report a native device while the
+        // renderer holds its ReShade/Streamline proxy. Unwrap only for exact
+        // COM identity comparison; keep all drawing on the original objects.
+        IUnknown* borrowed{};
+        ComPtr<IUnknown> identity;
+        if (d3d_native::get_borrowed(object,&borrowed))
+            borrowed->QueryInterface(IID_PPV_ARGS(&identity));
         return identity;
     }
     bool Owns(ID3D12DeviceChild* child) const
@@ -416,11 +417,11 @@ struct OverlayMenuRenderer::Impl {
     }
     static bool same_identity(IUnknown* a,IUnknown* b) noexcept {
         if(!a||!b)return false;
-        constexpr GUID nativeGuid{0xadec44e2,0x61f0,0x45c3,{0xad,0x9f,0x1b,0x37,0x37,0x92,0x84,0xff}};
         auto identity=[&](IUnknown* value) {
-            Ptr<IUnknown> native, result;
-            if(SUCCEEDED(value->QueryInterface(nativeGuid,reinterpret_cast<void**>(native.GetAddressOf()))))value=native.Get();
-            value->QueryInterface(IID_PPV_ARGS(&result));return result;
+            IUnknown* borrowed{};Ptr<IUnknown> result;
+            if(d3d_native::get_borrowed(value,&borrowed))
+                borrowed->QueryInterface(IID_PPV_ARGS(&result));
+            return result;
         };
         const auto first=identity(a),second=identity(b);return first&&second&&first.Get()==second.Get();
     }

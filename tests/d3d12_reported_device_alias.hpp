@@ -5,13 +5,14 @@
 class ReportedDeviceAlias : public ID3D12Device {
 public:
     explicit ReportedDeviceAlias(ID3D12Device* native, bool exposes_native = false,
-        bool exposes_public_video=false,ID3D12Device* video_owner=nullptr)
+        bool exposes_public_video=false,ID3D12Device* video_owner=nullptr,
+        GUID unwrap_guid=xrfg::d3d_native::streamline_native_guid)
         : native_(native),video_owner_(video_owner?video_owner:native),
-          exposes_native_(exposes_native),exposes_public_video_(exposes_public_video) {}
+          exposes_native_(exposes_native),exposes_public_video_(exposes_public_video),unwrap_guid_(unwrap_guid) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
         if (!object) return E_POINTER;
         *object = nullptr;
-        if (exposes_native_ && iid == xrfg::d3d_native::streamline_native_guid)
+        if (exposes_native_ && iid == unwrap_guid_)
             return native_->QueryInterface(__uuidof(ID3D12Device), object);
         if(exposes_public_video_ && iid==__uuidof(ID3D12VideoDevice2)) {
             ++public_video_queries;
@@ -74,5 +75,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Device> video_owner_;
     bool exposes_native_{};
     bool exposes_public_video_{};
+    GUID unwrap_guid_{};
     volatile LONG references_{1};
 };
