@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.987.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.988.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -97,6 +97,12 @@ endif()
 
 if(XRFG_BUILD_TESTS)
     enable_testing()
+    if(WIN32)
+        add_executable(xrfg_optiscaler_module_tests tests/optiscaler_module_tests.cpp)
+        target_include_directories(xrfg_optiscaler_module_tests PRIVATE include)
+        target_compile_features(xrfg_optiscaler_module_tests PRIVATE cxx_std_20)
+        target_link_libraries(xrfg_optiscaler_module_tests PRIVATE version)
+    endif()
     if(WIN32)
         add_library(xrfg_luke_marker_custom SHARED tests/luke_detection_marker.cpp)
         add_library(xrfg_luke_marker_named SHARED tests/luke_detection_marker.cpp)
@@ -2019,6 +2025,7 @@ if(XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
         target_include_directories(${t} PRIVATE "${XRFG_DLSS_SDK_ROOT}/include" "${XRFG_DEPENDENCY_ROOT}/Streamline")
         target_include_directories(${t} PRIVATE "${XRFG_GENERATED_SHADER_DIR}")
         target_link_libraries(${t} PRIVATE xrfg_autonomous_control xrfg_neural_rendering safetyhook version)
+        target_include_directories(${t} PRIVATE "${XRFG_FIDELITYFX_API_INCLUDE_DIR}")
         target_compile_definitions(${t} PRIVATE XRFG_NATIVE_DLSSG)
     endforeach()
 endif()
@@ -2028,6 +2035,7 @@ if(XRFG_BUILD_LAYER)
   if(NOT XRFG_X86)
     target_compile_definitions(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE XRFG_NATIVE_DLSSG)
   endif()
+  target_include_directories(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE "${XRFG_FIDELITYFX_API_INCLUDE_DIR}")
   target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE xrfg_neural_rendering)
   add_dependencies(XR_APILAYER_XRFrameBridge_diagnostic xrfg_neural_forwarder)
 endif()
@@ -2071,6 +2079,10 @@ if(TARGET xrfg_three_slot_director_tests AND TARGET xrfg_sl_fixture_legacy)
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
     set_tests_properties(xrfg_dead_space_ngx_actual_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
         PASS_REGULAR_EXPRESSION "Dead Space public SR:")
+    add_test(NAME xrfg_optiscaler_gta_capture COMMAND xrfg_three_slot_director_tests
+        optiscaler-gta-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+        "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+    set_tests_properties(xrfg_optiscaler_gta_capture PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
     add_test(NAME xrfg_gta_enhanced_ngx_actual_capture COMMAND xrfg_three_slot_director_tests
         gta-enhanced-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")

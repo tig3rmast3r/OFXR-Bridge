@@ -717,7 +717,8 @@ bool owned_registration_path(
             if (!equal_case_insensitive(parent.parent_path().wstring(), root.wstring()))
                 return false;
             const auto version = parent.filename().wstring();
-            if (version.size() < 4 || (version.front() != L'v' && version.front() != L'V'))
+            if (version.size() < 4 || (version.front() != L'v' && version.front() != L'V' &&
+                version.front() != L'R' && version.front() != L'r'))
                 return false;
             for (std::size_t i = 1; i < version.size(); ++i)
                 if (version[i] < L'0' || version[i] > L'9') return false;

@@ -324,6 +324,7 @@ int run_luke_ngx_dispatch_test(const wchar_t* path, bool engine = false) {
 }
 
 bool test_dead_space_rejected_camera{};
+bool test_optiscaler_replacement{};
 struct ActualNgxCaptureContext {
     Evaluate evaluate{};
     ID3D12GraphicsCommandList* list{};
@@ -387,6 +388,20 @@ void actual_fixture_copy(ID3D12GraphicsCommandList* list,ID3D12Resource* destina
         transition(source,D3D12_RESOURCE_STATE_COPY_SOURCE,source_state)};
     list->ResourceBarrier(source_state==D3D12_RESOURCE_STATE_COPY_SOURCE?1:2,after.data());
 }
+Evaluate actual_optiscaler_forward{};
+NVSDK_NGX_Result actual_optiscaler_original(ID3D12GraphicsCommandList* list,
+    const NVSDK_NGX_Handle* handle,const NVSDK_NGX_Parameter* parameters,void* callback) {
+    const auto result=actual_optiscaler_forward(list,handle,parameters,callback);
+    // Exercise the shipping FFX ABI interception, not just the receipt helper.
+    ffxDispatchDescUpscale dispatch{};dispatch.header.type=FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
+    dispatch.commandList=list;dispatch.output.resource=get<ID3D12Resource*>(parameters,NVSDK_NGX_Parameter_Output);
+    const auto saved=ffx_dispatch_original;
+    ffx_dispatch_original=[](ffxContext*,const ffxDispatchDescHeader*)->ffxReturnCode_t{return FFX_API_RETURN_OK;};
+    if(NVSDK_NGX_SUCCEED(result))static_cast<void>(optiscaler_ffx_dispatch(nullptr,&dispatch.header));
+    else OptiscalerEvaluationScope::dispatched(nullptr,nullptr,false);
+    ffx_dispatch_original=saved;
+    return result;
+}
 NVSDK_NGX_Result actual_crimson_public_forwarder(ID3D12GraphicsCommandList* list,
     const NVSDK_NGX_Handle* handle,const NVSDK_NGX_Parameter* parameters,void* callback) {
     const auto& c=*actual_ngx_capture_context;
@@ -400,7 +415,8 @@ NVSDK_NGX_Result actual_crimson_public_forwarder(ID3D12GraphicsCommandList* list
         modified.motion=c.injector_motion;modified.depth=c.injector_depth;
         modified.output=c.injector_output;
     }
-    const auto result=test_cyberpunk_bypass_native ? state().modules[0].evaluate(list,handle,parameters,callback) :
+    const auto result=test_optiscaler_replacement ? evaluate<5>(list,handle,parameters,callback) :
+        test_cyberpunk_bypass_native ? state().modules[0].evaluate(list,handle,parameters,callback) :
         evaluate<0>(list,handle,parameters,callback);
     if(test_gta_enhanced_production_identity&&NVSDK_NGX_SUCCEED(result)) {
         // GTA's actual public fixture delegates directly to the typed body.
@@ -809,6 +825,12 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             state().modules[0].typed_implementation=true;
             state().modules[0].evaluate=state().modules[3].evaluate;
             state().modules[3].evaluate=&actual_crimson_public_forwarder;
+            if(test_optiscaler_replacement) {
+                state().modules[0].typed_implementation=false;
+                state().modules[5].replacement_implementation=true;
+                actual_optiscaler_forward=state().modules[0].evaluate;
+                state().modules[5].evaluate=&actual_optiscaler_original;
+            }
         }
         if(test_unlisted_typed_dispatch) {
             // Public generic call outside, REAL VR in between, typed SR inside.
@@ -1621,6 +1643,12 @@ int run_gta_enhanced_ngx_capture_test(const wchar_t* realvr,const wchar_t* strea
     test_gta_enhanced_production_identity=false;dead_space_capture_report_at=0;
     if(sample_dead_space_capture()||dead_space_capture_report_at!=0)return 1;
     logger.shutdown();return 0;
+}
+int run_optiscaler_gta_capture_test(const wchar_t* realvr,const wchar_t* streamline) {
+    test_optiscaler_replacement=true;
+    const auto result=run_gta_enhanced_ngx_capture_test(realvr,streamline);
+    if(!result)std::cout<<"OptiScaler replacement SR: original game guides, exact final color and native-completion ownership PASS\n";
+    return result;
 }
 int run_dead_space_ingress_diagnostics_test(const wchar_t* realvr,const wchar_t* streamline) {
     const auto root=std::filesystem::temp_directory_path()/

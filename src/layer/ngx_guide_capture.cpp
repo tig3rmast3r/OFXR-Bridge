@@ -22,6 +22,8 @@
 #include "xrfg/luke_dispatch_module.hpp"
 #include "xrfg/ngx_feature_paths.hpp"
 #include "xrfg/ngx_evaluation_boundary.hpp"
+#include "xrfg/optiscaler_module.hpp"
+#include <ffx_upscale.h>
 #include <windows.h>
 #include <wrl/client.h>
 #include <nvsdk_ngx_params.h>
@@ -69,6 +71,7 @@ struct Module {
     Create create{}; Evaluate evaluate{}, evaluate_c{}; Release release{};
     HMODULE retained{};
     bool typed_implementation{};
+    bool replacement_implementation{}; // Verified stock OptiScaler NGX host, not NVIDIA DLSS.
 };
 struct OutlawsPublicLifetime {
     std::uint32_t identity{};
@@ -81,7 +84,7 @@ struct OutlawsPublicLifetime {
 struct Capture {
     std::mutex mutex, log_mutex;
     ComPtr<ID3D12CommandQueue> queue;
-    std::array<Module,5> modules;
+    std::array<Module,6> modules;
     std::unordered_map<const NVSDK_NGX_Handle*,Feature> features;
     std::unordered_map<const NVSDK_NGX_Handle*,std::uint64_t> native_production_sequences;
     std::unordered_map<const NVSDK_NGX_Handle*,std::uint64_t> guide_streams;
@@ -1495,11 +1498,28 @@ HRESULT complete_color(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Parameter
 template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12GraphicsCommandList* list,
     const NVSDK_NGX_Handle* h,const NVSDK_NGX_Parameter* p,void* callback) {
     const auto original = c_entry ? state().modules[slot].evaluate_c : state().modules[slot].evaluate;
+    // OptiScaler implements the public SR contract without calling NVIDIA's
+    // typed DLSS body. Only its outermost entry witnesses completion; a nested
+    // C alias or DLSS passthrough must not double-claim the same production.
+    OptiscalerEvaluationScope replacement(state().modules[slot].replacement_implementation);
+    const bool implementation=state().modules[slot].typed_implementation ||
+        state().modules[slot].replacement_implementation;
+    const bool witness=replacement.outermost() ||
+        (state().modules[slot].typed_implementation && !replacement.active());
+    const auto report_replacement=[&](NVSDK_NGX_Result result) {
+        if(!replacement.outermost())return;
+        static std::atomic_uint64_t successes{},failures{};
+        const bool ready=NVSDK_NGX_SUCCEED(result)&&replacement.completed();
+        auto& counter=ready?successes:failures;
+        const auto count=counter.fetch_add(1,std::memory_order_relaxed)+1;
+        if(count<=8||count%300==0)log("optiscaler_sr_completion",ready,count,slot,
+            reinterpret_cast<UINT64>(h));
+    };
     const bool kcd_production=kingdom_come_process();
     const bool outlaws_production=outlaws_public_process();
     bool diagnostic_entry{};
     if(kingdom_come_process()||cached_luke_title()) {
-        static std::array<std::atomic_uint64_t,5> last_entries{};
+        static std::array<std::atomic_uint64_t,6> last_entries{};
         auto& last_entry=last_entries[cached_luke_title()?slot:0];
         const auto now=GetTickCount64();auto previous=last_entry.load();
         if(now-previous>=1000&&last_entry.compare_exchange_strong(previous,now)) {
@@ -1511,6 +1531,8 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         }
     }
     auto native_list=native(list);
+    if(state().modules[slot].replacement_implementation&&p)
+        replacement.expect(native_list.Get(),native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_Output)).Get());
     ComPtr<IUnknown> native_list_identity;
     if(native_list)static_cast<void>(native_list.As(&native_list_identity));
     ComPtr<IUnknown> native_device_identity;
@@ -1590,7 +1612,8 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
        (it->second.type==NVSDK_NGX_Feature_SuperSampling||it->second.type==NVSDK_NGX_Feature_RayReconstruction);
      if(it!=state().features.end()) {identity=it->second.identity;
          evaluation_metadata=it->second;
-         if(sr)native_available=state().modules[it->second.type==NVSDK_NGX_Feature_SuperSampling?0:1].typed_implementation;
+         if(sr)native_available=state().modules[it->second.type==NVSDK_NGX_Feature_SuperSampling?0:1].typed_implementation ||
+             (it->second.type==NVSDK_NGX_Feature_SuperSampling && state().modules[5].replacement_implementation);
          hdr=it->second.flags_known&&(it->second.flags&NVSDK_NGX_DLSS_Feature_Flags_IsHDR)!=0;}}
     if(diagnostic_entry)title_capture_log("dead_space_evaluation_state",slot,sr,
         (evaluation_metadata.flags_known?1U:0U)|(evaluation_metadata.creation_observed?2U:0U),identity);
@@ -1599,7 +1622,7 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
     // Before this call forwards, and so before REAL VR's hook, which OFXR's
     // generic hooks wrap, can replace them: what the game passed.
     std::optional<PublicMotionScope> public_motion;
-    if(!state().modules[slot].typed_implementation&&native_ingress::luke_detected()&&p)
+    if(!implementation&&native_ingress::luke_detected()&&p)
         public_motion.emplace(native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_MotionVectors)).Get(),
             native_ingress::real_vr_bind_mark());
     // An untyped core dispatch may reach the typed SR module, where recovery
@@ -1616,14 +1639,14 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         return forward();
     }
     std::uint32_t public_production{};
-    if(kingdom_come_process()&&state().modules[slot].typed_implementation)
+    if(kingdom_come_process()&&implementation)
         public_production=NgxCreationEvaluationScope::public_production(evaluation_metadata.type,
             native_list_identity.Get(),native_device_identity.Get());
     NgxCreationEvaluationScope creation_scope(evaluation_metadata,native_list_identity.Get(),
-        !state().modules[slot].typed_implementation,native_device_identity.Get());
-    GtaFinalColorScope gta_final(!state().modules[slot].typed_implementation,evaluation_metadata,h,
+        !implementation,native_device_identity.Get());
+    GtaFinalColorScope gta_final(!implementation,evaluation_metadata,h,
         list,p,native_list_identity.Get(),native_device_identity.Get());
-    if(kingdom_come_process()&&!state().modules[slot].typed_implementation)
+    if(kingdom_come_process()&&!implementation)
         public_production=NgxCreationEvaluationScope::public_production(evaluation_metadata.type,
             native_list_identity.Get(),native_device_identity.Get());
     if(public_production) {
@@ -1636,7 +1659,7 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         if(!live)public_production=0; // An inherited alias cannot revive a retired creator.
     }
     KcdCameraInvocationScope invocation_camera(evaluation_metadata,native_list_identity.Get(),
-        native_device_identity.Get(),public_production,!state().modules[slot].typed_implementation,
+        native_device_identity.Get(),public_production,!implementation,
         native_list.Get(),p,h);
     invocation_camera.prepare_public_frame();
     const auto forward_public=[&] {
@@ -1654,12 +1677,12 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
     // N1. Its original public Output is marked after the wrapper completes,
     // including when another injector bypasses the typed-native hook.
     const bool original_public=(crimson_desert_process() || gta_enhanced_process() || cyberpunk_original_motion()) && native_ingress::luke_detected() &&
-        !state().modules[slot].typed_implementation;
+        !implementation;
     const bool delegate_nr=original_public && native_available;
-    NgxEvaluationBoundary scope(slot,state().modules[slot].typed_implementation,
+    NgxEvaluationBoundary scope(slot,implementation,
         native_available && !original_public,original_public);
     if(diagnostic_entry)title_capture_log("dead_space_observation_state",slot,scope.observes(),state().active.load(),scope.outermost());
-    if(sr && scope.outermost() && !state().modules[slot].typed_implementation &&
+    if(sr && scope.outermost() && !implementation &&
         crimson_desert_process() && two_frame_capture_images_active() && native_ingress::luke_detected()) {
         // F8 evidence before the generic dispatcher forwards to REALVR/native
         // SR. Do not publish a guide, alter a camera or select runtime motion.
@@ -1703,9 +1726,9 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
 
     static std::atomic_uint boundary_reports{};
     if(boundary_reports.fetch_add(1,std::memory_order_relaxed)<16)
-        log("ngx_observation_boundary",slot,state().modules[slot].typed_implementation,
+        log("ngx_observation_boundary",slot,implementation,
             native_available,scope.observes());
-    if(public_production&&!state().modules[slot].typed_implementation&&
+    if(public_production&&!implementation&&
         evaluation_metadata.identity==public_production&&
         evaluation_metadata.creation_source_identity==public_production) {
         // The public lifetime owns the family even when its wrapper delegates
@@ -1718,14 +1741,15 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
     if(!scope.observes()) {
         // Only guide/color ownership moves to the public boundary. NR retains
         // its existing typed-native before/after SR execution points.
-        if(sr && state().modules[slot].typed_implementation && scope.public_guide_parent()) {
-            try {neural_rendering::before_sr(identity,list,p,queue.Get());}
+        if(sr && witness && scope.public_guide_parent()) {
+            try {if(!replacement.active())neural_rendering::before_sr(identity,list,p,queue.Get());}
             catch(...){log("native_pre_sr_exception");}
-            const auto result=forward_public();
-            if(NVSDK_NGX_SUCCEED(result))try {neural_rendering::after_sr(identity,list,p,queue.Get());}
+            const auto result=forward_public();report_replacement(result);
+            if(NVSDK_NGX_SUCCEED(result))try {if(!replacement.active())neural_rendering::after_sr(identity,list,p,queue.Get());}
             catch(...){log("native_completion_exception");}
             if(gta_enhanced_process())GtaFinalColorScope::native_complete(evaluation_metadata,
-                native_list_identity.Get(),native_device_identity.Get(),list,p,result);
+                native_list_identity.Get(),native_device_identity.Get(),list,p,
+                replacement.completed()?result:NVSDK_NGX_Result_Fail);
             return result;
         }
         const auto result=forward_public();
@@ -1736,7 +1760,7 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         // the titles whose generic and native fields differ (KCD, Outlaws,
         // Crimson Desert, GTA), which keep their exact boundaries.
         const bool deferred=sr&&!scope.observes()&&!scope.public_guide_parent()&&
-            !state().modules[slot].typed_implementation;
+            !implementation;
         const bool fallback=deferred&&NVSDK_NGX_SUCCEED(result)&&scope.unobserved()&&
             !kcd_production&&!outlaws_production&&!original_public&&!gta_enhanced_process()&&
             !public_production;
@@ -1766,7 +1790,7 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         return result;
     }
     bool outlaws_family{};
-    if(outlaws_production&&state().modules[slot].typed_implementation) {
+    if(outlaws_production&&implementation) {
         outlaws_family=OutlawsPublicInvocationScope::claim(evaluation_metadata.type,
             native_list_identity.Get(),native_device_identity.Get(),public_production);
         if(outlaws_family&&!public_production)return forward();
@@ -1802,29 +1826,29 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         if(!public_transaction&&(!logical_production || production_sequence))frame=capture(list,h,p,production_sequence,guide_stream,
             kcd_production?&invocation_camera:nullptr,public_production,nullptr,nullptr,nullptr,
             original_public?1U:0U);
-        if(!delegate_nr)neural_rendering::before_sr(identity,list,p,queue.Get());
+        if(!delegate_nr&&!replacement.active())neural_rendering::before_sr(identity,list,p,queue.Get());
     }catch(...){log("native_pre_sr_exception");}
     if(original_public&&gta_enhanced_process())
         GtaFinalColorScope::record(evaluation_metadata,native_list_identity.Get(),native_device_identity.Get(),frame,hdr,
             NVSDK_NGX_Result_Success,scope.can_complete());
-    const auto result=forward();
+    const auto result=forward();report_replacement(result);
     if(sr&&NVSDK_NGX_SUCCEED(result))try {
-        if(!delegate_nr)neural_rendering::after_sr(identity,list,p,queue.Get());
+        if(!delegate_nr&&!replacement.active())neural_rendering::after_sr(identity,list,p,queue.Get());
         // GTA's enclosing final-caller scope marks after wrapper composition.
-        if(scope.can_complete()&&!public_transaction&&!outlaws_family&&
+        if(scope.can_complete()&&replacement.completed()&&!public_transaction&&!outlaws_family&&
             !(original_public&&gta_enhanced_process())) {
             if(original_public&&frame)complete_color_resource(list,frame->output.Get(),frame,hdr);
             else complete_color(list,p,frame,hdr);
         }
     }catch(...){log("native_completion_exception");}
     if(outlaws_family)OutlawsPublicInvocationScope::complete_native(evaluation_metadata.type,
-        native_list_identity.Get(),native_device_identity.Get(),frame,hdr,result,scope.can_complete());
-    if(public_transaction)invocation_camera.complete_native(result,scope.can_complete());
+        native_list_identity.Get(),native_device_identity.Get(),frame,hdr,replacement.completed()?result:NVSDK_NGX_Result_Fail,scope.can_complete());
+    if(public_transaction)invocation_camera.complete_native(replacement.completed()?result:NVSDK_NGX_Result_Fail,scope.can_complete());
     invocation_camera.finish_public(result);
     if(original_public && (NVSDK_NGX_FAILED(result)||!scope.can_complete()))
         invalidate_dlss_motion_vector_stream_history(guide_stream);
     if(logical_production) {
-        if(NVSDK_NGX_FAILED(result) || !scope.can_complete() || !production_sequence)
+        if(NVSDK_NGX_FAILED(result) || !replacement.completed() || !scope.can_complete() || !production_sequence)
             invalidate_dlss_motion_vector_stream_history(guide_stream);
         if(production_sequence<=8 || production_sequence%300==0 || NVSDK_NGX_FAILED(result))
             log(kcd_production?"kcd_production_identity":"outlaws_production_identity",production_sequence,frame?frame->camera_frame_token:0,
@@ -1896,7 +1920,7 @@ void install(UINT i,HMODULE mod,void* create_fn,void* eval_fn,void* release_fn,v
     // KCD embeds its public NGX SDK dispatcher in WHGame.dll. Its exports
     // and C-callback evaluation can bypass both the NVIDIA and REAL VR bodies.
     // Resolve only declared executable exports from the matching module PE.
-    if(i==4) {
+    if(i==4||i==5) {
         c=native_export_address(mod,"NVSDK_NGX_D3D12_CreateFeature");
         e=native_export_address(mod,"NVSDK_NGX_D3D12_EvaluateFeature");
         r=native_export_address(mod,"NVSDK_NGX_D3D12_ReleaseFeature");
@@ -1915,6 +1939,7 @@ void install(UINT i,HMODULE mod,void* create_fn,void* eval_fn,void* release_fn,v
     }
     HMODULE implementation{};GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(e),&implementation);
     m.typed_implementation=i<2&&implementation==mod;
+    m.replacement_implementation=i==5&&implementation==mod;
     HMODULE retained{};if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
         reinterpret_cast<LPCWSTR>(e),&retained))return;
     m.create_hook=safetyhook::create_inline(c,create_fn,SafetyHookInline::StartDisabled);
@@ -1935,7 +1960,45 @@ template<UINT slot> void install_dispatch(HMODULE module) {
         reinterpret_cast<void*>(&evaluate<slot>),reinterpret_cast<void*>(&release<slot>),
         reinterpret_cast<void*>(&evaluate<slot,true>));
 }
+using FfxDispatch=ffxReturnCode_t(*)(ffxContext*,const ffxDispatchDescHeader*);
+FfxDispatch ffx_dispatch_original{};
+ffxReturnCode_t optiscaler_ffx_dispatch(ffxContext* context,const ffxDispatchDescHeader* header) {
+    const auto result=ffx_dispatch_original(context,header);
+    if(OptiscalerEvaluationScope::observing()&&header&&header->type==FFX_API_DISPATCH_DESC_TYPE_UPSCALE) {
+        const auto& dispatch=*reinterpret_cast<const ffxDispatchDescUpscale*>(header);
+        auto list=native(static_cast<ID3D12GraphicsCommandList*>(dispatch.commandList));
+        auto output=native(static_cast<ID3D12Resource*>(dispatch.output.resource));
+        OptiscalerEvaluationScope::dispatched(list.Get(),output.Get(),result==FFX_API_RETURN_OK);
+    }
+    return result;
+}
+void poll_optiscaler_ffx() {
+    static std::mutex mutex;std::scoped_lock lock(mutex);
+    static SafetyHookInline hook; if(hook)return;
+    const auto module=GetModuleHandleW(L"amd_fidelityfx_upscaler_dx12.dll");
+    if(!module)return;
+    const auto entry=native_export_address(module,"ffxDispatch");if(!entry)return;
+    HMODULE pinned{};if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(entry),&pinned))return;
+    hook=safetyhook::create_inline(entry,reinterpret_cast<void*>(&optiscaler_ffx_dispatch),SafetyHookInline::StartDisabled);
+    if(hook){ffx_dispatch_original=hook.original<FfxDispatch>();(void)hook.enable();log("optiscaler_ffx_dispatch_hooked");}
+}
+void poll_optiscaler() {
+    // Inspect only already-loaded supported proxy names. No DLL injection,
+    // filesystem search, game changes or dependence on an NVIDIA NGX core.
+    static std::mutex mutex;std::scoped_lock lock(mutex);
+    if(state().modules[5].retained)return;
+    static ULONGLONG retry{};const auto now=GetTickCount64();
+    if(now<retry)return;retry=now+1000;
+    for(const auto* name:{L"winmm.dll",L"OptiScaler.dll",L"dxgi.dll",L"version.dll",L"d3d12.dll",L"dbghelp.dll"}) {
+        const auto module=GetModuleHandleW(name);
+        if(!optiscaler_module_valid(module))continue;
+        install_dispatch<5>(module);
+        if(state().modules[5].retained){log("optiscaler_sr_hook_installed",5);return;}
+    }
+}
 void install_feature_hooks() {
+    poll_optiscaler_ffx();poll_optiscaler();
     install_dispatch<0>(GetModuleHandleW(L"nvngx_dlss.dll"));
     install_dispatch<1>(GetModuleHandleW(L"nvngx_dlssd.dll"));
     install_dispatch<2>(GetModuleHandleW(L"_nvngx.dll"));
@@ -2030,8 +2093,8 @@ void prepare_ngx_feature_discovery(const wchar_t* directory) noexcept {
     try {
         native_ingress::refresh_luke_detection();
         auto& d=discovery(); if(d.ext_hook||d.project_hook||!directory||!*directory)return;
-        const HMODULE core=load_ngx_core(); if(!core)return;
         install_feature_hooks();start_hook_monitor();
+        const HMODULE core=load_ngx_core(); if(!core)return;
         auto ext=GetProcAddress(core,"NVSDK_NGX_D3D12_Init_Ext");
         auto project=GetProcAddress(core,"NVSDK_NGX_D3D12_Init_ProjectID");
         if(!ext||!project)return;

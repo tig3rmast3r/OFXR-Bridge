@@ -103,6 +103,8 @@ void ownership() {
     const std::filesystem::path root = L"C:\\Users\\Test\\OFXR Bridge";
     const auto valid = root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRBridge_manual-32292-11205031.json";
     require(xrfg::implicit_layer::owned_registration_path(valid, root), "reported v065 value accepted");
+    require(xrfg::implicit_layer::owned_registration_path(root / L"RuntimeLayer/R1000/XR_APILAYER_OFXRBridge_manual-1-2.json",root), "Radeon lane owned manifest");
+    require(!xrfg::implicit_layer::owned_registration_path(root / L"RuntimeLayer/R1000-extra/XR_APILAYER_OFXRBridge_manual-1-2.json",root), "malformed Radeon lane refused");
     for (const auto& bad : {
         root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRBridge_manual-abc.json",
         root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRBridge_manual-1-2-3.json",

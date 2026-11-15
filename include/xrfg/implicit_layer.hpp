@@ -241,7 +241,7 @@ private:
     std::wstring_view prefix = kManifestPrefix) noexcept;
 
 // Recognizes only tray-owned manual manifests in RuntimeLayer (legacy) or
-// RuntimeLayer/vNNN. Does not require the manifest or DLL to still exist.
+// RuntimeLayer/vNNN/RNNN. Does not require the manifest or DLL to still exist.
 [[nodiscard]] bool owned_registration_path(
     const std::filesystem::path& manifest,
     const std::filesystem::path& local_directory,
