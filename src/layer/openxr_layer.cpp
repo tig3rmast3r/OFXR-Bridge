@@ -1,5 +1,6 @@
 #include "xrfg/composition_panels.hpp"
 #include "xrfg/gpu_usage.hpp"
+#include "xrfg/gpu_route_support.hpp"
 #include "xrfg/luke_vulkan_scope.hpp"
 #define XR_USE_GRAPHICS_API_VULKAN
 #include "xrfg/vulkan_session_bridge.hpp"
@@ -1704,6 +1705,7 @@ private:
 
 [[nodiscard]] xrfg::embedded::Settings effective_session_settings(
     const SessionState& state, xrfg::embedded::Settings requested) noexcept {
+    xrfg::constrain_radeon_routes(requested,xrfg::rendering_gpu_vendor());
     if(requested.ofr) requested.rife_multiplier=2;
 #if !defined(_WIN64)
     // 0.2 V576: the 32-bit layer has NVIDIA optical flow alone - FidelityFX,
@@ -1714,6 +1716,7 @@ private:
     requested.hybrid = false;
     requested.motion_vectors = 0;
     requested.rife_model = -1;
+    if(xrfg::radeon_gpu(xrfg::rendering_gpu_vendor()))requested.enabled=false; // x86 transport has no non-NVIDIA flow
 #endif
     if(state.afw_only) {
         const int pacing=requested.pacing_mode;
@@ -6202,6 +6205,19 @@ XrResult layer_create_session_impl(
     // had a two-layer frame refused by SteamVR (XR_ERROR_SWAPCHAIN_RECT_INVALID).
     state->vdxr_legacy = true;
 #endif
+    // Bind hardware policy before reading a saved generator or initializing it.
+    for(auto* next=static_cast<const XrBaseInStructure*>(create_info->next);next;next=next->next) {
+        if(next->type==XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
+            const auto* binding=reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(next);
+            if(binding->device)xrfg::set_rendering_gpu_luid(binding->device->GetAdapterLuid());
+        } else if(next->type==XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
+            const auto* binding=reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(next);
+            Microsoft::WRL::ComPtr<IDXGIDevice> device;Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC desc{};
+            if(binding->device&&SUCCEEDED(binding->device->QueryInterface(IID_PPV_ARGS(&device)))&&
+               SUCCEEDED(device->GetAdapter(&adapter))&&SUCCEEDED(adapter->GetDesc(&desc)))
+                xrfg::set_rendering_gpu_luid(desc.AdapterLuid);
+        }
+    }
     const auto game_preferences=xrfg::autonomous::snapshot().desired;
     auto initial_control = xrfg::embedded::snapshot();
     state->afw_only=state->luke_afw_enabled && game_preferences.afw_only &&
@@ -6669,6 +6685,13 @@ XrResult layer_create_session_impl(
                 state->d3d12_queue.Reset();
             }
         }
+    }
+    // Query the physical adapter once, never from submission or telemetry.
+    if(state->d3d12_device)xrfg::set_rendering_gpu_luid(state->d3d12_device->GetAdapterLuid());
+    else if(state->d3d11_device) {
+        Microsoft::WRL::ComPtr<IDXGIDevice> device;Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC desc{};
+        if(SUCCEEDED(state->d3d11_device.As(&device))&&SUCCEEDED(device->GetAdapter(&adapter))&&SUCCEEDED(adapter->GetDesc(&desc)))
+            xrfg::set_rendering_gpu_luid(desc.AdapterLuid);
     }
     if(auto monitor=xrfg::neural_rendering::observe_device_removal(state->d3d12_device.Get()))
         state->gpu_crash_monitors.push_back(std::move(monitor));

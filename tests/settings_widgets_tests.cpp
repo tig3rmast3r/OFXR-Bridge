@@ -839,13 +839,36 @@ void aer_native_guide_widgets() {
     require(request(saved),"restore AER native guide UI settings");
 }
 
+namespace {
+void radeon_routes() {
+    for(bool compact:{false,true}) {
+        Snapshot amd;amd.connected=true;amd.runtime.gpu_vendor=0x1002;amd.revision=1;
+        amd.desired.advanced_mode=true;amd.desired.backend=0;amd.desired.afw_mode=0;
+        Context view(compact?ImVec2(1024,768):ImVec2(1180,900),compact);
+        view.injected_snapshot=&amd;view.draw();view.draw();
+        view.choose("OFXR engine",1,"Nvidia 0.2.1");
+        require(view.widgets.draft.backend==0,"Radeon rejects queued activation of NVIDIA OFA");
+        view.choose("Frame generation",3,"DLSS-G");
+        require(view.widgets.draft.frame_generation!=2,"Radeon rejects queued activation of DLSS-G");
+        amd.desired.frame_generation=3;amd.desired.hybrid_backend=0;++amd.revision;view.draw();view.draw();
+        view.choose("Optical flow engine",1,"Nvidia 0.2.1");
+        require(view.widgets.draft.hybrid_backend==0,"Radeon rejects Hybrid NVIDIA OFA");
+        amd.desired.frame_generation=0;amd.desired.backend=2;++amd.revision;view.draw();view.draw();
+        require(view.widgets.draft.backend==0,"Saved NVIDIA OFA is constrained on Radeon");
+        amd.desired.frame_generation=2;++amd.revision;view.draw();view.draw();
+        require(view.widgets.draft.frame_generation==3&&view.widgets.draft.hybrid_backend==0,"Saved DLSS-G falls back to Hybrid FidelityFX");
+    }
+}
+}
+
 int main(int argc, char** argv) {
     const auto profile = std::filesystem::temp_directory_path() /
         (L"ofxr-settings-widgets-" + std::to_wstring(GetCurrentProcessId()) +
             L"-" + std::to_wstring(GetTickCount64()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", profile.c_str());
     try {
-        if (argc == 2 && std::strcmp(argv[1], "--aer-framegen") == 0) {aer_framegen_widgets();aer_native_guide_widgets();}
+        if (argc == 2 && std::strcmp(argv[1], "--radeon-routes") == 0) radeon_routes();
+        else if (argc == 2 && std::strcmp(argv[1], "--aer-framegen") == 0) {aer_framegen_widgets();aer_native_guide_widgets();}
         else if (argc == 2 && std::strcmp(argv[1], "--gpu-telemetry") == 0) gpu_telemetry_and_quality();
         else if (argc == 2 && std::strcmp(argv[1], "--desktop-header") == 0) desktop_header_is_not_a_headset_control();
         else if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();

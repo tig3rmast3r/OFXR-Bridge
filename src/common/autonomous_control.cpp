@@ -1,4 +1,5 @@
 #include "xrfg/autonomous_control.hpp"
+#include "xrfg/gpu_route_support.hpp"
 #include "xrfg/rife_resolution.hpp"
 #include "xrfg/desktop_profiles.hpp"
 #include "xrfg/benchmark_suite.hpp"
@@ -82,7 +83,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 98401;
+constexpr std::uint32_t kAbi = 99401;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -418,6 +419,7 @@ Settings sanitize(Settings value) noexcept {
     value.hybrid_backend = std::clamp(value.hybrid_backend, 0, 2);
     value.motion_vectors = std::clamp(value.motion_vectors, 0, 1);
     value.frame_generation = std::clamp(value.frame_generation, 0, 4);
+    xrfg::constrain_radeon_routes(value,xrfg::rendering_gpu_vendor());
     // DLSS-G owns its generator. Do not inherit a previous OFXR presenter's
     // queue/history policy: benchmark and manual/INI/IPC selection must agree.
     if (value.frame_generation == 2) value.backend = 0;
@@ -840,6 +842,7 @@ Snapshot snapshot() noexcept {
         result.connected = result.runtime.sessions != 0 && result.runtime.process_id != 0 &&
             now >= result.runtime.heartbeat_ms && now - result.runtime.heartbeat_ms < 5000;
 #endif
+        xrfg::constrain_radeon_routes(result.desired,xrfg::settings_gpu_vendor(result));
         return result;
     } catch (...) { return {}; }
 }
@@ -1107,6 +1110,7 @@ void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const Runtim
     rec.dlssg_preset=preset;
     rec.rife_quality=rife_quality;
     rec.plan=benchmark_execution_plan(b.full,b.luke,rec.steamvr,b.advanced,runtime.eye_long_side,runtime.rife_max_multiplier,rife_quality);
+    filter_radeon_benchmark_plan(rec.plan,runtime.gpu_vendor?runtime.gpu_vendor:xrfg::rendering_gpu_vendor());
     rec.game=utf8_path(benchmark_game_path(b.game_pid).filename());
     if(!b.csv)return;
     const auto folder=common_folder()/L"Benchmarks";
@@ -1214,7 +1218,8 @@ bool start_benchmark(bool full,bool luke) noexcept {
         const auto run=std::max(b.run_id+1,(now<<16)^GetCurrentProcessId());
         b={};b.full=full;b.luke=luke;b.advanced=s.desired.advanced_mode;b.auto_pick=s.desired.benchmark_auto_pick;b.csv=s.desired.benchmark_csv;b.game_pid=s.runtime.process_id;
         b.run_id=run;
-        const auto plan=benchmark_execution_plan(full,luke,pacing_comparison_runtime(s.runtime),b.advanced,s.runtime.eye_long_side,s.runtime.rife_max_multiplier,shared.benchmark_saved.rife_resolution);b.count=static_cast<unsigned>(plan.size());
+        auto plan=benchmark_execution_plan(full,luke,pacing_comparison_runtime(s.runtime),b.advanced,s.runtime.eye_long_side,s.runtime.rife_max_multiplier,shared.benchmark_saved.rife_resolution);
+        filter_radeon_benchmark_plan(plan,s.runtime.gpu_vendor?s.runtime.gpu_vendor:xrfg::rendering_gpu_vendor());b.count=static_cast<unsigned>(plan.size());
         b.phase=BenchmarkPhase::applying;
         std::snprintf(b.label,sizeof(b.label),"%s",plan[0].label.c_str());
         if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,plan[0]),now)) {
@@ -1385,6 +1390,7 @@ void report_benchmark_memory(BenchmarkMemory memory) noexcept {
 }
 
 void report_runtime(RuntimeStatus status) noexcept {
+    status.gpu_vendor=xrfg::rendering_gpu_vendor();
     try {
         auto& connection = channel();
         Lock lock(connection);

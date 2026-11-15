@@ -31,6 +31,12 @@ struct BenchmarkStep {
     int rife_multiplier{2},rife_quality{18};
     int osr{-1},osr_lower_quality{-1};
 };
+// Unsupported NVIDIA routes are omitted rather than benchmarked as a fallback.
+inline void filter_radeon_benchmark_plan(std::vector<BenchmarkStep>& plan,unsigned vendor) {
+    if(vendor!=0x1002)return;
+    std::erase_if(plan,[](const BenchmarkStep& step){return !step.disabled &&
+        (step.generation==2 || ((step.generation==0||step.generation==3)&&step.backend!=0));});
+}
 inline const char* benchmark_pacing_label(int mode) {
     return mode==0 ? "Framework" : mode==1 ? "Director" : "Framework+director";
 }

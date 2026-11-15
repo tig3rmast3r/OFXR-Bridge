@@ -1,6 +1,7 @@
 #include <optional>
 #include "xrfg/presented_output_rate.hpp"
 #include "xrfg/settings_widgets.hpp"
+#include "xrfg/gpu_route_support.hpp"
 #include "xrfg/rife_resolution.hpp"
 #include "xrfg/dlssg_profile.hpp"
 #include "xrfg/benchmark_suite.hpp"
@@ -291,7 +292,7 @@ bool toggle_box(Panel& p,const char* label,const char* id,bool& value,Help help,
     return switch_control(p,id,value,help,disabled);
 }
 
-struct Card {const char* name;const char* tag;bool warn{};Help help{};};
+struct Card {const char* name;const char* tag;bool warn{};Help help{};bool disabled{};};
 bool cards(Panel& p,const char* id,int& value,std::span<const Card> options) {
     constexpr float gap=4;
     const float count=float(options.size());
@@ -308,15 +309,18 @@ bool cards(Panel& p,const char* id,int& value,std::span<const Card> options) {
     auto* list=ImGui::GetWindowDrawList();
     for(const auto& option:options) {
         if(index)ImGui::SameLine(0,gap);
-        const bool selected=index==value;
-        if(ImGui::InvisibleButton(option.name,ImVec2(width,height)) && !selected) {value=index;changed=true;}
+        const bool selected=index==value&&!option.disabled;
+        ImGui::BeginDisabled(option.disabled);
+        if(ImGui::InvisibleButton(option.name,ImVec2(width,height)) && !selected && !option.disabled) {value=index;changed=true;}
         const auto min=ImGui::GetItemRectMin(),max=ImGui::GetItemRectMax();
         list->AddRectFilled(min,max,selected ? p.c.accent_soft : ImGui::IsItemHovered() ? p.c.hover : p.c.control,kCardRadius);
         list->AddRect(min,max,selected ? p.c.accent : p.c.line,kCardRadius,0,p.m.border);
         const float top=min.y+(height-name_height-tag_height)*.5F;
         {
             FaceScope scope(face_semibold,p.m.body);
+            if(option.disabled)ImGui::PushStyleColor(ImGuiCol_Text,p.c.muted);
             ImGui::RenderText({min.x+8,top},option.name);
+            if(option.disabled)ImGui::PopStyleColor();
         }
         {
             FaceScope scope(face_sans,p.m.label);
@@ -326,6 +330,7 @@ bool cards(Panel& p,const char* id,int& value,std::span<const Card> options) {
         }
         ImGui::RenderNavCursor(ImRect(min,max),ImGui::GetItemID());
         hover_help(p,option.help);
+        ImGui::EndDisabled();
         ++index;
     }
     ImGui::PopID();
@@ -616,7 +621,9 @@ bool generation(Panel& p) {
     auto& ui=p.ui;
     auto& draft=ui.draft;
     const auto& state=p.state;
-    bool changed=false;
+    const auto vendor=xrfg::settings_gpu_vendor(state);
+    const bool radeon=xrfg::radeon_gpu(vendor);
+    bool changed=xrfg::constrain_radeon_routes(draft,vendor);
     const float right=right_edge();
     title(p,"Frame generation");
     ImGui::SameLine();
@@ -660,7 +667,8 @@ bool generation(Panel& p) {
     const bool no_vectors=state.connected && (interface_vectors_text(state,GetTickCount64())=="None" ||
         (draft.ofr_enabled && !state.runtime.upscaler_depth));
     auto routes=kRoutes;
-    for(int i=1;i<4;++i)if(no_vectors) {routes[i].tag="No DLSS";routes[i].warn=true;}
+    if(radeon){routes[3].disabled=true;routes[3].tag="NVIDIA GPU required";}
+    for(int i=1;i<4;++i)if(no_vectors&&!routes[i].disabled) {routes[i].tag="No DLSS";routes[i].warn=true;}
     int selected_generation=generation_ui_index(draft.frame_generation);
     if(cards(p,"Frame generation",selected_generation,routes)) {
         select_generation(draft,generation_from_ui(selected_generation),draft.backend);
@@ -704,7 +712,8 @@ bool generation(Panel& p) {
         // UI order differs from persisted backend IDs: 0.2.13 is backend 3,
         // while 0.3.0 is backend 2. Keep each existing profile on its engine.
         constexpr int engine_order[]={0,1,3,2};
-        constexpr std::array<Card,4> engines{kEngineFidelity,kEngine021,kEngine0213,kEngine030};
+        std::array<Card,4> engines{kEngineFidelity,kEngine021,kEngine0213,kEngine030};
+        if(radeon)for(unsigned i=1;i<engines.size();++i){engines[i].disabled=true;engines[i].tag="NVIDIA GPU required";}
         int selected_engine=engine_order[std::clamp(draft.backend,0,3)];
         if(cards(p,"OFXR engine",selected_engine,engines)) {
             select_generation(draft,0,engine_order[selected_engine]);
@@ -751,7 +760,8 @@ bool generation(Panel& p) {
     } else if(draft.frame_generation==3) {
         // Hybrid's engine is its own (hybrid_backend), never the OFXR one.
         // 0.2.13 is left out: it is a pacing route as well as a flow.
-        constexpr std::array<Card,3> engines{kEngineFidelity,kEngine021,kEngine030};
+        std::array<Card,3> engines{kEngineFidelity,kEngine021,kEngine030};
+        if(radeon)for(unsigned i=1;i<engines.size();++i){engines[i].disabled=true;engines[i].tag="NVIDIA GPU required";}
         changed|=cards(p,"Optical flow engine",draft.hybrid_backend,engines);
         show_flow=true;nvidia_flow=draft.hybrid_backend!=0;
         changed|=toggle_row(p,"Depth search","Depth search",draft.hybrid_depth_search,kHelpDepth);

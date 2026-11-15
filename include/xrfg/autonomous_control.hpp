@@ -196,6 +196,7 @@ struct RuntimeStatus {
     unsigned ofr_delivery{}; // 0 learning, 1 alternating, 2 paired.
     bool uevr_osr{}; // UEVR Alternating/AFR attached as OSR's eye source, as Luke Ross is
     unsigned frame_multiplier{2}; // effective session output factor reported by the layer, not capability/request
+    unsigned gpu_vendor{}; // actual rendering adapter PCI vendor from DXCore, never DXGI spoofing
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
     return !r.vdxr_legacy;
