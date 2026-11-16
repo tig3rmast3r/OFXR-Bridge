@@ -13,7 +13,7 @@ $progressPath=$ResultJson+'.progress.json'
 $cancelPath=$ResultJson+'.cancel'
 $logPath=$ResultJson+'.log'
 $form=New-Object Windows.Forms.Form
-$form.Text=if(Test-Path -LiteralPath (Join-Path $Root 'vulkan/backend.json')){'OFXR - Prepare Vulkan for found games'}else{'OFXR 0.3.3 - Pre-compile TensorRT for found games'}
+$form.Text=if(Test-Path -LiteralPath (Join-Path $Root 'vulkan/backend.json')){'OFXR - Prepare Vulkan for found games'}else{'OFXR 0.4.0 - Pre-compile TensorRT for found games'}
 $form.ClientSize=New-Object Drawing.Size(560,164)
 $form.StartPosition='CenterScreen';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false;$form.MinimizeBox=$true
 $label=New-Object Windows.Forms.Label

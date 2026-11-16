@@ -380,7 +380,7 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const int used=rows_top+count*line_height+8;
     if(used_height)*used_height=unsigned(used);
     Canvas c(w,h,bgra,linear);c.panel(used,16,2);
-    c.text(margin,18,"OFXR 0.3.3",body,PanelTone::accent);
+    c.text(margin,18,"OFXR 0.4.0",body,PanelTone::accent);
     const auto vram=autonomous::interface_vram_text(state);
     const auto gpu=autonomous::interface_gpu_text(state,now_ms);
     const auto gpu_memory=vram+"  "+gpu;

@@ -302,9 +302,9 @@ void basic_defaults_policy() {
 }
 void route_profiles() {
     using namespace xrfg::autonomous;
-    require(generation_ui_index(0)==0 && generation_ui_index(3)==1 && generation_ui_index(1)==2 && generation_ui_index(2)==3 && generation_ui_index(4)==4,
+    require(generation_ui_index(0)==0 && generation_ui_index(4)==1 && generation_ui_index(3)==2 && generation_ui_index(1)==3 && generation_ui_index(2)==4,
         "Hybrid UI order preserves existing persisted generator IDs");
-    require(generation_from_ui(1)==3 && generation_from_ui(2)==1 && generation_from_ui(3)==2 && generation_from_ui(4)==4,"UI selection maps to stable route IDs");
+    require(generation_from_ui(1)==4 && generation_from_ui(2)==3 && generation_from_ui(3)==1 && generation_from_ui(4)==2,"UI selection maps to stable route IDs");
     Settings hybrid;hybrid.advanced_mode=true;select_generation(hybrid,0,2);hybrid.scale=0;hybrid.motion_vectors=0;hybrid=sanitize(hybrid);
     select_generation(hybrid,3,2);hybrid.scale=1;hybrid.lower_vram=1;hybrid.hybrid_backend=1;hybrid=sanitize(hybrid);
     select_generation(hybrid,1,2);hybrid.native_scale=42;hybrid=sanitize(hybrid);
@@ -608,8 +608,8 @@ int wmain(int count, wchar_t** arguments) {
         const auto shared_budget=xrfg::autonomous::snapshot();
         require(shared_budget.runtime.swapchains.total==14 && shared_budget.runtime.swapchains.fallback,
             "versioned IPC retains swapchain inventory and actual fallback");
-        require(xrfg::autonomous::interface_status_text(shared_budget).find("Swapchain fallback")!=std::string::npos,
-            "actual fallback reaches shared status");
+        require(xrfg::autonomous::interface_status_text(shared_budget).find("Swapchain fallback")==std::string::npos,
+            "fallback stays in swapchain details, not shared status");
         budget_report.shared_queue=true;
         xrfg::autonomous::report_runtime(budget_report);
         auto queue_report=xrfg::autonomous::snapshot();

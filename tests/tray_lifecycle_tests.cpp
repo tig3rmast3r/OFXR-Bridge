@@ -242,6 +242,12 @@ void experimental_preferences() {
         AppState restarted;restarted.settings_path=test.state.settings_path;load_settings(restarted);
         require(restarted.settings.pacing==mode,"global pacing survives tray restart");
     }
+    require(!set_benchmark_preference(test.state.settings_path,true,&error),"Basic rejects forced benchmark enable");
+    require(WritePrivateProfileStringW(L"ofxr",L"AdvancedMode",L"1",test.state.settings_path.c_str()),"explicit Advanced benchmark setup");
+    for(bool advanced:{false,true}) {
+        HMENU menu=CreatePopupMenu();append_benchmark_menu(menu,advanced);
+        require(GetMenuItemCount(menu)==int(advanced),"benchmark tray item is Advanced-only");DestroyMenu(menu);
+    }
     for(bool enabled:{true,false}) {
         require(set_benchmark_preference(test.state.settings_path,enabled,&error),"benchmark switch saved globally");
         require(GetPrivateProfileIntW(L"benchmark",L"enabled",-1,test.state.settings_path.c_str())==int(enabled),"benchmark canonical value");

@@ -83,7 +83,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 99901;
+constexpr std::uint32_t kAbi = 100001;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -793,13 +793,17 @@ bool initialize_user_configuration() noexcept {
         if(std::filesystem::exists(file))return std::filesystem::is_regular_file(file);
         const auto defaults=sanitize(Settings{});
         const auto settings=serialize_settings(defaults,true);
-        if(!save_sections(file,settings+"\n[benchmark]\nenabled=1\n"))return false;
+        if(!save_sections(file,settings+"\n[benchmark]\nenabled=0\n"))return false;
         return true;
     } catch (...) {return false;}
 }
 bool benchmark_enabled() noexcept {
 #ifdef _WIN32
-    try {return GetPrivateProfileIntW(L"benchmark",L"enabled",1,global_configuration_path().c_str())!=0;}
+    try {
+        const auto ini=global_configuration_path();
+        return GetPrivateProfileIntW(L"ofxr",L"AdvancedMode",0,ini.c_str())!=0 &&
+            GetPrivateProfileIntW(L"benchmark",L"enabled",0,ini.c_str())!=0;
+    }
     catch (...) {}
 #endif
     return false;
@@ -1577,9 +1581,9 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
         // Columns: base, + AFW, + Neural, + AFW + Neural, + OSR, + OSR + Neural.
         static constexpr std::string_view names[8][6]={
             {"FidelityFX","FidelityFX + AFW","FidelityFX + Neural","FidelityFX + AFW + Neural","FidelityFX + OSR","FidelityFX + OSR + Neural"},
-            {"Nvidia 0.2.1","Nvidia 0.2.1 + AFW","Nvidia 0.2.1 + Neural","Nvidia 0.2.1 + AFW + Neural","Nvidia 0.2.1 + OSR","Nvidia 0.2.1 + OSR + Neural"},
-            {"Nvidia 0.3.0","Nvidia 0.3.0 + AFW","Nvidia 0.3.0 + Neural","Nvidia 0.3.0 + AFW + Neural","Nvidia 0.3.0 + OSR","Nvidia 0.3.0 + OSR + Neural"},
-            {"Nvidia 0.2.13","Nvidia 0.2.13 + AFW","Nvidia 0.2.13 + Neural","Nvidia 0.2.13 + AFW + Neural","Nvidia 0.2.13 + OSR","Nvidia 0.2.13 + OSR + Neural"},
+            {"Nvidia OFA","Nvidia OFA + AFW","Nvidia OFA + Neural","Nvidia OFA + AFW + Neural","Nvidia OFA + OSR","Nvidia OFA + OSR + Neural"},
+            {"Nvidia OFA","Nvidia OFA + AFW","Nvidia OFA + Neural","Nvidia OFA + AFW + Neural","Nvidia OFA + OSR","Nvidia OFA + OSR + Neural"},
+            {"Nvidia OFA","Nvidia OFA + AFW","Nvidia OFA + Neural","Nvidia OFA + AFW + Neural","Nvidia OFA + OSR","Nvidia OFA + OSR + Neural"},
             {"Hybrid","Hybrid + AFW","Hybrid + Neural","Hybrid + AFW + Neural","Hybrid + OSR","Hybrid + OSR + Neural"},
             {"FSR","FSR + AFW","FSR + Neural","FSR + AFW + Neural","FSR + OSR","FSR + OSR + Neural"},
             {"DLSS-G","DLSS-G + AFW","DLSS-G + Neural","DLSS-G + AFW + Neural","DLSS-G + OSR","DLSS-G + OSR + Neural"},
@@ -1672,9 +1676,6 @@ std::string interface_status_text(const Snapshot& s,bool include_reconstruction)
         std::snprintf(code, sizeof(code), "NGX result 0x%08X", r.provider_error);
         add(code);
     }
-    if (r.swapchains.fallback) add("Swapchain fallback");
-    else if (r.swapchains.refused) add("Swapchain allocation refused");
-    if (r.swapchains.other) add("Unclassified app swapchain");
     if (r.overlay_limit_mask) add("Overlay swapchain limit reached");
     if (r.luke_detected) add("Luke Ross detected");
     if (r.uevr_osr) add("UEVR Alternating detected");

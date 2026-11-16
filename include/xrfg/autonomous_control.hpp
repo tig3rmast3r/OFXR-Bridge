@@ -295,8 +295,8 @@ bool initialize_user_configuration() noexcept;
 bool write_configuration_sections(const std::filesystem::path& path, std::string_view sections) noexcept;
 bool benchmark_enabled() noexcept; // controller/UI only; never called by frame sampling
 
-constexpr int generation_ui_index(int mode) noexcept { return mode==3 ? 1 : mode==1 ? 2 : mode==2 ? 3 : mode==4 ? 4 : 0; }
-constexpr int generation_from_ui(int index) noexcept { return index==1 ? 3 : index==2 ? 1 : index==3 ? 2 : index==4 ? 4 : 0; }
+constexpr int generation_ui_index(int mode) noexcept { return mode==4 ? 1 : mode==3 ? 2 : mode==1 ? 3 : mode==2 ? 4 : 0; }
+constexpr int generation_from_ui(int index) noexcept { return index==1 ? 4 : index==2 ? 3 : index==3 ? 1 : index==4 ? 2 : 0; }
 void select_generation(Settings& value, int generation, int ofxr_engine) noexcept;
 Settings sanitize(Settings value) noexcept;
 // OFXR's FidelityFX, 0.2.1 and 0.3.0 engines and Hybrid: the routes whose

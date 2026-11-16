@@ -302,7 +302,10 @@ bool cards(Panel& p,const char* id,int& value,std::span<const Card> options) {
         FaceScope scope(face_sans,p.m.label);
         for(const auto& option:options)tag_height=std::max(tag_height,ImGui::CalcTextSize(option.tag,nullptr,false,inner).y);
     }
-    const float name_height=p.m.body*1.25F,height=std::max(p.m.control+16,name_height+tag_height+16);
+    float name_height=p.m.body*1.25F;
+    {FaceScope scope(face_semibold,p.m.body);
+     for(const auto& option:options)name_height=std::max(name_height,ImGui::CalcTextSize(option.name,nullptr,false,inner).y);}
+    const float height=std::max(p.m.control+16,name_height+tag_height+16);
     ImGui::PushID(id);
     bool changed=false;
     int index=0;
@@ -319,7 +322,7 @@ bool cards(Panel& p,const char* id,int& value,std::span<const Card> options) {
         {
             FaceScope scope(face_semibold,p.m.body);
             if(option.disabled)ImGui::PushStyleColor(ImGuiCol_Text,p.c.muted);
-            ImGui::RenderText({min.x+8,top},option.name);
+            ImGui::RenderTextWrapped({min.x+8,top},option.name,nullptr,inner);
             if(option.disabled)ImGui::PopStyleColor();
         }
         {
@@ -484,12 +487,12 @@ constexpr Help kHelpHzSteam{"Display Hz","SteamVR physical display frequency."};
 constexpr Help kHelpHzOpenXr{"Display Hz","OpenXR shortest observed predicted display period; may reflect runtime throttling."};
 
 constexpr std::array<Card,5> kRoutes{{
-    {"OFXR","Fast",false,{"OFXR","Fastest route. Optical flow only, no game vectors needed."}},
+    {"OpticalFlow","Fast",false,{"OpticalFlow","Optical flow only, no game vectors needed."}},
+    {"RIFE","Slow",false,{"RIFE","NVIDIA uses CUDA/TensorRT. Radeon Vulkan uses RIFE 4.4 with device-specific preparation. Requires the matching RIFE runtime installed in AppData. Radeon hardware validation is pending."}},
     {"Hybrid","Needs DLSS",false,{"Hybrid","Game motion vectors plus optical flow. If game guides are unavailable or rejected, it uses optical flow alone."}},
     {"FSR 3.1","Needs DLSS",false,{"FSR 3.1","Uses game motion vectors and depth, so the game must run DLSS. Slow."}},
-    {"DLSS-G","Needs DLSS",false,{"DLSS-G","The slowest route. Uses game motion vectors and depth, and needs compatible NVIDIA hardware and runtime."}},
-    {"RIFE","Experimental",false,{"RIFE","NVIDIA uses CUDA/TensorRT. Radeon Vulkan uses RIFE 4.4 with device-specific preparation. Requires the matching RIFE runtime installed in AppData. Radeon hardware validation is pending."}}}};
-constexpr Card kEngineFidelity{"FidelityFX","Low latency, medium compat",false,{"FidelityFX","Low latency, medium compatibility. Offers Flow resolution only."}};
+    {"DLSS-G","Needs DLSS",false,{"DLSS-G","Uses game motion vectors and depth, and needs compatible NVIDIA hardware and runtime."}}}};
+constexpr Card kEngineFidelity{"FidelityFX","Optical Flow",false,{"FidelityFX","Optical flow generation. Offers Flow resolution only."}};
 constexpr Card kEngine021{"Nvidia 0.2.1","Low latency, low compat",false,{"Nvidia 0.2.1","Low latency, low compatibility."}};
 constexpr Card kEngine0213{"Nvidia 0.2.13","Medium latency, high compat",false,{"Nvidia 0.2.13","Medium latency, high compatibility. Stops at 3X."}};
 constexpr Card kEngine030{"Nvidia 0.3.0","Medium latency, medium compat",false,{"Nvidia 0.3.0","Medium latency, medium compatibility."}};
@@ -649,7 +652,7 @@ bool generation(Panel& p) {
         changed|=toggle_row(p,"Swap","AER Swap",draft.ofr_swap,kHelpOfrSwap,!draft.ofr_enabled);
     }
     if(draft.ofr_enabled && controls_enabled) {
-        notice(p,Tone::idle,"AER framegen: 2X only. Uses the selected generator, quality and pacing. OSR/AFW are bypassed while framegen is enabled.");
+        notice(p,Tone::idle,"AER framegen uses the selected generator, quality and pacing. OSR/AFW are bypassed while framegen is enabled.");
         if(state.connected) {
             const char* delivery=state.runtime.ofr_delivery==1?"Alternating eye releases":state.runtime.ofr_delivery==2?"Paired releases (phase assumed)":"Learning release cadence";
             reason(p,delivery);
@@ -668,8 +671,14 @@ bool generation(Panel& p) {
     const bool no_vectors=state.connected && (interface_vectors_text(state,GetTickCount64())=="None" ||
         (draft.ofr_enabled && !state.runtime.upscaler_depth));
     auto routes=kRoutes;
-    if(radeon){routes[3].disabled=true;routes[3].tag="NVIDIA GPU required";}
-    for(int i=1;i<4;++i)if(no_vectors&&!routes[i].disabled) {routes[i].tag="No DLSS";routes[i].warn=true;}
+    if(radeon){routes[4].disabled=true;routes[4].tag="NVIDIA GPU required";}
+    for(int i=2;i<5;++i)if(no_vectors&&!routes[i].disabled) {routes[i].tag="No DLSS";routes[i].warn=true;}
+    if(reconstruction_source(state.runtime) && draft.afw_mode!=0 && !draft.ofr_enabled) {
+        for(int i:{3,4}) {
+            routes[i].disabled=true;routes[i].warn=false;routes[i].tag="Unavailable with OSR/AFW";
+            routes[i].help={routes[i].name,"This generator needs native stereo guides. With OSR/AFW use OpticalFlow, RIFE or Hybrid; AER framegen can use native vector generators."};
+        }
+    }
     int selected_generation=generation_ui_index(draft.frame_generation);
     if(cards(p,"Frame generation",selected_generation,routes)) {
         select_generation(draft,generation_from_ui(selected_generation),draft.backend);
@@ -723,9 +732,9 @@ bool generation(Panel& p) {
     bool show_flow=false,nvidia_flow=false;
     if(draft.frame_generation==0 && draft.independent_pacing) {
         int engine=draft.backend==0?0:1;
-        std::array<Card,2> engines{kEngineFidelity,{"NVIDIA","Optical flow",false,{"NVIDIA","Optical generation with Independent pacing."}}};
+        std::array<Card,2> engines{kEngineFidelity,{"NVIDIA","Optical Flow",false,{"NVIDIA","Optical generation with Independent pacing."}}};
         if(radeon){engines[1].disabled=true;engines[1].tag="NVIDIA GPU required";}
-        if(cards(p,"OFXR engine",engine,engines)){select_generation(draft,0,engine);changed=true;}
+        if(cards(p,"OpticalFlow engine",engine,engines)){select_generation(draft,0,engine);changed=true;}
         if(draft.advanced_mode)changed|=segmented(p,"Motion source","Motion source",draft.motion_vectors,{{"Optical flow"},{"Game motion vectors"}},kHelpMotion);
         show_flow=draft.motion_vectors==0;nvidia_flow=engine!=0;
     } else if(draft.frame_generation==0) {
@@ -735,7 +744,7 @@ bool generation(Panel& p) {
         std::array<Card,4> engines{kEngineFidelity,kEngine021,kEngine0213,kEngine030};
         if(radeon)for(unsigned i=1;i<engines.size();++i){engines[i].disabled=true;engines[i].tag="NVIDIA GPU required";}
         int selected_engine=engine_order[std::clamp(draft.backend,0,3)];
-        if(cards(p,"OFXR engine",selected_engine,engines)) {
+        if(cards(p,"OpticalFlow engine",selected_engine,engines)) {
             select_generation(draft,0,engine_order[selected_engine]);
             changed=true;
         }
@@ -782,7 +791,7 @@ bool generation(Panel& p) {
         // 0.2.13 is left out: it is a pacing route as well as a flow.
         if(draft.independent_pacing) {
             int engine=draft.hybrid_backend==0?0:1;
-            std::array<Card,2> engines{kEngineFidelity,{"NVIDIA","Optical flow",false,{"NVIDIA","Optical generation with Independent pacing."}}};
+            std::array<Card,2> engines{kEngineFidelity,{"NVIDIA","Optical Flow",false,{"NVIDIA","Optical generation with Independent pacing."}}};
             if(radeon){engines[1].disabled=true;engines[1].tag="NVIDIA GPU required";}
             if(cards(p,"Optical flow engine",engine,engines)){draft.hybrid_backend=engine;changed=true;}
         } else {
@@ -891,7 +900,7 @@ void session_swapchain_budget(Panel& p) {
     std::snprintf(line,sizeof(line),"Game: %u",b.application);reason(p,line);
     if(b.unassigned_native) {std::snprintf(line,sizeof(line),"Other / unclassified: %u",b.unassigned_native);reason(p,line);}
     if (const auto warning=swapchain_budget_warning(b);!warning.empty())
-        notice(p,Tone::warn,std::string(warning).c_str());
+        reason(p,std::string(warning).c_str());
     // Draw actual lines only. Empty/padded rows must not reserve a large
     // blank block before the ownership limitation text in the headset menu.
     std::string_view details(b.details,std::find(std::begin(b.details),std::end(b.details),'\0')-std::begin(b.details));
@@ -908,7 +917,7 @@ void session_swapchain_budget(Panel& p) {
         details.remove_prefix(newline+1);
     }
     if (b.details_truncated) reason(p,"Additional app handles omitted from this panel.");
-    if(b.unassigned_native)notice(p,Tone::warn,"Some native swapchains have no assigned owner.");
+    if(b.unassigned_native)reason(p,"Some native swapchains have no assigned owner.");
 }
 
 bool framewarp(Panel& p) {
@@ -1192,6 +1201,7 @@ bool suite(Panel& p,const char* name,const char* id,std::size_t count,bool disab
 }
 
 bool tests(Panel& p) {
+    if(!p.ui.draft.advanced_mode)return false;
     auto& ui=p.ui;
     auto& draft=ui.draft;
     const auto& state=p.state;
@@ -1433,7 +1443,7 @@ std::string section_summary(const Panel& p,int index,bool& live,bool& alert) {
 
         live=interface_generation_active(state);
         if(!draft.enabled)return "Off";
-        constexpr const char* names[]{"OFXR","FSR 3.1","DLSS-G","Hybrid","RIFE"};
+        constexpr const char* names[]{"OpticalFlow","FSR 3.1","DLSS-G","Hybrid","RIFE"};
         std::string text=names[std::clamp(draft.frame_generation,0,4)];
         if(draft.frame_generation!=1)text+=" "+std::to_string(generation_multiplier(draft))+"X";
         if(draft.ofr_enabled)text+=" / AER";
@@ -1467,6 +1477,7 @@ void rail(Panel& p,float width) {
     auto* list=ImGui::GetWindowDrawList();
     ImGui::SetCursorPosY(pad);
     for(int i=0;i<int(kSections.size());++i) {
+        if(i==5 && !ui.draft.advanced_mode)continue;
         ImGui::SetCursorPosX(pad);
         const auto& section=kSections[i];
         const bool selected=ui.section==i;
@@ -1513,7 +1524,7 @@ void header(Panel& p,SettingsWidgetOptions& options,std::optional<Snapshot>& sel
     {
         FaceScope scope(face_sans,p.m.label);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("0.3.3 (v%d)",XRFG_IMPLEMENTATION_VERSION);
+        ImGui::TextDisabled("0.4.0 (v%d)",XRFG_IMPLEMENTATION_VERSION);
     }
     ImGui::SameLine();
     ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX()+8,kRailWidth+kPad));
@@ -1636,6 +1647,7 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& initial,
     Panel current{ui,state,options.compact,c,m};
 
     bool changed{};
+    if(!ui.draft.advanced_mode && ui.section==5)ui.section=0;
     const float rail_width=region.x<kNarrowWindow ? kRailNarrow : kRailWidth;
     const float main_width=std::max(120.F,region.x-rail_width-kStatusWidth);
     ImGui::SetCursorScreenPos({origin.x,origin.y+kHeaderHeight});

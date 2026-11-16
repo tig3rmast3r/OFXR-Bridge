@@ -211,7 +211,7 @@ bool show_settings_window(HWND owner) noexcept {
             cls.lpszClassName = kClassName;
             if (!RegisterClassExW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
             auto candidate = std::make_unique<Window>();
-            const auto title=L"OFXR-BRIDGE 0.3.3 (v"+std::to_wstring(XRFG_IMPLEMENTATION_VERSION)+L") - Settings";
+            const auto title=L"OFXR-BRIDGE 0.4.0 (v"+std::to_wstring(XRFG_IMPLEMENTATION_VERSION)+L") - Settings";
             // The same 1024 x 768 layout as the headset menu.
             RECT frame{0, 0, 1024, 768};
             AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW);

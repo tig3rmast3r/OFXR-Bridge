@@ -42,7 +42,7 @@ constexpr wchar_t kWindowClass[] = L"OFXRBridgeTrayWindow";
 #define XRFG_STRING(x) XRFG_STRING_IMPL(x)
 #define XRFG_WIDE_IMPL(x) L##x
 #define XRFG_WIDE(x) XRFG_WIDE_IMPL(x)
-constexpr wchar_t kApplicationName[] = L"OFXR-BRIDGE 0.3.3 (v" XRFG_WIDE(XRFG_STRING(XRFG_IMPLEMENTATION_VERSION)) L")";
+constexpr wchar_t kApplicationName[] = L"OFXR-BRIDGE 0.4.0 (v" XRFG_WIDE(XRFG_STRING(XRFG_IMPLEMENTATION_VERSION)) L")";
 constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
@@ -711,7 +711,7 @@ void close_pause_signal(AppState& state) {
     refresh_tray_icon(state);
     show_balloon(
         state,
-        L"OFXR 0.3.3 armed",
+        L"OFXR 0.4.0 armed",
         L"The bridge will remain enabled for OpenXR applications until you disarm it or exit the tray.");
     return true;
 }
@@ -1056,6 +1056,12 @@ void append_legacy_pacing_menu(HMENU menu,const AppState& state,bool advanced) {
     }
 }
 
+void append_benchmark_menu(HMENU menu,bool advanced) {
+    if(!advanced)return;
+    AppendMenuW(menu,MF_STRING | (xrfg::autonomous::benchmark_enabled() ? MF_CHECKED : MF_UNCHECKED),
+        toggle_benchmark_mode,L"Enable benchmarks");
+}
+
 void show_context_menu(AppState& state) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
@@ -1073,8 +1079,7 @@ void show_context_menu(AppState& state) {
         toggle_crash_debug,L"Crash debug (restart game)");
     if(!state.crash_debug_status.empty())
         AppendMenuW(menu,MF_STRING | MF_GRAYED,0,state.crash_debug_status.c_str());
-    AppendMenuW(menu,MF_STRING | (xrfg::autonomous::benchmark_enabled() ? MF_CHECKED : MF_UNCHECKED),
-        toggle_benchmark_mode,L"Enable benchmarks");
+    append_benchmark_menu(menu,xrfg::autonomous::snapshot().desired.advanced_mode);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, open_logs, L"Open folder");
     AppendMenuW(menu, MF_STRING, show_about, L"About");
@@ -1089,6 +1094,10 @@ void show_context_menu(AppState& state) {
 }
 
 [[nodiscard]] bool set_benchmark_preference(const std::filesystem::path& ini, bool enabled, std::wstring* error) {
+    if(enabled && !GetPrivateProfileIntW(L"ofxr",L"AdvancedMode",0,ini.c_str())) {
+        if(error)*error=L"Benchmarks require Advanced Mode.";
+        return false;
+    }
     if(!xrfg::autonomous::write_configuration_sections(ini,
         enabled ? "[benchmark]\nenabled=1\n" : "[benchmark]\nenabled=0\n")) {
         if(error)*error=L"Could not save benchmark mode in ofxr-bridge.ini.";
@@ -1328,6 +1337,7 @@ void handle_command(AppState& state, UINT command) {
         break;
     }
     case toggle_benchmark_mode: {
+        if(!xrfg::autonomous::snapshot().desired.advanced_mode)return;
         std::wstring error;
         if(!set_benchmark_preference(state.settings_path,!xrfg::autonomous::benchmark_enabled(),&error))
             show_error(state.window,error);
@@ -1384,7 +1394,7 @@ void handle_command(AppState& state, UINT command) {
         break;
     case show_about: {
         wchar_t version_label[64]{};
-        swprintf_s(version_label, L"OFXR-BRIDGE 0.3.3 (v%03u)", kImplementationVersion);
+        swprintf_s(version_label, L"OFXR-BRIDGE 0.4.0 (v%03u)", kImplementationVersion);
         TASKDIALOGCONFIG dialog{};
         dialog.cbSize = sizeof(dialog);
         dialog.hwndParent = state.window;
@@ -1535,7 +1545,7 @@ LRESULT CALLBACK window_procedure(
     case WM_QUERYENDSESSION: {
         std::wstring error;
         if (!disarm_bridge(*state, &error)) {
-            ShutdownBlockReasonCreate(window, L"OFXR 0.3.3 could not disable its OpenXR registrations.");
+            ShutdownBlockReasonCreate(window, L"OFXR 0.4.0 could not disable its OpenXR registrations.");
             return FALSE;
         }
         ShutdownBlockReasonDestroy(window);
@@ -1729,7 +1739,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(
             nullptr,
-            L"OFXR 0.3.3 is already running in the notification area.",
+            L"OFXR 0.4.0 is already running in the notification area.",
             kApplicationName,
             MB_OK | MB_ICONINFORMATION);
         CloseHandle(single_instance);
@@ -1763,7 +1773,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
     } catch (...) {
         MessageBoxW(
             nullptr,
-            L"OFXR 0.3.3 could not initialize its local configuration.",
+            L"OFXR 0.4.0 could not initialize its local configuration.",
             kApplicationName,
             MB_OK | MB_ICONERROR);
         CloseHandle(single_instance);
@@ -1776,7 +1786,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
     if (state.armed_icon == nullptr || state.disarmed_icon == nullptr) {
         MessageBoxW(
             nullptr,
-            L"OFXR 0.3.3 could not load its notification icons.",
+            L"OFXR 0.4.0 could not load its notification icons.",
             kApplicationName,
             MB_OK | MB_ICONERROR);
         CloseHandle(single_instance);

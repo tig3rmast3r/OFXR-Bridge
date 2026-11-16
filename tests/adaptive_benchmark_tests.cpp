@@ -17,7 +17,7 @@ void report(RuntimeStatus& r){
 std::string read(const std::filesystem::path& path){std::ifstream f(path);return {std::istreambuf_iterator<char>(f),{}};}
 void controller(bool modern,bool full,bool luke,double base,double two,double three,double four,
     unsigned cap=4,bool confirmed=true,bool optimize=false,bool unstable=false,bool only=false,double hz=90){
-    auto saved=snapshot().desired;saved.advanced_mode=false;saved.benchmark_auto_pick=true;
+    auto saved=snapshot().desired;saved.advanced_mode=true;saved.independent_pacing=false;saved.benchmark_auto_pick=true;
     saved.rife_resolution=36;saved.benchmark_csv=true;saved.afw_only=false;saved.nr_enabled=true;saved.afw_mode=3;
     require(request(saved),"save isolated settings");saved=snapshot().desired;
     RuntimeStatus r{};r.process_id=GetCurrentProcessId();r.sessions=1;r.luke_detected=luke;
@@ -176,6 +176,7 @@ int main(int argc,char** argv){
     const auto root=std::filesystem::temp_directory_path()/(L"ofxr-adaptive-"+std::to_wstring(GetCurrentProcessId()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",root.c_str());
     try{
+        require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",global_configuration_path().c_str()),"explicit benchmark test enable");
         if(argc==2 && std::string_view(argv[1])=="--independent"){independent_controller_cases();return 0;}
         for(bool modern:{false,true})for(bool full:{false,true})for(bool luke:{false,true})
             controller(modern,full,luke,70,90,90,90);

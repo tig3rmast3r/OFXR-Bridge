@@ -182,36 +182,36 @@ void route_motion_widgets() {
     require(request(settings), "initialize OFXR optical-flow selection");
     Context tray(ImVec2(674, 861), false), headset(ImVec2(1024, 768), true);
     tray.draw(); tray.draw(); headset.draw(); headset.draw();
-    tray.choose("OFXR engine", 3, "Nvidia 0.3.0");
+    tray.choose("OpticalFlow engine", 3, "Nvidia 0.3.0");
     require(snapshot().desired.backend == 2, "new display order keeps 0.3.0 on persisted backend 2");
     headset.draw();
-    headset.choose("OFXR engine", 2, "Nvidia 0.2.13");
+    headset.choose("OpticalFlow engine", 2, "Nvidia 0.2.13");
     require(snapshot().desired.backend == 3, "new display order keeps 0.2.13 on persisted backend 3");
     tray.draw();
-    tray.choose("Frame generation", 4, "RIFE");
+    tray.choose("Frame generation", 1, "RIFE");
     require(snapshot().desired.frame_generation == 4,
         "RIFE is displayed last while keeping its persisted mode ID 4");
     headset.draw();
-    headset.choose("Frame generation", 0, "OFXR");
+    headset.choose("Frame generation", 0, "OpticalFlow");
     require(snapshot().desired.motion_vectors == 0,
         "returning from RIFE preserves the independent OFXR optical-flow selection");
     tray.draw();
-    tray.choose("Frame generation", 1, "Hybrid");
+    tray.choose("Frame generation", 2, "Hybrid");
     require(snapshot().desired.frame_generation == 3, "actual tray selects Hybrid with stable mode ID");
     headset.draw();
-    headset.choose("Frame generation", 0, "OFXR");
+    headset.choose("Frame generation", 0, "OpticalFlow");
     require(snapshot().desired.motion_vectors == 0, "Hybrid preserves independent OFXR optical flow selection");
     tray.draw();
-    tray.choose("Frame generation", 2, "FSR 3.1");
+    tray.choose("Frame generation", 3, "FSR 3.1");
     require(snapshot().desired.frame_generation == 1, "actual tray selects FSR");
     headset.draw();
-    headset.choose("Frame generation", 0, "OFXR");
+    headset.choose("Frame generation", 0, "OpticalFlow");
     require(snapshot().desired.motion_vectors == 0,
         "returning from FSR restores OFXR optical flow");
     tray.draw();
-    tray.choose("Frame generation", 3, "DLSS-G");
+    tray.choose("Frame generation", 4, "DLSS-G");
     headset.draw();
-    headset.choose("Frame generation", 0, "OFXR");
+    headset.choose("Frame generation", 0, "OpticalFlow");
     require(snapshot().desired.motion_vectors == 0,
         "returning from DLSS-G restores OFXR optical flow");
 }
@@ -226,20 +226,20 @@ void route_multiplier_widgets() {
     tray.choose("Multiplier", 1, "3X");
     require(snapshot().desired.triple_frame_gen, "actual DJ menu selects 3X");
     headset.draw();
-    headset.choose("Frame generation", 3, "DLSS-G");
+    headset.choose("Frame generation", 4, "DLSS-G");
     require(!snapshot().desired.triple_frame_gen,
         "DLSS-G keeps its own 2X after DJ selects 3X");
     headset.choose("Multiplier", 1, "3X");
-    tray.draw(); tray.choose("Frame generation", 0, "OFXR");
+    tray.draw(); tray.choose("Frame generation", 0, "OpticalFlow");
     // Since V609, DLSS-G has canonical backend0. Select Djules explicitly
     // after leaving it instead of assuming DLSS-G retained a Djules presenter.
-    tray.choose("OFXR engine", 2, "Nvidia 0.2.13");
+    tray.choose("OpticalFlow engine", 2, "Nvidia 0.2.13");
     tray.choose("Multiplier", 0, "2X");
-    headset.draw(); headset.choose("Frame generation", 3, "DLSS-G");
+    headset.draw(); headset.choose("Frame generation", 4, "DLSS-G");
     require(snapshot().desired.triple_frame_gen,
         "DLSS-G keeps its 3X after DJ selects 2X");
-    tray.draw(); tray.choose("Frame generation", 0, "OFXR");
-    tray.choose("OFXR engine", 2, "Nvidia 0.2.13");
+    tray.draw(); tray.choose("Frame generation", 0, "OpticalFlow");
+    tray.choose("OpticalFlow engine", 2, "Nvidia 0.2.13");
     require(!snapshot().desired.triple_frame_gen, "DJ keeps its own 2X");
 }
 void rife_catalog() {
@@ -465,8 +465,8 @@ void actual_widgets() {
         require(view->rendered_text.find("Use previous frame (debug only)")!=std::string::npos &&
             view->rendered_text.find("Total swapchains:")==std::string::npos,
             "Luke controls remain above collapsed swapchain Details");
-        require(view->rendered_text.find("Swapchain fallback")!=std::string::npos,
-            "status warns even with ownership Details collapsed");
+        require(view->rendered_text.find("Swapchain fallback")==std::string::npos,
+            "swapchain failures stay out of global status");
     }
     require(tray.rendered_text.find("Swapchains")==std::string::npos && headset.rendered_text.find("Swapchains")==std::string::npos,
         "inventory is no longer a Reconstruction-only control");
@@ -478,7 +478,7 @@ void actual_widgets() {
         require(view->rendered_text.find("Diagnostic logging")<view->rendered_text.find("Total swapchains:"),
             "expanded inventory belongs with diagnostic logging");
         require(view->rendered_text.find("Swapchain fallback")!=std::string::npos,
-            "desktop/headset status and warning expose actual fallback");
+            "desktop/headset expanded details retain actual fallback");
         require(view->rendered_text.find("Total swapchains: 14")!=std::string::npos &&
             view->rendered_text.find("0x823")!=std::string::npos,
             "Logging exposes handle count and unknown app identity without Luke Ross");
@@ -600,7 +600,7 @@ void offline_preset() {
 void automatic_buttons() {
     require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable benchmark GUI fixture in single INI");
     // Factory Auto pick is ON since V663. This click test exercises OFF->ON.
-    auto initial=snapshot().desired;initial.benchmark_auto_pick=false;
+    auto initial=snapshot().desired;initial.advanced_mode=true;initial.benchmark_auto_pick=false;
     require(request(initial),"explicit unchecked state for auto-pick interaction fixture");
     RuntimeStatus runtime{};runtime.sessions=1;runtime.luke_detected=true;
     runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;
@@ -660,26 +660,13 @@ void automatic_buttons() {
     require(snapshot().desired.preset==1&&snapshot().desired.scale==1,
         "visible Basic flow quality and size publish their selected values");
 
-    tray.select_tab("Tests");
-    runtime.applied_revision=snapshot().revision;runtime.pacing_mode=kIndependentPacingMode;runtime.dlssg_max_multiplier=4;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("Up to 7 tests")!=std::string::npos && tray.rendered_text.find("Up to 14 tests")!=std::string::npos,"Basic Display uses the compact Independent plan");
-    tray.activate("/Tests_","How tests work");tray.draw();tray.draw(true);
-    require(tray.rendered_text.find("10 seconds per configuration")!=std::string::npos &&
-        tray.rendered_text.find("All 2X candidates finish first")!=std::string::npos,
-        "Display describes the actual shorter benchmark timing");
-    tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
-    require(snapshot().benchmark.count==7 && !snapshot().benchmark.advanced,"Basic Display starts the Independent 2X-first matrix");
-    tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
-    require(tray.rendered_text.find("Auto pick best one")!=std::string::npos,"auto-pick checkbox is in Display");
-    require(tray.rendered_text.find("On completion: within")==std::string::npos &&
-        tray.rendered_text.find("Native vectors take priority")==std::string::npos,
-        "automatic selection rules stay out of the product interface");
-    tray.activate("/Tests_","Auto pick best one");tray.draw();tray.draw();
-    require(snapshot().desired.benchmark_auto_pick,"actual checkbox saves the per-profile automatic preference");
-    tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
-    require(snapshot().benchmark.auto_pick,"UI-started suite captures the auto-pick preference");
-    tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
-    require(snapshot().desired.benchmark_auto_pick && snapshot().benchmark.phase==BenchmarkPhase::stopped,"Stop restores settings without clearing the auto-pick preference");
+    tray.widgets.section=5;basic_headset.widgets.section=5;
+    tray.draw(true);basic_headset.draw(true);
+    require(tray.widgets.section==0 && basic_headset.widgets.section==0,"Basic cannot retain the hidden Tests page");
+    require(tray.rendered_text.find("Without vectors")==std::string::npos &&
+        basic_headset.rendered_text.find("Without vectors")==std::string::npos && !benchmark_enabled(),
+        "Basic hides and disables benchmark controls even with a saved enabled preference");
+
 }
 } // namespace
 
@@ -971,9 +958,9 @@ void radeon_routes() {
         amd.desired.advanced_mode=true;amd.desired.backend=0;amd.desired.afw_mode=0;
         Context view(compact?ImVec2(1024,768):ImVec2(1180,900),compact);
         view.injected_snapshot=&amd;view.draw();view.draw();
-        view.choose("OFXR engine",1,"Nvidia 0.2.1");
+        view.choose("OpticalFlow engine",1,"Nvidia 0.2.1");
         require(view.widgets.draft.backend==0,"Radeon rejects queued activation of NVIDIA OFA");
-        view.choose("Frame generation",3,"DLSS-G");
+        view.choose("Frame generation",4,"DLSS-G");
         require(view.widgets.draft.frame_generation!=2,"Radeon rejects queued activation of DLSS-G");
         amd.desired.frame_generation=3;amd.desired.hybrid_backend=0;++amd.revision;view.draw();view.draw();
         view.choose("Optical flow engine",1,"Nvidia 0.2.1");
@@ -986,13 +973,58 @@ void radeon_routes() {
 }
 }
 
+
+void release_040_widgets() {
+    Settings settings;settings.enabled=true;settings.backend=1;settings.afw_mode=0;
+    require(request(settings),"seed release0.4 UI");
+    require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",global_configuration_path().c_str()),"old saved enabled benchmark preference");
+    require(!benchmark_enabled() && !start_benchmark(false,false),"Basic blocks even direct benchmark requests");
+    for(bool compact:{false,true}) {
+        Context view(compact?ImVec2(1024,768):ImVec2(690,900),compact);
+        view.widgets.section=5;view.draw();view.draw(true);
+        require(view.widgets.section==0,"hidden Tests selection returns to Frame generation");
+        require(view.rendered_text.find("0.4.0")!=std::string::npos &&
+            view.rendered_text.find("OpticalFlow")!=std::string::npos && view.rendered_text.find("Experimental")==std::string::npos,
+            "new product and generator labels appear on both surfaces");
+        require(view.rendered_text.find("Without vectors")==std::string::npos,"Basic never renders test controls");
+        view.choose("Frame generation",1,"RIFE");require(snapshot().desired.frame_generation==4,"second card selects RIFE stable ID");
+        view.choose("Frame generation",0,"OpticalFlow");
+        RuntimeStatus runtime{};runtime.sessions=1;runtime.process_id=GetCurrentProcessId();runtime.luke_detected=true;
+        runtime.heartbeat_ms=GetTickCount64();runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        auto desired=snapshot().desired;desired.afw_mode=3;require(request(desired),"select reconstruction");
+        view.draw();view.draw(true);const auto original=snapshot().desired.frame_generation;
+        for(const auto* name:{"FSR 3.1","DLSS-G"}) {
+            view.choose("Frame generation",name[0]=='F'?3:4,name);
+            require(snapshot().desired.frame_generation==original,"incompatible reconstruction method cannot activate by keyboard navigation");
+        }
+        require(view.rendered_text.find("Unavailable with OSR/AFW")!=std::string::npos,"disabled generators explain compatibility");
+        desired=snapshot().desired;desired.luke_osr=0;require(request(desired),"select legacy AFW");view.draw();
+        view.choose("Frame generation",3,"FSR 3.1");require(snapshot().desired.frame_generation==original,"legacy AFW also blocks native-guide generation");
+        desired=snapshot().desired;desired.ofr_enabled=true;require(request(desired),"AER bypasses reconstruction");view.draw();
+        view.choose("Frame generation",3,"FSR 3.1");require(snapshot().desired.frame_generation==1,"raw AER permits vector generation");
+        desired=snapshot().desired;desired.ofr_enabled=false;desired.afw_mode=0;require(request(desired),"restore normal stereo");
+        runtime.luke_detected=false;runtime.afw_running=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);view.draw();
+        view.choose("Frame generation",4,"DLSS-G");require(snapshot().desired.frame_generation==2,"stereo permits vector generation");
+        runtime.swapchains.other=7;runtime.swapchains.refused=2;runtime.swapchains.unassigned_native=1;
+        report_runtime(runtime);view.draw(true);require(interface_status_text(snapshot()).find("swapchain")==std::string::npos,"irrelevant swapchains do not produce global warnings");
+        desired=snapshot().desired;select_generation(desired,0,1);desired.afw_mode=0;require(request(desired),"restore optical for next surface");
+    }
+    auto advanced=snapshot().desired;advanced.advanced_mode=true;require(request(advanced),"enable Advanced");
+    require(benchmark_enabled(),"Advanced can use saved explicit benchmark preference");
+    Context view({1024,768},true);view.draw();view.select_tab("Tests");view.draw(true);
+    require(view.widgets.section==5 && view.rendered_text.find("Without vectors")!=std::string::npos,"Advanced retains Tests");
+    advanced.advanced_mode=false;require(request(advanced),"leave Advanced");view.draw();
+    require(!benchmark_enabled() && view.widgets.section==0,"live policy change hides Tests and disables benchmark execution");
+}
+
 int main(int argc, char** argv) {
     const auto profile = std::filesystem::temp_directory_path() /
         (L"ofxr-settings-widgets-" + std::to_wstring(GetCurrentProcessId()) +
             L"-" + std::to_wstring(GetTickCount64()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", profile.c_str());
     try {
-        if (argc == 2 && std::strcmp(argv[1], "--basic-independent") == 0) basic_independent_widgets();
+        if(argc==2 && std::strcmp(argv[1],"--release-040")==0) release_040_widgets();
+        else if (argc == 2 && std::strcmp(argv[1], "--basic-independent") == 0) basic_independent_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--independent-bench") == 0) independent_benchmark_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--independent") == 0) independent_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--radeon-routes") == 0) radeon_routes();
