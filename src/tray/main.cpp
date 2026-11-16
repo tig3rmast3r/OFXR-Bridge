@@ -863,9 +863,7 @@ struct RifeInstallDialog {
     bool vulkan_available{},vulkan_selected{};
 };
 bool rife_vulkan_installation_available(const RifeInstallDialog& state) noexcept {
-    // Keep the public installer disabled while Radeon validation is in progress.
-    constexpr bool released=false;
-    return released && state.vulkan_available;
+    return state.vulkan_available;
 }
 INT_PTR CALLBACK rife_install_dialog_procedure(HWND dialog,UINT message,WPARAM wparam,LPARAM lparam) {
     if(message==WM_INITDIALOG) {

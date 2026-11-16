@@ -37,16 +37,18 @@ void rife_setup_ui_tests() {
     require(answer==IDOK&&!dialog.vulkan_selected,"actual NVIDIA confirmation accepts Install");
     dialog.vulkan_available=true;
     answer=run_rife_dialog(dialog,[](HWND window){
-        require(IsWindowEnabled(GetDlgItem(window,IDC_RIFE_AMD))==FALSE,"Radeon remains disabled with its optional payload");
+        require(IsWindowEnabled(GetDlgItem(window,IDC_RIFE_AMD))!=FALSE,"Radeon is available when its payload is packaged");
         require(IsDlgButtonChecked(window,IDC_RIFE_NVIDIA)==BST_CHECKED,"NVIDIA remains the default with the optional payload");
         require(IsWindowEnabled(GetDlgItem(window,IDC_RIFE_NVIDIA))!=FALSE,"NVIDIA remains available with the optional payload");
         CheckRadioButton(window,IDC_RIFE_NVIDIA,IDC_RIFE_AMD,IDC_RIFE_AMD);
         SendMessageW(window,WM_COMMAND,IDOK,0);
-        require(IsWindow(window)!=FALSE,"forced Radeon selection cannot submit installation even with its payload");
-        CheckRadioButton(window,IDC_RIFE_NVIDIA,IDC_RIFE_AMD,IDC_RIFE_NVIDIA);
+    });
+    require(answer==IDOK&&dialog.vulkan_selected,"packaged Radeon selection accepts Install");
+    answer=run_rife_dialog(dialog,[](HWND window){
+        require(IsDlgButtonChecked(window,IDC_RIFE_NVIDIA)==BST_CHECKED,"NVIDIA remains the default on reopening the dialog");
         SendMessageW(window,WM_COMMAND,IDOK,0);
     });
-    require(answer==IDOK&&!dialog.vulkan_selected,"NVIDIA installation accepts while the Radeon payload is present");
+    require(answer==IDOK&&!dialog.vulkan_selected,"NVIDIA installation still accepts with the Radeon payload present");
     dialog.vulkan_available=false;
     answer=run_rife_dialog(dialog,[](HWND window){SendMessageW(window,WM_COMMAND,IDCANCEL,0);});
     require(answer==IDCANCEL,"Cancel does not accept an installation");
