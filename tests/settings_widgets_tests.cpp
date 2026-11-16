@@ -175,7 +175,7 @@ void rebase_and_publish() {
 }
 
 void route_motion_widgets() {
-    auto settings = snapshot().desired;
+    auto settings = snapshot().desired;settings.advanced_mode=true;settings.independent_pacing=false;
     settings.enabled=true;
     settings.frame_generation = 0; settings.backend = 3;
     settings.motion_vectors = 0; settings.triple_frame_gen = false;
@@ -216,7 +216,7 @@ void route_motion_widgets() {
         "returning from DLSS-G restores OFXR optical flow");
 }
 void route_multiplier_widgets() {
-    auto settings = snapshot().desired;
+    auto settings = snapshot().desired;settings.advanced_mode=true;settings.independent_pacing=false;
     settings.enabled=true;
     settings.frame_generation = 0; settings.backend = 3;
     settings.motion_vectors = 0; settings.triple_frame_gen = false;
@@ -292,8 +292,7 @@ void release_controls() {
     Context desktop({690,900},false);desktop.draw();desktop.draw(true);
     require(desktop.rendered_text.find("Motion source")==std::string::npos,"basic mode hides motion source");
     require(desktop.rendered_text.find("Framework+director")==std::string::npos,"basic UI has no combined mode or help");
-    desktop.choose("Pacing",0,"Framework");require(snapshot().desired.pacing_mode==0,"basic Framework selection works");
-    desktop.choose("Pacing",1,"Director");require(snapshot().desired.pacing_mode==1,"basic Director selection works");
+    require(snapshot().desired.independent_pacing && desktop.rendered_text.find("Director")==std::string::npos,"Basic uses Independent and hides legacy pacing choices");
     require(desktop.rendered_text.find("Reset defaults")!=std::string::npos,"reset appears in the footer");
     const auto before_reset=snapshot().desired;
     desktop.activate_root("Reset defaults");desktop.draw();desktop.draw();
@@ -330,13 +329,13 @@ void release_controls() {
     require(desktop.rendered_text.find("Frame Reconstruction only")!=std::string::npos && desktop.rendered_text.find("Clear before framewarp")==std::string::npos,"basic Luke UI exposes per-game Frame Reconstruction only without Clear");
     desktop.activate("/Framewarp_","Frame Reconstruction only");desktop.draw();
     require(snapshot().desired.afw_only,"actual AFW Only control persists settings");
-    auto advanced=snapshot().desired;advanced.advanced_mode=true;advanced.afw_only=false;require(request(advanced),"enable advanced UI by configuration");
+    auto advanced=snapshot().desired;advanced.advanced_mode=true;advanced.independent_pacing=false;advanced.afw_only=false;require(request(advanced),"enable advanced UI by configuration");
     desktop.select_tab("Frame generation");desktop.draw(true);
     require(desktop.rendered_text.find("Motion source")!=std::string::npos,"advanced mode restores motion source");
     desktop.choose("Pacing",2,"Framework+director");require(snapshot().desired.pacing_mode==2,"advanced combined selection works");
 }
 void actual_widgets() {
-    auto advanced=snapshot().desired;advanced.enabled=true;advanced.advanced_mode=true;require(request(advanced),"enable advanced-only UI fixture");
+    auto advanced=snapshot().desired;advanced.enabled=true;advanced.advanced_mode=true;advanced.independent_pacing=false;require(request(advanced),"enable advanced-only UI fixture");
     Context tray(ImVec2(674, 861), false);
     Context headset(ImVec2(1024, 768), true);
     const auto before = snapshot();
@@ -878,8 +877,8 @@ void aer_framegen_widgets() {
         require(request(basic),"return enabled AER and Swap to Basic");view.draw();view.draw(true);
         require(snapshot().desired.ofr_enabled && !snapshot().desired.ofr_swap,"returning to Basic preserves AER and clears Advanced-only Swap");
         require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"returning to Basic keeps AER visible and hides Swap");
-        settings=snapshot().desired;settings.advanced_mode=true;
-        require(request(settings),"restore Advanced for disabled-control coverage");view.draw();view.draw();
+        settings=snapshot().desired;settings.advanced_mode=true;settings.independent_pacing=false;
+        require(request(settings),"restore Advanced legacy for disabled-control coverage");view.draw();view.draw();
         const auto multiplier=snapshot().desired.rife_multiplier;
         view.choose("RIFE multiplier",1,"3X");
         require(snapshot().desired.rife_multiplier==multiplier && generation_multiplier(snapshot().desired)==2,"AER disables higher multiplier buttons: before="+std::to_string(multiplier)+" after="+std::to_string(snapshot().desired.rife_multiplier)+" aer="+std::to_string(snapshot().desired.ofr_enabled)+" fg="+std::to_string(snapshot().desired.frame_generation));
@@ -925,7 +924,7 @@ void aer_native_guide_widgets() {
     constexpr const char* cards[]{"OFXR","FSR 3.1","DLSS-G","Hybrid","RIFE"};
     constexpr int ui_indices[]{0,2,3,1,4};
     for(bool compact:{false,true})for(int method:{0,1,2,3,4}) {
-        auto settings=saved;settings.advanced_mode=true;settings.ofr_enabled=true;
+        auto settings=saved;settings.advanced_mode=true;settings.independent_pacing=false;settings.ofr_enabled=true;
         settings.ofr_swap=true;settings.enabled=true;settings.afw_mode=3;
         select_generation(settings,method,2);
         require(request(settings),"AER native-guide selected method setup");

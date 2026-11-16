@@ -1281,7 +1281,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
             check(SUCCEEDED(generation->synthesizer->retire_previous())&&SUCCEEDED(history->invalidate()),"prediction reuse still retires GPU");
             std::cout<<"Actual native GPU gate: legacy prediction blocks 1s; Luke prediction returns before work, reuse still retires PASS\n";
         }
-        state->synthesis_thread = std::thread(synthesis_worker_main, state);
+        state->synthesis_thread = std::thread(synthesis_worker_main, state, false);
         state->presenter_thread = std::thread(three_slot_director_main, state);
         presented.clear(); waits = begins = ends = 0;
         for (unsigned n = 1; n <= 8; ++n) {
@@ -3128,7 +3128,7 @@ xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
         RegisteredFixtureSession failed_registration(failed);
         auto job = std::make_shared<SynthesisJob>();
         job->current = frame(1); failed->synthesis_job = job; failed->synthesis_busy = true;
-        failed->synthesis_thread = std::thread(synthesis_worker_main, failed);
+        failed->synthesis_thread = std::thread(synthesis_worker_main, failed, false);
         check(XR_FAILED(wait_for_synthesis_handoff(failed)), "worker error not propagated");
         stop_continuous_presenter(failed);
         std::cout << "Actual director: 49 legal ordered cycles, slow synthesis/runtime, drain, unpaced producer, worker failure\n";
