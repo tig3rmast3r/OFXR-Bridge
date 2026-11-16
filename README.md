@@ -44,7 +44,7 @@ Not working, or not feeling smoother? See [Troubleshooting](#troubleshooting).
 >   50-series card; higher multipliers depend on hardware support.
 > - **RIFE:** install its runtime using the **RIFE** menu in the tray before
 >   selecting it. NVIDIA installation is available; Radeon Vulkan support is
->   still being tested and its installation choice is disabled in this release.
+>   still being tested; its installer is available when the Vulkan payload is included.
 >   RIFE does not require DLSS motion vectors or depth. See [RIFE installation](#rife-installation).
 > - **AER framegen:** requires **plain alternate-eye rendering**, without the
 >   mod's additional AER reconstruction or interpolation fixes. In UEVR this
@@ -122,8 +122,9 @@ and at least **14 GB free** during setup. Optimization caches need additional sp
 1. Close the game and open **RIFE -> Check RIFE...** in the tray.
 2. If RIFE is missing, accept the installation prompt. To repair an existing
    installation, choose **RIFE -> Reinstall RIFE...**.
-3. In **Install RIFE**, select **NVIDIA (CUDA / TensorRT)** and click **Install**.
-   The Radeon Vulkan choice is greyed out while Radeon support is being tested.
+3. In **Install RIFE**, select **NVIDIA (CUDA / TensorRT)** for NVIDIA cards or
+   **AMD Radeon - Vulkan** for Radeon cards, then click **Install**. Radeon support
+   is still being tested; its installer requires the bundled Vulkan payload.
 4. Wait for the PowerShell installation window to finish. It shows download
    and setup progress and needs no further input.
 5. Run **RIFE -> Check RIFE...** again and confirm that the runtime is ready.

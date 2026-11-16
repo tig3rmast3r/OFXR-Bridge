@@ -4,8 +4,8 @@ RIFE uses NVIDIA CUDA/TensorRT to generate frames from colour images. It does
 not require the game's DLSS motion vectors or depth. Luke Ross **OSR/AFW** and
 **Neural Rendering** retain their own requirements when used alongside RIFE.
 
-Radeon Vulkan support is still being tested. Its installation choice is disabled
-in this release.
+Radeon Vulkan support is still being tested. The Radeon installer is available
+when the complete archive includes its Vulkan payload.
 
 ## Install or check RIFE
 
@@ -13,7 +13,7 @@ in this release.
    and `python` folders beside `OFXRBridgeTray.exe`, and close any running games.
 2. Open the tray menu and choose **RIFE > Check RIFE...**.
 3. If the runtime is missing or needs repair, confirm **Install** with
-   **NVIDIA (CUDA / TensorRT)** selected.
+   **NVIDIA (CUDA / TensorRT)** for NVIDIA or **AMD Radeon - Vulkan** for Radeon.
 4. A PowerShell window shows progress. Wait for installation to finish and for
    the tray to report the result.
 5. Choose **RIFE > Check RIFE...** again. Confirm that it reports a ready runtime
