@@ -214,4 +214,4 @@ if($StandaloneInstaller){
     & $buildPython $installerBuilder --package $stage --output $installerOutput
     if($LASTEXITCODE -ne 0){throw 'Standalone installer build failed; the sealed main package was preserved.'}
     Write-Host 'Integrated and standalone Radeon installers were built from the same staged payload.'
-}else{Write-Host 'One complete OFXR ZIP; install NVIDIA RIFE from the tray. Radeon installation remains disabled while testing continues.'}
+}else{Write-Host 'One complete OFXR ZIP; install RIFE from the tray. Radeon Vulkan is available for testing when its payload is packaged.'}
