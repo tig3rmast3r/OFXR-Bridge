@@ -661,14 +661,14 @@ void automatic_buttons() {
         "visible Basic flow quality and size publish their selected values");
 
     tray.select_tab("Tests");
-    runtime.applied_revision=snapshot().revision;runtime.pacing_mode=1;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("Up to 35 tests")!=std::string::npos && tray.rendered_text.find("Up to 42 tests")!=std::string::npos,"basic Display shows current two/three-buffer counts");
+    runtime.applied_revision=snapshot().revision;runtime.pacing_mode=kIndependentPacingMode;runtime.dlssg_max_multiplier=4;report_runtime(runtime);tray.draw(true);
+    require(tray.rendered_text.find("Up to 7 tests")!=std::string::npos && tray.rendered_text.find("Up to 14 tests")!=std::string::npos,"Basic Display uses the compact Independent plan");
     tray.activate("/Tests_","How tests work");tray.draw();tray.draw(true);
-    require(tray.rendered_text.find("7.5 seconds per configuration")!=std::string::npos &&
-        tray.rendered_text.find("2.5 seconds settling, then 5 seconds measured")!=std::string::npos,
+    require(tray.rendered_text.find("10 seconds per configuration")!=std::string::npos &&
+        tray.rendered_text.find("All 2X candidates finish first")!=std::string::npos,
         "Display describes the actual shorter benchmark timing");
     tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
-    require(snapshot().benchmark.count==35 && !snapshot().benchmark.advanced,"basic Display starts current buffer matrix");
+    require(snapshot().benchmark.count==7 && !snapshot().benchmark.advanced,"Basic Display starts the Independent 2X-first matrix");
     tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     require(tray.rendered_text.find("Auto pick best one")!=std::string::npos,"auto-pick checkbox is in Display");
     require(tray.rendered_text.find("On completion: within")==std::string::npos &&
