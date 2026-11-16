@@ -45,7 +45,9 @@ class D3D12NativeDlssG final {
     D3D12NativeDlssG();
     ~D3D12NativeDlssG();
     // scale is the feature's resolution in percent of each eye's, 25 to 100;
-    // XRFG_NATIVE_DLSSG_SCALE overrides it.
+    // XRFG_NATIVE_DLSSG_SCALE overrides it. Features always use the private native
+    // provider; the legacy isolated_provider argument only permits Luke guide
+    // allocation aliases. Ordinary consumers keep strict canonical ownership.
     HRESULT initialize(ID3D12Device *device, ID3D12CommandQueue *queue,
                        const D3D12_RESOURCE_DESC &source, DXGI_FORMAT view_format,
                        UINT scale = 100,bool isolated_provider=false) noexcept;
@@ -71,7 +73,8 @@ class D3D12NativeDlssG final {
 
 // Frames NGX can generate between two rendered frames on this device's
 // adapter: 0 when native frame generation is unavailable, 1 for 2X only, and
-// 2 or more when 3X is possible. The first call per adapter queries NGX.
+// 2 or more when 3X is possible. Queries use the same private provider as
+// creation, never the game core; the legacy boolean is retained for callers.
 [[nodiscard]] std::uint32_t native_dlssg_max_generated_frames(ID3D12Device *device,bool isolated_provider=false) noexcept;
 
 } // namespace xrfg

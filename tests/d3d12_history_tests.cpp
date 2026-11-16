@@ -6465,7 +6465,54 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 #include "rife_switch_lifecycle.inc"
 #include "aer_unused_current_tests.inc"
 
+
+class NgxHostDeviceProbe final:public ReportedDeviceAlias {
+    ComPtr<ID3D12Device> native_;
+public:
+    unsigned heaps{};
+    explicit NgxHostDeviceProbe(ID3D12Device* native):ReportedDeviceAlias(native,true,false,nullptr,xrfg::d3d_native::reshade_unwrapped_guid),native_(native){}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** output) override {
+        const auto result=ReportedDeviceAlias::QueryInterface(iid,output);
+        return result==E_NOINTERFACE?native_->QueryInterface(iid,output):result;
+    }
+    HRESULT STDMETHODCALLTYPE CreateDescriptorHeap(const D3D12_DESCRIPTOR_HEAP_DESC* desc,REFIID iid,void** output) override {
+        ++heaps;return native_->CreateDescriptorHeap(desc,iid,output);
+    }
+};
+void test_native_private_context(bool hardware) {
+    D3D12WarpFixture fixture(hardware);
+    const auto before=xrfg::native_dlssg_lifetime_snapshot();
+    if(!hardware) {
+        require(xrfg::native_dlssg_max_generated_frames(fixture.device(),false)==0,"WARP must not advertise private DLSS-G");
+        const auto after=xrfg::native_dlssg_lifetime_snapshot();
+        require(after.shared_initializations==before.shared_initializations,"ordinary DLSS-G still initializes the game NGX context");
+        auto source=create_source_texture(fixture);xrfg::D3D12NativeDlssG rejected;
+        require(FAILED(rejected.initialize(fixture.device(),fixture.queue(),source->GetDesc(),kFormat)),"unsupported private provider must bypass");
+        require(xrfg::native_dlssg_lifetime_snapshot().shared_initializations==before.shared_initializations,"failed private setup fell back to the unsafe game context");
+        std::cout<<"Unsupported ordinary DLSS-G leaves shared NGX context untouched PASS\n";return;
+    }
+#ifdef XRFG_NATIVE_DLSSG
+    ComPtr<NgxHostDeviceProbe> game;game.Attach(new NgxHostDeviceProbe(fixture.device()));
+    const auto folder=std::filesystem::temp_directory_path()/L"ofxr-ngxc-context";std::filesystem::create_directories(folder);
+    const auto dll=std::filesystem::absolute(L"nvngx_dlssg.dll").parent_path();const wchar_t* paths[]{dll.c_str()};
+    NVSDK_NGX_FeatureCommonInfo info{};info.PathListInfo={paths,1};
+    require(NVSDK_NGX_SUCCEED(NVSDK_NGX_D3D12_Init_with_ProjectID("2152e8d8-a3d7-4d4c-88a5-37f740f81036",NVSDK_NGX_ENGINE_TYPE_CUSTOM,"OFXR-Bridge",folder.c_str(),game.Get(),&info)),"seed game NGX with device proxy");
+    const auto heap_count=game->heaps;
+    test_native_dlss_packed_stereo(fixture,false);
+    require(xrfg::native_dlssg_lifetime_snapshot().shared_initializations==before.shared_initializations,"native interpolation touched shared NGX init");
+    require(game->heaps==heap_count,"private generation reused the game proxy heap allocator");
+    NVSDK_NGX_Parameter* caps{};require(NVSDK_NGX_SUCCEED(NVSDK_NGX_D3D12_GetCapabilityParameters(&caps))&&caps,"game NGX context no longer alive");
+    NVSDK_NGX_D3D12_DestroyParameters(caps);fixture.require_no_debug_errors();
+    std::cout<<"Actual NVIDIA packed stereo interpolation with live proxy-initialized game NGX:private context,game allocator untouched PASS\n";
+#endif
+}
+
 int main(int argc, char** argv) {
+    if(argc>1 && (std::string_view(argv[1])=="native-context-isolation" || std::string_view(argv[1])=="native-context-nvidia")) {
+        try{test_native_private_context(std::string_view(argv[1])=="native-context-nvidia");return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+
     if(argc>1 && std::string_view(argv[1])=="aer-unused-current") {
         try{test_aer_unused_current();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

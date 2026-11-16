@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1001.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1002.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -3086,4 +3086,9 @@ if(XRFG_BUILD_TESTS AND WIN32 AND NOT XRFG_X86 AND TARGET xrfg_bridge_flight_log
     target_compile_definitions(xrfg_guide_device_proxy_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(xrfg_guide_device_proxy_tests PRIVATE xrfg_bridge_flight_logger d3d12 dxgi)
     add_test(NAME xrfg_guide_device_proxy_tests COMMAND xrfg_guide_device_proxy_tests)
+endif()
+
+if(TARGET xrfg_d3d12_history_tests)
+    add_test(NAME xrfg_native_private_context_warp COMMAND xrfg_d3d12_history_tests native-context-isolation)
+    set_tests_properties(xrfg_native_private_context_warp PROPERTIES RUN_SERIAL TRUE TIMEOUT 30)
 endif()

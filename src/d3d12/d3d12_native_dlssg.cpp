@@ -647,7 +647,7 @@ struct D3D12NativeDlssG::Impl {
     UINT recorded_slot{kSlots};
     ComPtr<ID3D12GraphicsCommandList> capture_list;
     bool diagnostic_decisions{}, capture_only{}, test_output{}, reseed_every_pair{};
-    bool direct_route{}, recover_requested{}, recovery_attempted{},isolated{};
+    bool direct_route{}, recover_requested{}, recovery_attempted{},isolated{},allow_luke_guide_alias{};
     FILE *decision_log{};
     Skip skip{Skip::none};
     std::shared_ptr<D3D12NativeFrameResult> last_result;
@@ -1191,6 +1191,13 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
                                      DXGI_FORMAT format, UINT scale,bool isolated_provider) noexcept {
 #ifdef XRFG_NATIVE_DLSSG
     try {
+        // Our FG lists/resources must never borrow the game's NGX allocator:
+        // it may retain a ReShade device and hand proxy heaps to a native list.
+        ComPtr<ID3D12Device> native_device;
+        ComPtr<ID3D12CommandQueue> native_queue;
+        const auto binding=d3d_native::canonical_binding(device,queue,native_device,native_queue);
+        if(FAILED(binding))return binding;
+        device=native_device.Get();queue=native_queue.Get();
         auto p = std::make_unique<Impl>();
         p->device = device;
         p->queue = queue;
@@ -1217,20 +1224,18 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
         p->near_far_partition = environment(L"XRFG_TEST_NATIVE_DLSSG_NEAR_FAR", p->near_far_partition);
         p->object_separation = environment(L"XRFG_TEST_NATIVE_DLSSG_SEPARATION", p->object_separation);
         p->vectors_dilated = environment(L"XRFG_TEST_NATIVE_DLSSG_DILATED");
-        p->isolated=isolated_provider;
+        // Keep the old Luke guide-allocation permission separate from provider
+        // isolation. A private ordinary feature must not admit opaque aliases.
+        p->allow_luke_guide_alias=isolated_provider;
+        p->isolated=true;
         HRESULT hr=S_OK;
-        if(!isolated_provider) {
-            hr=acquire_ngx(device);
-            if(FAILED(hr))return hr;
-            p->acquired=true;
-        }
-        const std::uint32_t frames = isolated_provider?query_isolated_frames(device):query_generated_frames(device);
-        remember_frames(device, frames,isolated_provider);
+        const std::uint32_t frames=query_isolated_frames(device);
+        remember_frames(device,frames,true);
         if (!frames) {
             return DXGI_ERROR_UNSUPPORTED;
         }
         p->max_outputs = frames;
-        p->direct_route = isolated_provider || uses_direct(device);
+        p->direct_route = true;
         hr = p->pipelines();
         if (FAILED(hr)) {
             return hr;
@@ -1359,6 +1364,18 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             return E_INVALIDARG;
         }
         auto &p = *impl_;
+        IUnknown* borrowed_list{};
+        ComPtr<ID3D12GraphicsCommandList> native_list;
+        ComPtr<ID3D12Device> reported_device;
+        ComPtr<IUnknown> native_owner,expected_owner;
+        IUnknown* borrowed_owner{};
+        if(!d3d_native::get_borrowed(list,&borrowed_list) ||
+            FAILED(borrowed_list->QueryInterface(IID_PPV_ARGS(&native_list))) ||
+            FAILED(native_list->GetDevice(IID_PPV_ARGS(&reported_device))) ||
+            !d3d_native::get_borrowed(reported_device.Get(),&borrowed_owner) ||
+            FAILED(borrowed_owner->QueryInterface(IID_PPV_ARGS(&native_owner))) ||
+            FAILED(p.device.As(&expected_owner)) || native_owner.Get()!=expected_owner.Get())return E_INVALIDARG;
+        list=native_list.Get();
         p.skip = Skip::none;
         p.poll_retired_features();
         p.poll_decisions();
@@ -1449,8 +1466,8 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                                     : DXGI_FORMAT_UNKNOWN;
                 const auto df =
                     g->depth ? depth_format(g->depth->GetDesc().Format) : DXGI_FORMAT_UNKNOWN;
-                if (!guide_resource_on_device(p.device.Get(),*g,g->motion_vectors.Get(),p.isolated) ||
-                    !guide_resource_on_device(p.device.Get(),*g,g->depth.Get(),p.isolated))
+                if (!guide_resource_on_device(p.device.Get(),*g,g->motion_vectors.Get(),p.allow_luke_guide_alias) ||
+                    !guide_resource_on_device(p.device.Get(),*g,g->depth.Get(),p.allow_luke_guide_alias))
                     return skip(Skip::guides, 11, i);
                 if (!valid_rect(g->motion_vectors.Get(),g->motion_x,g->motion_y,
                     g->motion_width,g->motion_height,g->motion_slice)) return skip(Skip::guides,12,i);
@@ -1882,6 +1899,10 @@ std::uint32_t native_dlssg_max_generated_frames(ID3D12Device *device,bool isolat
         if (!device) {
             return 0;
         }
+        ComPtr<ID3D12Device> owner;
+        if(FAILED(d3d_native::allocation_owner(device,owner)))return 0;
+        device=owner.Get();
+        isolated_provider=true; // Match creation: no host-core capability/allocator calls.
         const LUID adapter = device->GetAdapterLuid();
         {
             std::scoped_lock lock(ngx_mutex);
