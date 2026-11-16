@@ -600,7 +600,7 @@ void offline_preset() {
 void automatic_buttons() {
     require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable benchmark GUI fixture in single INI");
     // Factory Auto pick is ON since V663. This click test exercises OFF->ON.
-    auto initial=snapshot().desired;initial.advanced_mode=true;initial.benchmark_auto_pick=false;
+    auto initial=snapshot().desired;initial.advanced_mode=true;initial.afw_mode=3;initial.benchmark_auto_pick=false;
     require(request(initial),"explicit unchecked state for auto-pick interaction fixture");
     RuntimeStatus runtime{};runtime.sessions=1;runtime.luke_detected=true;
     runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;
