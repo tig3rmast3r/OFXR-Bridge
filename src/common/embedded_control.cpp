@@ -49,8 +49,9 @@ struct Control {
         settings.separate_synthesis = std::clamp(static_cast<int>(GetPrivateProfileIntW(
             L"ofxr", L"separate_synthesis", settings.lower_vram, ini().c_str())), 0, 1);
         settings.pacing_mode = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr", L"pacing_mode", 2, ini().c_str())),0,2);
-        settings.independent_pacing=GetPrivateProfileIntW(L"ofxr",L"independent_pacing",0,ini().c_str())!=0;
-        settings.independent_acquire_fix=GetPrivateProfileIntW(L"ofxr",L"independent_acquire_fix",1,ini().c_str())!=0;
+        settings.independent_pacing=GetPrivateProfileIntW(L"ofxr",L"AdvancedMode",0,ini().c_str())==0 ||
+            GetPrivateProfileIntW(L"ofxr",L"independent_pacing",0,ini().c_str())!=0;
+        settings.independent_acquire_fix=true;
         settings.independent_aer_double=GetPrivateProfileIntW(L"ofxr",L"independent_aer_double",0,ini().c_str())!=0;
         settings.pacing_buffer=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr",L"pacing_buffer",0,ini().c_str())),0,3);
         settings.increase_buffer=GetPrivateProfileIntW(L"ofxr",L"increase_buffer",0,ini().c_str())!=0;

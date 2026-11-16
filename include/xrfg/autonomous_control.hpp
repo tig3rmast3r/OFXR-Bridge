@@ -43,8 +43,8 @@ struct Settings {
     bool enabled{true};
     bool advanced_mode{}; // Global INI-only AdvancedMode; mirrored into each UI snapshot
     bool afw_only{}; // per-game startup choice, independent of Neural Rendering
-    bool independent_pacing{}; // startup-only isolated source/generator/presenter route
-    bool independent_acquire_fix{true}; // temporary live V1103/V1102 private-acquire comparison
+    bool independent_pacing{}; // startup-only; sanitize forces ON outside Advanced
+    bool independent_acquire_fix{true}; // retired INI compatibility; corrected acquire is always enabled
     int pacing_buffer{}; // legacy local-build setting, retained for INI compatibility; automatic route ignores it
     bool increase_buffer{}; // Framework2->3; native SteamVR Director already uses3; Legacy unaffected
     int pacing_mode{1}; // 0 framework, 1 sole director, 2 framework + director

@@ -624,6 +624,7 @@ bool generation(Panel& p) {
     const auto vendor=xrfg::settings_gpu_vendor(state);
     const bool radeon=xrfg::radeon_gpu(vendor);
     bool changed=xrfg::constrain_radeon_routes(draft,vendor);
+    if(!draft.advanced_mode && !draft.independent_pacing){draft.independent_pacing=true;changed=true;}
     const float right=right_edge();
     title(p,"Frame generation");
     ImGui::SameLine();
@@ -722,7 +723,8 @@ bool generation(Panel& p) {
     bool show_flow=false,nvidia_flow=false;
     if(draft.frame_generation==0 && draft.independent_pacing) {
         int engine=draft.backend==0?0:1;
-        constexpr std::array<Card,2> engines{kEngineFidelity,{"NVIDIA","Optical flow",false,{"NVIDIA","Optical generation with Independent pacing."}}};
+        std::array<Card,2> engines{kEngineFidelity,{"NVIDIA","Optical flow",false,{"NVIDIA","Optical generation with Independent pacing."}}};
+        if(radeon){engines[1].disabled=true;engines[1].tag="NVIDIA GPU required";}
         if(cards(p,"OFXR engine",engine,engines)){select_generation(draft,0,engine);changed=true;}
         if(draft.advanced_mode)changed|=segmented(p,"Motion source","Motion source",draft.motion_vectors,{{"Optical flow"},{"Game motion vectors"}},kHelpMotion);
         show_flow=draft.motion_vectors==0;nvidia_flow=engine!=0;
@@ -803,21 +805,25 @@ bool generation(Panel& p) {
     }
 
     const bool framework_only=state.connected && !pacing_comparison_runtime(state.runtime);
-    group_title(p,"Delivery");
+    if(draft.advanced_mode)group_title(p,"Delivery");
     ImGui::EndDisabled();
+    if(draft.advanced_mode) {
     constexpr Help independent_help{"Independent pacing","Isolated source clock, generation queue and runtime delivery. Select before starting the game; restart required to change routes."};
-    changed|=toggle_row(p,"Independent pacing","Independent pacing",draft.independent_pacing,independent_help);
+    changed|=toggle_row(p,"Independent pacing","Independent pacing",draft.independent_pacing,independent_help,false,"Requires restart");
     if(draft.independent_pacing)reason(p,state.connected && state.runtime.pacing_mode==kIndependentPacingMode ? "Independent route active: existing pacing, buffer and fast controls are bypassed." : "Independent route selected: restart the game to activate it.");
     if(draft.independent_pacing) {
-        reason(p,"Automatic pacing buffer: learns from missed delivery deadlines and slowly reduces spare allowance after stable delivery.");
+        reason(p,"Automatic pacing buffer: learns from missed delivery deadlines and recovers spare allowance when native delivery is stable.");
         if(state.connected && state.runtime.pacing_mode==kIndependentPacingMode) {
             char line[112];std::snprintf(line,sizeof(line),"Extra allowance: %.1f ms. Expired deliveries: %llu",
                 state.runtime.pacing_allowance_ns*1e-6,static_cast<unsigned long long>(state.runtime.pacing_expired));
             reason(p,line);
         }
     }
+    } else if(state.connected && state.runtime.pacing_mode!=kIndependentPacingMode) {
+        notice(p,Tone::warn,"Restart the game to apply the selected delivery route.");
+    }
     ImGui::BeginDisabled(!controls_enabled);
-    if(!draft.independent_pacing) {
+    if(draft.advanced_mode && !draft.independent_pacing) {
     int pacing=framework_only ? 0 : draft.pacing_mode;
     const bool picked_pacing=draft.advanced_mode
         ? segmented(p,"Pacing","Pacing",pacing,{{"Framework"},{"Director"},{"Framework+director"}},kHelpPacingAdvanced,framework_only || draft.independent_pacing)
@@ -1138,11 +1144,6 @@ bool logging(Panel& p) {
     const auto& state=p.state;
     bool changed=false;
     title(p,"Logging");
-    if(draft.independent_pacing || (state.connected && state.runtime.pacing_mode==kIndependentPacingMode)) {
-        constexpr Help acquire_help{"V1103 acquire fix","Temporary live A/B test for native D3D12 Independent. On uses the V1103 private-acquire correction; Off restores the V1102 binding-queue wait. Generator history and automatic buffer are retained."};
-        changed|=toggle_row(p,"V1103 acquire fix","V1103 acquire fix",draft.independent_acquire_fix,acquire_help);
-        reason(p,draft.independent_acquire_fix ? "A/B: V1103 correction ON" : "A/B: V1102 acquire wait restored");
-    }
     changed|=toggle_row(p,"Diagnostic logging","Diagnostic logging",draft.diagnostics,kHelpLogging);
     if(state.connected) reason(p,state.runtime.logging_active
         ? (draft.diagnostics ? "Logging active" : "Stopping logging...")

@@ -1046,6 +1046,18 @@ HMENU append_rife_menu(HMENU menu,const AppState& state) {
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(child),L"RIFE");return child;
 }
 
+void append_legacy_pacing_menu(HMENU menu,const AppState& state,bool advanced) {
+    if(!advanced)return;
+    HMENU pacing_menu=CreatePopupMenu();
+    if(pacing_menu) {
+        using xrfg::standalone::RuntimePacing;
+        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::automatic?MF_CHECKED:0),pacing_auto,L"Auto");
+        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::force_vdxr?MF_CHECKED:0),pacing_vdxr,L"Force VDXR");
+        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::force_steamvr?MF_CHECKED:0),pacing_steamvr,L"Force SteamVR");
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(pacing_menu),L"Pacing (restart game)");
+    }
+}
+
 void show_context_menu(AppState& state) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
@@ -1058,14 +1070,7 @@ void show_context_menu(AppState& state) {
         toggle_arm, L"Disable");
     AppendMenuW(menu, MF_STRING, configure_keybinds, L"Configure keybinds...");
     append_rife_menu(menu,state);
-    HMENU pacing_menu=CreatePopupMenu();
-    if(pacing_menu) {
-        using xrfg::standalone::RuntimePacing;
-        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::automatic?MF_CHECKED:0),pacing_auto,L"Auto");
-        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::force_vdxr?MF_CHECKED:0),pacing_vdxr,L"Force VDXR");
-        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::force_steamvr?MF_CHECKED:0),pacing_steamvr,L"Force SteamVR");
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(pacing_menu),L"Pacing (restart game)");
-    }
+    append_legacy_pacing_menu(menu,state,xrfg::autonomous::snapshot().desired.advanced_mode);
     AppendMenuW(menu,MF_STRING | (state.settings.crash_debug ? MF_CHECKED : MF_UNCHECKED),
         toggle_crash_debug,L"Crash debug (restart game)");
     if(!state.crash_debug_status.empty())

@@ -280,6 +280,17 @@ void queue_preference() {
     require(!set_steamvr_queue_preference(test.state, true, &error) && !test.state.settings.steamvr_separate_queue,
         "failed persistence rolls back the selection");
 }
+void pacing_menu_policy() {
+    AppState state;state.settings.pacing=xrfg::standalone::RuntimePacing::force_vdxr;
+    auto menu=CreatePopupMenu();require(menu!=nullptr,"pacing menu fixture");
+    append_legacy_pacing_menu(menu,state,false);
+    require(GetMenuItemCount(menu)==0,"Basic tray hides Auto/VDXR/SteamVR entirely");
+    append_legacy_pacing_menu(menu,state,true);auto pacing=GetSubMenu(menu,0);
+    require(GetMenuItemCount(menu)==1 && pacing && GetMenuItemCount(pacing)==3,"Advanced tray retains all legacy runtime choices");
+    require(GetMenuState(pacing,pacing_vdxr,MF_BYCOMMAND)&MF_CHECKED,"Advanced restores stored runtime selection");
+    require(state.settings.pacing==xrfg::standalone::RuntimePacing::force_vdxr,"hiding menu preserves saved launcher preference");
+    DestroyMenu(menu);
+}
 #include "tray_keybind_tests.inc"
 #include "tray_rife_setup_tests.inc"
 } // namespace
@@ -303,6 +314,7 @@ int main(int argc,char** argv) {
         runtime_stop_and_watchdog();
         integrity_scope_policy();
         queue_preference();
+        pacing_menu_policy();
         experimental_preferences();
         std::cout << "V074 dual-hive registry recovery and production tray lifecycle checks passed\n";
         return 0;

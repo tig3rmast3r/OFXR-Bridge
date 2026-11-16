@@ -764,7 +764,7 @@ void independent_benchmark_widgets() {
 void independent_widgets() {
     const auto saved=snapshot().desired;
     for(bool compact:{false,true}) {
-        auto settings=saved;settings.enabled=false;settings.independent_pacing=false;
+        auto settings=saved;settings.enabled=false;settings.independent_pacing=false;settings.advanced_mode=true;
         settings.frame_generation=0;settings.backend=0;settings.pacing_mode=1;
         settings.increase_buffer=true;settings.lower_vram=settings.separate_synthesis=1;
         require(request(settings),"independent UI setup");
@@ -849,16 +849,12 @@ void independent_widgets() {
             }
         }
         view.select_tab("Logging");view.draw();view.draw(true);
-        require(view.rendered_text.find("V1103 acquire fix")!=std::string::npos,"temporary A/B visible without Advanced on desktop and headset");
-        const auto before_ab=snapshot().desired;
-        view.activate("/Logging_","V1103 acquire fix");view.draw();view.draw();
-        auto ab=before_ab;ab.independent_acquire_fix=!ab.independent_acquire_fix;
-        require(snapshot().desired==ab,"A/B changes only the acquire flag");
-        view.activate("/Logging_","V1103 acquire fix");view.draw();view.draw();
-        require(snapshot().desired==before_ab,"A/B restores the exact saved settings");
+        require(view.rendered_text.find("V1103 acquire fix")==std::string::npos,"retired A/B is absent from desktop and headset");
     }
     require(request(saved),"restore after independent UI test");
 }
+
+#include "basic_independent_widgets.inc"
 
 void aer_framegen_widgets() {
     auto saved=snapshot().desired;auto settings=saved;
@@ -997,7 +993,8 @@ int main(int argc, char** argv) {
             L"-" + std::to_wstring(GetTickCount64()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", profile.c_str());
     try {
-        if (argc == 2 && std::strcmp(argv[1], "--independent-bench") == 0) independent_benchmark_widgets();
+        if (argc == 2 && std::strcmp(argv[1], "--basic-independent") == 0) basic_independent_widgets();
+        else if (argc == 2 && std::strcmp(argv[1], "--independent-bench") == 0) independent_benchmark_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--independent") == 0) independent_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--radeon-routes") == 0) radeon_routes();
         else if (argc == 2 && std::strcmp(argv[1], "--aer-framegen") == 0) {aer_framegen_widgets();aer_native_guide_widgets();}

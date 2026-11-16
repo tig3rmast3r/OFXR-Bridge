@@ -396,7 +396,9 @@ Settings sanitize(Settings value) noexcept {
     value.pacing_buffer=std::clamp(value.pacing_buffer,0,3);
     value.pacing_mode=std::clamp(value.pacing_mode,0,value.advanced_mode?2:1);
     value.benchmark_csv=true;
+    value.independent_acquire_fix=true; // Retain the corrected acquire path; retired A/B key is ignored.
     if(!value.advanced_mode) {
+        value.independent_pacing=true;
         const Settings defaults;
         value.ofr_swap=defaults.ofr_swap;
         value.backward=defaults.backward;

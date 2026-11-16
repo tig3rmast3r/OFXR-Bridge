@@ -83,10 +83,14 @@ void codec() {
     require(desired.independent_acquire_fix,"V1103 A/B defaults to current correction");
     for(bool active:{false,true}) {
         auto ab=desired;ab.independent_acquire_fix=active;
-        require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(ab)).independent_acquire_fix==active,"A/B persists per game");
+        require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(ab)).independent_acquire_fix==true,"A/B persists per game");
         auto concurrent=desired;concurrent.overlay_enabled=!desired.overlay_enabled;
         const auto merged=xrfg::autonomous::merge_changes(concurrent,desired,ab);
-        require(merged.independent_acquire_fix==active && merged.overlay_enabled==concurrent.overlay_enabled,"A/B delta merge preserves concurrent controls");
+        require(merged.independent_acquire_fix==true && merged.overlay_enabled==concurrent.overlay_enabled,"A/B delta merge preserves concurrent controls");
+    }
+    for(bool advanced:{false,true})for(bool selected:{false,true}) {
+        const auto restored=xrfg::autonomous::parse_settings("[ofxr]\nAdvancedMode="+std::to_string(advanced)+"\nindependent_pacing="+std::to_string(selected)+"\n");
+        require(restored.independent_pacing==(!advanced || selected),"Basic forces Independent;Advanced preserves explicit legacy/Independent choice");
     }
     for(int factor:{2,3,4}) {
         auto optical=desired;optical.independent_pacing=true;optical.frame_generation=0;optical.backend=3;optical.frame_multiplier=factor;

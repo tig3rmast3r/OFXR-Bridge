@@ -666,6 +666,7 @@ std::string build_runtime_ini(
     bool flush_each_event) {
     const auto desired = autonomous::sanitize(controls);
     LauncherSettings settings = launcher;
+    if(desired.independent_pacing)settings.pacing=RuntimePacing::automatic;
     // Hybrid runs on its own engine, never the OFXR one.
     const int engine = desired.frame_generation == 3 ? desired.hybrid_backend : desired.backend;
     settings.backend = engine == 0 ? FlowBackend::fidelity_fx : FlowBackend::nvidia;
@@ -708,6 +709,8 @@ std::string build_runtime_ini(
     const auto route = engine == 3 ? "djules" : engine == 2 ? "new" : "legacy";
     const auto first_section = result.find("\r\n\r\n[diagnostics]");
     result.insert(first_section,
+        "\r\nAdvancedMode=" + std::to_string(desired.advanced_mode) +
+        "\r\nindependent_pacing=" + std::to_string(desired.independent_pacing) +
         "\r\nenabled=" + std::string(desired.enabled ? "1" : "0") +
         "\r\nnvidia_route=" + route+"\r\nrife_multiplier="+std::to_string(multiplier)+"\r\nrife_model="+std::to_string(desired.frame_generation==4?desired.rife_model:-1)+"\r\nrife_resolution="+std::to_string(desired.rife_resolution));
     result += "\r\n[experimental]\r\nluke_afw_mode=" + std::to_string(desired.afw_mode) +
