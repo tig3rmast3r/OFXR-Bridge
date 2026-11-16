@@ -341,6 +341,9 @@ static_assert(kGhostSquareGuideRect.height == 1672U);
         case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
             return resource_format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
                    resource_format == view_format;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+            return resource_format == DXGI_FORMAT_R16G16B16A16_TYPELESS ||
+                   resource_format == view_format;
         default:
             return false;
     }

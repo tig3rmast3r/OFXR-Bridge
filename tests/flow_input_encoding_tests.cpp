@@ -22,7 +22,8 @@ static_assert(xrfg::flow_input_flags(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, reference)
 static_assert(xrfg::flow_input_flags(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, corrected) == 2);
 static_assert(xrfg::flow_input_flags(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, corrected) == 2);
 static_assert(xrfg::flow_input_flags(DXGI_FORMAT_R8G8B8A8_UNORM, corrected) == 0);
-static_assert(xrfg::flow_input_flags(DXGI_FORMAT_R16G16B16A16_FLOAT, corrected) == 0);
+static_assert(xrfg::flow_input_flags(DXGI_FORMAT_R16G16B16A16_FLOAT, reference) == 0);
+static_assert(xrfg::flow_input_flags(DXGI_FORMAT_R16G16B16A16_FLOAT, corrected) == 2);
 
 void require(bool condition,const char* message) { if(!condition) throw std::runtime_error(message); }
 void checked(HRESULT result,const char* message) { require(SUCCEEDED(result),message); }
@@ -98,6 +99,30 @@ int main(int argc,char** argv) {
             auto b=transition(source_bgra.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             list->ResourceBarrier(1,&b);
         });
+        d.Format=DXGI_FORMAT_R16G16B16A16_TYPELESS;
+        ComPtr<ID3D12Resource> source_fp16;
+        checked(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,IID_PPV_ARGS(&source_fp16)),"FP16 source");
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp16_footprint{};
+        UINT64 fp16_bytes=0;
+        device->GetCopyableFootprints(&d,0,1,0,&fp16_footprint,nullptr,nullptr,&fp16_bytes);
+        auto fp16_upload=buffer(fp16_bytes,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
+        // Half-precision encodings of the two linear RGBA pixels below.
+        const std::array<std::uint16_t,8> fp16_pixels{0x2c00,0x3000,0x3400,0x3800,0x3400,0x3400,0x3400,0x3800};
+        const std::array<double,8> fp16_values{0.0625,0.125,0.25,0.5,0.25,0.25,0.25,0.5};
+        checked(fp16_upload->Map(0,nullptr,&mapped),"FP16 upload map");
+        std::memcpy(static_cast<unsigned char*>(mapped)+fp16_footprint.Offset,
+            fp16_pixels.data(),sizeof(fp16_pixels));
+        fp16_upload->Unmap(0,nullptr);
+        submit([&](ID3D12GraphicsCommandList* list) {
+            D3D12_TEXTURE_COPY_LOCATION src{},dst{};
+            src.pResource=fp16_upload.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint=fp16_footprint;src.PlacedFootprint.Footprint.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            dst.pResource=source_fp16.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+            auto b=transition(source_fp16.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            list->ResourceBarrier(1,&b);
+        });
         std::array<ComPtr<ID3D12Resource>,3> outputs;
         d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;d.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         for(auto& output:outputs) checked(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,
@@ -135,16 +160,18 @@ int main(int argc,char** argv) {
         checked(device->CreateComputePipelineState(&ps,IID_PPV_ARGS(&pipelines[1])),"NVIDIA pack pipeline");
         auto readback=buffer(bytes,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
         unsigned cases=0;
-        for(bool bgra:{false,true}) for(bool nvidia:{false,true}) for(bool srgb:{false,true})
+        for(unsigned family:{0U,1U,2U}) for(bool nvidia:{false,true}) for(bool srgb:{false,true})
         for(bool new_route:{false,true}) for(bool reduced:{false,true}) {
-            if(reference_only && new_route) continue;
-            const auto format=bgra
+            const bool bgra=family==1;
+            const bool fp16=family==2;
+            if((reference_only && new_route) || (fp16 && srgb)) continue;
+            const auto format=fp16 ? DXGI_FORMAT_R16G16B16A16_FLOAT : bgra
                 ? (srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM)
                 : (srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM);
             D3D12_SHADER_RESOURCE_VIEW_DESC v{};v.Format=format;v.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
             v.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;v.Texture2DArray.MipLevels=1;
             v.Texture2DArray.ArraySize=1;
-            auto* input=bgra ? source_bgra.Get() : source.Get();
+            auto* input=fp16 ? source_fp16.Get() : bgra ? source_bgra.Get() : source.Get();
             device->CreateShaderResourceView(input,&v,cpu(0));device->CreateShaderResourceView(input,&v,cpu(1));
             std::array<UINT,62> constants{};
             constants[0]=2;constants[1]=1;constants[2]=1;constants[3]=reduced?1:2;
@@ -169,25 +196,26 @@ int main(int argc,char** argv) {
             D3D12_RANGE range{0,static_cast<SIZE_T>(bytes)};
             checked(readback->Map(0,&range,&mapped),"readback map");
             const auto* actual=static_cast<const unsigned char*>(mapped)+footprint.Offset;
-            if(!new_route) for(unsigned i=0;i<(reduced?4U:8U);++i) {
+            if(!new_route && !fp16) for(unsigned i=0;i<(reduced?4U:8U);++i) {
                 reference_digest^=actual[i];reference_digest*=1099511628211ULL;
             }
             bool correct=true;
             for(unsigned channel=0;channel<4;++channel) {
                 auto component=[&](unsigned pixel) {
+                    if(fp16) return fp16_values[pixel*4+channel];
                     const unsigned input_channel=bgra && channel<3 ? 2-channel : channel;
                     const double c=pixels[pixel*4+input_channel]/255.0;
                     return srgb && channel<3 ? decode(c) : c;
                 };
                 double expected=reduced ? (component(0)+component(1))*0.5 : component(0);
-                if(srgb && new_route && channel<3) expected=encode(expected);
+                if((srgb || fp16) && new_route && channel<3) expected=encode(expected);
                 correct &= std::abs(static_cast<int>(actual[channel])-static_cast<int>(std::lround(expected*255)))<=1;
             }
             D3D12_RANGE empty{};readback->Unmap(0,&empty);
-            if(!correct) std::cerr<<"pack case bgra="<<bgra<<" nvidia="<<nvidia<<" srgb="<<srgb<<" new="<<new_route<<" reduced="<<reduced<<'\n';
+            if(!correct) std::cerr<<"pack case format="<<format<<" nvidia="<<nvidia<<" new="<<new_route<<" reduced="<<reduced<<'\n';
             require(correct,"optical-flow pack output mismatch");++cases;
         }
-        std::cout<<"PASS "<<cases<<" actual shader cases: RGBA/BGRA, both pack pipelines, reference/new, sRGB/UNORM, full/reduced, alpha\n";
+        std::cout<<"PASS "<<cases<<" actual shader cases: RGBA/BGRA/FP16, both pack pipelines, reference/new, full/reduced, alpha\n";
         std::cout<<"REFERENCE_PACK_FNV64 "<<std::hex<<reference_digest<<'\n';
         return 0;
     } catch(const std::exception& error) { std::cerr<<error.what()<<'\n';return 1; }

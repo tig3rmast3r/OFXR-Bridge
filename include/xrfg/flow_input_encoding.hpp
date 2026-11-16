@@ -18,11 +18,13 @@ enum class D3D12OpticalFlowInputEncoding {
 }
 
 // Bit 0 and bits 8-23 keep their existing repeat/fraction meaning. The shared
-// CPU/HLSL constant layout does not grow. UNORM/float inputs remain unchanged.
+// The perceptual route encodes linear FP16 samples in its 8-bit flow input.
+// The original FP16 color remains available for synthesis and presentation.
 [[nodiscard]] constexpr std::uint32_t flow_input_flags(
     DXGI_FORMAT view_format, D3D12OpticalFlowInputEncoding encoding) noexcept {
     return encoding == D3D12OpticalFlowInputEncoding::perceptual_srgb &&
         (view_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
-         view_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) ? 2U : 0U;
+         view_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+         view_format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 2U : 0U;
 }
 } // namespace xrfg
