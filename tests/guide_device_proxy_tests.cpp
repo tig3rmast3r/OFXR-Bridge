@@ -1,3 +1,4 @@
+#include "xrfg/d3d12_native_binding.hpp"
 #include "xrfg/d3d12_guide_ownership.hpp"
 #include <dxgi1_4.h>
 #include <iostream>
