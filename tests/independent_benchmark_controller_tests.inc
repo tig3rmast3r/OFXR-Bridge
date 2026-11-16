@@ -60,6 +60,7 @@ void independent_controller(bool aer,bool full,bool luke,double two,double three
     std::cout<<"Independent benchmark aer="<<aer<<" full="<<full<<" luke="<<luke<<" trials="<<done<<" PASS\n";
 }
 void independent_controller_cases() {
+    auto policy=snapshot().desired;policy.advanced_mode=true;require(request(policy),"Advanced-only benchmark fixture");
     std::filesystem::create_directories(configuration_path().parent_path());
     require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable isolated controller");
     independent_controller(false,false,false,90,90,90);

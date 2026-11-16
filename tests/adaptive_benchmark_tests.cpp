@@ -176,6 +176,7 @@ int main(int argc,char** argv){
     const auto root=std::filesystem::temp_directory_path()/(L"ofxr-adaptive-"+std::to_wstring(GetCurrentProcessId()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",root.c_str());
     try{
+        std::filesystem::create_directories(root);
         require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",global_configuration_path().c_str()),"explicit benchmark test enable");
         if(argc==2 && std::string_view(argv[1])=="--independent"){independent_controller_cases();return 0;}
         for(bool modern:{false,true})for(bool full:{false,true})for(bool luke:{false,true})

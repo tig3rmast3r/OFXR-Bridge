@@ -176,7 +176,7 @@ void rebase_and_publish() {
 
 void route_motion_widgets() {
     auto settings = snapshot().desired;settings.advanced_mode=true;settings.independent_pacing=false;
-    settings.enabled=true;
+    settings.enabled=true;settings.afw_mode=0;
     settings.frame_generation = 0; settings.backend = 3;
     settings.motion_vectors = 0; settings.triple_frame_gen = false;
     require(request(settings), "initialize OFXR optical-flow selection");
@@ -217,7 +217,7 @@ void route_motion_widgets() {
 }
 void route_multiplier_widgets() {
     auto settings = snapshot().desired;settings.advanced_mode=true;settings.independent_pacing=false;
-    settings.enabled=true;
+    settings.enabled=true;settings.afw_mode=0;
     settings.frame_generation = 0; settings.backend = 3;
     settings.motion_vectors = 0; settings.triple_frame_gen = false;
     require(request(settings), "initialize independent multipliers");
@@ -721,7 +721,7 @@ void independent_benchmark_widgets() {
     require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable Independent widget fixture");
     const auto original=snapshot().desired;
     for(bool compact:{false,true}) {
-        auto settings=original;settings.independent_pacing=true;settings.ofr_enabled=false;
+        auto settings=original;settings.advanced_mode=true;settings.independent_pacing=true;settings.ofr_enabled=false;
         settings.afw_only=false;settings.rife_resolution=36;settings.benchmark_auto_pick=false;
         require(request(settings),"Independent benchmark widget setup");settings=snapshot().desired;
         RuntimeStatus runtime{};runtime.process_id=GetCurrentProcessId();runtime.sessions=1;
@@ -975,6 +975,8 @@ void radeon_routes() {
 
 
 void release_040_widgets() {
+    require(initialize_user_configuration(),"create new default configuration");
+    require(GetPrivateProfileIntW(L"benchmark",L"enabled",-1,global_configuration_path().c_str())==0,"fresh configuration disables benchmarks");
     Settings settings;settings.enabled=true;settings.backend=1;settings.afw_mode=0;
     require(request(settings),"seed release0.4 UI");
     require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",global_configuration_path().c_str()),"old saved enabled benchmark preference");
