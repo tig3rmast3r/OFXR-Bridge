@@ -280,6 +280,8 @@ void two_frame_capture_record_ng_x(const TwoFrameImageInfo& info,ID3D12Device*,I
 }
 }
 
+#include "neural_reshade_submission_tests.inc"
+
 int main(int argc,char** argv)try{
     using namespace nr_test;
     const std::string_view mode=argc<2?"pre":argv[1];
@@ -287,6 +289,7 @@ int main(int argc,char** argv)try{
     const bool arrayOutput=mode=="post-array";
     ComPtr<ID3D12Debug> debug;if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     Gpu gpu;active=&gpu;
+    if(mode=="reshade-submission"){reshade_submission_run(gpu);return 0;}
     auto folder=std::filesystem::temp_directory_path()/(L"ofxr-nr2-host-"+std::to_wstring(GetCurrentProcessId()));std::filesystem::create_directories(folder);
     std::ofstream(folder/L"nvngx_dlssnr.dll",std::ios::binary).put('0');g_dllDir=folder;
     g_runtime.forwarder=LoadLibraryW(L"kernel32.dll");g_runtime.forwarderReady=true;g_runtime.floatSlotKnown=true;

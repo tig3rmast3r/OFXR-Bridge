@@ -96,3 +96,8 @@ if(XRFG_BUILD_TESTS)
  add_test(NAME xrfg_neural_exposure_resolve COMMAND xrfg_neural_exposure_gpu_tests resolve)
  set_tests_properties(xrfg_neural_exposure_warp PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()
+
+if(TARGET xrfg_neural_multipass_host_tests)
+ add_test(NAME xrfg_neural_reshade_submission COMMAND xrfg_neural_multipass_host_tests reshade-submission)
+ set_tests_properties(xrfg_neural_reshade_submission PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
+endif()
