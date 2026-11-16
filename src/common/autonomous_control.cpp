@@ -83,7 +83,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 99401;
+constexpr std::uint32_t kAbi = 99801;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -376,10 +376,10 @@ bool suspend_keybinds(bool value) noexcept {
 }
 
 bool optical_multiplier_route(const Settings& s) noexcept {
-    return (s.frame_generation == 0 && s.backend != 3) || s.frame_generation == 3;
+    return (s.frame_generation == 0 && (s.independent_pacing || s.backend != 3)) || s.frame_generation == 3;
 }
 int generation_multiplier(const Settings& s) noexcept {
-    if(s.ofr_enabled)return 2;
+    if(s.ofr_enabled)return s.independent_pacing && (s.frame_generation==4?s.rife_multiplier:s.frame_multiplier)==4?4:2;
     if (s.frame_generation == 4) return s.rife_multiplier;
     if (optical_multiplier_route(s)) return s.frame_multiplier;
     if (s.frame_generation == 2 && s.frame_multiplier == 4) return 4;
@@ -393,6 +393,7 @@ int runtime_multiplier(const Settings& s) noexcept {
     return s.frame_generation == 2 && s.frame_multiplier == 4 ? 4 : 2;
 }
 Settings sanitize(Settings value) noexcept {
+    value.pacing_buffer=std::clamp(value.pacing_buffer,0,3);
     value.pacing_mode=std::clamp(value.pacing_mode,0,value.advanced_mode?2:1);
     value.benchmark_csv=true;
     if(!value.advanced_mode) {
@@ -429,7 +430,7 @@ Settings sanitize(Settings value) noexcept {
     value.lower_vram = std::clamp(value.lower_vram, 0, 1);
     value.separate_synthesis = value.lower_vram;
     value.native_scale = std::clamp(value.native_scale, 25, 100);
-    value.frame_multiplier = optical_multiplier_route(value) || value.frame_generation == 2
+    value.frame_multiplier = (value.independent_pacing && value.ofr_enabled) || optical_multiplier_route(value) || value.frame_generation == 2
         ? std::clamp(value.frame_multiplier, 2, 4) : 2;
     // DLSS-G 4X holds 3X's switch on: a session that cannot run 4X runs 3X.
     if (value.frame_generation == 2 && value.frame_multiplier == 4) value.triple_frame_gen = true;
@@ -491,7 +492,8 @@ Settings sanitize(Settings value) noexcept {
         p.native_scale = std::clamp(p.native_scale, 25, 100);
         // OFXR FidelityFX, 0.2.1 and 0.3.0, Hybrid, and DLSS-G's 4X. 0.2.13
         // keeps its own 3X.
-        p.frame_multiplier = i <= 2 || i == 5 || i == 6 ? std::clamp(p.frame_multiplier, 2, 4) : 2;
+        p.frame_multiplier = i <= 2 || i == 5 || i == 6 || (value.independent_pacing && (i==3 || value.ofr_enabled))
+            ? std::clamp(p.frame_multiplier, 2, 4) : 2;
         if(!value.advanced_mode) {
             const GenerationPreferences defaults;
             // Flow size and Slow/Medium are visible again. Hidden Fast and
@@ -563,7 +565,7 @@ Settings parse_settings(std::string_view text) {
         if(key=="AdvancedMode")value.advanced_mode=number!=0;
         if(key=="single_director") legacy_single_director=number!=0;
 #define READ_FIELD(name) if (key == #name) value.name = static_cast<decltype(value.name)>(number);
-        READ_FIELD(increase_buffer) READ_FIELD(enabled) READ_FIELD(afw_only) READ_FIELD(backend) READ_FIELD(motion_vectors)
+        READ_FIELD(independent_pacing) READ_FIELD(independent_acquire_fix) READ_FIELD(pacing_buffer) READ_FIELD(increase_buffer) READ_FIELD(enabled) READ_FIELD(afw_only) READ_FIELD(backend) READ_FIELD(motion_vectors)
         READ_FIELD(frame_generation) READ_FIELD(rife_resolution) READ_FIELD(rife_multiplier) READ_FIELD(rife_model) READ_FIELD(hybrid_backend) READ_FIELD(preset) READ_FIELD(scale)
         READ_FIELD(pacing_mode) READ_FIELD(backward) READ_FIELD(separate_synthesis) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
         READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(frame_multiplier) READ_FIELD(hybrid_depth_search) READ_FIELD(hybrid_hud_fix) READ_FIELD(r19_camera)
@@ -609,7 +611,7 @@ std::string serialize_settings(const Settings& settings,bool include_global_ui) 
     output << "[ofxr]\n" << std::setprecision(9);
     if(include_global_ui)output<<"AdvancedMode="<<value.advanced_mode<<'\n';
 #define WRITE_FIELD(name) output << #name << '=' << value.name << '\n';
-    WRITE_FIELD(increase_buffer) WRITE_FIELD(enabled) WRITE_FIELD(afw_only) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
+    WRITE_FIELD(independent_pacing) WRITE_FIELD(independent_acquire_fix) WRITE_FIELD(pacing_buffer) WRITE_FIELD(increase_buffer) WRITE_FIELD(enabled) WRITE_FIELD(afw_only) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
     WRITE_FIELD(frame_generation) WRITE_FIELD(rife_resolution) WRITE_FIELD(rife_multiplier) WRITE_FIELD(rife_model) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
     WRITE_FIELD(pacing_mode) WRITE_FIELD(backward) WRITE_FIELD(separate_synthesis) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
     WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(frame_multiplier) WRITE_FIELD(hybrid_depth_search) WRITE_FIELD(hybrid_hud_fix) WRITE_FIELD(r19_camera)
@@ -882,7 +884,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
 #undef MERGE_PROFILE
     }
 #define MERGE_FIELD(name) if (base.name != desired.name) current.name = desired.name;
-    MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(rife_resolution) MERGE_FIELD(rife_multiplier) MERGE_FIELD(rife_model) MERGE_FIELD(hybrid_backend) MERGE_FIELD(hybrid_depth_search) MERGE_FIELD(hybrid_hud_fix) MERGE_FIELD(r19_camera)
+    MERGE_FIELD(independent_pacing) MERGE_FIELD(independent_acquire_fix) MERGE_FIELD(pacing_buffer) MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(rife_resolution) MERGE_FIELD(rife_multiplier) MERGE_FIELD(rife_model) MERGE_FIELD(hybrid_backend) MERGE_FIELD(hybrid_depth_search) MERGE_FIELD(hybrid_hud_fix) MERGE_FIELD(r19_camera)
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
     MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
     MERGE_FIELD(ofr_enabled) MERGE_FIELD(ofr_backend) MERGE_FIELD(ofr_scale) MERGE_FIELD(ofr_swap)
@@ -941,6 +943,7 @@ struct SuiteRecorder {
     std::uint64_t run{}, revision{}, started{}, next_sample{};
     unsigned index{};
     unsigned dlssg_preset{};
+    bool independent{},aer{};
     int rife_quality{18}; // immutable user quality captured when the suite starts
     std::ofstream stream;
     BenchmarkSamples samples;
@@ -1019,7 +1022,7 @@ void csv_mib(std::ostream& stream,bool valid,std::uint64_t bytes) {
     else stream<<"N/A";
 }
 bool same_trial(const Settings& a,const Settings& b) {
-    return a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
+    return a.independent_acquire_fix==b.independent_acquire_fix && a.pacing_buffer==b.pacing_buffer && a.independent_pacing==b.independent_pacing && a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
         (a.frame_generation!=4 || (a.rife_resolution==b.rife_resolution && a.rife_model==b.rife_model && a.rife_multiplier==b.rife_multiplier)) &&
         a.triple_frame_gen==b.triple_frame_gen && a.frame_multiplier==b.frame_multiplier && a.prefer_fps==b.prefer_fps &&
         a.separate_synthesis==b.separate_synthesis && a.lower_vram==b.lower_vram &&
@@ -1028,7 +1031,7 @@ bool same_trial(const Settings& a,const Settings& b) {
 }
 void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
     if(rec.layout_path.empty())return;
-    const auto steps=benchmark_export_plan(b.full,b.luke,rec.steamvr,b.advanced,rec.rife_quality);
+    const auto steps=benchmark_export_plan(b.full,b.luke,rec.steamvr,b.advanced,rec.rife_quality,rec.independent,rec.aer);
     std::ofstream output(rec.layout_path,std::ios::trunc);output.imbue(std::locale::classic());
     if(!output)throw std::runtime_error("Cannot write layout CSV");
     output<<"Game,Build,Metric";
@@ -1066,19 +1069,19 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
     if(rec.stream.is_open()) {
         const auto& s=rec.settings;
         rec.stream<<XRFG_IMPLEMENTATION_VERSION<<','<<b.run_id<<','<<b.game_pid<<','<<quoted(rec.game)<<','<<rec.index+1<<','<<quoted(rec.label)<<','
-            <<s.separate_synthesis<<','<<s.lower_vram<<','<<generation_multiplier(s)<<','<<s.prefer_fps<<','
+            <<(rec.independent?0:s.separate_synthesis)<<','<<(rec.independent?0:s.lower_vram)<<','<<generation_multiplier(s)<<','<<s.prefer_fps<<','
             <<s.nr_enabled<<','<<s.afw_mode<<','<<s.afw_shading_rate<<','<<(s.frame_generation!=2 ? "N/A" :
                 rec.dlssg_preset==1 ? "A startup request" : rec.dlssg_preset==3 ? "C startup request" : "Game default / unverified")
             <<','<<double(kBenchmarkSettleMs)/1000.0<<','
             <<std::clamp((double(ended)-double(rec.started)-double(kBenchmarkSettleMs))/1000.0,
-                0.0,double(kBenchmarkMeasureMs)/1000.0)<<',';
+                0.0,double(benchmark_measure_ms(rec.independent))/1000.0)<<',';
         csv_stat(rec.stream,rec.samples.fps);rec.stream<<','<<rec.samples.fps.size()<<',';
         csv_stat(rec.stream,rec.samples.latency);rec.stream<<','<<rec.samples.latency.size()<<','
             <<rec.memory.updated_ms<<',';
         csv_mib(rec.stream,rec.memory.vram_valid,rec.memory.vram_bytes);rec.stream<<',';
         csv_mib(rec.stream,rec.memory.shared_gpu_valid,rec.memory.shared_gpu_bytes);rec.stream<<',';
         csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_working_set_bytes);rec.stream<<',';
-        csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_private_commit_bytes);rec.stream<<','<<quoted(verdict)<<','<<s.pacing_mode<<','<<rec.runtime<<','<<rec.legacy_vdxr<<','<<rec.eye_long_side<<',';
+        csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_private_commit_bytes);rec.stream<<','<<quoted(verdict)<<','<<(rec.independent?kIndependentPacingMode:s.pacing_mode)<<','<<rec.runtime<<','<<rec.legacy_vdxr<<','<<rec.eye_long_side<<',';
         if(rec.samples.refresh_hz.empty())rec.stream<<"N/A";else rec.stream<<benchmark_median(rec.samples.refresh_hz);
         rec.stream<<','<<rec.vector_success<<','<<rec.bridge_buffer_capacity<<','<<s.luke_osr<<','<<s.luke_osr_lower_quality;
         const auto measured=benchmark_score(rec.samples,std::string_view(verdict)=="complete");
@@ -1104,12 +1107,12 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
 }
 void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const RuntimeStatus& runtime,int rife_quality) {
     {auto* owner=rec.controller;rec=SuiteRecorder{};rec.controller=owner;}rec.run=b.run_id;
-    rec.steamvr=pacing_comparison_runtime(runtime);
+    rec.steamvr=pacing_comparison_runtime(runtime);rec.independent=runtime.pacing_mode==kIndependentPacingMode;rec.aer=rec.controller && rec.controller->data->benchmark_saved.ofr_enabled;
     rec.legacy_vdxr=runtime.vdxr_legacy;
     rec.runtime=runtime.vdxr_runtime?"VDXR":runtime.steamvr_runtime?"SteamVR":"Other";
     rec.dlssg_preset=preset;
     rec.rife_quality=rife_quality;
-    rec.plan=benchmark_execution_plan(b.full,b.luke,rec.steamvr,b.advanced,runtime.eye_long_side,runtime.rife_max_multiplier,rife_quality);
+    rec.plan=benchmark_execution_plan(b.full,b.luke,rec.steamvr,b.advanced,runtime.eye_long_side,runtime.rife_max_multiplier,rife_quality,rec.independent,rec.aer,runtime.dlssg_max_multiplier);
     filter_radeon_benchmark_plan(rec.plan,runtime.gpu_vendor?runtime.gpu_vendor:xrfg::rendering_gpu_vendor());
     rec.game=utf8_path(benchmark_game_path(b.game_pid).filename());
     if(!b.csv)return;
@@ -1174,7 +1177,7 @@ void suite_complete(Shared& shared,const SuiteRecorder& rec,std::uint64_t now) {
 void suite_advance(Shared& shared,SuiteRecorder& rec,std::uint64_t now) {
     auto& b=shared.snapshot.benchmark;
     const auto scores=suite_scores(rec,b.luke);
-    if(!b.luke) {
+    if(!rec.independent && !b.luke) {
         bool sufficient=false;
         for(std::size_t i=0;i<rec.results.size();++i)
             sufficient |= benchmark_2x_sufficient(rec.results[i].settings,scores[i]);
@@ -1182,7 +1185,11 @@ void suite_advance(Shared& shared,SuiteRecorder& rec,std::uint64_t now) {
             [](const auto& step){return step.triple;}),rec.plan.end());
         b.count=static_cast<unsigned>(rec.plan.size());
     }
-    benchmark_prune_rife(rec.plan,b.index+1,scores);
+    if(rec.independent) {
+        benchmark_limit_independent(rec.plan,b.index+1,shared.snapshot.runtime.rife_max_multiplier,shared.snapshot.runtime.dlssg_max_multiplier,rec.aer);
+        benchmark_prune_independent(rec.plan,b.index+1,scores);
+    }
+    else benchmark_prune_rife(rec.plan,b.index+1,scores);
     b.count=static_cast<unsigned>(rec.plan.size());
     if(++b.index>=rec.plan.size()) {
         suite_complete(shared,rec,now);rec.stream.close();return;
@@ -1205,9 +1212,13 @@ bool start_benchmark(bool full,bool luke) noexcept {
             b={};b.phase=BenchmarkPhase::error;
             std::snprintf(b.message,sizeof(b.message),"Open the game and load the test scene first.");return false;
         }
-        if(s.runtime.pacing_mode==kAfwOnlyPacingMode) {
+        if(s.runtime.pacing_mode==kAfwOnlyPacingMode || s.runtime.afw_only_session) {
             b={};b.phase=BenchmarkPhase::error;
             std::snprintf(b.message,sizeof(b.message),"Frame Reconstruction only is active. Disable it in the Frame Reconstruction tab and restart the game for the OFXR matrix.");return false;
+        }
+        if((s.runtime.pacing_mode==kIndependentPacingMode)!=s.desired.independent_pacing) {
+            b={};b.phase=BenchmarkPhase::error;
+            std::snprintf(b.message,sizeof(b.message),"Restart the game to apply the selected delivery route before benchmarking.");return false;
         }
         if(luke && !s.runtime.luke_detected) {
             b={};b.phase=BenchmarkPhase::error;
@@ -1218,8 +1229,7 @@ bool start_benchmark(bool full,bool luke) noexcept {
         const auto run=std::max(b.run_id+1,(now<<16)^GetCurrentProcessId());
         b={};b.full=full;b.luke=luke;b.advanced=s.desired.advanced_mode;b.auto_pick=s.desired.benchmark_auto_pick;b.csv=s.desired.benchmark_csv;b.game_pid=s.runtime.process_id;
         b.run_id=run;
-        auto plan=benchmark_execution_plan(full,luke,pacing_comparison_runtime(s.runtime),b.advanced,s.runtime.eye_long_side,s.runtime.rife_max_multiplier,shared.benchmark_saved.rife_resolution);
-        filter_radeon_benchmark_plan(plan,s.runtime.gpu_vendor?s.runtime.gpu_vendor:xrfg::rendering_gpu_vendor());b.count=static_cast<unsigned>(plan.size());
+        auto plan=benchmark_execution_plan(full,luke,pacing_comparison_runtime(s.runtime),b.advanced,s.runtime.eye_long_side,s.runtime.rife_max_multiplier,shared.benchmark_saved.rife_resolution,s.runtime.pacing_mode==kIndependentPacingMode,shared.benchmark_saved.ofr_enabled,s.runtime.dlssg_max_multiplier);filter_radeon_benchmark_plan(plan,s.runtime.gpu_vendor?s.runtime.gpu_vendor:xrfg::rendering_gpu_vendor());b.count=static_cast<unsigned>(plan.size());
         b.phase=BenchmarkPhase::applying;
         std::snprintf(b.label,sizeof(b.label),"%s",plan[0].label.c_str());
         if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,plan[0]),now)) {
@@ -1288,11 +1298,11 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 std::snprintf(b.message,sizeof(b.message),"Settings changed outside the suite; stopped.");return;
             }
             if(b.phase==BenchmarkPhase::applying) {
-                const bool quality_pending=(b.luke || s.runtime.luke_detected || s.runtime.afw_running) && s.desired.afw_mode &&
+                const bool quality_pending=(b.luke || s.runtime.luke_detected || s.runtime.afw_running) && !(s.desired.ofr_enabled && s.desired.enabled) && s.desired.afw_mode &&
                     (s.runtime.afw_shading_rate!=s.desired.afw_shading_rate ||
                     (s.runtime.osr_mode>=0 && s.runtime.osr_mode!=s.desired.luke_osr) ||
                     (s.desired.luke_osr==2 && s.runtime.osr_lower_quality>=0 && s.runtime.osr_lower_quality!=int(s.desired.luke_osr_lower_quality)));
-                const bool pacing_pending=rec.steamvr && s.runtime.pacing_mode!=static_cast<unsigned>(s.desired.pacing_mode);
+                const bool pacing_pending=rec.steamvr && !rec.independent && s.runtime.pacing_mode!=static_cast<unsigned>(s.desired.pacing_mode);
                 const bool buffer_pending=rec.steamvr && rec.plan[b.index].buffer>=0 &&
                     s.runtime.buffer_capacity!=static_cast<unsigned>(s.desired.enabled && s.desired.pacing_mode!=0
                         ? (s.desired.increase_buffer?4:3):s.desired.increase_buffer?3:2);
@@ -1343,7 +1353,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 if(s.runtime.applied_revision==b.revision && s.runtime.telemetry.updated_ms<=GetTickCount64()) {
                     rec.bridge_buffer_capacity=s.runtime.buffer_capacity;
                     const auto previous=rec.samples.last_ms;
-                    rec.samples.observe(s.runtime.telemetry,b.started_ms,std::min(now+1,b.started_ms+kBenchmarkDurationMs));
+                    rec.samples.observe(s.runtime.telemetry,b.started_ms,std::min(now+1,b.started_ms+benchmark_duration_ms(rec.independent)));
                     if(rec.samples.last_ms!=previous) {
                         if(const auto side=s.runtime.eye_long_side)rec.eye_long_side=rec.eye_long_side?std::min(rec.eye_long_side,side):side;
                         rec.vector_success |= s.desired.enabled && s.desired.frame_generation!=4 && s.runtime.telemetry.generating && s.runtime.motion_source==1 &&
@@ -1353,16 +1363,16 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 rec.afw_success |= s.runtime.afw_running;
                 rec.rife_success |= s.runtime.rife_execution_active && s.runtime.telemetry.generating;
             }
-            if(!rec.memory_requested && now>=b.started_ms+kBenchmarkMemoryRequestMs) {
+            if(!rec.memory_requested && now>=b.started_ms+benchmark_memory_request_ms(rec.independent)) {
                 shared.benchmark_memory={};
                 std::atomic_ref<std::uint64_t>(shared.benchmark_memory_request).store(b.revision,std::memory_order_release);
                 rec.memory_requested=true;
             }
             if(shared.benchmark_memory.revision==b.revision && shared.benchmark_memory.updated_ms>=rec.started)
                 rec.memory=shared.benchmark_memory;
-            if(now<b.started_ms+kBenchmarkDurationMs)return;
+            if(now<b.started_ms+benchmark_duration_ms(rec.independent))return;
             csv_finish(rec,b,now,s.desired.frame_generation==4 && !rec.rife_success ? "no confirmed RIFE output" : b.luke && s.desired.afw_mode && !rec.afw_success ? "no confirmed AFW output" : rec.samples.fps.empty() ? "no measured presentation rate" :
-                s.desired.enabled && !rec.samples.generated ? "no confirmed generation" : "complete");
+                s.desired.enabled && !rec.samples.generated ? "no confirmed generation" : rec.independent && s.desired.enabled && s.desired.frame_generation>0 && s.desired.frame_generation<4 && !rec.vector_success ? "no confirmed game-vector generation" : "complete");
             suite_advance(shared,rec,now);
         } catch(...) {
             rec.stream.close();suite_restore(shared,BenchmarkPhase::error,"CSV output failed; suite stopped. Check the Benchmarks folder.",now);
@@ -1634,7 +1644,7 @@ std::string interface_status_text(const Snapshot& s,bool include_reconstruction)
         else if(r.rife_tensorrt)add("TensorRT FP16");
     }
     if (r.shared_queue) add("Shared queue");
-    if(pacing_comparison_runtime(r) && r.pacing_mode>=0 && r.pacing_mode!=kAfwOnlyPacingMode && r.pacing_mode!=s.desired.pacing_mode)
+    if(pacing_comparison_runtime(r) && r.pacing_mode>=0 && r.pacing_mode!=kAfwOnlyPacingMode && r.pacing_mode!=kIndependentPacingMode && r.pacing_mode!=s.desired.pacing_mode)
         add("Applying pacing policy");
     switch (r.generation_state) {
     case GenerationState::missing_motion: add("Missing game vectors"); break;

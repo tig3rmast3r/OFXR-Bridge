@@ -43,8 +43,13 @@ inline void apply_runtime_settings() {
     const auto incoming=snapshot();
     if (applied==incoming.revision) return;
     const auto& s=incoming.desired;
+    static const bool independent=s.independent_pacing; // restart-only route selection
     embedded::Settings e{};
     e.ofr=s.ofr_enabled;e.ofr_backend=s.ofr_backend;e.ofr_scale=s.ofr_scale;e.ofr_swap=s.ofr_swap;
+    e.independent_pacing=independent;
+    e.pacing_buffer=s.pacing_buffer;
+    e.independent_acquire_fix=s.independent_acquire_fix;
+    e.independent_aer_double=independent && s.ofr_enabled && generation_multiplier(s)==4;
     e.pacing_mode=s.pacing_mode;
     e.increase_buffer=s.increase_buffer;
     e.enabled=s.enabled; e.backend=s.backend; e.preset=s.preset; e.scale=s.scale;
@@ -59,6 +64,10 @@ inline void apply_runtime_settings() {
     e.rife_resolution=s.rife_resolution;
     if(e.hybrid) e.backend=s.hybrid_backend; // Hybrid's own engine, independent of OFXR's.
     e.native_scale=static_cast<unsigned>(s.native_scale);
+    if(independent && (s.frame_generation==0 || e.hybrid)) {
+        e.backend=e.backend==0?0:1;e.rife_multiplier=runtime_multiplier(s);
+        e.lower_vram=e.separate_synthesis=0;
+    }
     if (!embedded::request(e)) return;
     embedded::AfwSettings a{};
     // Basic-mode sanitation resets hidden AFW controls; keep this final debug
@@ -100,15 +109,18 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     GenerationState generation=GenerationState::waiting, HRESULT initialization_result=S_OK,
     bool vulkan_detected=false, std::uint32_t provider_error=0,
     const SwapchainBudgetStatus* swapchains=nullptr,int pacing_mode=-1,bool steamvr=false,bool afw_only=false,
-    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false,unsigned buffer_capacity=0,unsigned rife_max_multiplier=2,std::uint64_t rife_after_ms=0,std::uint64_t consumer_guides_ms=0,unsigned frame_multiplier=2) {
+    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false,unsigned buffer_capacity=0,unsigned rife_max_multiplier=2,std::uint64_t rife_after_ms=0,std::uint64_t consumer_guides_ms=0,std::uint64_t pacing_expired=0,std::int64_t pacing_allowance_ns=0,unsigned frame_multiplier=2) {
     const auto control=embedded::snapshot();
     const auto afw=embedded::afw_snapshot();
     const auto nr=neural_rendering::status();
     RuntimeStatus out{};out.rife_max_multiplier=rife_max_multiplier;
     out.frame_multiplier=std::clamp(frame_multiplier,2U,4U);
-    out.pacing_mode=afw_only?kAfwOnlyPacingMode:pacing_mode;out.steamvr_runtime=steamvr;
+    out.dlssg_max_multiplier=native_generated_frames?std::min(native_generated_frames+1,4U):0;
+    out.afw_only_session=afw_only;
+    out.pacing_mode=afw_only && pacing_mode!=kIndependentPacingMode?kAfwOnlyPacingMode:pacing_mode;out.steamvr_runtime=steamvr;
     out.vdxr_runtime=vdxr;out.vdxr_legacy=legacy_vdxr;
     out.buffer_capacity=buffer_capacity;
+    out.pacing_expired=pacing_expired;out.pacing_allowance_ns=pacing_allowance_ns;
     out.eye_long_side=eye_long_side;
     out.shared_queue=shared_queue;
     out.luke_shared_swapchains=luke_shared;out.luke_shared_swapchains_forced=luke_shared_forced;
@@ -128,6 +140,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.ofr_running=afw.desired.ofr && control.desired.enabled && ofr_last && now>=ofr_last && now-ofr_last<1000 &&
         ofr_last>=out.ofr_evidence.last_bypass_ms;
     out.ofr_delivery=embedded::ofr_delivery.load(std::memory_order_relaxed);
+    out.independent_aer_double_state=embedded::independent_aer_double_state.load();
     if(afw.desired.ofr && control.desired.enabled && bridge_flight_logger().enabled()) {
         static std::atomic_uint64_t next_aer_report{};auto next=next_aer_report.load();
         if(now>=next && next_aer_report.compare_exchange_strong(next,now+1000))

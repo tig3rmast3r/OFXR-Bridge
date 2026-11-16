@@ -43,6 +43,9 @@ struct Settings {
     bool enabled{true};
     bool advanced_mode{}; // Global INI-only AdvancedMode; mirrored into each UI snapshot
     bool afw_only{}; // per-game startup choice, independent of Neural Rendering
+    bool independent_pacing{}; // startup-only isolated source/generator/presenter route
+    bool independent_acquire_fix{true}; // temporary live V1103/V1102 private-acquire comparison
+    int pacing_buffer{}; // legacy local-build setting, retained for INI compatibility; automatic route ignores it
     bool increase_buffer{}; // Framework2->3; native SteamVR Director already uses3; Legacy unaffected
     int pacing_mode{1}; // 0 framework, 1 sole director, 2 framework + director
     int backend{2}; // 0 FidelityFX, 1 NVIDIA reference, 2 NVIDIA new, 3 NVIDIA djules
@@ -143,6 +146,7 @@ struct VideoMemoryStatus {
     std::uint32_t rife_process_id{};
     bool rife_active{}, rife_valid{};
 };
+inline constexpr int kIndependentPacingMode=4;
 inline constexpr int kAfwOnlyPacingMode=3; // native AFW terminal delivery, no OFXR transport
 struct RuntimeStatus {
     std::uint32_t process_id{};
@@ -188,15 +192,20 @@ struct RuntimeStatus {
     bool rife_tensorrt{}; // backend used by the latest RIFE inference, independent of desired state
     bool rife_vulkan{};
     unsigned rife_max_multiplier{2}; // actual active session capability, independent of requested engine
+    unsigned dlssg_max_multiplier{}; // zero unknown/unavailable; queried session SDK capacity otherwise
+    bool afw_only_session{}; // active startup latch, including Independent terminal reconstruction
     bool rife_execution_active{}; // a fresh, live worker receipt exists (false is not proof of Torch)
     unsigned rife_error{}; // fresh receipt: 1 timeout, 2 unavailable, 3 optimization failure
     int osr_mode{-1},osr_lower_quality{-1}; // last successfully submitted reconstruction
     AerFramegenEvidenceSnapshot ofr_evidence{};
     bool ofr_running{}; // confirmed retimed output, not preparation or flag alone
+    unsigned independent_aer_double_state{};
     unsigned ofr_delivery{}; // 0 learning, 1 alternating, 2 paired.
     bool uevr_osr{}; // UEVR Alternating/AFR attached as OSR's eye source, as Luke Ross is
     unsigned frame_multiplier{2}; // effective session output factor reported by the layer, not capability/request
     unsigned gpu_vendor{}; // actual rendering adapter PCI vendor from DXCore, never DXGI spoofing
+    std::uint64_t pacing_expired{};
+    std::int64_t pacing_allowance_ns{};
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
     return !r.vdxr_legacy;

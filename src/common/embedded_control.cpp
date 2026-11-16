@@ -49,6 +49,10 @@ struct Control {
         settings.separate_synthesis = std::clamp(static_cast<int>(GetPrivateProfileIntW(
             L"ofxr", L"separate_synthesis", settings.lower_vram, ini().c_str())), 0, 1);
         settings.pacing_mode = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr", L"pacing_mode", 2, ini().c_str())),0,2);
+        settings.independent_pacing=GetPrivateProfileIntW(L"ofxr",L"independent_pacing",0,ini().c_str())!=0;
+        settings.independent_acquire_fix=GetPrivateProfileIntW(L"ofxr",L"independent_acquire_fix",1,ini().c_str())!=0;
+        settings.independent_aer_double=GetPrivateProfileIntW(L"ofxr",L"independent_aer_double",0,ini().c_str())!=0;
+        settings.pacing_buffer=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr",L"pacing_buffer",0,ini().c_str())),0,3);
         settings.increase_buffer=GetPrivateProfileIntW(L"ofxr",L"increase_buffer",0,ini().c_str())!=0;
         settings.enabled = GetPrivateProfileIntW(L"ofxr", L"enabled", 1, ini().c_str()) != 0;
         wchar_t motion[16]{};
@@ -138,6 +142,7 @@ Snapshot snapshot() {
     return s;
 }
 bool request(Settings s) {
+    if(s.pacing_buffer<0 || s.pacing_buffer>3)return false;
     if(s.ofr_backend<0 || s.ofr_backend>1 || s.ofr_scale<0 || s.ofr_scale>3) return false;
     if (s.pacing_mode < 0 || s.pacing_mode > 2 || s.backend < 0 || s.backend > 3 || s.preset < 0 || s.preset > 2 ||
         s.scale < 0 || s.scale > (s.rife_model>=0?6:3) || s.motion_vectors < 0 || s.motion_vectors > 1 ||
@@ -153,6 +158,10 @@ bool request(Settings s) {
         ok &= write(L"ofxr", L"pacing_mode", mode);
     }
     if (old.enabled != s.enabled) ok &= write(L"ofxr", L"enabled", s.enabled ? L"1" : L"0");
+    if(old.independent_pacing!=s.independent_pacing)ok &=write(L"ofxr",L"independent_pacing",s.independent_pacing?L"1":L"0");
+    if(old.independent_acquire_fix!=s.independent_acquire_fix)ok &=write(L"ofxr",L"independent_acquire_fix",s.independent_acquire_fix?L"1":L"0");
+    if(old.independent_aer_double!=s.independent_aer_double)ok &=write(L"ofxr",L"independent_aer_double",s.independent_aer_double?L"1":L"0");
+    if(old.pacing_buffer!=s.pacing_buffer){wchar_t value[8]{};swprintf_s(value,L"%d",s.pacing_buffer);ok &=write(L"ofxr",L"pacing_buffer",value);}
     if(old.increase_buffer!=s.increase_buffer)ok &=write(L"ofxr",L"increase_buffer",s.increase_buffer?L"1":L"0");
     if(old.ofr!=s.ofr) ok &= write(L"experimental",L"ofr_enabled",s.ofr?L"1":L"0");
     if(old.ofr_swap!=s.ofr_swap) ok &= write(L"experimental",L"ofr_swap",s.ofr_swap?L"1":L"0");

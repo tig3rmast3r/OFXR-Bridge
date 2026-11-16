@@ -6,10 +6,14 @@
 #include <wrl/client.h>
 #include <atomic>
 #include <new>
+#include "xrfg/native_ingress/D3D_DeviceOwner.h"
 
 namespace xrfg::owned_d11_output {
 using Microsoft::WRL::ComPtr;
 
+// A wrapped D12 allocator can expose another COM identity through GetDevice.
+// The existing two-way backing challenge admits only proven aliases; adapter
+// equality alone never authorizes adoption. All image/heap checks stay strict.
 // Only OFXR-created private generation outputs carry this marker. It pins a
 // D12 backing, never the D11 texture which owns the marker (no COM cycle).
 // Copying the marker onto a different texture cannot authorize adoption.
@@ -64,7 +68,7 @@ inline ComPtr<ID3D12Resource> backing_for(ID3D11Texture2D* image,ID3D12Device* o
     ComPtr<ID3D12Resource> resource;
     if(FAILED(marker->get(image,&resource)) || !resource)return {};
     ComPtr<ID3D12Device> actual;
-    if(FAILED(resource->GetDevice(IID_PPV_ARGS(&actual))) || !same_identity(actual.Get(),owner))return {};
+    if(FAILED(resource->GetDevice(IID_PPV_ARGS(&actual))) || !d3d_owner::same(actual.Get(),owner))return {};
     D3D11_TEXTURE2D_DESC d11{};image->GetDesc(&d11);
     const auto d12=resource->GetDesc();
     if(d11.Usage!=D3D11_USAGE_DEFAULT || d11.CPUAccessFlags || d11.MipLevels!=1 ||
@@ -84,7 +88,8 @@ inline ComPtr<ID3D12Resource> backing_for(ID3D11Texture2D* image,ID3D12Device* o
 // No keyed mutex or application/native-runtime texture is adopted. The caller
 // may retain the ordinary private D11 + separate-mirror path on failure.
 inline HRESULT create(ID3D11Device* d11,ID3D12Device* d12,
-                      const D3D11_TEXTURE2D_DESC& desc,ID3D11Texture2D** output) noexcept {
+                      const D3D11_TEXTURE2D_DESC& desc,ID3D11Texture2D** output,unsigned* step=nullptr) noexcept {
+    if(step)*step=1;
     if(!output)return E_POINTER;*output=nullptr;
     if(!d11 || !d12 || !desc.Width || !desc.Height || !desc.ArraySize ||
        desc.ArraySize>D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION || desc.MipLevels!=1 ||
@@ -105,23 +110,30 @@ inline HRESULT create(ID3D11Device* d11,ID3D12Device* d12,
         D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
         heap.CreationNodeMask=heap.VisibleNodeMask=1;
         ComPtr<ID3D12Resource> backing;
+        if(step)*step=2;
         auto result=d12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_SHARED,&shared,
             D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&backing));
         if(FAILED(result))return result;
+        if(step)*step=3;
         ComPtr<ID3D12Device> actual;
-        if(FAILED(backing->GetDevice(IID_PPV_ARGS(&actual))) || !same_identity(actual.Get(),d12))return E_INVALIDARG;
+        if(FAILED(backing->GetDevice(IID_PPV_ARGS(&actual))) || !d3d_owner::same(actual.Get(),d12))return E_INVALIDARG;
+        if(step)*step=4;
         HANDLE handle{};
         result=d12->CreateSharedHandle(backing.Get(),nullptr,GENERIC_ALL,nullptr,&handle);
         if(FAILED(result))return result;
+        if(step)*step=5;
         ComPtr<ID3D11Device1> device1;ComPtr<ID3D11Texture2D> image;
         result=d11->QueryInterface(IID_PPV_ARGS(&device1));
         if(SUCCEEDED(result))result=device1->OpenSharedResource1(handle,IID_PPV_ARGS(&image));
         CloseHandle(handle);
         if(FAILED(result))return result;
+        if(step)*step=6;
         auto* marker=new Marker(image.Get(),backing.Get());
         result=image->SetPrivateDataInterface(marker_id,marker);marker->Release();
         if(FAILED(result))return result;
+        if(step)*step=7;
         if(!backing_for(image.Get(),d12))return E_INVALIDARG;
+        if(step)*step=0;
         return image.CopyTo(output);
     } catch(const std::bad_alloc&) {return E_OUTOFMEMORY;}
       catch(...) {return E_FAIL;}

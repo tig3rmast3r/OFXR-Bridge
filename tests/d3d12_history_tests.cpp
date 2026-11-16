@@ -241,7 +241,7 @@ public:
     [[nodiscard]] std::uint64_t last_submitted_value() const noexcept { return next_fence_value_ - 1; }
 
     template <typename Recorder>
-    void execute_and_wait(Recorder&& recorder,bool report_submission=true) {
+    void execute_and_wait(Recorder&& recorder,bool report_submission=true,ID3D12CommandQueue* override_queue=nullptr) {
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> command_list;
         require_hresult(
@@ -261,11 +261,12 @@ public:
         recorder(command_list.Get());
         require_hresult(command_list->Close(), "ID3D12GraphicsCommandList::Close");
         ID3D12CommandList* command_lists[] = {command_list.Get()};
-        queue_->ExecuteCommandLists(1, command_lists);
-        if(report_submission)xrfg::report_dlss_motion_vector_submission(queue_.Get(),1,command_lists);
+        auto* executing=override_queue?override_queue:queue_.Get();
+        executing->ExecuteCommandLists(1, command_lists);
+        if(report_submission)xrfg::report_dlss_motion_vector_submission(executing,1,command_lists);
 
         const std::uint64_t fence_value = next_fence_value_++;
-        require_hresult(queue_->Signal(fence_.Get(), fence_value), "ID3D12CommandQueue::Signal");
+        require_hresult(executing->Signal(fence_.Get(), fence_value), "ID3D12CommandQueue::Signal");
         wait_for_fence(fence_.Get(), fence_value);
     }
 
@@ -518,7 +519,7 @@ void clear_double_wide_pattern(
 [[nodiscard]] std::vector<std::uint8_t> readback_single_slice(
     D3D12WarpFixture& fixture,
     ID3D12Resource* texture,
-    D3D12_RESOURCE_STATES initial_state) {
+    D3D12_RESOURCE_STATES initial_state,ID3D12CommandQueue* override_queue=nullptr) {
     const D3D12_RESOURCE_DESC description = texture->GetDesc();
     require(
         description.DepthOrArraySize == 1 &&
@@ -558,7 +559,7 @@ void clear_double_wide_pattern(
         const D3D12_RESOURCE_BARRIER restore = transition_barrier(
             texture, D3D12_RESOURCE_STATE_COPY_SOURCE, initial_state);
         command_list->ResourceBarrier(1, &restore);
-    });
+    },false,override_queue);
 
     const UINT width = static_cast<UINT>(description.Width);
     const UINT height = description.Height;
@@ -6123,6 +6124,121 @@ void test_rife_multiframe(D3D12WarpFixture& fixture,int model,unsigned factor,bo
 
 #include "rife_vulkan_cold_tests.inc"
 
+// A queued optical-flow wait in one projection resource must not prevent the
+// sibling resource from packing/copying its already-ready source. Use deferred
+// providers so this ownership test needs neither OFA nor a RIFE installation.
+void test_independent_projection_queues(D3D12WarpFixture& fixture) {
+    constexpr UINT width=256,height=128;
+    std::array<ComPtr<ID3D12Resource>,2> input,real,synthetic;
+    std::array<std::shared_ptr<xrfg::D3D12SwapchainHistory>,2> histories;
+    std::array<xrfg::D3D12FrameSynthesizer,2> engines;
+    std::array<xrfg::D3D12HistoryCaptureTicket,2> captures{};
+    std::array<xrfg::D3D12FrameSynthesisTicket,2> tickets{};
+    const auto pixels=translated_motion_pattern(width,height,{0,0});
+    for(unsigned eye=0;eye<2;++eye) {
+        input[eye]=create_source_texture(fixture,width,height);
+        real[eye]=create_source_texture(fixture,width,height);
+        synthetic[eye]=create_source_texture(fixture,width,height);
+        upload_pattern(fixture,input[eye].Get(),pixels);
+        std::array<ID3D12Resource*,1> inputs{input[eye].Get()},reals{real[eye].Get()},outputs{synthetic[eye].Get()};
+        histories[eye]=std::make_shared<xrfg::D3D12SwapchainHistory>();
+        require_hresult(histories[eye]->initialize(fixture.device(),fixture.queue(),inputs,D3D12_RESOURCE_STATE_RENDER_TARGET),"isolated history");
+        require_hresult(engines[eye].initialize(fixture.device(),fixture.queue(),histories[eye],reals,outputs,kFormat,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,xrfg::D3D12OpticalFlowBackend::fidelity_fx,{},false,
+            xrfg::D3D12FrameGenerationMode::ofxr,false,true,true),"isolated engine");
+        require_hresult(histories[eye]->capture(0,&captures[eye]),"isolated capture");
+        require_hresult(histories[eye]->commit(captures[eye]),"isolated commit");
+    }
+    // All input copies predate this gate; only the first engine is held.
+    require_hresult(histories[1]->wait_for_idle(),"isolated sources ready");
+    ComPtr<ID3D12Fence> gate;
+    require_hresult(fixture.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"isolated gate");
+    require_hresult(engines[0].submission_queue()->Wait(gate.Get(),1),"hold first projection");
+    std::jthread rescue([gate]{std::this_thread::sleep_for(std::chrono::milliseconds(700));gate->Signal(1);});
+    const auto views=make_reprojection_views();
+    require_hresult(engines[0].submit_copy(captures[0],views,0,&tickets[0]),"held copy");
+    require_hresult(engines[1].submit_copy(captures[1],views,0,&tickets[1]),"sibling copy");
+    const auto sibling=engines[1].wait_for_previous_submission(250);
+    const bool first_pending=engines[0].submission_fence(tickets[0])->GetCompletedValue()<tickets[0].fence_value;
+    require_hresult(gate->Signal(1),"release isolated gate");rescue.join();
+    for(auto& engine:engines)require_hresult(engine.wait_for_previous_submission(3000),"isolated drain");
+    require_hresult(sibling,"sibling projection inherited first projection GPU wait");
+    require(first_pending,"held projection was falsely reported complete");
+    require(engines[0].submission_queue()!=engines[1].submission_queue(),"projection queues alias");
+    for(unsigned eye=0;eye<2;++eye) {
+        require(readback_pattern(fixture,real[eye].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==pixels,"isolated pixels");
+        require_hresult(engines[eye].resume_flow_resources(),"isolated lazy provider upgrade");
+        require(engines[eye].submission_queue().Get()!=fixture.queue(),"lazy provider upgrade lost isolation");
+        require_hresult(engines[eye].reconfigure(xrfg::D3D12OpticalFlowBackend::fidelity_fx,{}),"isolated method switch");
+        require(engines[eye].submission_queue().Get()!=fixture.queue(),"method switch lost isolation");
+    }
+    fixture.require_no_debug_errors();
+    std::cout<<"Independent projection queues: held peer, exact pixels, lazy upgrade and reconfigure PASS\n";
+}
+
+// This is a dependency/identity test on tiny real NVIDIA inputs, not a
+// performance benchmark. With B's producer blocked, raw A must already be
+// readable from first S, while second B is still unfinished.
+void test_aer_first_stream(D3D12WarpFixture& fixture) {
+    constexpr UINT width=256,height=128;
+    for(bool swap:{false,true}) {
+        auto a=create_single_slice_texture(fixture,width,height),b=create_single_slice_texture(fixture,width,height);
+        const auto clear=[&](ID3D12Resource* texture,float value) {
+            D3D12_DESCRIPTOR_HEAP_DESC desc{};desc.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;desc.NumDescriptors=1;
+            ComPtr<ID3D12DescriptorHeap> heap;require_hresult(fixture.device()->CreateDescriptorHeap(&desc,IID_PPV_ARGS(&heap)),"stream clear heap");
+            auto rtv=heap->GetCPUDescriptorHandleForHeapStart();fixture.device()->CreateRenderTargetView(texture,nullptr,rtv);
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list){const float c[]{value,0,0,1};list->ClearRenderTargetView(rtv,c,0,nullptr);});
+        };
+        clear(a.Get(),.2F);clear(b.Get(),.4F);
+        const auto raw=readback_single_slice(fixture,a.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const auto run=[&](bool stream) {
+            auto real=create_single_slice_texture(fixture,width,height),first=create_single_slice_texture(fixture,width,height);
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list){for(auto* r:{real.Get(),first.Get()}){auto q=transition_barrier(r,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COMMON);list->ResourceBarrier(1,&q);}});
+            ID3D12Resource* inputs[]{a.Get(),b.Get()},*reals[]{real.Get()},*firsts[]{first.Get()};
+            auto history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+            require_hresult(history->initialize(fixture.device(),fixture.queue(),inputs,D3D12_RESOURCE_STATE_RENDER_TARGET),"stream history");
+            xrfg::D3D12NvidiaOpticalFlowOptions options;options.ofr=true;options.ofr_swap=swap;
+            xrfg::D3D12FrameSynthesizer synth;
+            require_hresult(synth.initialize(fixture.device(),fixture.queue(),history,reals,firsts,kFormat,D3D12_RESOURCE_STATE_COMMON,
+                xrfg::D3D12OpticalFlowBackend::nvidia,options,false,xrfg::D3D12FrameGenerationMode::ofxr,false,false,true),"stream engine");
+            auto view=make_reprojection_views()[swap?0:1];view.logical_eye=swap?0:1;view.array_slice=0;view.image_rect={0,0,width,height};
+            xrfg::D3D12HistoryCaptureTicket ca{},cb{};xrfg::D3D12FrameSynthesisTicket ticket{};
+            require_hresult(history->capture(0,&ca),"stream capture A");require_hresult(history->commit(ca),"stream commit A");
+            require_hresult(synth.submit_prime(ca,{&view,1},0,&ticket),"stream prime");require_hresult(synth.wait_for_previous_submission(3000),"stream prime done");
+            ComPtr<ID3D12Fence> gate;require_hresult(fixture.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"stream gate");
+            if(stream)require_hresult(fixture.queue()->Wait(gate.Get(),1),"hold current source B");
+            std::jthread rescue([gate,stream]{if(stream)std::this_thread::sleep_for(std::chrono::milliseconds(700));gate->Signal(1);});
+            require_hresult(history->capture(1,&cb),"stream capture B");require_hresult(history->commit(cb),"stream commit B");
+            require_hresult(synth.submit_pair(cb,{&view,1},{&view,1},0,0,&ticket,{}, {},false,.5F,{}, {},false,3,false,stream),"stream pair");
+            bool early=false,pending=false;std::vector<std::uint8_t> before;
+            HANDLE ready=CreateEventW(nullptr,FALSE,FALSE,nullptr);require(ready!=nullptr,"stream event");
+            auto fence=synth.submission_fence(ticket);
+            if(stream) {
+                require_hresult(fence->SetEventOnCompletion(ticket.synthetic_fence_value,ready),"stream first receipt");
+                early=WaitForSingleObject(ready,250)==WAIT_OBJECT_0;
+                pending=fence->GetCompletedValue()<ticket.fence_value;
+                if(early && pending) {
+                    ComPtr<ID3D12CommandQueue> reader;D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+                    require_hresult(fixture.device()->CreateCommandQueue(&desc,IID_PPV_ARGS(&reader)),"stream independent native reader");
+                    before=readback_single_slice(fixture,first.Get(),D3D12_RESOURCE_STATE_COMMON,reader.Get());
+                }
+            }
+            require_hresult(gate->Signal(1),"release stream input");rescue.join();
+            require_hresult(synth.wait_for_previous_submission(3000),"stream full drain");CloseHandle(ready);
+            if(stream) {
+                require(ticket.aer_streamed && early && pending,"first AER output waited for the current newer eye");
+                require(before==raw,"early AER source is not the exact previous same-eye image");
+            }
+            require(readback_single_slice(fixture,first.Get(),D3D12_RESOURCE_STATE_COMMON)==raw,"late generation overwrote the already-published first image");
+            return readback_single_slice(fixture,real.Get(),D3D12_RESOURCE_STATE_COMMON);
+        };
+        const auto reference=run(false),streamed=run(true);
+        require(reference==streamed,"streaming changed second AER pixels");
+        std::cout<<"AER_FIRST_STREAM swap="<<swap<<" early/raw-first,blocked-second,independent read and exact legacy second PASS\n";
+    }
+    fixture.require_no_debug_errors();
+}
+
 // Reproduce a foreign eye's future-acquire wait on the session synthesis queue.
 // Its acquire becomes ready only after this eye's output reaches the runtime.
 // An async worker must not inherit that unrelated wait ahead of its own copy.
@@ -6347,8 +6463,13 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 #include "guide_device_ownership.inc"
 #include "aer_guide_endpoints.inc"
 #include "rife_switch_lifecycle.inc"
+#include "aer_unused_current_tests.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="aer-unused-current") {
+        try{test_aer_unused_current();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
 
     if(argc>1 && std::string_view(argv[1])=="luke-token-owner") {
         try {
@@ -7115,6 +7236,12 @@ int main(int argc, char** argv) {
             test_luke_production_camera_units(fixture);
             fixture.require_no_debug_errors();
             return 0;
+        }
+        if(argc>1&&std::string_view(argv[1])=="aer-first-stream") {
+            D3D12WarpFixture fixture(true);test_aer_first_stream(fixture);return 0;
+        }
+        if(argc>1&&std::string_view(argv[1])=="independent-projection-queues") {
+            D3D12WarpFixture fixture;test_independent_projection_queues(fixture);return 0;
         }
         if(argc>1&&std::string_view(argv[1])=="rdr2-interleaved") {
             D3D12WarpFixture fixture;

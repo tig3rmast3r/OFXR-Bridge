@@ -2,6 +2,7 @@
 #include "xrfg/benchmark_suite.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include <fstream>
+#define XRFG_SOFTWARE_OPTICAL_FIXTURE 1
 #include "../src/layer/openxr_layer.cpp"
 #define main private_transport_core_main
 #include "private_openxr_runtime_tests.cpp"
@@ -12,6 +13,10 @@
 #include "afw_only_session_test.inc"
 #include "steamvr_vram_budget_test.inc"
 #include "auxiliary_slot_selection_test.inc"
+#include "independent_aer4_test.inc"
+#include "producer_timelines_test.inc"
+#include "independent_features_test.inc"
+#include "aer4_phase_recovery_test.inc"
 
 // Model the native timing owner used by the shipping SteamVR endpoint. The old
 // fixture's instantaneous Wait only tested a consumer that imposed its own CPU
@@ -112,6 +117,47 @@ static int admission_credit_test() {
         xr_ok(f.transport->destroy_swapchain(chain),"stopped reservation source cleanup");
     }
     std::puts("End reservation: bounded credits, drain, policy serialization, invalid/double commit and stop wakeup PASS");
+    return 0;
+}
+static int independent_meter_test() {
+    xrfg_fixture::ControlProfile profile;
+    const auto unavailable=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult {
+        *out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;
+    };
+    const auto downstream=+[](XrSession,const XrFrameEndInfo*)->XrResult{return XR_ERROR_RUNTIME_FAILURE;};
+    xrfg::OpenXrFpsOverlay overlay(reinterpret_cast<XrInstance>(1),reinterpret_cast<XrSession>(2),0,
+        unavailable,downstream,nullptr,nullptr,nullptr,xrfg::autonomous::configuration_path());
+    overlay.set_runtime_acceptance_source([](auto)->std::optional<float>{return {};},false,{},true);
+    std::vector<std::shared_ptr<xrfg::InterfaceDeliveryReceipt>> receipts;
+    overlay.set_private_delivery_end([&](const auto*,const auto& receipt) {
+        check(bool(receipt),"independent receipt must exist with logging/UI disabled");
+        receipts.push_back(receipt);return XR_SUCCESS;
+    });
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    const auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=1;end.layerCount=1;end.layers=&layer;
+    for(unsigned i=0;i<20;++i)xr_ok(overlay.end_frame(&end,i%2!=0),"virtual admission without physical completion");
+    auto empty=overlay.metrics();
+    check(empty.real_fps==0 && empty.generated_fps==0 && empty.submitted_fps==0,
+        "virtual acceptance fabricated delivered real/generated FPS");
+    for(unsigned i=0;i<receipts.size();++i)receipts[i]->discarded();
+    check(overlay.metrics().submitted_fps==0,"expired output was counted as delivered");
+    for(unsigned i=0;i<4;++i)xr_ok(overlay.end_frame(&end,i%2!=0),"fresh native candidate admission");
+    const auto now=xrfg::interface_clock_ns();
+    for(unsigned i=0;i<4;++i)receipts[20+i]->completed(true,now-50'000'000+i*10'000'000,
+        now-49'000'000+i*10'000'000,0);
+    const auto fresh=overlay.metrics();
+    check(fresh.real_fps>0 && fresh.generated_fps>0,"confirmed native outputs were not counted");
+    check(receipts[21]->synthetic_confirmed && receipts[23]->synthetic_confirmed,
+        "native completion lost generated classification");
+    check(overlay.metrics().submitted_fps==fresh.submitted_fps,"polling a receipt counted the same image twice");
+    auto bypass=std::make_shared<xrfg::D3D12NativeFrameResult>();bypass->outputs=1;bypass->mask=0;
+    const std::array<std::shared_ptr<xrfg::D3D12NativeFrameResult>,1> results{bypass};
+    xr_ok(overlay.end_frame(&end,true,true,results),"SDK fallback candidate admission");
+    receipts.back()->completed(true,now-10'000'000,now-9'000'000,0);
+    check(overlay.metrics().submitted_fps==fresh.submitted_fps && !receipts.back()->synthetic_confirmed,
+        "confirmed native fallback was counted as newly generated content");
+    std::puts("Independent meter: no virtual/expired/replayed counts; confirmed real/generated receipts only PASS");
     return 0;
 }
 static int overlay_admission_test(bool measured) {
@@ -256,10 +302,195 @@ static int panel_metadata_contract() {
 #include "aer_alternate_delivery.inc"
 #include "aer_native_guide_cache_fixture.inc"
 
+static int independent_ready_admission_test(bool learned=false) {
+    xrfg_fixture::ControlProfile profile;
+    auto settings=xrfg::autonomous::snapshot().desired;settings.enabled=true;
+    check(xrfg::autonomous::request(settings),"ready admission control");xrfg::autonomous::apply_runtime_settings();
+    const auto prior_mode=independent_fixture_mode;
+    const auto prior_auto=independent_fixture_auto.load();
+    if(learned){independent_fixture_mode=true;independent_fixture_auto=true;}
+    Fixture f(true,true,{},false,true,false,8);f.throttled=false;
+    const auto chain=f.make_chain();f.write(chain,80);
+    if(learned) {
+        f.unblock();
+        for(unsigned i=0;i<4;++i){f.begin_virtual();f.transport->set_next_independent_deadline(ns()-4*period);
+            xr_ok(f.submit(chain,float(20+i)),"learn genuine late-source allowance");xr_ok(f.transport->drain(),"retire allowance training packet");}
+        for(unsigned i=0;i<1000 && f.transport->independent_load().reserve<3*period;++i)std::this_thread::sleep_for(1ms);
+        check(f.transport->independent_load().reserve>=3*period,"ready budget probe needs a real learned expiry allowance");
+        f.block_end=true;f.end_entered=false;
+    }
+    const auto before=f.real_ends.load();
+    for(unsigned i=1;i<=2;++i){f.begin_virtual();if(learned)f.transport->set_next_independent_deadline(ns()+period);
+        xr_ok(f.submit(chain,float(i)),"fill ready native credits");if(i==1)f.wait_entered();}
+    auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
+    state->menu_enabled=state->presenter_active=state->independent_pacing=true;state->private_runtime=f.transport;
+    auto admission=std::async(std::launch::async,[&]{return wait_for_independent_source_budget(*state);});
+    const bool held=admission.wait_for(25ms)==std::future_status::timeout;
+    f.unblock();const bool resumed=admission.wait_for(500ms)==std::future_status::ready;
+    if(!resumed){state->presenter_stop_requested=true;state->presenter_condition.notify_all();}
+    xr_ok(admission.get(),"pre-render admission resumes on native progress");
+    f.wait_count(before+2);xr_ok(f.transport->drain(),"ready admission drains exact accepted images");
+    check(held && resumed,"ready/native-held outputs were allowed to fill independent source pipeline");
+    check(f.positions.size()>=2 && std::vector<float>(f.positions.end()-2,f.positions.end())==std::vector<float>({1,2}),"admission smoothing dropped or reordered accepted outputs");
+    xr_ok(f.transport->destroy_swapchain(chain),"ready admission source cleanup");
+    f.transport->stop();independent_fixture_mode=prior_mode;independent_fixture_auto=prior_auto;
+    if(learned)std::puts("READY_ALLOWANCE learned expiry margin does not expand ready ownership; native progress drains accepted FIFO PASS");
+    std::puts("READY_ADMISSION pre-render bound includes native-held images; native progress releases source without output drops PASS");return 0;
+}
+static int independent_d11_binding_test() {
+    xrfg_fixture::ControlProfile profile(true);
+    Fixture f(false);f.transport->stop();f.transport.reset();f.throttled=false;f.unblock();
+    f.source_device11=f.device11;f.source_context11=f.context;
+    auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=true;
+    dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult{*out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;};
+    dispatch->create_session=+[](XrInstance,const XrSessionCreateInfo* info,XrSession* out)->XrResult {
+        auto& f=*current;const auto* binding=static_cast<const XrGraphicsBindingD3D11KHR*>(info->next);
+        check(binding && binding->type==XR_TYPE_GRAPHICS_BINDING_D3D11_KHR && binding->device!=f.source_device11.Get(),"native XR must receive a separate D11 device");
+        f.device11=binding->device;f.device11->GetImmediateContext(f.context.ReleaseAndGetAddressOf());
+        *out=reinterpret_cast<XrSession>(2);return XR_SUCCESS;
+    };
+    dispatch->destroy_session=+[](XrSession)->XrResult{return XR_SUCCESS;};
+    dispatch->wait_frame=Fixture::wait;dispatch->begin_frame=Fixture::begin;dispatch->end_frame=Fixture::end;
+    dispatch->create_swapchain=Fixture::create;dispatch->destroy_swapchain=Fixture::destroy;dispatch->enumerate_swapchain_images=Fixture::enumerate;
+    dispatch->acquire_swapchain_image=Fixture::acquire;dispatch->wait_swapchain_image=Fixture::wait_image;dispatch->release_swapchain_image=Fixture::release;dispatch->convert_time_to_qpc=Fixture::to_qpc;
+    {std::scoped_lock lock(g_state_mutex);g_instances[dispatch->instance]=dispatch;}
+    XrGraphicsBindingD3D11KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};binding.device=f.source_device11.Get();
+    XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};info.next=&binding;info.systemId=1;XrSession handle{};
+    xr_ok(layer_create_session_impl(dispatch->instance,&info,&handle),"actual independent D11 session");
+    auto state=find_session(handle);
+    check(state && state->independent_pacing && state->private_runtime && state->d3d11_device==f.source_device11 &&
+        state->private_delivery_device11==f.device11,"separate native binding changed original app device or lost endpoint wiring");
+    f.transport=state->private_runtime;xr_ok(f.transport->start(),"actual D11 endpoint starts");
+    const auto chain=f.make_chain();f.write(chain,80);f.begin_virtual();xr_ok(f.submit(chain,1),"actual D11 binding input");
+    f.wait_count(1);xr_ok(f.transport->drain(),"actual D11 binding drain");
+    check(f.pixels==std::vector<unsigned>({80}) && f.positions==std::vector<float>({1}),"actual session binding pixels/pose differ");
+    xr_ok(f.transport->destroy_swapchain(chain),"actual D11 binding chain cleanup");
+    xr_ok(layer_destroy_session_impl(handle),"actual D11 binding session cleanup");
+    {std::scoped_lock lock(g_state_mutex);g_instances.clear();}
+    std::puts("D11_BINDING actual session isolates native device; original app images retained; native pixels/pose PASS");return 0;
+}
+static int independent_stage_overlap_test() {
+    xrfg_fixture::ControlProfile profile;
+    auto settings=xrfg::autonomous::snapshot().desired;settings.enabled=true;
+    check(xrfg::autonomous::request(settings),"stage overlap control");xrfg::autonomous::apply_runtime_settings();
+    Fixture f(true,true,{},false,true,false,8);f.throttled=false;
+    const auto chain=f.make_chain();f.write(chain,80);f.begin_virtual();
+    xr_ok(f.submit(chain,1),"stage overlap native head");f.wait_entered();
+    check(f.transport->independent_load().pending==1,"one native owner needed for overlap probe");
+    auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
+    state->menu_enabled=state->presenter_active=state->independent_pacing=true;
+    state->private_runtime=f.transport;state->independent_completion_busy=true;
+    // One earlier GPU completion and one native head are different stages.
+    // The app must be allowed to start the next render while BOTH remain held.
+    auto admission=std::async(std::launch::async,[&]{return wait_for_independent_source_budget(*state);});
+    const bool overlapped=admission.wait_for(40ms)==std::future_status::ready;
+    const bool native_held=f.real_ends==0 && f.block_end;
+    {std::scoped_lock lock(state->presenter_mutex);state->independent_completion_busy=false;}
+    state->presenter_condition.notify_all();
+    check(admission.wait_for(500ms)==std::future_status::ready,"stage overlap cleanup admission");
+    xr_ok(admission.get(),"stage overlap admission result");f.unblock();f.wait_count(1);
+    xr_ok(f.transport->drain(),"stage overlap native drain");
+    xr_ok(f.transport->destroy_swapchain(chain),"stage overlap cleanup");
+    check(overlapped && native_held,"ready limit serialized next render behind unfinished GPU and native stages");
+    std::puts("STAGE_OVERLAP next render admitted with one unfinished GPU completion and one held native image PASS");return 0;
+}
+static int independent_source_admission_test() {
+    xrfg_fixture::ControlProfile profile;
+    auto settings=xrfg::autonomous::snapshot().desired;settings.enabled=true;
+    check(xrfg::autonomous::request(settings),"source budget control");
+    xrfg::autonomous::apply_runtime_settings();
+    auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
+    state->menu_enabled=true;state->presenter_active=true;
+    // Completed frames can all be awaiting a blocked native compositor.
+    // They must not consume the GPU budget or stop a new source render.
+    state->independent_outputs.resize(8);
+    state->independent_completion_busy=true;
+    xr_ok(wait_for_independent_source_budget(*state),"one GPU batch overlaps next game render");
+    state->synthesis_busy=true;
+    auto waiting=std::async(std::launch::async,[&]{return wait_for_independent_source_budget(*state);});
+    const bool bounded=waiting.wait_for(25ms)==std::future_status::timeout;
+    {std::scoped_lock lock(state->presenter_mutex);state->independent_completion_busy=false;}
+    state->presenter_condition.notify_all();
+    const bool resumed=waiting.wait_for(500ms)==std::future_status::ready;
+    if(!resumed){std::scoped_lock lock(state->presenter_mutex);state->presenter_stop_requested=true;state->presenter_condition.notify_all();}
+    xr_ok(waiting.get(),"source resumes on GPU completion");
+    check(bounded && resumed && state->independent_outputs.size()==8,
+        "source budget followed native delivery or admitted a third GPU batch");
+    state->synthesis_busy=false;
+    state->independent_sources.push_back(std::make_shared<SynthesisJob>());
+    state->independent_completions.push_back(std::make_shared<IndependentSynthesisWork>());
+    auto queued=std::async(std::launch::async,[&]{return wait_for_independent_source_budget(*state);});
+    const bool queued_bounded=queued.wait_for(25ms)==std::future_status::timeout;
+    // A control change can release admission without waiting for a vendor
+    // fence or applying a new image at EndFrame first.
+    settings.enabled=false;check(xrfg::autonomous::request(settings),"stop generation while admission is full");
+    xrfg::autonomous::apply_runtime_settings();
+    const bool disabled=queued.wait_for(500ms)==std::future_status::ready;
+    if(!disabled){std::scoped_lock lock(state->presenter_mutex);state->presenter_stop_requested=true;state->presenter_condition.notify_all();}
+    xr_ok(queued.get(),"disabled generator must not retain game admission");
+    check(queued_bounded && disabled,"queued submissions ignored budget or FG off did not release it");
+    state->presenter_stop_requested=true;state->menu_enabled=false;
+    xr_ok(wait_for_independent_source_budget(*state),"retired generator is not a stopped OpenXR session when FG is off");
+    settings.enabled=true;check(xrfg::autonomous::request(settings),"restart generation for shutdown guard");
+    xrfg::autonomous::apply_runtime_settings();state->menu_enabled=true;
+    state->presenter_active=false;
+    xr_ok(wait_for_independent_source_budget(*state),"first source must bootstrap a re-enabled generator");
+    state->presenter_active=true;
+    check(wait_for_independent_source_budget(*state)==XR_ERROR_SESSION_NOT_RUNNING,"shutdown wakes source admission");
+    std::puts("INDEPENDENT_SOURCE_BUDGET two unfinished batches; completed/native-held outputs ignored; GPU progress and FG-off release source PASS");
+    return 0;
+}
+
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
     if(route=="pimax-ready-queue")return pimax_ready_queue_test();
     if(route.starts_with("native-vdxr-") || route.starts_with("native-pimax-") || route.starts_with("native-other-") || route.starts_with("steamvr-framework-"))return vdxr_multiframe_test(route);
+    if(route=="producer-timelines")return producer_timelines_test();
+    if(route=="producer-timelines-second")return producer_timelines_test(true);
+    if(route=="independent-feature-settings")return independent_feature_settings_test();
+    if(route=="independent-guide-inputs")return independent_feature_inputs_test();
+    if(route=="independent-post-afw-inputs")return independent_feature_inputs_test(true);
+    if(route=="aer4-phase")return aer4_phase_recovery_test();
+    if(route=="aer4-phase-bundled")return aer4_phase_recovery_test(4);
+    if(route=="aer4-phase-healthy")return aer4_phase_recovery_test(2,true,1);
+    if(route=="aer4-phase-ready")return aer4_phase_recovery_test(2,true,2,false);
+    if(route=="aer4-phase-control2x")return aer4_phase_recovery_test(2,false);
+    if(route=="aer4-stage-native-reader")return independent_aer4_stage_test(true,false,false,1,false,false,false,false,true);
+    if(route=="aer4-stage-d11-native-reader")return independent_aer4_stage_test(false,false,false,1,false,false,false,false,true);
+    if(route=="aer4-stage")return independent_aer4_stage_test();
+    if(route=="aer4-stage-d11")return independent_aer4_stage_test(false);
+    if(route=="aer4-stage-d11-bgra")return independent_aer4_stage_test(false,true);
+    if(route=="aer4-stage-d11-unmarked")return independent_aer4_stage_test(false,false,true);
+    if(route=="aer4-stage-d11-bgra-unmarked")return independent_aer4_stage_test(false,true,true);
+    if(route=="aer4-stage-d11-mips")return independent_aer4_stage_test(false,false,false,4);
+    if(route=="aer4-stage-d11-bgra-mips")return independent_aer4_stage_test(false,true,false,4);
+    if(route=="aer4-stage-d11-credits")return independent_aer4_stage_test(false,false,false,1,true);
+    if(route=="aer4-stage-held")return independent_aer4_stage_test(true,false,false,1,false,true);
+    if(route=="aer4-stage-d11-held")return independent_aer4_stage_test(false,false,true,1,false,true);
+    if(route=="aer4-stage-d11-publication")return independent_aer4_stage_test(false,false,true,1,false,false,true);
+    if(route=="aer4-stage-d11-alias")return independent_aer4_stage_test(false,false,false,1,false,false,false,true);
+    if(route=="aer4-stage-d11-bgra-alias")return independent_aer4_stage_test(false,true,false,1,false,false,false,true);
+    if(route=="independent-source-budget")return independent_source_admission_test();
+    if(route=="independent-ready-admission")return independent_ready_admission_test();
+    if(route=="independent-ready-admission-learned")return independent_ready_admission_test(true);
+    if(route=="independent-stage-overlap")return independent_stage_overlap_test();
+    if(route=="independent-d11-binding")return independent_d11_binding_test();
+    const bool independent=route.starts_with("independent-");if(independent)route=route.substr(12);
+    const bool independent_paired_split=independent && route.starts_with("paired-split-");if(independent_paired_split)route=route.substr(13);
+    const bool independent_resize=independent && route.starts_with("resize-");if(independent_resize)route=route.substr(7);
+    const bool independent_offon=independent && route.starts_with("offon-");if(independent_offon)route=route.substr(6);
+    const bool independent_tickets=independent && route.starts_with("tickets-");if(independent_tickets)route=route.substr(8);
+    const bool independent_runtime_tail=independent && route.starts_with("runtime-tail-");if(independent_runtime_tail)route=route.substr(13);
+    const bool independent_runtime_tail_legacy=independent_runtime_tail && route.starts_with("legacy-");if(independent_runtime_tail_legacy)route=route.substr(7);
+    const bool independent_input_timing=independent && route.starts_with("input-timing-");if(independent_input_timing)route=route.substr(13);
+    const bool independent_input_timing_off=independent_input_timing && route.starts_with("off-");if(independent_input_timing_off)route=route.substr(4);
+    const bool independent_vdxr=independent && route.starts_with("native-vdxr-");if(independent_vdxr)route=route.substr(12);
+    const bool independent_other=independent && route.starts_with("native-other-");if(independent_other)route=route.substr(13);
+    const bool independent_held=independent && route.starts_with("worker-held-");if(independent_held)route=route.substr(12);
+    const bool independent_aer=independent && route.starts_with("aer-");if(independent_aer)route=route.substr(4);
+    const bool independent_aer4=independent_aer && route.starts_with("4x-");if(independent_aer4)route=route.substr(3);
+    const bool independent_alternate=independent_aer && route.starts_with("alt-");if(independent_alternate)route=route.substr(4);
+    const bool independent_stream_hold=independent_paired_split && route.starts_with("stream-");if(independent_stream_hold)route=route.substr(7);
     if(route.starts_with("aer-alternate-"))return aer_alternate_delivery_test(route);
     const bool aer_path=route.starts_with("aer-");if(aer_path)route.erase(0,4);
     const bool aer_swap=aer_path&&route.starts_with("swap-");if(aer_swap)route.erase(0,5);
@@ -620,6 +851,10 @@ int main(int argc,char** argv) {
     const bool adaptive_director=route.starts_with("adaptive-director-");
     if(adaptive_framework)route="large-"+route.substr(19);
     if(adaptive_director)route="large-"+route.substr(18);
+    if(independent && route=="aux-d12")return auxiliary_slot_selection_test(4);
+    if(independent && route=="aux-d11")return auxiliary_slot_selection_test(5);
+    if(independent && route=="luke-aux-d11")return auxiliary_slot_selection_test(6);
+    if(!independent && route=="luke-aux-legacy")return auxiliary_slot_selection_test(7);
     if(route=="auxiliary-slot-available")return auxiliary_slot_selection_test(0);
     if(route=="auxiliary-slot-lazy")return auxiliary_slot_selection_test(1);
     if(route=="auxiliary-slot-all-busy")return auxiliary_slot_selection_test(2);
@@ -627,6 +862,7 @@ int main(int argc,char** argv) {
     if(route=="overlay-admission" || route=="overlay-admission-measured")
         return overlay_admission_test(route.ends_with("measured"));
     if(route=="admission-credit")return admission_credit_test();
+    if(route=="meter-native-confirmation")return independent_meter_test();
     const bool rife_luke=route.starts_with("rife-luke");
     const unsigned rife_luke_factor=route.find("luke4")!=std::string::npos?4:route.find("luke2")!=std::string::npos?2:3;
     const bool rife_tail=route.starts_with("rife-tail");
@@ -685,7 +921,7 @@ int main(int argc,char** argv) {
     if(force_vdxr_steamvr || force_steamvr_vdxr || unknown_session || pimax_session)route="session";
     if(vdxr_probe)period=8'333'333; // 120Hz runtime predictions, no SteamVR timing API
     vdxr_legacy_probe=force_vdxr_steamvr || route=="legacy-session" || (pimax_session && !force_framework_pimax);if(vdxr_legacy_probe)route="session";
-    if(route.starts_with("afw-only") || route=="luke-shared-session")return afw_only_session_test(route,argc>2?argv[2]:nullptr);
+    if(route.starts_with("afw-only") || route=="luke-shared-session")return afw_only_session_test(route,argc>2?argv[2]:nullptr,independent);
     const bool shared_budget=route=="luke-shared-budget",unshared_budget=route=="luke-unshared-budget" || route=="outlaws-unshared-budget";
     const bool outlaws_budget=route=="outlaws-budget" || route=="outlaws-unshared-budget";
     const bool publication_budget=outlaws_budget || shared_budget || unshared_budget;
@@ -707,15 +943,45 @@ int main(int argc,char** argv) {
     const bool canonical=route.starts_with("canonical-");if(canonical)route=route.substr(10);
     const bool pooled=route.starts_with("pooled-");if(pooled)route=route.substr(7);
     const bool unpooled=route.starts_with("unpooled-");if(unpooled)route=route.substr(9);
-    const bool split_eyes=pooled || unpooled || rife_msfs || layout_alternation;
+    const bool split_eyes=independent_paired_split || independent_alternate || pooled || unpooled || rife_msfs || layout_alternation;
     const bool separate_queue=route.starts_with("separate-");if(separate_queue)route=route.substr(9);
     int a{},b{};if(route.size()>3 && route[route.size()-3]=='-'){a=route[route.size()-2]-'0';b=route.back()-'0';route.resize(route.size()-3);}
     const bool switching=route=="switch";if(switching)route="new";
     const bool luke=route.starts_with("luke-");if(luke)route=route.substr(5);
     const bool native12=!route.starts_with("d11-");if(!native12)route=route.substr(4);
     check(!steady_memory || native12,"steady VRAM mode currently uses the native D12 route fixtures");
+    const bool independent_nvidia=independent && route.starts_with("nvidia-");if(independent_nvidia)route=route.substr(7);
     const bool triple=route.ends_with('3');if(triple)route.pop_back();
-    xrfg_fixture::ControlProfile profile;
+    xrfg_fixture::ControlProfile profile(independent);
+    if(independent) {
+        auto desired=xrfg::autonomous::snapshot().desired;
+        xrfg::autonomous::select_generation(desired,route=="fsr"?1:route=="dlssg"?2:route=="hybrid"?3:0,route=="fidelity"?0:route=="ref"?1:2);
+        if(route=="hybrid")desired.hybrid_backend=independent_nvidia?2:0; // stale NVIDIA ID must select the single Independent engine
+        desired.independent_pacing=true;desired.ofr_enabled=independent_aer;desired.afw_mode=luke?3:0;desired.nr_enabled=true;desired.r19_camera=true;desired.motion_vectors=route=="fsr" || route=="dlssg" || route=="hybrid";
+        desired.independent_acquire_fix=!independent_runtime_tail_legacy;
+        if(independent_aer4)desired.frame_multiplier=4;
+        check(xrfg::autonomous::request(desired),"independent production selection");xrfg::autonomous::apply_runtime_settings();
+        check(xrfg::embedded::afw_snapshot().desired.mode==(luke?3:0) && xrfg::neural_rendering::status().enabled &&
+            xrfg::autonomous::r19_camera_enabled.load() && xrfg::embedded::snapshot().desired.motion_vectors==desired.motion_vectors,
+            "Independent restores selected reconstruction/camera/vectors alongside NR");
+        const auto original=desired;
+        for(bool generation:{false,true}) {
+            desired=original;desired.enabled=generation;
+            check(xrfg::autonomous::request(desired),"independent NR generation state");xrfg::autonomous::apply_runtime_settings();
+            const auto generation_settings=xrfg::embedded::snapshot().desired;
+            const auto afw_settings=xrfg::embedded::afw_snapshot().desired;
+            for(bool nr:{false,true}) {
+                desired.nr_enabled=nr;desired.nr_before_sr=nr;
+                check(xrfg::autonomous::request(desired),"independent NR live toggle");xrfg::autonomous::apply_runtime_settings();
+                const auto status=xrfg::neural_rendering::status();
+                check(status.enabled==nr && status.before_sr==nr,"NR live selection reaches its host with FG on or off");
+                check(xrfg::embedded::snapshot().desired==generation_settings &&
+                    xrfg::embedded::afw_snapshot().desired==afw_settings,
+                    "NR selection changed independent cadence/generation/reconstruction settings");
+            }
+        }
+        check(xrfg::autonomous::request(original),"restore independent optical selection");xrfg::autonomous::apply_runtime_settings();
+    }
     if(rife_factor){
         auto desired=xrfg::autonomous::snapshot().desired;
         xrfg::autonomous::select_generation(desired,4,2);
@@ -754,10 +1020,11 @@ int main(int argc,char** argv) {
     if(force_vdxr_steamvr)check(WritePrivateProfileStringW(L"tray",L"pacing",L"force_vdxr",xrfg::autonomous::global_configuration_path().c_str()),"force VDXR on real SteamVR identity");
     if(pimax_session)check(WritePrivateProfileStringW(L"tray",L"pacing",force_framework_pimax?L"force_steamvr":L"auto",xrfg::autonomous::global_configuration_path().c_str()),"Pimax auto/explicit framework transport preference");
     if(vdxr_probe)check(WritePrivateProfileStringW(L"tray",L"pacing",vdxr_legacy_probe?L"auto":L"force_steamvr",xrfg::autonomous::global_configuration_path().c_str()),"isolated VDXR transport preference");
-    if(rife_report || ((benchmark_sequence || rife_factor) && GetEnvironmentVariableW(L"XRFG_BENCH_TRACE",nullptr,0))) {
+    if(independent_input_timing || rife_report || ((benchmark_sequence || rife_factor) && GetEnvironmentVariableW(L"XRFG_BENCH_TRACE",nullptr,0))) {
         const auto folder=xrfg::autonomous::configuration_path().parent_path()/L"trace";
         std::filesystem::create_directories(folder);
         WritePrivateProfileStringW(L"diagnostics",L"logging_enabled",L"1",(folder/L"ofxr_bridge.ini").c_str());
+        if(independent_input_timing)WritePrivateProfileStringW(L"diagnostics",L"gpu_instrumentation_enabled",independent_input_timing_off?L"0":L"1",(folder/L"ofxr_bridge.ini").c_str());
         xrfg::bridge_flight_logger().initialize(folder);
         std::fprintf(stderr,"TRACE=%s\n",xrfg::bridge_flight_logger().log_path().string().c_str());
     }
@@ -791,12 +1058,12 @@ int main(int argc,char** argv) {
     }
     ComPtr<ID3D12Debug> debug;
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
-    Fixture f(native12);f.transport->stop();if(route!="memory" && route!="scope" && !framework_session_probe)f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
+    Fixture f(native12);f.independent_mode=independent;f.transport->stop();if(route!="memory" && route!="scope" && !framework_session_probe)f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
     if(rife_latency)f.frame_wait_us=[](unsigned){return 11111;};
     if(rife_factor)f.prediction_horizon_ns=period*3; // cold-model/GPU-load fixture, unchanged physical refresh
 
     f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
-    auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=!vdxr_probe && !unknown_session && !pimax_session;dispatch->virtual_desktop_runtime=vdxr_probe;
+    auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=!independent_vdxr && !independent_other && !vdxr_probe && !unknown_session && !pimax_session;dispatch->virtual_desktop_runtime=independent_vdxr || vdxr_probe;
     if(pimax_session){dispatch->runtime_name="Pimax OpenXR";dispatch->inline_unless_pipelined=true;}
     if(measured)dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult{*out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;};
     // Deliberately unthrottled fault model for OFF: detects a client-added
@@ -973,9 +1240,13 @@ int main(int argc,char** argv) {
         std::puts("Shipping xrCreateSession receives dedicated consumer queue; private producer queue retained PASS");return 0;
     }
     auto state=std::make_shared<SessionState>(dispatch);state->handle=reinterpret_cast<XrSession>(2);state->graphics_binding=native12?SessionGraphicsBinding::d3d12:SessionGraphicsBinding::d3d11;
+    state->independent_pacing=independent;
+    if(independent)state->history_capture_wait_period=period; // mirrors shipping application Wait before capture
     if(!native12)ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),f.device12.GetAddressOf(),f.queue.GetAddressOf()),"D11 generator interop device");
     state->d3d12_device=f.device12;state->d3d12_queue=f.queue;
     state->d3d11_device=f.device11;state->d3d11_context=f.context;
+    if(independent) {D3D12_COMMAND_QUEUE_DESC queue{};queue.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+        ok(f.device12->CreateCommandQueue(&queue,IID_PPV_ARGS(&state->d3d12_synthesis_queue)),"independent compute queue");}
     state->vdxr_legacy=false;
     state->single_director_requested=sole;
     state->luke_afw_enabled=luke;
@@ -1064,7 +1335,7 @@ int main(int argc,char** argv) {
         state->nvidia_options.rife_async=true;state->nvidia_options.input_scale=xrfg::D3D12NvidiaInputScale::sixth;
     }
 
-    if(ofxr_factor)state->nvidia_options.rife_multiplier=int(ofxr_factor);
+    if(ofxr_factor && !independent)state->nvidia_options.rife_multiplier=int(ofxr_factor);
     if(benchmark_sequence)state->djules_pipeline_switchable=true; // shipping xrCreateSession enables live multiplier polling
     const bool vectors=route=="fsr" || route=="hybrid" || route=="dlssg";
     if(vectors)state->dlss_motion_vectors=true;
@@ -1081,7 +1352,7 @@ int main(int argc,char** argv) {
         state->luke_shared_swapchains=shared_budget || (outlaws_budget && !unshared_budget);
         state->graphics_binding_capabilities|=8ULL;
     }
-    if(sole && !rife_factor)ok(apply_embedded_control(state),"initial settings match the real public route selection");
+    if((sole || independent) && !rife_factor)ok(apply_embedded_control(state),"initial settings match the real public route selection");
     else state->control_revision=xrfg::embedded::snapshot().revision;
     {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;g_instances[dispatch->instance]=dispatch;}
     ok(install_private_runtime(state),"install real SteamVR private dispatch");
@@ -1284,6 +1555,7 @@ int main(int argc,char** argv) {
             xr_ok(layer_enumerate_swapchain_images_impl(packed_layout,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(pi.data())),"packed D11 capture setup");}
     }
     XrSwapchain panel_chain{},second_panel_chain{},budget_meter{};
+    unsigned independent_panel_checks{},independent_panel_fractional{};
     if(panel_test) {
         const auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
         auto ci=info;ci.arraySize=1;
@@ -1353,7 +1625,13 @@ int main(int argc,char** argv) {
         f.commands([&](ID3D12GraphicsCommandList* list){const float z[]={.5F,.5F,.5F,1},v[]={0,0,0,0};list->ClearRenderTargetView(d,z,0,nullptr);list->ClearRenderTargetView(m,v,0,nullptr);D3D12_RESOURCE_BARRIER b[2]{};for(auto& x:b){x.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;x.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;x.Transition.StateBefore=D3D12_RESOURCE_STATE_RENDER_TARGET;x.Transition.StateAfter=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;}b[0].Transition.pResource=depth.Get();b[1].Transition.pResource=motion.Get();list->ResourceBarrier(2,b);});
     }
     if(split_eyes && vectors && native12)xrfg::configure_dlss_motion_vector_tracking(true);
+    unsigned stream_base_pixels{};bool stream_probe_armed{},stream_probe_done{};
+    ComPtr<ID3D12Fence> stream_input_gate;std::unique_ptr<std::jthread> stream_rescue;
+    if(independent_stream_hold)ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&stream_input_gate)),"stream layer gate");
     f.release_callback=[&](XrSwapchain handle,unsigned index){
+        if(stream_probe_armed && handle==right) {
+            ok(f.queue->Wait(stream_input_gate.Get(),1),"block newer-eye history capture after its game rendering");stream_probe_armed=false;
+        }
         auto c=find_swapchain(handle);
         if(split_eyes && vectors && native12 && handle!=packed_layout) {
             ComPtr<ID3D12GraphicsCommandList> recorded;
@@ -1387,7 +1665,39 @@ int main(int argc,char** argv) {
     // SDK limited to one generated frame it would instead test an unrelated
     // prefer_fps scheduling change while repeating the same 2X Fast policy.
     const unsigned benchmark_policy_phases=benchmark_dlssg_sequence && !benchmark_dlssg_transition && state->native_dlss_generated_frames<2?6:7;
-    const unsigned input_count=layout_alternation?24:rife_latency?64:phase_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:rife_msfs?64:panel_lifecycle_test?16:8;
+    const unsigned input_count=(independent && blocked) || layout_alternation || independent_offon || independent_tickets || independent_input_timing || (independent && panel_budget_test)?24:independent_aer4 && !native12?16:rife_latency?64:phase_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:rife_msfs?64:panel_lifecycle_test?16:8;
+    if(independent && panel_test)f.inspect_layers=[&](const XrFrameEndInfo* frame) {
+        check(frame->layerCount>=3,"Independent output lost one of its original panels");
+        const auto progress=reinterpret_cast<const XrCompositionLayerQuad*>(frame->layers[1])->pose.position.x*10.f;
+        const auto source=unsigned(std::ceil(progress-.001f));
+        check(source>=1 && source<=input_count,"panel correction escaped its admitted source pair");
+        if(independent_aer)check(std::abs(progress*2.f-std::round(progress*2.f))<.002f,"AER panel correction has an invalid temporal fraction");
+        if(std::abs(progress-std::round(progress))>.01f)++independent_panel_fractional;
+        for(unsigned i=0;i<2;++i) {
+            const auto* q=reinterpret_cast<const XrCompositionLayerQuad*>(frame->layers[i+1]);
+            check(q && q->type==XR_TYPE_COMPOSITION_LAYER_QUAD,"Independent changed panel layer type");
+            const auto captured_pixel=f.read_pixel(f.chains.at(q->subImage.swapchain),q->subImage.imageRect.offset.x,q->subImage.imageRect.offset.y,0);
+            check(captured_pixel>=(panel_budget_test&&i?70u:30u),"HUD and counter source pixels were confused");
+            const unsigned base=panel_budget_test&&i?70:30;
+            check(captured_pixel>=base+source-1 && captured_pixel<=base+source,"panel pixel must belong to its exact current/previous source pair");
+            const auto captured_source=source;
+            if(panel_budget_test && i)check(q->subImage.swapchain!=
+                reinterpret_cast<const XrCompositionLayerQuad*>(frame->layers[1])->subImage.swapchain,
+                "distinct HUD and counter sources share one native publication image");
+            const XrExtent2Df expected_size=independent_resize
+                ? XrExtent2Df{captured_source%2?1.25f:3.f,captured_source%3?2.f:.75f}:XrExtent2Df{1,1};
+            check(q->space==reinterpret_cast<XrSpace>(9) && q->pose.orientation.w==1.f &&
+                q->size.width==expected_size.width && q->size.height==expected_size.height,
+                "Independent froze stale panel size after a source resize");
+            check(q->subImage.imageRect.offset.x==int(i*image_width/2) &&
+                q->subImage.imageRect.extent.width==int(image_width/2) &&
+                q->subImage.imageRect.offset.y==(independent_resize?int((captured_source%2)*image_height/2):0) &&
+                q->subImage.imageRect.extent.height==int(independent_resize?image_height/2:image_height) && q->subImage.imageArrayIndex==0,
+                "Independent changed original panel atlas or array slice");
+            if(i)check(q->pose.position.x==5.f,"Independent moved the stationary peer panel");
+        }
+        ++independent_panel_checks;
+    };
     if(benchmark_sequence) {
         std::fprintf(stderr,"BENCH policies=%u real_inputs=%u actual_3x_to_2x_transition=%u explicit_prefer_fps_transition_diagnostic=%u memory_sampling=%s\n",
             benchmark_policy_phases,input_count,unsigned(benchmark_policy_phases==7 &&
@@ -1401,11 +1711,39 @@ int main(int argc,char** argv) {
     unsigned rife_phase_start{},rife_bank_epoch_start{};
     unsigned rife_phase_factor=rife_factor?rife_factor:ofxr_factor;
     bool hfw_gate_proven=false;
+    bool independent_ahead=false;
     bool rife_overlap_proven=false;
     std::uint64_t rife_overlap_b_sequence{};
     ComPtr<ID3D12Fence> rife_overlap_compute_gate;
     XrFrameState overlap_prediction{XR_TYPE_FRAME_STATE};bool overlap_wait_ready=false;
+    ComPtr<ID3D12Fence> independent_runtime_gate;
     for(unsigned n=1;n<=input_count;++n) {
+        if(independent_stream_hold && n==4) {
+            xr_ok(wait_for_presenter_idle(state),"drain previous stream metadata");xr_ok(f.transport->drain(),"drain previous stream native output");
+            {std::scoped_lock lock(f.gpu);stream_base_pixels=unsigned(f.pixels.size());}
+            stream_probe_armed=true;
+            stream_rescue=std::make_unique<std::jthread>([gate=stream_input_gate]{std::this_thread::sleep_for(1500ms);gate->Signal(1);});
+        }
+        if(independent && n==8) {
+            const auto generation=find_swapchain(chain)->frame_generation;
+            check(generation!=nullptr,"live cap probe requires warmed generator");
+            for(int level:{3,0,2,1,0}) {
+                auto settings=xrfg::autonomous::snapshot().desired;settings.pacing_buffer=level;
+                check(xrfg::autonomous::request(settings),"live independent cap request");
+                xrfg::autonomous::apply_runtime_settings();
+                ok(apply_embedded_control(state),"live independent cap apply");
+                check(find_swapchain(chain)->frame_generation==generation &&
+                    state->applied_generation_settings->pacing_buffer==level,
+                    "live cap change reset generator/history or failed to reach layer");
+            }
+            for(bool enabled:{false,true,!independent_runtime_tail_legacy}) {
+                auto settings=xrfg::autonomous::snapshot().desired;settings.independent_acquire_fix=enabled;
+                check(xrfg::autonomous::request(settings),"live acquire A/B request");xrfg::autonomous::apply_runtime_settings();
+                ok(apply_embedded_control(state),"live acquire A/B apply");
+                check(find_swapchain(chain)->frame_generation==generation && state->applied_generation_settings->independent_acquire_fix==enabled,
+                    "A/B flag reset the warmed generator or failed to apply");
+            }
+        }
         if(rife_overlap && n==4) {
             xr_ok(wait_for_synthesis_handoff(state),"overlap probe drains the previous compute job");
             xr_ok(wait_for_presenter_idle(state),"overlap probe drains previous upper descriptors");
@@ -1496,6 +1834,11 @@ int main(int argc,char** argv) {
             check(state->luke_synthesis_queue==cold_queue && app->frame_generation==cold_generation &&
                 !session_uses_shared_queue(*state),"AFW readiness replaced early lane/history or exposed shared projection");
         }
+        if(independent_offon && (n==3||n==5||n==6||n==7)) {
+            auto desired=xrfg::autonomous::snapshot().desired;desired.enabled=n==5||n==7;
+            check(xrfg::autonomous::request(desired),"Independent actual generation off/on");
+            xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(state),"Independent worker stop/start keeps XR session");
+        }
         if(hfw_offon && (n==6 || n==7)) {
             auto desired=xrfg::autonomous::snapshot().desired;desired.enabled=n==7;
             check(xrfg::autonomous::request(desired),"HFW actual OFXR off/on control");
@@ -1574,8 +1917,8 @@ int main(int argc,char** argv) {
             }
             released.get();
             check(captured,"RIFE next source Release/capture waited for old batch delivery admission after GPU completion");
-        } else if(!rife_msfs && !(rife_early_capture_done && n==6) && !(layout_alternation && n%2==0))f.write(chain,color);
-        if(split_eyes && !rife_msfs && !(layout_alternation && n%2==0))f.write(right,color+7);
+        } else if(!(independent_ahead && n==4) && (!independent_alternate || n==1 || n%2) && !rife_msfs && !(rife_early_capture_done && n==6) && !(layout_alternation && n%2==0))f.write(chain,color);
+        if(split_eyes && (!independent_alternate || n==1 || n%2==0) && !rife_msfs && !(layout_alternation && n%2==0))f.write(right,color+7);
         if(layout_alternation && n%2==0)f.write(packed_layout,color);
         if(layout_alternation && n==11)f.write(chain,color); // one eye skips a released capture
         if(panel_test)f.write(panel_chain,30+n);
@@ -1596,6 +1939,8 @@ int main(int argc,char** argv) {
             });
             started.wait();std::this_thread::sleep_for(300us);
         }
+        std::uint64_t begun_ticket{},next_ticket{};
+        if(independent_tickets){std::scoped_lock lock(state->mutex);check(!state->pending_frames.empty(),"begun source retains its returned Wait ticket");begun_ticket=state->pending_frames.back().serial;}
         xr_ok(rife_msfs?layer_begin_frame(state->handle,nullptr):layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
         if(measured)if(auto cycle=state->interface_active_cycle.load())measured_cycles.push_back(std::move(cycle));
         if(rife_msfs) {
@@ -1605,7 +1950,10 @@ int main(int argc,char** argv) {
             f.write(chain,color);f.write(right,color+7);
         }
         std::array<XrCompositionLayerProjectionView,2> views;
-        for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={int(image_width),int(image_height)};}
+        for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=((sole || independent)?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={int(image_width),int(image_height)};}
+        if(independent_aer4)for(unsigned eye=0;eye<2;++eye) {
+            views[eye].pose.position.x=.1f*n+(eye?.032F:-.032F);views[eye].pose.position.y=.1f*n;
+        } // stay within the production camera-discontinuity limit
         if(layout_alternation && n%2==0)for(unsigned eye=0;eye<2;++eye){views[eye].subImage.swapchain=packed_layout;views[eye].subImage.imageArrayIndex=0;views[eye].subImage.imageRect.offset.x=int(eye*image_width);}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
@@ -1615,6 +1963,7 @@ int main(int argc,char** argv) {
             for(unsigned i=0;i<2;++i){auto& q=panel_quads[i];q={XR_TYPE_COMPOSITION_LAYER_QUAD};
                 q.space=projection.space;q.pose.orientation.w=1;q.pose.position.x=i?5.f:.1f*n;
                 q.size={1,1};q.subImage.swapchain=panel_budget_test&&i?second_panel_chain:panel_chain;q.subImage.imageRect={{int(i*image_width/2),0},{int(image_width/2),int(image_height)}};
+                if(independent_resize){q.size={n%2?1.25f:3.f,n%3?2.f:.75f};q.subImage.imageRect.offset.y=int((n%2)*image_height/2);q.subImage.imageRect.extent.height=int(image_height/2);}
                 panel_layers[i+1]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);}
             end.layerCount=3;end.layers=panel_layers.data();
             if(panel_lifecycle_test && (n==5||n==6))end.layerCount=2;
@@ -1630,6 +1979,14 @@ int main(int argc,char** argv) {
             // captures and real runtime delivery remain independently owned.
             if(rife_replay_time)end.displayTime=*rife_replay_time+(n%2?34'935'700:34'294'989);
             rife_replay_time=end.displayTime;
+        }
+        if(independent_runtime_tail && n==4) {
+            xr_ok(wait_for_synthesis_handoff(state),"prior generator submitted before binding-tail probe");
+            xr_ok(wait_for_presenter_idle(state),"prior outputs retired before binding-tail probe");
+            xr_ok(f.transport->drain(),"prior native reads complete before binding-tail probe");
+            check(state->binding_queue && state->private_runtime,"probe requires private targets and distinct legacy binding queue");
+            ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&independent_runtime_gate)),"unrelated binding-tail gate");
+            ok(state->binding_queue->Wait(independent_runtime_gate.Get(),1),"hold only the old consumer queue tail");
         }
         if(rife_latency)rife_source_ends.push_back(xrfg::interface_clock_ns());
         if(rife_overlap_retire && n==5) {
@@ -1648,6 +2005,18 @@ int main(int argc,char** argv) {
             overlap_wait_ready=true;
             check(continuous_presenter_active(state) || state->application_frame_has_overlapping_wait,
                 "private RIFE keeps overlapping application-frame bookkeeping");
+        }
+        if(independent_tickets && n>=3) {
+            // The next Wait sometimes finishes before this End, sometimes
+            // after it. Rewriting displayTime must not change ticket ownership.
+            if(n<input_count && n%3!=0) {
+                xr_ok(layer_wait_frame_impl(state->handle,nullptr,&overlap_prediction),"Independent next Wait before current End");
+                overlap_wait_ready=true;
+                std::scoped_lock lock(state->mutex);next_ticket=state->pending_frames.back().serial;
+            }
+            end.displayTime+=period+1234;
+            const auto selected=latest_pending_application_frame(state,end.displayTime,false,true);
+            check(selected && selected->serial==begun_ticket,"Independent End selects its begun source, never the newer Wait or rewritten prediction");
         }
         if(hfw) std::fprintf(stderr,"HFW before%u active%u worker%u request%u forbidden%u mode%u enabled%u\n",n,
             unsigned(continuous_presenter_active(state)),unsigned(state->three_slot_director),unsigned(state->presenter_start_requested),
@@ -1678,14 +2047,57 @@ int main(int argc,char** argv) {
             check(independent,"HFW game waited for OFXR synthesis/publication completion");
             hfw_gate_proven=true;
             std::puts("HFW game returns while actual OFXR GPU queue is still blocked PASS");
-        } else if(blocked && n==2) {
-            f.wait_count(1); // all three endpoint credits are free before the probe
+        } else if(independent_held && n==3) {
+            ComPtr<ID3D12Fence> gate;ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"independent worker gate");
+            ok(state->d3d12_synthesis_queue->Wait(gate.Get(),1),"hold only generator GPU queue");
+            auto submitted=std::async(std::launch::async,[&]{return layer_end_frame_impl(state->handle,&end);});
+            const bool returned=submitted.wait_for(500ms)==std::future_status::ready;
+            if(!returned)gate->Signal(1);
+            xr_ok(submitted.get(),"source handoff while generator GPU is held");
+            check(returned,"source End inherited generation completion");
+            bool handed_to_consumer=false;
+            const auto handoff_limit=std::chrono::steady_clock::now()+500ms;
+            while(std::chrono::steady_clock::now()<handoff_limit) {
+                {std::scoped_lock lock(state->presenter_mutex);
+                 handed_to_consumer=!state->synthesis_busy && state->independent_sources.empty() &&
+                     (state->independent_completion_busy || !state->independent_completions.empty());}
+                if(handed_to_consumer)break;
+                std::this_thread::yield();
+            }
+            const bool gpu_still_pending=gate->GetCompletedValue()==0;
+            if(!handed_to_consumer)gate->Signal(1);
+            check(handed_to_consumer && gpu_still_pending,
+                "submission worker retained transaction until GPU completion instead of handing it to consumer");
+            auto captured=std::async(std::launch::async,[&]{f.write(chain,80);});
+            const bool free=captured.wait_for(500ms)==std::future_status::ready;
+            gate->Signal(1);captured.get();
+            check(free,"next game source capture inherited blocked worker queue/mutex");
+            std::puts("INDEPENDENT_SUBMIT pending GPU output is consumer-owned while submitting worker is free PASS");
+            independent_ahead=true;
+            std::puts("INDEPENDENT_GPU_HELD End and next capture return before generator GPU completes PASS");
+        } else if(blocked && n==(independent?3U:2U)) {
+            f.wait_count(1); // one confirmed native prime; another cold source may legitimately expire
             f.block_end=true;f.end_entered=false;
             auto producer=std::async(std::launch::async,[&]{return layer_end_frame_impl(state->handle,&end);});
-            const bool independent=producer.wait_for(500ms)==std::future_status::ready;
+            const bool returned=producer.wait_for(500ms)==std::future_status::ready;
+            bool worker_free=!state->independent_pacing;
+            if(state->independent_pacing) {
+                const auto limit=std::chrono::steady_clock::now()+500ms;
+                while(std::chrono::steady_clock::now()<limit) {
+                    {std::scoped_lock lock(state->presenter_mutex);
+                     worker_free=!state->synthesis_busy && state->independent_sources.empty() && f.end_entered;}
+                    if(worker_free)break;
+                    std::this_thread::yield();
+                }
+            }
+            const bool native_held=f.block_end;
             f.unblock();
             xr_ok(producer.get(),"shipping End while native End is withheld");
-            check(independent,"bridge acceptance returns to game before blocked native End with spare credits");
+            check(returned,"bridge acceptance returns to game before blocked native End with spare credits");
+            if(state->independent_pacing) {
+                check(worker_free && native_held,"generation submission must be free while native presentation is still blocked");
+                std::puts("INDEPENDENT_NATIVE_HELD game and generation submitter are free before native End returns PASS");
+            }
         } else {
             const auto submitted=rife_msfs?layer_end_frame(state->handle,&end):layer_end_frame_impl(state->handle,&end);
             if(rife_inherited && n==5) {
@@ -1701,6 +2113,42 @@ int main(int argc,char** argv) {
                 check(find_swapchain(panel_chain)->frame_generation!=nullptr,
                     "closing one panel retired the other visible panel");
             }
+        }
+        if(independent_stream_hold && n==4) {
+            bool first=false,only_first=false;unsigned right_pixel{};
+            const auto deadline=std::chrono::steady_clock::now()+300ms;
+            while(std::chrono::steady_clock::now()<deadline) {
+                {std::scoped_lock lock(f.gpu);
+                 if(f.pixels.size()>stream_base_pixels){first=true;only_first=f.pixels.size()==stream_base_pixels+1;
+                     right_pixel=f.right_pixels[stream_base_pixels];break;}}
+                std::this_thread::sleep_for(1ms);
+            }
+            const bool input_still_blocked=stream_input_gate->GetCompletedValue()==0;
+            bool second_pending{};{std::scoped_lock lock(state->presenter_mutex);second_pending=state->independent_completion_busy;}
+            ok(stream_input_gate->Signal(1),"release newer source after first native presentation probe");stream_rescue.reset();
+            check(first && only_first && input_still_blocked && second_pending,
+                "first coherent native AER presentation waited for second eye or published second prematurely");
+            check(right_pixel==67,"early native AER eye is not exact prior same-eye color");stream_probe_done=true;
+            std::puts("AER_NATIVE_FIRST first reached native while newer input/second generation pending; exact previous eye PASS");
+        }
+        if(independent_runtime_tail && n==4) {
+            std::unique_lock lock(state->presenter_mutex);
+            const bool ready=state->presenter_condition.wait_for(lock,500ms,[&] {
+                return state->independent_sources.empty() && !state->synthesis_busy &&
+                    state->independent_completions.empty() && !state->independent_completion_busy;
+            });
+            lock.unlock();
+            // Always release before any assertion/teardown. The final consumer
+            // may still need this queue; only generation must be independent.
+            ok(independent_runtime_gate->Signal(1),"release binding-tail probe");
+            check((ready!=independent_runtime_tail_legacy) && XR_SUCCEEDED(state->presenter_failure),"A/B mode did not select the expected private-acquire binding-tail dependency");
+            std::printf("INDEPENDENT_RUNTIME_TAIL AB fix=%d gated_completion=%d exact capture/ownership PASS\n",!independent_runtime_tail_legacy,ready);
+        }
+        if(independent_tickets && n>=3) {
+            std::scoped_lock lock(state->mutex);
+            check(std::none_of(state->pending_frames.begin(),state->pending_frames.end(),[&](const auto& t){return t.serial<=begun_ticket;}),"End retires its begun ticket");
+            if(next_ticket)check(state->pending_frames.size()==1 && state->pending_frames.front().serial==next_ticket,"Independent End must preserve the next unbegun Wait ticket");
+            else check(state->pending_frames.empty(),"late next Wait does not invent a pending ticket");
         }
         if(layout_alternation && n>=4)check(state->generation_resume_wall_time.time_since_epoch().count()==0,
             "alternating valid projection layouts entered a one-second quarantine");
@@ -1959,6 +2407,12 @@ int main(int argc,char** argv) {
             }
         }
     }
+    if(independent_stream_hold)check(stream_probe_done,"streamed native first-output dependency probe missing");
+    if(independent_paired_split) {
+        std::scoped_lock lock(state->presenter_mutex);
+        if(std::getenv("XRFG_TEST_NVIDIA_OPTICAL"))check(state->independent_streamed_first>0,
+            "paired split-source NVIDIA stream never published a first output");
+    }
     if(hfw && !toggling)check(hfw_gate_proven,"HFW never promoted to actual synthesis worker");
     xr_ok(wait_for_synthesis_handoff(state),"worker complete");
     if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"generator transport drained");
@@ -2020,7 +2474,48 @@ int main(int argc,char** argv) {
             "total includes worker exactly once, not its Torch-reserved subset");
         check(xrfg::autonomous::interface_vram_text(status)!="VRAM N/A","RIFE VRAM must remain readable after warmup");
     }
-    auto generated=count>0 && f.real_ends>=(budget_fallback_test?input_count:steady_memory?input_count+4:(switching || hfw_offon)?10:12);
+    if(independent) {
+        check(state->independent_pacing && state->next_source_sequence>3,"independent source jobs never entered the new queue");
+        check(state->three_slots.empty() && state->independent_sources.empty() && state->independent_outputs.empty(),"independent queue drain retained an old-slot dependency");
+        check(state->independent_completions.empty() && !state->independent_completion_busy,
+            "independent drain returned while submitted GPU transactions were still consumer-owned");
+        check(!state->private_runtime->director_enabled() && state->private_runtime->buffer_capacity()==8,"old delivery policy leaked into independent consumer");
+        if(independent_aer)check(state->ofr_delivery.load()==(independent_alternate?1U:2U),"AER release cadence did not reach the actual independent route");
+        const auto expired=state->private_runtime->independent_load().expired;
+        // Off frames3,4,6 each omit one synthetic. The one-frame enabled
+        // epoch5 and the restarted epoch7 each prime again (one+two outputs
+        // omitted). The remaining long epoch must actually generate again.
+        const auto base_outputs=independent_alternate?input_count:
+            2+(ofxr_factor?ofxr_factor:2)*(input_count-2)-(independent_offon?6:0);
+        // Native D11's lazy output initialization can pass more cold real
+        // frames before coherent reconstruction begins. Every original output
+        // must still be accounted for, plus each genuinely paired endpoint.
+        const auto stage_endpoints=independent_aer4 && state->independent_aer_double
+            ?state->independent_aer_double->ordinal:0;
+        const auto expected=base_outputs+(independent_aer4 && stage_endpoints?unsigned(stage_endpoints-1):0);
+        if(independent_aer4) {
+            const auto stage=state->independent_aer_double;
+            std::fprintf(stderr,"AER4 state helper=%u hr=%08x ordinal=%llu selected=%u mapped=%u\n",unsigned(bool(stage)),stage?unsigned(stage->failure):0,stage?stage->ordinal:0,unsigned(xrfg::autonomous::generation_multiplier(xrfg::autonomous::snapshot().desired)),unsigned(xrfg::embedded::snapshot().desired.independent_aer_double));
+            check(stage && SUCCEEDED(stage->failure) && stage->ordinal>2 &&
+                xrfg::embedded::independent_aer_double_state==2,"4X AER never generated actual coherent stereo midpoints");
+            std::printf("AER4 accepted coherent endpoints=%llu final outputs=%u expired=%llu expected=%u\n",stage->ordinal,f.real_ends.load(),expired,expected);
+        }
+        check(f.real_ends+expired==expected,"every produced output must be confirmed native or explicitly expired, never lost/faked");
+        check(f.real_ends>=2,"independent route never recovered a fresh scene after warmup/stall expiration");
+        if(!independent_aer) {
+            check(std::is_sorted(f.positions.begin(),f.positions.end()),"deadline culling reordered source poses");
+            check(f.positions.back()>input_count/2,"expired warmup backlog prevented recent sources from being displayed");
+        }
+        if(independent_held)check(independent_ahead,"held generator isolation was not exercised");
+        if(route=="fsr" || route=="dlssg" || route=="hybrid") {
+            check(state->guided_generation_ms.load()!=0,"requested vector generator must consume matching game guides, never optical fallback");
+            std::puts("INDEPENDENT_GUIDES matching game-vector generation confirmed PASS");
+        }
+        std::puts("INDEPENDENT_QUEUE_PROOF source/jobs/drain/native-policy PASS");
+        if(independent_tickets)std::puts("INDEPENDENT_TICKETS early/late next Wait and rewritten End time preserve exact begun identity; full generated count PASS");
+    }
+    auto generated=count>0 && (independent ? f.real_ends>=2 && f.real_ends+state->private_runtime->independent_load().expired>=input_count
+        : f.real_ends>=(budget_fallback_test?input_count:steady_memory?input_count+4:(switching || hfw_offon)?10:12));
     std::printf("%s physical outputs=%u generation state=%u\n",route.c_str(),f.real_ends.load(),unsigned(state->generation_status.load()));
     if(!generated) {
         const auto ext=xrfg::autonomous::snapshot();const auto inner=xrfg::embedded::snapshot();const auto chain_state=find_swapchain(chain);
@@ -2050,7 +2545,7 @@ int main(int argc,char** argv) {
             route.c_str(),ofxr_factor,f.real_ends.load(),unsigned(state->generation_status.load()),state->three_slots.capacity(),
             state->three_slot_director,state->private_runtime->ready_clock_enabled());
         // The worker has stopped by now (three_slot_director is cleared): judge by the frames.
-        if(!ofxr_switch)check(f.real_ends==2+(input_count-2)*ofxr_factor,"OFXR multiplier lost, duplicated or skipped intermediate/real outputs");
+        if(!ofxr_switch)check(f.real_ends+(independent?state->private_runtime->independent_load().expired:0)==2+(input_count-2)*ofxr_factor,"OFXR multiplier lost, duplicated or skipped intermediate/real outputs");
     }
     check(generated,"actual generator must produce synthetic outputs beyond accepted real inputs");
     if(sole) {
@@ -2162,11 +2657,22 @@ int main(int argc,char** argv) {
         xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,false);
     }
     if(split_eyes) {
-        check(f.chains.size()==4,"ordinary and UEVR separate eyes share one physical publication sink per source");
+        check(f.chains.size()==(state->independent_pacing?6:4),"separate eyes retain bounded native publications per source and delivery lane");
+        auto inventory=state->private_runtime->native_swapchain_mapping();
+        for(unsigned retry=0;!inventory && retry<1000;++retry){std::this_thread::yield();inventory=state->private_runtime->native_swapchain_mapping();}
+        check(inventory.has_value(),"native lane inventory available");
+        const auto native=[&](XrSwapchain handle)->XrSwapchain{for(auto& item:*inventory)if(item.handle==handle)return item.native;return XR_NULL_HANDLE;};
+        std::vector<XrSwapchain> sinks;
         for(auto source:{chain,right}) {
             auto c=find_swapchain(source);check(c->pooled_publication && c->frame_generation,"both non-Luke source output sets obey shared publication admission");
+            const auto real=native(c->frame_generation->current[0].handle),generated=native(c->frame_generation->synthetic[0].handle);
+            check(real && generated,"both actual generation outputs retain native publication owners");
+            check(state->independent_pacing?real!=generated:real==generated,"shipping real/generated rings use distinct native lanes only with Independent");
+            if(std::find(sinks.begin(),sinks.end(),real)==sinks.end())sinks.push_back(real);
+            if(std::find(sinks.begin(),sinks.end(),generated)==sinks.end())sinks.push_back(generated);
             check(!state->lower_vram && !state->separate_synthesis,"pool does not activate Lower VRAM");
         }
+        check(sinks.size()==(state->independent_pacing?4:2),"native lanes never merge different eye sources");
     }
     if(steady_memory) {
         auto disabled=xrfg::autonomous::snapshot().desired;disabled.enabled=false;disabled.afw_mode=0;
@@ -2197,6 +2703,13 @@ int main(int argc,char** argv) {
         check(!state->generation_budget_exhausted,"optional panels must preserve world generation budget");
         check(f.real_ends>input_count,"world real and generated frames still reach native runtime");
         std::puts("Two independent UEVR panels: budget refusal preserves world delivery PASS");
+    } else if(panel_test && independent) {
+        const auto panel=find_swapchain(panel_chain);
+        check(panel && panel->panel_source && panel->frame_generation,"Independent did not restore its panel engine");
+        if(!independent_aer)check(!state->panel_generated.empty(),"Independent never generated a corrected auxiliary image");
+        check(independent_panel_checks>=4,"Independent corrected-panel native checks were not exercised");
+        if(!independent_resize)check(independent_panel_fractional>0,"Independent lost moving-panel temporal correction");
+        std::printf("Independent panel correction: exact source pairs/size/atlas, stationary peer, %u fractional poses PASS\n",independent_panel_fractional);
     } else if(panel_test) {
         xr_ok(wait_for_synthesis_handoff(state),"panel worker finished");
         if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"panel presenter finished");
@@ -2210,6 +2723,7 @@ int main(int argc,char** argv) {
         check(fractional>0,"private outputs lost interpolated panel poses");
         std::printf("Private panel atlas: %zu physical frames, %u fractional poses PASS\n",f.panel_positions.size(),fractional);
     }
+    if(independent_input_timing)check(!xrfg::bridge_flight_logger().ram_enabled(),"input timestamps use ordinary disk logging, not RAM capture");
     if(rife_app_overlap)check(!state->pipelined_presenter_mode,
         "private RIFE must not enter legacy presenter mode when application frames overlap");
     if(rife_inherited)check(f.real_ends>=1+(input_count-8)*3,
@@ -2218,6 +2732,21 @@ int main(int argc,char** argv) {
     f.transport->stop();
     for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
     xr_ok(layer_destroy_swapchain_impl(chain),"shipping destroy");
+    if(independent_input_timing) {
+        const auto path=xrfg::bridge_flight_logger().log_path();
+        xrfg::bridge_flight_logger().shutdown();
+        const auto read=[](const auto& p){std::ifstream f(p,std::ios::binary);return std::string{std::istreambuf_iterator<char>(f),{}};};
+        const auto text=read(path);
+        // The compact sidecar uses a distinct benchmark prefix.
+        std::string compact;
+        for(const auto& file:std::filesystem::directory_iterator(path.parent_path()))if(file.path().filename().wstring().find(L"benchmark")!=std::wstring::npos)compact+=read(file.path());
+        const bool has_input=text.find("op=gpu_history result=1 ")!=std::string::npos;
+        const bool has_clock=text.find("op=gpu_history result=4 ")!=std::string::npos;
+        const bool has_join=text.find("op=presenter_transition result=110400 ")!=std::string::npos;
+        check(has_input==!independent_input_timing_off && has_clock==!independent_input_timing_off && has_join==!independent_input_timing_off,"input GPU timestamps/clock/acquire receipts follow the optional instrumentation switch");
+        if(!independent_input_timing_off)check(compact.find("op=gpu_history result=1 ")!=std::string::npos && compact.find("op=gpu_history result=4 ")!=std::string::npos,"compact F9 retains calibrated GPU input completion even after flight wrap");
+        std::printf("INDEPENDENT_INPUT_TIMING enabled=%u ordinary F9 input timestamps/clock/acquire receipts; no RAM capture PASS\n",unsigned(!independent_input_timing_off));
+    }
     if(panel_test)xr_ok(layer_destroy_swapchain_impl(panel_chain),"panel atlas cleanup");
     if(panel_budget_test)xr_ok(layer_destroy_swapchain_impl(second_panel_chain),"second panel cleanup");
     if(budget_meter)xr_ok(f.transport->destroy_swapchain(budget_meter),"meter budget reservation cleanup");

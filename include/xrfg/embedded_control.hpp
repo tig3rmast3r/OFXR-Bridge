@@ -15,6 +15,10 @@ struct Settings {
     int ofr_backend{};
     int ofr_scale{2};
     bool ofr_swap{};
+    bool independent_pacing{};
+    bool independent_acquire_fix{true}; // temporary live V1103/V1102 private-acquire comparison
+    bool independent_aer_double{}; // temporal midpoint between reconstructed stereo endpoints
+    int pacing_buffer{}; // legacy local-build setting, retained for INI compatibility; automatic route ignores it
     bool increase_buffer{};
     int pacing_mode{2}; // 0 framework, 1 sole director, 2 framework + director
     int backend{}; // 0 FidelityFX, 1 NVIDIA legacy, 2 NVIDIA new, 3 NVIDIA djules
@@ -102,6 +106,7 @@ bool request(Settings settings); // persists only owned keys; false means INI wr
 AfwSnapshot afw_snapshot();
 bool request_afw(AfwSettings settings);
 inline std::atomic_uint64_t ofr_last_success_ms{};
+inline std::atomic_uint independent_aer_double_state{}; // 0 off,1 warmup,2 GPU pair ready,3 unavailable
 inline std::atomic_uint ofr_delivery{};
 inline std::shared_ptr<AerFramegenEvidence> ofr_evidence=std::make_shared<AerFramegenEvidence>();
 inline std::atomic_int active_osr_mode{-1},active_osr_lower_quality{-1};

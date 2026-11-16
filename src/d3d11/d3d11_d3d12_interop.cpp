@@ -276,6 +276,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
     std::uint64_t last_d3d12_access_value{};
     std::uint64_t last_d3d11_access_value{};
     D3D11PublicationSnapshot last_publication{};
+    ComPtr<ID3D12Fence> last_owned_publication_fence;
     bool enabled{};
 
     ~Impl() {
@@ -636,10 +637,15 @@ struct D3D11D3D12SwapchainInterop::Impl {
         return S_OK;
     }
 
-    [[nodiscard]] HRESULT prepare_capture(std::uint32_t source_index) noexcept {
+    [[nodiscard]] HRESULT prepare_capture(std::uint32_t source_index,ID3D11Texture2D* exact=nullptr) noexcept {
         if (!enabled || source_index >= source_images.size() ||
             source_index >= shared_sources.size()) {
             return E_INVALIDARG;
+        }
+        if(exact) {
+            ID3D11Texture2D* images[]{exact};
+            const auto valid=validate_images(d3d11_device.Get(),images,source_description,true);
+            if(FAILED(valid))return valid;
         }
         HRESULT result = S_OK;
         if (last_d3d12_access_value != 0) {
@@ -653,7 +659,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
         copy_mip_zero(
             d3d11_context.Get(),
             shared_sources[source_index].d3d11.Get(),
-            source_images[source_index].Get(),
+            exact?exact:source_images[source_index].Get(),
             source_description.ArraySize,
             source_description.MipLevels,
             1);
@@ -824,6 +830,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
         current_d3d11_access[current_destination_index] = complete_value;
         if (synthetic_destination_index)
             synthetic_d3d11_access[*synthetic_destination_index] = complete_value;
+        last_owned_publication_fence.Reset();
         last_publication = {
             static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(d3d12_fence.Get())),
             ready_value, complete_value, 0, current_target,
@@ -950,6 +957,15 @@ HRESULT D3D11D3D12SwapchainInterop::prepare_capture(
     } catch (...) {
         return E_FAIL;
     }
+}
+
+HRESULT D3D11D3D12SwapchainInterop::prepare_capture_image(
+    std::uint32_t source_index,ID3D11Texture2D* image) noexcept {
+    if(!image)return E_INVALIDARG;
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_?impl_->prepare_capture(source_index,image):E_UNEXPECTED;
+    }catch(...){return E_FAIL;}
 }
 
 HRESULT D3D11D3D12SwapchainInterop::finish_capture() noexcept {
@@ -1089,7 +1105,8 @@ HRESULT D3D11D3D12SwapchainInterop::publish_completed(
     std::optional<std::uint32_t> synthetic_destination_index,
     ID3D12Fence* producer_fence, std::uint64_t producer_value,
     D3D11PublicationReceipt* receipt,
-    std::optional<D3D11PublicationTargets> targets) noexcept {
+    std::optional<D3D11PublicationTargets> targets,
+    bool owned_completion_receipt) noexcept {
     if(receipt) *receipt={};
     if(!producer_fence || !producer_value) return E_INVALIDARG;
     const auto completed=producer_fence->GetCompletedValue();
@@ -1098,6 +1115,32 @@ HRESULT D3D11D3D12SwapchainInterop::publish_completed(
     try {
         std::scoped_lock lock(mutex_);
         if(!impl_) return E_UNEXPECTED;
+        // Only the private endpoint caller opts in: its acquired images and
+        // reader leases protect this exact backing through the native copy.
+        // No D11 operation is needed when both selected outputs ARE their D12
+        // views. A D11 Signal here would inherit unrelated game rendering and
+        // then become a false dependency of the next synthesis transaction.
+        const auto current_target=targets?targets->current_index:current_destination_index;
+        const auto synthetic_target=targets?targets->synthetic_index:synthetic_destination_index;
+        if(owned_completion_receipt && receipt && impl_->enabled &&
+            current_target==current_destination_index &&
+            synthetic_target==synthetic_destination_index &&
+            current_target<impl_->current_destination_images.size() &&
+            current_destination_index<impl_->shared_current_destinations.size() &&
+            impl_->current_destination_images[current_target]==impl_->shared_current_destinations[current_destination_index].d3d11 &&
+            (!synthetic_destination_index ||
+             (*synthetic_destination_index<impl_->synthetic_destination_images.size() &&
+              *synthetic_destination_index<impl_->shared_synthetic_destinations.size() &&
+              impl_->synthetic_destination_images[*synthetic_destination_index]==impl_->shared_synthetic_destinations[*synthetic_destination_index].d3d11))) {
+            receipt->fence=producer_fence;receipt->copy_complete_value=producer_value;
+            receipt->current_destination_index=current_target;
+            receipt->private_current_index=current_destination_index;
+            receipt->synthetic_destination_index=synthetic_target.value_or(UINT32_MAX);
+            impl_->last_owned_publication_fence=producer_fence;
+            impl_->last_publication={reinterpret_cast<std::uintptr_t>(producer_fence),producer_value,
+                producer_value,completed,current_target,synthetic_target.value_or(UINT32_MAX)};
+            return S_OK;
+        }
         const auto result=impl_->publish(current_destination_index,synthetic_destination_index,true,targets);
         if(SUCCEEDED(result) && receipt) {
             receipt->fence=impl_->d3d12_fence;
@@ -1146,7 +1189,8 @@ D3D11PublicationSnapshot D3D11D3D12SwapchainInterop::publication_snapshot() cons
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr || impl_->d3d12_fence == nullptr) return {};
         auto snapshot = impl_->last_publication;
-        snapshot.completed_value = impl_->d3d12_fence->GetCompletedValue();
+        snapshot.completed_value = impl_->last_owned_publication_fence
+            ? impl_->last_owned_publication_fence->GetCompletedValue() : impl_->d3d12_fence->GetCompletedValue();
         return snapshot;
     } catch (...) {
         return {};

@@ -81,6 +81,7 @@ struct OpenXrFpsOverlay::Impl {
     std::int64_t next_telemetry{};
     bool native_content_counter{};
     bool direct_acceptance{};
+    bool native_confirmation{};
     std::function<std::optional<float>(std::int64_t)> runtime_acceptance;
     std::function<DeliveryCadenceBatch(std::int64_t)> runtime_cadence;
     std::optional<float> runtime_rate(std::int64_t now) {
@@ -98,6 +99,7 @@ struct OpenXrFpsOverlay::Impl {
         std::shared_ptr<InterfaceDeliveryReceipt> delivery;
         std::int64_t entered_qpc{};
         bool aer_mixed{};
+        bool native_delivery{},requested_synthetic{},new_content{true};
     };
     std::vector<PendingNativeCount> pending_native_counts;
     struct PendingAerOutput {
@@ -132,6 +134,29 @@ struct OpenXrFpsOverlay::Impl {
     void poll_native_counts(std::int64_t now) noexcept {
         poll_aer_outputs();
         for (auto i=pending_native_counts.begin(); i!=pending_native_counts.end();) {
+            if(i->native_delivery) {
+                const auto outcome=i->delivery?i->delivery->outcome.load(std::memory_order_acquire):-1;
+                if(outcome<0){i=pending_native_counts.erase(i);continue;}
+                bool unresolved=false;
+                for(const auto& r:i->results)unresolved|=r && r->resolve()==D3D12NativeFrameResult::pending;
+                if(!outcome || unresolved) {
+                    if(now-i->submitted_ns<2'000'000'000){++i;continue;}
+                    i=pending_native_counts.erase(i);continue;
+                }
+                const auto content=classify_native_frame_content(i->results,i->output,i->requested_synthetic,i->new_content);
+                const auto at=i->delivery->returned_ns;
+                counter.submitted(at,content.synthetic,content.new_content,
+                    i->aer_mixed && (content.synthetic || !i->requested_synthetic));
+                if(luke_scene_measurement && content.new_content) {
+                    auto scene=i->scene;scene.output=content.synthetic?i->output+1:0;
+                    accepted_scenes.accepted(at,scene);
+                }
+                if(i->cycle && content.synthetic && !i->aer_mixed)
+                    i->cycle->synthetic_accepted(at,i->period,i->entered_qpc);
+                if(content.synthetic || (i->aer_mixed && content.new_content))
+                    i->delivery->synthetic_confirmed.store(true,std::memory_order_release);
+                i=pending_native_counts.erase(i);continue;
+            }
             bool pending=false;
             for(const auto& r:i->results) pending |= r && r->resolve()==D3D12NativeFrameResult::pending;
             if(pending && now-i->submitted_ns < 1'000'000'000) { ++i; continue; }
@@ -963,6 +988,14 @@ struct OpenXrFpsOverlay::Impl {
                 bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,0,1242,times[0],now);
             }
         }
+        if(native_confirmation) {
+            // These buckets contain only confirmed native receipts classified
+            // as new content. Native call cadence can include SDK fallbacks.
+            out.output_fps=fps.sample_valid?fps.submitted_fps:0.F;
+            out.output_source=InterfaceSource::runtime_accepted_delivery;
+            out.output_cadence=counter.cadence(now);
+            out.accepted_cadence=out.output_cadence;
+        }
         out.generating = fps.generated_fps > 0;
         auto period = display_period_ns.load(std::memory_order_relaxed);
         out.display_source = period > 0 ? InterfaceSource::openxr_period : InterfaceSource::none;
@@ -1158,9 +1191,10 @@ void OpenXrFpsOverlay::set_native_swapchain_count_source(NativeSwapchainCount so
     std::scoped_lock lock(impl_->mutex);impl_->ui_native_count=std::move(source);impl_->ui_pair_choice.reset();
 }
 void OpenXrFpsOverlay::set_runtime_acceptance_source(std::function<std::optional<float>(std::int64_t)> source,bool direct,
-    std::function<DeliveryCadenceBatch(std::int64_t)> cadence) noexcept {
+    std::function<DeliveryCadenceBatch(std::int64_t)> cadence,bool native_confirmation) noexcept {
     std::scoped_lock lock(impl_->mutex);impl_->runtime_acceptance=std::move(source);impl_->direct_acceptance=direct;
     impl_->runtime_cadence=std::move(cadence);
+    impl_->native_confirmation=native_confirmation;
 }
 void OpenXrFpsOverlay::set_unique_content_only(bool enabled) noexcept {
     std::scoped_lock lock(impl_->mutex);
@@ -1227,7 +1261,7 @@ FpsSnapshot OpenXrFpsOverlay::metrics() const noexcept {
     const auto now=now_ns();
     impl_->poll_native_counts(now);
     auto result=impl_->counter.snapshot(now);
-    if(impl_->luke_scene_measurement) {
+    if(impl_->luke_scene_measurement && !impl_->native_confirmation) {
         result.delivered_valid=false;
         if(const auto scene=impl_->accepted_scenes.rate(now)) {
             result.submitted_fps=result.delivered_fps=scene->output;
@@ -1306,7 +1340,7 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
         if (!impl_->converter(impl_->converter_user, info->displayTime, display)) display = 0;
     std::shared_ptr<InterfaceDeliveryReceipt> delivery;
     const bool capture_delivery=two_frame_capture_delivery_active();
-    if(nonempty && impl_->private_delivery_end && ((measure && stamp.cycle)||capture_delivery||stamp.aer_evidence)) {
+    if(nonempty && impl_->private_delivery_end && (impl_->native_confirmation||(measure && stamp.cycle)||capture_delivery||stamp.aer_evidence)) {
         if(measure && stamp.cycle)stamp.cycle->require_native_delivery();
         try {delivery=std::make_shared<InterfaceDeliveryReceipt>(synthetic,stamp.aer_mixed);
             if(capture_delivery){
@@ -1330,7 +1364,7 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
             // successful virtual admission or an enabled checkbox is insufficient.
             try {impl_->pending_aer_outputs.push_back({stamp.aer_evidence,delivery,
                 {native_results.begin(),native_results.end()},GetTickCount64(),native_output,
-                stamp.aer_delivery,stamp.aer_mixed,bool(impl_->private_delivery_end)});}
+                stamp.aer_delivery,stamp.aer_mixed || stamp.aer_generated_pair,bool(impl_->private_delivery_end)});}
             catch(...) {stamp.aer_evidence->unknown.fetch_add(1);}
         }
         impl_->poll_aer_outputs();
@@ -1350,6 +1384,14 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
         impl_->native_content_counter=impl_->unique_content_only || !native_results.empty();
         const auto metrics=classify_native_frame_content(native_results,native_output,synthetic,new_content);
         SceneIdentity scene{stamp.scene_owner,stamp.scene_serial,metrics.synthetic?native_output+1:0};
+        if(impl_->native_confirmation) {
+            if(delivery && impl_->pending_native_counts.size()<256)
+                impl_->pending_native_counts.push_back({{native_results.begin(),native_results.end()},now,native_output,
+                    measure?stamp.cycle:nullptr,accepted_clock,impl_->estimate_period(),scene,delivery,submit_clock,
+                    stamp.aer_mixed,true,synthetic,new_content});
+            impl_->poll_native_counts(now);
+            return result;
+        }
         if(impl_->luke_scene_measurement && metrics.new_content) {
             if(!scene&&bridge_flight_logger().enabled())bridge_flight_logger().event(
                 BridgeFlightOperation::luke_afw_stage,scene.owner?1:0,1240,info->displayTime,scene.serial);

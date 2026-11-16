@@ -112,6 +112,12 @@ public:
     // them before any history access.
     [[nodiscard]] HRESULT prepare_capture(std::uint32_t source_index) noexcept;
 
+    // Copy an exact retained endpoint into an existing source slot. This does
+    // not change history or the registered application images; callers keep
+    // the supplied texture alive through finish_capture completion.
+    [[nodiscard]] HRESULT prepare_capture_image(std::uint32_t source_index,
+        ID3D11Texture2D* image) noexcept;
+
     // Marks the shared source safe for the next D3D11 write after the history
     // copy submitted immediately before this call completes on the D3D12 queue.
     [[nodiscard]] HRESULT finish_capture() noexcept;
@@ -153,12 +159,16 @@ public:
 
     // Output already completed on its retained synthesis fence. Reject an
     // incomplete proof; never append a ready signal behind newer native work.
+    // The private endpoint may opt into a direct owned-output receipt. It must
+    // hold acquired output ownership, then transfer the exact receipt to its
+    // image reader leases. Remapped/non-owned outputs retain the D11 copy.
     [[nodiscard]] HRESULT publish_completed(
         std::uint32_t current_destination_index,
         std::optional<std::uint32_t> synthetic_destination_index,
         ID3D12Fence* producer_fence, std::uint64_t producer_value,
         D3D11PublicationReceipt* receipt = nullptr,
-        std::optional<D3D11PublicationTargets> targets = {}) noexcept;
+        std::optional<D3D11PublicationTargets> targets = {},
+        bool owned_completion_receipt = false) noexcept;
 
 
     [[nodiscard]] HRESULT wait_for_idle() noexcept;

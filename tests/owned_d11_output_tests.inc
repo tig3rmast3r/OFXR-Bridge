@@ -63,7 +63,7 @@ std::array<unsigned,2> read_owned_d11_backing(Fixture& f,ID3D12Resource* image) 
     const auto* bytes=static_cast<unsigned char*>(data);
     const std::array<unsigned,2> result{bytes[0],bytes[placement]};readback->Unmap(0,nullptr);return result;
 }
-void owned_d11_output_case(bool shared_output) {
+void owned_d11_output_case(bool shared_output,bool independent_receipt=false) {
     VramResourceCounters counters;
     Fixture f(false,true,{},false,true,true);f.native_image_count=3;f.expected_views=2;f.throttled=false;
     ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),&f.device12,&f.queue),"owned output's verified D12 owner");
@@ -166,6 +166,10 @@ void owned_d11_output_case(bool shared_output) {
         {{{20,130},{50,160}}});
     ok(f.queue->Signal(produced.Get(),1),"production completion signal");
     xrfg::D3D11PublicationReceipt receipt;
+    if(independent_receipt) {
+        check(FAILED(bridge->publish_completed(0,0,produced.Get(),1,&receipt,{},true)) && !receipt.fence,
+            "owned completion cannot authorize an incomplete producer");
+    }
     ok(bridge->publish(0,0,&receipt),"publication orders incomplete producer work");
     ok(bridge->capture_published_current(receipt),"same-output reverse capture retains ordering without a self-copy");
     release(0);release(2);submit(0,1);
@@ -185,14 +189,32 @@ void owned_d11_output_case(bool shared_output) {
     ok(f.queue->Signal(produced.Get(),2),"second producer completion");f.gpu_wait();
     ok(context4->Wait(gate11.Get(),2),"hold D11 consumer/publication timeline");context4->Flush();
     xrfg::D3D11PublicationReceipt second_receipt;
-    ok(bridge->publish_completed(1,1,produced.Get(),2,&second_receipt),"already-complete producer uses existing D11 publication timeline");
+    ok(bridge->publish_completed(1,1,produced.Get(),2,&second_receipt,{},independent_receipt),"completed producer publication");
     ok(bridge->prepare_synthesis_targets(1,1),"isolated next writer waits for these exact output slots");
     ok(isolated->Signal(reused.Get(),1),"isolated reuse completion proof");
-    release(1);release(3);submit(1,3);
+    const bool fast=independent_receipt && shared_output;
+    const bool exact_ready=second_receipt.fence.Get()==produced.Get() && second_receipt.copy_complete_value==2;
+    if(fast && exact_ready) {
+        XrSwapchainImageReleaseInfo r{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        xr_ok(f.transport->release_completed_image(handles[1],&r,0,currents[1],second_receipt.fence.Get(),second_receipt.copy_complete_value),"exact owned current receipt release");
+        xr_ok(f.transport->release_completed_image(handles[3],&r,0,synthetics[1],second_receipt.fence.Get(),second_receipt.copy_complete_value),"exact owned synthetic receipt release");
+    } else {release(1);release(3);}
+    submit(1,3);
     std::this_thread::sleep_for(25ms);
-    check(reused->GetCompletedValue()<1 && second_receipt.fence->GetCompletedValue()<second_receipt.copy_complete_value && f.real_ends==2,
+    unsigned reacquired{};XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    const bool reader_pinned=!fast || f.transport->try_acquire_image(handles[1],&acquire_info,&reacquired)==XR_TIMEOUT_EXPIRED;
+    if(!fast)check(reused->GetCompletedValue()<1 && second_receipt.fence->GetCompletedValue()<second_receipt.copy_complete_value && f.real_ends==2,
         "D11 consumer fence still protects shared output reuse and native admission");
+    const bool native_pending=f.real_ends==2;
     ok(f.gate->Signal(2),"release D11 consumer timeline");
+    if(fast)check(exact_ready && reader_pinned && native_pending,
+        "owned completion bypasses unrelated D11 work while endpoint reader lease still prevents image overwrite/native delivery");
+    if(fast) {
+        const auto snapshot=bridge->publication_snapshot();
+        check(snapshot.fence_identity==reinterpret_cast<std::uintptr_t>(produced.Get()) &&
+            snapshot.copy_complete_value==2 && snapshot.completed_value>=2,
+            "diagnostic snapshot reports the exact owned completion fence");
+    }
     ok(xrfg::wait_for_d3d11_publication(second_receipt),"completed producer's publication retired");
     f.gpu_wait(isolated.Get());check(reused->GetCompletedValue()>=1,"isolated reuse requires actual D11 completion");
     submit(3,4);f.wait_count(4);xr_ok(f.transport->drain(),"all four owned outputs retired");
@@ -203,7 +225,11 @@ void owned_d11_output_case(bool shared_output) {
     auto remap_write=queue_owned_d11_write(f,{bridge->current_destination_images()[0],bridge->current_destination_images()[1]},
         {{{25,135},{99,88}}});f.gpu_wait();
     xrfg::D3D11PublicationReceipt remap;
-    ok(bridge->publish(0,std::nullopt,&remap,xrfg::D3D11PublicationTargets{1,std::nullopt}),"remapped publication copies between distinct output aliases");
+    if(independent_receipt) {
+        ok(f.queue->Signal(produced.Get(),3),"remapped producer completion");f.gpu_wait();
+        ok(bridge->publish_completed(0,std::nullopt,produced.Get(),3,&remap,xrfg::D3D11PublicationTargets{1,std::nullopt},true),"remapped owned completion must retain actual D11 copy");
+        check(remap.fence.Get()!=produced.Get(),"a distinct target cannot use the no-copy completion proof");
+    } else ok(bridge->publish(0,std::nullopt,&remap,xrfg::D3D11PublicationTargets{1,std::nullopt}),"remapped publication copies between distinct output aliases");
     ok(xrfg::wait_for_d3d11_publication(remap),"remapped target completed");
     {
         Chain actual;actual.d11.emplace_back(currents[1]);
@@ -231,6 +257,7 @@ void owned_d11_output_case(bool shared_output) {
         "shared D11 marker/backing has no COM cycle and releases every output allocation");
     std::printf("D11 outputs %s: physical backing count %u (including source snapshot and three native images), producer/consumer fences, both array eyes, remap and teardown PASS\n",
         shared_output?"shared backing":"separate mirrors",shared_output?8:12);
+    if(independent_receipt)std::printf("OWNED_COMPLETED direct=%u pending_producer_refused=1 reader_pinned=1 remap_copy=1 stereo_pixels=1\n",unsigned(shared_output));
 }
 void owned_d11_output_format_contracts() {
     VramResourceCounters counters;
@@ -291,4 +318,39 @@ void owned_d11_output_format_contracts() {
 }
 void owned_d11_output_tests() {
     owned_d11_output_case(false);owned_d11_output_case(true);owned_d11_output_format_contracts();
+}
+
+class UnprovedOwnedOutputAlias final:public ReportedDeviceAlias {
+public:
+    using ReportedDeviceAlias::ReportedDeviceAlias;
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID,UINT*,void*) override {return DXGI_ERROR_NOT_FOUND;}
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID,UINT,const void*) override {return S_OK;}
+};
+void owned_d11_output_alias_tests() {
+    Fixture f(false,true,{},false,true,true);
+    ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),&f.device12,&f.queue),"owned alias native D12 owner");
+    ComPtr<ReportedDeviceAlias> alias;alias.Attach(new ReportedDeviceAlias(f.device12.Get()));
+    check(!xrfg::owned_d11_output::same_identity(alias.Get(),f.device12.Get()),"test requires distinct COM identities");
+    D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=64;
+    desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;desc.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> image;unsigned step{};
+    const auto result=xrfg::owned_d11_output::create(f.device11.Get(),alias.Get(),desc,&image,&step);
+    std::printf("OWNED_ALIAS create_hr=%08x step=%u\n",unsigned(result),step);std::fflush(stdout);
+    ok(result,"shared output creation through proven backing alias");
+    check(bool(xrfg::owned_d11_output::backing_for(image.Get(),alias.Get())) &&
+        bool(xrfg::owned_d11_output::backing_for(image.Get(),f.device12.Get())),"native and proven alias retain exact same output backing");
+    ComPtr<UnprovedOwnedOutputAlias> unproved;unproved.Attach(new UnprovedOwnedOutputAlias(f.device12.Get()));
+    check(!xrfg::owned_d11_output::backing_for(image.Get(),unproved.Get()),"same adapter without backing proof cannot adopt owned image");
+    ComPtr<ID3D11Texture2D> refused;
+    check(FAILED(xrfg::owned_d11_output::create(f.device11.Get(),unproved.Get(),desc,&refused,&step)) && !refused,
+        "unproved same-adapter allocator must fail closed");
+    ComPtr<ID3D11Texture2D> other;ok(f.device11->CreateTexture2D(&desc,nullptr,&other),"unmarked independent image");
+    ComPtr<IUnknown> marker;UINT size=sizeof(IUnknown*);
+    ok(image->GetPrivateData(xrfg::owned_d11_output::marker_id,&size,marker.GetAddressOf()),"owned alias marker");
+    ok(other->SetPrivateDataInterface(xrfg::owned_d11_output::marker_id,marker.Get()),"transplanted alias marker");
+    check(!xrfg::owned_d11_output::backing_for(other.Get(),alias.Get()),"proven device cannot authorize a different texture");
+    UINT residue{};check(f.device12->GetPrivateData(d3d_owner::receipt_guid,&residue,nullptr)==DXGI_ERROR_NOT_FOUND,
+        "ownership challenge must leave no device private-data residue");
+    std::puts("OWNED_ALIAS proven/native PASS;unproved same-adapter/transplanted texture refused;challenge cleanup PASS");
 }

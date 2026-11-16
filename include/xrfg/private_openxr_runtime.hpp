@@ -62,6 +62,10 @@ public:
         ID3D12CommandQueue* producer_queue12{}; // private writes, never future work on queue12
         ID3D11Device* device11{};
         ID3D11DeviceContext* context11{};
+        // Native D11 runtime/copies may use a separate device on the same
+        // adapter. Virtual app images and release readiness stay on device11.
+        ID3D11Device* delivery_device11{};
+        ID3D11DeviceContext* delivery_context11{};
         std::size_t capacity{2}; // requested; native SteamVR Director keeps at least3 credits
         std::function<std::int64_t()> physical_period;
         // Cached physical vsync only. Must not call a runtime, lock an observer
@@ -100,7 +104,8 @@ public:
         // and required display-edge+guard coverage (V651). This is bounded to one
         // attempt per packet, separate from expired-cycle recovery. A still-current
         // replacement may retain a shorter horizon; never spin for that preference.
-        // Stage46: learned native entry QPC and reservation ordinal (V955).
+        // Stage46: reserved native gate QPC and ordinal; a just-opened gate
+        // may precede the actual entry reported by stage7.
         // Stage47: witnessed blocking native gate QPC/cost.48: cost/zero lookahead.
         // Emitted after Begin, not on the timed native End edge.
         // Stage35: buffered FIFO-head release entry/return before native Begin, b/c.
@@ -114,6 +119,8 @@ public:
         // QPC ns and lease count. This does not retire real targets or FIFO credits.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
         std::function<void(std::int64_t)> accepted_output; // optional native End success, never enqueue
+        std::function<unsigned()> independent_buffer; // optional fixture override; production uses automatic 4-refresh ceiling
+        bool independent_pacing{}; // dedicated common consumer; ignores legacy clocks/reserves
         bool director_enabled{true}; // false: ordered native-runtime paced bypass
         // SteamVR only. Framework capacity3 enables its adaptive timing reserve.
         // Native Director: Normal3, Buffer4, with the same near-refresh reserve learner.
@@ -157,6 +164,9 @@ public:
     [[nodiscard]] bool ready_clock_enabled() const noexcept;
     XrResult set_buffer_capacity(std::size_t,bool stabilization_active=true,bool reset_learning=false);
     [[nodiscard]] std::size_t buffer_capacity() const noexcept;
+    struct IndependentLoad {std::size_t pending{};std::int64_t reserve{},period{};std::uint64_t expired{};std::int64_t cycle_ns{};
+        std::size_t prepared{};std::int64_t ready_residence{};std::uint64_t delivered{},idle{};};
+    [[nodiscard]] IndependentLoad independent_load() const;
     [[nodiscard]] bool director_enabled() const noexcept;
     XrResult wait_frame(const XrFrameWaitInfo*, XrFrameState*);
     XrResult predict_frame(XrFrameState*); // upper virtual application clock
@@ -188,6 +198,7 @@ public:
     // runtime reprojects the frame from the pose it was made for even when it
     // reaches a later slot than planned. Native-paced delivery only.
     void set_next_end_content_time(XrTime time) noexcept;
+    void set_next_independent_deadline(std::int64_t) noexcept; // QPC ns, source-owned delivery slot
     // The display time of the last frame handed to the native runtime (0
     // before the first). The application's predicted display time runs ahead
     // of it by the queue depth; a frame prepared now is shown one period after
@@ -202,7 +213,10 @@ public:
         // Internal generated D11 outputs only. A confirmed owner can supply
         // one shared backing for D11 publication and D12 synthesis; the native
         // XR sink and every other output still retain independent allocations.
-        ID3D12Device* d11_output_owner=nullptr);
+        ID3D12Device* d11_output_owner=nullptr,
+        // Independent only: keep generated and real native publications
+        // separate so either can be prepared while its peer awaits delivery.
+        unsigned publication_lane=0);
     XrResult destroy_swapchain(XrSwapchain);
     // Optional UI retirement: busy readers/consumers leave the chain intact
     // and return XR_ERROR_CALL_ORDER_INVALID for a later frame-thread retry.
@@ -214,10 +228,19 @@ public:
     XrResult try_acquire_image(XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t*);
     XrResult wait_image(XrSwapchain,const XrSwapchainImageWaitInfo*);
     XrResult release_image(XrSwapchain,const XrSwapchainImageReleaseInfo*);
+    // Independent D12 output: exact resource + CPU-observed synthesis fence.
+    // The consumer must not append readiness behind later application work.
+    XrResult release_completed_image12(XrSwapchain,const XrSwapchainImageReleaseInfo*,
+        std::uint32_t index,ID3D12Resource*,ID3D12Fence*,std::uint64_t value);
     // Completion proof for the EXACT acquired output; never a guessed serial.
     // Caller already CPU-observed this publication's fence. Unproven/foreign
     // images still go through release_image and its original-context marker.
     XrResult release_completed_image(XrSwapchain,const XrSwapchainImageReleaseInfo*,
+        std::uint32_t index,ID3D11Texture2D* published_image,ID3D12Fence*,std::uint64_t value);
+    // Exact queued D11 publication. Keep its immutable fence/texture identity;
+    // preparation waits it before copying, without blocking the producer or
+    // inheriting later work from the application's immediate context.
+    XrResult release_queued_image(XrSwapchain,const XrSwapchainImageReleaseInfo*,
         std::uint32_t index,ID3D11Texture2D* published_image,ID3D12Fence*,std::uint64_t value);
     [[nodiscard]] bool owns(XrSwapchain) const;
     struct SwapchainMapping { XrSwapchain handle{}, native{}; };

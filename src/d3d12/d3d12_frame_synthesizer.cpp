@@ -1013,6 +1013,9 @@ struct D3D12FrameSynthesizer::Impl {
         UINT timing_query_base{};
         bool timing_pending{};
         bool timing_cached{};
+        bool aer_streamed{},aer_early_copy{};
+        std::uint64_t aer_first_fence{};
+        bool omit_current_write{}; // per-recorded transaction, including RIFE fallback
     };
 
     struct RollingSource {
@@ -1077,6 +1080,7 @@ struct D3D12FrameSynthesizer::Impl {
     // Session transport queue survives method changes. An asynchronous RIFE
     // eye owns a private submission queue, never the next method's transport.
     ComPtr<ID3D12CommandQueue> input_queue;
+    bool isolated_submission_queue{};
     std::shared_ptr<D3D12SwapchainHistory> history;
     std::vector<Destination> current_destinations;
     std::vector<Destination> synthetic_destinations;
@@ -1138,19 +1142,25 @@ struct D3D12FrameSynthesizer::Impl {
     NV_OF_D3D12_API_FUNCTION_LIST nvidia_api{};
     std::array<NvOFHandle, kMaxReprojectionViews> nvidia_contexts{};
     ComPtr<ID3D12Fence> fence;
-    // Carries the runtime's acquire guarantee from the queue it knows about
-    // onto the one it does not. Kept apart from `fence` so it cannot disturb
-    // the submission values the rest of the pipeline tracks against that one.
-    ComPtr<ID3D12Fence> acquire_fence;
-    std::uint64_t next_acquire_fence_value{1};
+    // Each upstream queue owns its own monotonic timeline. Two queues must
+    // never Signal the same fence: reverse execution can rewind its value.
+    struct AcquireTimeline {
+        ComPtr<ID3D12CommandQueue> producer;
+        ComPtr<ID3D12Fence> fence;
+        std::uint64_t next{1};
+    };
+    std::array<AcquireTimeline,2> acquire_timelines;
+    ComPtr<ID3D12Fence> drain_fence; // signalled only by our own queue at teardown
     [[nodiscard]] D3D12SynthesisInputs submission_inputs(const RollingSource& first,
         const RollingSource* second=nullptr) const noexcept {
         D3D12SynthesisInputs result;
         result.captured=true;
         result.dependencies[0]={first.producer_fence,first.ticket.fence_value};
         if(second) result.dependencies[1]={second->producer_fence,second->ticket.fence_value};
-        if(next_acquire_fence_value>1)
-            result.dependencies[2]={acquire_fence,next_acquire_fence_value-1};
+        for(std::size_t i=0;i<acquire_timelines.size();++i) {
+            const auto& proof=acquire_timelines[i];
+            if(proof.next>1)result.dependencies[2+i]={proof.fence,proof.next-1};
+        }
         return result;
     }
 
@@ -1278,13 +1288,12 @@ struct D3D12FrameSynthesizer::Impl {
         // Signal a fresh value rather than waiting on the tracked one. A
         // deferred current copy that was never flushed has already reserved
         // last_submitted_fence_value, and nothing will ever signal it, so
-        // waiting there would hang instead of draining. The acquire fence is
-        // used because its values are not part of that bookkeeping.
-        if (!copy_resources_retired && queue != nullptr && acquire_fence != nullptr &&
+        // waiting there would hang instead of draining. A private drain fence
+        // cannot overwrite any upstream queue's acquire timeline.
+        if (!copy_resources_retired && queue != nullptr && drain_fence != nullptr &&
             fence_event != nullptr) {
-            const std::uint64_t drain = next_acquire_fence_value++;
-            if (SUCCEEDED(queue->Signal(acquire_fence.Get(), drain))) {
-                static_cast<void>(wait_for_fence(acquire_fence.Get(), drain));
+            if (SUCCEEDED(queue->Signal(drain_fence.Get(), 1))) {
+                static_cast<void>(wait_for_fence(drain_fence.Get(), 1));
             }
         }
         if (ffx_context_created) {
@@ -2606,7 +2615,8 @@ struct D3D12FrameSynthesizer::Impl {
         bool enable_nvidia_gpu_timing,
         D3D12FrameGenerationMode input_generation_mode,
         bool input_allow_luke_guide_device_alias,
-        bool defer_flow_resources = false) {
+        bool defer_flow_resources = false,
+        bool isolate_submission_queue = false) {
         // Initialization-only F9 diagnostics. Preserve every validation rule;
         // the public HRESULT alone cannot identify a failed transport contract.
         const auto invalid_argument=[&](std::uint32_t stage,std::size_t index=0,
@@ -2808,19 +2818,20 @@ struct D3D12FrameSynthesizer::Impl {
 
         device = input_device;
         this->input_queue = input_queue;
+        isolated_submission_queue = isolate_submission_queue;
         queue = input_queue;
-        if (input_nvidia_options.rife_model >= 0 && input_nvidia_options.rife_async && !defer_flow_resources) {
-            // Each asynchronous eye owns its GPU submission order. Sharing the
-            // session queue lets another eye enqueue a future acquire/history
-            // wait ahead of this eye's completion signal, while the runtime
-            // queue already waits for that completion before the future signal.
-            // Keep the existing cross-queue producer/consumer fences, but never
-            // allow another worker's future dependency to block this worker.
+        if (isolated_submission_queue ||
+            (input_nvidia_options.rife_model >= 0 && input_nvidia_options.rife_async && !defer_flow_resources)) {
+            // A session queue serializes pack/copy for sibling projection
+            // resources behind each other's OFA or producer-fence waits.
+            // Independent owns exact input/output receipts: give each engine
+            // its own order, preserving every producer/consumer dependency.
+            // RIFE also requires this to avoid future-acquire cycles.
             const auto queue_description = input_queue->GetDesc();
             queue.Reset();
             result = device->CreateCommandQueue(&queue_description, IID_PPV_ARGS(&queue));
             if (FAILED(result)) return result;
-            queue->SetName(L"OFXR asynchronous RIFE eye");
+            queue->SetName(isolated_submission_queue ? L"OFXR independent projection synthesis" : L"OFXR asynchronous RIFE eye");
         }
         history = std::move(input_history);
         image_description = description;
@@ -2852,7 +2863,7 @@ struct D3D12FrameSynthesizer::Impl {
         result = device->CreateFence(
             0,
             D3D12_FENCE_FLAG_NONE,
-            IID_PPV_ARGS(acquire_fence.GetAddressOf()));
+            IID_PPV_ARGS(drain_fence.GetAddressOf()));
         if (FAILED(result)) {
             return result;
         }
@@ -5171,6 +5182,7 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
         slot.rife_result.reset();
+        slot.omit_current_write=false;slot.aer_streamed=slot.aer_early_copy=false;slot.aer_first_fence=0;
         result = slot.current_copy_allocator->Reset();
         if (FAILED(result)) {
             synthesis_enabled = false;
@@ -5726,9 +5738,12 @@ struct D3D12FrameSynthesizer::Impl {
             const UINT output_destination = synthetic_output_destination(output, synthetic_destination_index);
             parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
                 packed_synthesis_fraction(synthetic_output_fraction(output));
-            const UINT first_rtv = output_destination *
-                image_description.DepthOrArraySize;
-            synthetic_target_state(synthesis, output_destination, true);
+            const UINT first_rtv = slot.aer_early_copy ? current_rtv_base+current_destination_index*image_description.DepthOrArraySize
+                : output_destination*image_description.DepthOrArraySize;
+            if(slot.aer_early_copy) {
+                const auto barrier=transition_barrier(current_destination,release_state,D3D12_RESOURCE_STATE_RENDER_TARGET);
+                synthesis->ResourceBarrier(1,&barrier);
+            } else synthetic_target_state(synthesis, output_destination, true);
             for (UINT view_index = 0;
                  view_index < static_cast<UINT>(target_views.size());
                  ++view_index) {
@@ -5780,7 +5795,10 @@ struct D3D12FrameSynthesizer::Impl {
                 clear_synthetic_marker(synthesis, rtv, target_views[view_index],
                     static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
             }
-            synthetic_target_state(synthesis, output_destination, false);
+            if(slot.aer_early_copy) {
+                const auto barrier=transition_barrier(current_destination,D3D12_RESOURCE_STATE_RENDER_TARGET,release_state);
+                synthesis->ResourceBarrier(1,&barrier);
+            } else synthetic_target_state(synthesis, output_destination, false);
         }
         motion_barriers(false);
         if (depth_search) guide_depth_barriers(synthesis, *guides, false);
@@ -5831,6 +5849,23 @@ struct D3D12FrameSynthesizer::Impl {
                 D3D12_QUERY_TYPE_TIMESTAMP,
                 slot.timing_query_base + kSpanEnd);
         }
+        if(slot.aer_early_copy) {
+            // S needs raw previous R1, not current R3. This independent copy
+            // list executes before the current-input GPU wait. Generation
+            // writes R2 straight to B, so S is never touched afterwards.
+            const auto restore=transition_barrier(current_resource,kShaderReadState,D3D12_RESOURCE_STATE_COMMON);
+            synthesis->ResourceBarrier(1,&restore);
+            auto* first=synthetic_destinations[synthetic_destination_index].resource.Get();
+            const std::array<D3D12_RESOURCE_BARRIER,2> before{
+                transition_barrier(previous_resource,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE),
+                transition_barrier(first,release_state,D3D12_RESOURCE_STATE_COPY_DEST)};
+            slot.current_copy_command_list->ResourceBarrier(2,before.data());
+            slot.current_copy_command_list->CopyResource(first,previous_resource);
+            const std::array<D3D12_RESOURCE_BARRIER,2> after{
+                transition_barrier(previous_resource,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON),
+                transition_barrier(first,D3D12_RESOURCE_STATE_COPY_DEST,release_state)};
+            slot.current_copy_command_list->ResourceBarrier(2,after.data());
+        } else {
         // The copy's own transitions travel with the copy, so the resources
         // are left in their normal states while it waits to be submitted.
         const std::array<D3D12_RESOURCE_BARRIER, 2> before_copy_states{
@@ -5849,7 +5884,7 @@ struct D3D12FrameSynthesizer::Impl {
         // Recorded here but submitted only after the synthetic frame has gone
         // to the runtime; see flush_current_copy.
         dred_marker(slot.current_copy_command_list.Get(), "OFXR NVIDIA current copy");
-        slot.current_copy_command_list->CopyResource(
+        if(!slot.omit_current_write)slot.current_copy_command_list->CopyResource(
             current_destination,
             current_resource);
 
@@ -5909,6 +5944,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.current_copy_command_list->ResourceBarrier(
             static_cast<UINT>(after_current_copy.size()),
             after_current_copy.data());
+        }
         if (nvidia_gpu_timing_enabled) {
             synthesis->EndQuery(
                 nvidia_timestamp_heap.Get(),
@@ -5925,8 +5961,8 @@ struct D3D12FrameSynthesizer::Impl {
         }
         dred_marker(synthesis, "OFXR NVIDIA composition complete");
         slot.ram_gpu.mark(synthesis,3);
-        slot.ram_gpu.mark(slot.current_copy_command_list.Get(),4);
-        slot.ram_gpu.resolve(slot.current_copy_command_list.Get());
+        auto* timing_end=slot.aer_early_copy?synthesis:slot.current_copy_command_list.Get();
+        slot.ram_gpu.mark(timing_end,4);slot.ram_gpu.resolve(timing_end);
         return S_OK;
     }
 
@@ -5964,7 +6000,8 @@ struct D3D12FrameSynthesizer::Impl {
             }
             auto* source=current_source.resource.Get();auto* destination=current_destinations[current_destination_index].resource.Get();
             const std::array before{transition_barrier(source,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE),transition_barrier(destination,release_state,D3D12_RESOURCE_STATE_COPY_DEST)};
-            slot.current_copy_command_list->ResourceBarrier(2,before.data());slot.current_copy_command_list->CopyResource(destination,source);
+            slot.current_copy_command_list->ResourceBarrier(2,before.data());
+            if(!slot.omit_current_write)slot.current_copy_command_list->CopyResource(destination,source);
             const std::array after{transition_barrier(source,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON),transition_barrier(destination,D3D12_RESOURCE_STATE_COPY_DEST,release_state)};
             slot.current_copy_command_list->ResourceBarrier(2,after.data());
             if(slot.rife_fallback_list){
@@ -6422,7 +6459,7 @@ struct D3D12FrameSynthesizer::Impl {
         // Recorded here but submitted only after the synthetic frame has gone
         // to the runtime; see flush_current_copy.
         dred_marker(slot.current_copy_command_list.Get(), "OFXR FidelityFX current copy");
-        slot.current_copy_command_list->CopyResource(
+        if(!slot.omit_current_write)slot.current_copy_command_list->CopyResource(
             current_destination,
             current_resource);
 
@@ -6512,7 +6549,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->ResourceBarrier(
             static_cast<UINT>(before_current_copy.size()),
             before_current_copy.data());
-        slot.command_list->CopyResource(current_destination, source);
+        if(!slot.omit_current_write)slot.command_list->CopyResource(current_destination, source);
         const std::array<D3D12_RESOURCE_BARRIER, 2> before_synthesis{
             transition_barrier(
                 source,
@@ -6681,8 +6718,10 @@ struct D3D12FrameSynthesizer::Impl {
                     86710+dependency_index,reinterpret_cast<std::uintptr_t>(input.fence.Get()),input.value,
                     input.fence?input.fence->GetCompletedValue():0);
                 if(input.fence && input.value && SUCCEEDED(result))result=queue->Wait(input.fence.Get(),input.value);
-                if(diagnostic)diagnostic->marker(queue.Get(),++dependency_index);
+                ++dependency_index;
+                if(diagnostic && dependency_index<=2)diagnostic->marker(queue.Get(),dependency_index);
             }
+            if(diagnostic)diagnostic->marker(queue.Get(),3); // both acquire/reuse proofs
             if(SUCCEEDED(result) && job.pair.pending){
                 result=rife_error.load(std::memory_order_acquire);
                 if(SUCCEEDED(result)){
@@ -6932,7 +6971,7 @@ struct D3D12FrameSynthesizer::Impl {
             synthesis_enabled = false;
             return result;
         }
-        result = slot.current_copy_command_list->Close();
+        result = slot.aer_early_copy ? S_OK : slot.current_copy_command_list->Close();
         if (FAILED(result)) {
             synthesis_enabled = false;
             return result;
@@ -7082,10 +7121,10 @@ struct D3D12FrameSynthesizer::Impl {
         } else {
             ID3D12CommandList* copy_lists[] = {
                 slot.current_copy_command_list.Get()};
-            queue->ExecuteCommandLists(1, copy_lists);
+            if(!slot.aer_early_copy)queue->ExecuteCommandLists(1, copy_lists);
             completion_value = next_fence_value;
             ++next_fence_value;
-            last_synthetic_fence_value = completion_value;
+            last_synthetic_fence_value = slot.aer_early_copy?slot.aer_first_fence:completion_value;
             HRESULT signal_result = queue->Signal(fence.Get(), completion_value);
             if (FAILED(signal_result)) {
                 synthesis_enabled = false;
@@ -7403,7 +7442,7 @@ struct D3D12FrameSynthesizer::Impl {
         float interpolation_fraction,
         D3D12PresentationTransform presentation_transform,
         const std::optional<D3D12ExtraSynthetic>& extra_synthetic,
-        bool allow_synthetic_camera, unsigned ofr_fresh_mask) noexcept {
+        bool allow_synthetic_camera, unsigned ofr_fresh_mask, bool current_output_unused, bool split_aer_first) noexcept {
         ofr_paired = ofr_fresh_mask == 3;
         if(nvidia_options.ofr) {defer_current_copy=false;interpolation_fraction=.5F;}
         rife_pair={}; // no abandoned pre-submission transaction survives a retry
@@ -7451,6 +7490,13 @@ struct D3D12FrameSynthesizer::Impl {
             extra_output = extra_synthetic;
             if (!extra_synthetic->target_views.empty()) extra_target_views = extra_synthetic->target_views;
         }
+        // Only a caller which discards this current endpoint may opt in.
+        // Keep transitions, command lists, leases and the original completion
+        // fence: they protect source reuse and async RIFE fallback as well.
+        const bool omit_current_write=current_output_unused && nvidia_options.ofr &&
+            (ofr_fresh_mask==1 || ofr_fresh_mask==2) && !extra_output &&
+            generation_mode==D3D12FrameGenerationMode::ofxr && !nvidia_options.hybrid &&
+            !motion_vectors && !debug_marker && !two_frame_capture_images_active();
         const bool repeated_capture =
             previous.active() && current.serial == previous.ticket.serial &&
             current.fence_value == previous.ticket.fence_value &&
@@ -7628,6 +7674,7 @@ struct D3D12FrameSynthesizer::Impl {
             if (FAILED(result)) {
                 return result;
             }
+            slot.omit_current_write=omit_current_write;
             result = record_repeated_pair(
                 slot,
                 previous,
@@ -7685,6 +7732,8 @@ struct D3D12FrameSynthesizer::Impl {
                 synthetic_destination_index;
             output_ticket->current_destination_index = current_destination_index;
             output_ticket->held_capture=true;
+            if(slot.omit_current_write)bridge_flight_logger().event(
+                BridgeFlightOperation::presenter_transition,112000,current.serial,1,ofr_fresh_mask);
         output_ticket->aer_retimed=nvidia_options.ofr;
         output_ticket->synthetics_in_target_camera = true;
             return S_OK;
@@ -7727,6 +7776,12 @@ struct D3D12FrameSynthesizer::Impl {
             cancel_next();
             return result;
         }
+        slot.omit_current_write=omit_current_write;
+        slot.aer_streamed=split_aer_first && nvidia_options.ofr && ofr_paired &&
+            backend==D3D12OpticalFlowBackend::nvidia && generation_mode==D3D12FrameGenerationMode::ofxr &&
+            !rife && !native_dlss && !nvidia_options.hybrid && !next.motion_vectors && !extra_output &&
+            image_description.DepthOrArraySize==1 && current_source_views.size()==1;
+        slot.aer_early_copy=slot.aer_streamed && current_source_views[0].logical_eye==(nvidia_options.ofr_swap?0U:1U);
         // R22 applies to OFXR vectors, Hybrid and native DLSS-G only.
         // FSR consumes its unchanged release-bound guides; no extra pass there.
         if ((generation_mode != D3D12FrameGenerationMode::fsr3 || nvidia_options.ofr) && next.motion_vectors) {
@@ -7872,7 +7927,7 @@ struct D3D12FrameSynthesizer::Impl {
                 two_frame_capture_guide_contract(c);
             }
         }
-        if(aer_retimed && ofr_paired) {
+        if(aer_retimed && ofr_paired && !slot.aer_early_copy) {
             auto* list=slot.current_copy_command_list.Get();
             auto barrier=transition_barrier(current_destination,release_state,D3D12_RESOURCE_STATE_COPY_DEST);
             list->ResourceBarrier(1,&barrier);
@@ -7880,6 +7935,18 @@ struct D3D12FrameSynthesizer::Impl {
                 {next.views.data(),next.view_count});
             barrier=transition_barrier(current_destination,D3D12_RESOURCE_STATE_COPY_DEST,release_state);
             list->ResourceBarrier(1,&barrier);
+        }
+        if(slot.aer_early_copy) {
+            result=slot.current_copy_command_list->Close();
+            if(SUCCEEDED(result))result=queue->Wait(previous.producer_fence.Get(),previous.ticket.fence_value);
+            if(FAILED(result)){synthesis_enabled=false;cancel_next();return result;}
+            ID3D12CommandList* early[]{slot.current_copy_command_list.Get()};queue->ExecuteCommandLists(1,early);
+            completion_unknown=true;
+            const auto value=next_fence_value++;
+            result=queue->Signal(fence.Get(),value);
+            if(FAILED(result)){synthesis_enabled=false;untracked_source=std::move(next);return result;}
+            slot.aer_first_fence=value;slot.fence_value=value;
+            last_submitted_fence_value=value;
         }
         result = wait_aer_guide_dependencies(previous,next,slot.guide_composer_inputs.get());
         if(FAILED(result)) {
@@ -7932,7 +7999,7 @@ struct D3D12FrameSynthesizer::Impl {
         if (generation_mode == D3D12FrameGenerationMode::fsr3) {
             last_fsr_context_fence_values[active_fsr_domain] = fence_value;
         }
-        if(nvidia_options.ofr) last_synthetic_fence_value=fence_value;
+        if(nvidia_options.ofr && !slot.aer_early_copy) last_synthetic_fence_value=fence_value;
         if (native_dlss) native_dlss->submitted(fence.Get(), fence_value, last_synthetic_fence_value);
         if (!rife && (used_game_motion || hybrid_guides_used) && (!native_dlss || native_pair_generated)) report_dlss_motion_vector_use();
 
@@ -7964,6 +8031,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         if (native_dlss) output_ticket->native_result = native_dlss->last_result();
         if(rife)output_ticket->native_result=slot.rife_result;
+        output_ticket->aer_streamed=slot.aer_streamed;
         output_ticket->aer_retimed=aer_retimed;
         output_ticket->used_game_motion=!rife && (used_game_motion || hybrid_guides_used) &&
             (!native_dlss || native_pair_generated);
@@ -7976,6 +8044,8 @@ struct D3D12FrameSynthesizer::Impl {
         output_ticket->current_destination_index = current_destination_index;
         // A skipped native pair copied B into its outputs.
         output_ticket->synthetics_in_target_camera = generation_mode==D3D12FrameGenerationMode::fsr3 ? fsr_pair_in_target_camera : (!native_dlss || native_pair_generated);
+        if(slot.omit_current_write)bridge_flight_logger().event(
+            BridgeFlightOperation::presenter_transition,112000,current.serial,0,ofr_fresh_mask);
         return S_OK;
     }
 
@@ -8069,7 +8139,8 @@ HRESULT D3D12FrameSynthesizer::initialize(
     bool enable_nvidia_gpu_timing,
     D3D12FrameGenerationMode generation_mode,
     bool allow_luke_guide_device_alias,
-    bool defer_flow_resources) noexcept {
+    bool defer_flow_resources,
+    bool isolated_submission_queue) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ != nullptr) {
@@ -8091,7 +8162,7 @@ HRESULT D3D12FrameSynthesizer::initialize(
             nvidia_options,
             enable_nvidia_gpu_timing,
             generation_mode,
-            allow_luke_guide_device_alias, defer_flow_resources);
+            allow_luke_guide_device_alias, defer_flow_resources, isolated_submission_queue);
         if (FAILED(result)) {
             return result;
         }
@@ -8155,6 +8226,7 @@ HRESULT D3D12FrameSynthesizer::replace_resources_locked(D3D12OpticalFlowBackend 
         const auto release_state=impl_->release_state;
         const auto timing=impl_->requested_gpu_timing;
         const auto allow_alias=impl_->allow_luke_guide_device_alias;
+        const auto isolated_queue=impl_->isolated_submission_queue;
         const auto completed_fence=preserve_completed_tickets?impl_->fence:ComPtr<ID3D12Fence>{};
         const auto next_fence=impl_->next_fence_value;
         const auto submitted_fence=impl_->last_submitted_fence_value;
@@ -8174,7 +8246,7 @@ HRESULT D3D12FrameSynthesizer::replace_resources_locked(D3D12OpticalFlowBackend 
         impl_.reset();
         const HRESULT result = candidate->initialize(device.Get(),queue.Get(),
             std::move(history),current,synthetic,view_format,release_state,
-            backend,options,timing,generation_mode,allow_alias,defer_flow);
+            backend,options,timing,generation_mode,allow_alias,defer_flow,isolated_queue);
         // A failed replacement remains explicitly uninitialized. The layer
         // reports the error and presents real frames; never retain a different
         // method's resources or advertise that old method as the new one.
@@ -8209,9 +8281,9 @@ HRESULT D3D12FrameSynthesizer::ensure_flow_resources_locked() {
     // An unavailable provider must not drain the caller's gated capture queue
     // while destroying this unused candidate.
     candidate->copy_resources_retired=true;
-    const auto result=candidate->initialize(impl_->device.Get(),impl_->queue.Get(),impl_->history,
+    const auto result=candidate->initialize(impl_->device.Get(),impl_->input_queue.Get(),impl_->history,
         current,synthetic,impl_->view_format,impl_->release_state,impl_->backend,impl_->nvidia_options,
-        impl_->requested_gpu_timing,impl_->generation_mode,impl_->allow_luke_guide_device_alias,false);
+        impl_->requested_gpu_timing,impl_->generation_mode,impl_->allow_luke_guide_device_alias,false,impl_->isolated_submission_queue);
     bridge_flight_logger().event(BridgeFlightOperation::synthesis_initialize,result,0xAF053700ULL,
         static_cast<std::uint64_t>(impl_->backend),impl_->image_description.DepthOrArraySize);
     if(FAILED(result))return result;
@@ -8322,7 +8394,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
     float interpolation_fraction,
     D3D12PresentationTransform presentation_transform,
     std::optional<D3D12ExtraSynthetic> extra_synthetic,
-    bool allow_synthetic_camera, unsigned ofr_fresh_mask) noexcept {
+    bool allow_synthetic_camera, unsigned ofr_fresh_mask, bool current_output_unused, bool split_aer_first) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -8346,7 +8418,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             std::move(motion_vectors),
             defer_current_copy,
             interpolation_fraction,
-            std::move(presentation_transform), extra_synthetic, allow_synthetic_camera, ofr_fresh_mask);
+            std::move(presentation_transform), extra_synthetic, allow_synthetic_camera, ofr_fresh_mask,current_output_unused,split_aer_first);
     } catch (...) {
         if (ticket != nullptr) {
             *ticket = {};
@@ -8492,7 +8564,7 @@ HRESULT D3D12FrameSynthesizer::synchronize_producer_queue(
             const auto ready=ensure_flow_resources_locked();
             if(FAILED(ready))return ready;
         }
-        if (impl_->queue == nullptr || impl_->acquire_fence == nullptr) {
+        if (impl_->queue == nullptr || impl_->device == nullptr) {
             return E_UNEXPECTED;
         }
         // Same queue on both sides means the acquire already applies; the
@@ -8500,14 +8572,25 @@ HRESULT D3D12FrameSynthesizer::synchronize_producer_queue(
         if (queue == impl_->queue.Get()) {
             return S_FALSE;
         }
-        const std::uint64_t value = impl_->next_acquire_fence_value;
+        auto found=std::find_if(impl_->acquire_timelines.begin(),impl_->acquire_timelines.end(),
+            [&](const auto& proof){return proof.producer.Get()==queue;});
+        if(found==impl_->acquire_timelines.end()) {
+            found=std::find_if(impl_->acquire_timelines.begin(),impl_->acquire_timelines.end(),
+                [](const auto& proof){return !proof.producer;});
+            if(found==impl_->acquire_timelines.end())return E_NOTIMPL;
+            const auto created=impl_->device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(found->fence.GetAddressOf()));
+            if(FAILED(created))return created;
+            found->producer=queue;
+        }
+        if(found->next==UINT64_MAX)return E_UNEXPECTED;
+        const std::uint64_t value = found->next;
         const HRESULT signal_result =
-            queue->Signal(impl_->acquire_fence.Get(), value);
+            queue->Signal(found->fence.Get(), value);
         if (FAILED(signal_result)) {
             return signal_result;
         }
-        ++impl_->next_acquire_fence_value;
-        return impl_->rife && impl_->nvidia_options.rife_async ? S_OK : impl_->queue->Wait(impl_->acquire_fence.Get(), value);
+        ++found->next;
+        return impl_->rife && impl_->nvidia_options.rife_async ? S_OK : impl_->queue->Wait(found->fence.Get(), value);
     } catch (...) {
         return E_FAIL;
     }
@@ -8555,7 +8638,12 @@ void D3D12FrameSynthesizer::report_pending_submission() const noexcept {
         snapshot(49301, impl_->fence.Get(), impl_->last_submitted_fence_value);
         snapshot(49302, impl_->nvidia_fence.Get(), impl_->last_nvidia_fence_value);
         snapshot(49303, impl_->previous.producer_fence.Get(), impl_->previous.ticket.fence_value);
-        snapshot(49304, impl_->acquire_fence.Get(), impl_->next_acquire_fence_value - 1);
+        for(std::size_t i=0;i<impl_->acquire_timelines.size();++i) {
+            const auto& proof=impl_->acquire_timelines[i];
+            snapshot(49304+int(i),proof.fence.Get(),proof.next-1);
+            if(proof.producer)flight.event(BridgeFlightOperation::gpu_fence_snapshot,49314+int(i),
+                reinterpret_cast<std::uintptr_t>(proof.producer.Get()),reinterpret_cast<std::uintptr_t>(proof.fence.Get()),proof.next-1);
+        }
         if (impl_->device) flight.event(BridgeFlightOperation::gpu_device_status,
             impl_->device->GetDeviceRemovedReason(), reinterpret_cast<std::uintptr_t>(impl_->queue.Get()),
             reinterpret_cast<std::uintptr_t>(impl_->device.Get()), 49300);

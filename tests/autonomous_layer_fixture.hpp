@@ -10,9 +10,14 @@ namespace xrfg_fixture {
 inline bool request_control(const xrfg::embedded::Settings& desired) {
     auto s=xrfg::autonomous::snapshot().desired;
     s.advanced_mode=true;
+    s.independent_pacing=desired.independent_pacing;
+    s.pacing_buffer=desired.pacing_buffer;
+    s.independent_acquire_fix=desired.independent_acquire_fix;
     s.pacing_mode=desired.pacing_mode;
     s.increase_buffer=desired.increase_buffer;
     s.rife_resolution=desired.rife_resolution;s.rife_model=desired.rife_model; s.rife_multiplier=desired.rife_multiplier;
+    if(desired.rife_model<0)s.frame_multiplier=desired.independent_aer_double?4:desired.rife_multiplier;
+    else if(desired.independent_aer_double)s.rife_multiplier=4;
     s.ofr_enabled=desired.ofr;s.ofr_backend=desired.ofr_backend;s.ofr_scale=desired.ofr_scale;s.ofr_swap=desired.ofr_swap;
     s.enabled=desired.enabled; s.backend=desired.backend; s.preset=desired.preset;
     s.scale=desired.scale; s.backward=desired.backward; s.lower_vram=desired.lower_vram;
@@ -27,11 +32,16 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     if (!xrfg::autonomous::request(s)) return false;
     xrfg::autonomous::apply_runtime_settings();
     auto effective=desired;
+    effective.independent_aer_double=desired.independent_pacing && desired.ofr && desired.independent_aer_double;
     if(effective.ofr)effective.rife_multiplier=2;
     effective.hybrid=canonical_generation==3;
     effective.frame_generation=canonical_generation>=3?0:canonical_generation;
     if (effective.frame_generation == 2) effective.backend = 0;
     effective.motion_vectors=xrfg::autonomous::snapshot().desired.motion_vectors;
+    if(effective.independent_pacing && (canonical_generation==0 || canonical_generation==3)) {
+        effective.backend=desired.backend==0?0:1;
+        effective.lower_vram=effective.separate_synthesis=0;
+    }
     const auto actual=xrfg::embedded::snapshot().desired;
     if(actual!=effective) {
 #define TRACE_SETTING(name) if(actual.name!=effective.name) std::fprintf(stderr,"fixture setting %s: actual=%d expected=%d\n",#name,int(actual.name),int(effective.name));
@@ -46,16 +56,17 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
 class ControlProfile {
     std::filesystem::path directory_;
 public:
-    ControlProfile() {
+    ControlProfile(bool independent=false) {
         directory_=std::filesystem::temp_directory_path()/
             (L"ofxr-autonomous-layer-test-"+std::to_wstring(GetCurrentProcessId())+
                 L"-"+std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(directory_);
         SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",directory_.c_str());
-        auto initial=xrfg::embedded::snapshot().desired;initial.pacing_mode=2;initial.enabled=true;
+        auto initial=xrfg::embedded::snapshot().desired;initial.pacing_mode=2;initial.enabled=true;initial.independent_pacing=independent;
         // The fixture owns a fresh profile, not a RIFE choice left beside the test EXE.
         initial.rife_model=-1;initial.rife_multiplier=2;initial.scale=std::clamp(initial.scale,0,3);
         initial.ofr=false;initial.ofr_swap=false; // do not inherit an earlier fixture's temporal modifier
+        initial.independent_aer_double=false;
         initial.increase_buffer=false; // independent fixture baseline, not the prior test's saved flag
         if (!request_control(initial))
             throw std::runtime_error("autonomous fixture publication failed");

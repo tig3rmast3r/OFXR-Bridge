@@ -1,7 +1,9 @@
 void release_readiness_test(bool enabled) {
     Fixture f(false,true,{},true,true,enabled,enabled?2:3);f.throttled=false;f.unblock();
     auto chain=f.make_chain(),overlay=f.make_chain();
-    ComPtr<ID3D12Device> device12;ok(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device12)),"proof device");
+    ComPtr<IDXGIDevice> dxgi;ok(f.device11.As(&dxgi),"proof DXGI device");
+    ComPtr<IDXGIAdapter> adapter;ok(dxgi->GetAdapter(&adapter),"proof same adapter");
+    ComPtr<ID3D12Device> device12;ok(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device12)),"proof device");
     ComPtr<ID3D12Fence> proof,gate;ComPtr<ID3D11Device5> device11;ComPtr<ID3D11DeviceContext4> context11;
     ok(f.device11.As(&device11),"proof D11 owner");ok(f.context.As(&context11),"proof D11 context");
     auto shared=[&](ComPtr<ID3D12Fence>& fence) {

@@ -675,9 +675,21 @@ bool generation(Panel& p) {
         changed=true;
     }
 
-    const bool djules=draft.frame_generation==0 && draft.backend==3;
+    const bool djules=!draft.independent_pacing && draft.frame_generation==0 && draft.backend==3;
     const bool dlssg=draft.frame_generation==2;
-    if(draft.frame_generation==4) {
+    if(draft.independent_pacing && draft.ofr_enabled) {
+        int multiplier=(draft.frame_generation==4?draft.rife_multiplier:draft.frame_multiplier)==4?1:0;
+        constexpr Help aer_four{"AER multiplier","2X reconstructs the alternating eye. 4X also generates a complete stereo pair between coherent reconstructed pairs. Additional GPU work; 3X is unavailable."};
+        if(segmented(p,"Multiplier","AER multiplier",multiplier,{{"2X"},{"4X"}},aer_four)) {
+            if(draft.frame_generation==4)draft.rife_multiplier=multiplier?4:2;
+            else draft.frame_multiplier=multiplier?4:2;
+            changed=true;
+        }
+        if(multiplier && state.connected) {
+            constexpr const char* stages[]{"4X stereo stage: off","4X stereo stage: warming up","4X stereo stage: generated pair ready","4X stereo stage: unavailable; coherent 2X retained"};
+            reason(p,stages[std::min(state.runtime.independent_aer_double_state,3U)]);
+        }
+    } else if(draft.frame_generation==4) {
         int multiplier=draft.ofr_enabled?0:draft.rife_multiplier-2;
         if(segmented(p,"Multiplier","RIFE multiplier",multiplier,{{"2X"},{"3X",draft.ofr_enabled},{"4X",draft.ofr_enabled}},kHelpRifeMultiplier)) {
             draft.rife_multiplier=multiplier+2;changed=true;
@@ -703,12 +715,18 @@ bool generation(Panel& p) {
         if(segmented(p,"Multiplier","Multiplier",multiplier,{{"2X"},{"3X",draft.ofr_enabled},{"4X",draft.ofr_enabled}},kHelpMultiplier)) {
             draft.frame_multiplier=multiplier+2;changed=true;
         }
-        if(!draft.ofr_enabled&&draft.frame_multiplier>2)
+        if(!draft.independent_pacing && !draft.ofr_enabled&&draft.frame_multiplier>2)
             reason(p,"Needs a supported session on private SteamVR or native OpenXR; compatible Luke Ross OSR/AFW sessions are included.");
     }
 
     bool show_flow=false,nvidia_flow=false;
-    if(draft.frame_generation==0) {
+    if(draft.frame_generation==0 && draft.independent_pacing) {
+        int engine=draft.backend==0?0:1;
+        constexpr std::array<Card,2> engines{kEngineFidelity,{"NVIDIA","Optical flow",false,{"NVIDIA","Optical generation with Independent pacing."}}};
+        if(cards(p,"OFXR engine",engine,engines)){select_generation(draft,0,engine);changed=true;}
+        if(draft.advanced_mode)changed|=segmented(p,"Motion source","Motion source",draft.motion_vectors,{{"Optical flow"},{"Game motion vectors"}},kHelpMotion);
+        show_flow=draft.motion_vectors==0;nvidia_flow=engine!=0;
+    } else if(draft.frame_generation==0) {
         // UI order differs from persisted backend IDs: 0.2.13 is backend 3,
         // while 0.3.0 is backend 2. Keep each existing profile on its engine.
         constexpr int engine_order[]={0,1,3,2};
@@ -760,9 +778,16 @@ bool generation(Panel& p) {
     } else if(draft.frame_generation==3) {
         // Hybrid's engine is its own (hybrid_backend), never the OFXR one.
         // 0.2.13 is left out: it is a pacing route as well as a flow.
-        std::array<Card,3> engines{kEngineFidelity,kEngine021,kEngine030};
-        if(radeon)for(unsigned i=1;i<engines.size();++i){engines[i].disabled=true;engines[i].tag="NVIDIA GPU required";}
-        changed|=cards(p,"Optical flow engine",draft.hybrid_backend,engines);
+        if(draft.independent_pacing) {
+            int engine=draft.hybrid_backend==0?0:1;
+            std::array<Card,2> engines{kEngineFidelity,{"NVIDIA","Optical flow",false,{"NVIDIA","Optical generation with Independent pacing."}}};
+            if(radeon){engines[1].disabled=true;engines[1].tag="NVIDIA GPU required";}
+            if(cards(p,"Optical flow engine",engine,engines)){draft.hybrid_backend=engine;changed=true;}
+        } else {
+            std::array<Card,3> engines{kEngineFidelity,kEngine021,kEngine030};
+            if(radeon)for(unsigned i=1;i<engines.size();++i){engines[i].disabled=true;engines[i].tag="NVIDIA GPU required";}
+            changed|=cards(p,"Optical flow engine",draft.hybrid_backend,engines);
+        }
         show_flow=true;nvidia_flow=draft.hybrid_backend!=0;
         changed|=toggle_row(p,"Depth search","Depth search",draft.hybrid_depth_search,kHelpDepth);
         changed|=toggle_row(p,"HUD fix","HUD fix",draft.hybrid_hud_fix,kHelpHud);
@@ -779,26 +804,41 @@ bool generation(Panel& p) {
 
     const bool framework_only=state.connected && !pacing_comparison_runtime(state.runtime);
     group_title(p,"Delivery");
+    ImGui::EndDisabled();
+    constexpr Help independent_help{"Independent pacing","Isolated source clock, generation queue and runtime delivery. Select before starting the game; restart required to change routes."};
+    changed|=toggle_row(p,"Independent pacing","Independent pacing",draft.independent_pacing,independent_help);
+    if(draft.independent_pacing)reason(p,state.connected && state.runtime.pacing_mode==kIndependentPacingMode ? "Independent route active: existing pacing, buffer and fast controls are bypassed." : "Independent route selected: restart the game to activate it.");
+    if(draft.independent_pacing) {
+        reason(p,"Automatic pacing buffer: learns from missed delivery deadlines and slowly reduces spare allowance after stable delivery.");
+        if(state.connected && state.runtime.pacing_mode==kIndependentPacingMode) {
+            char line[112];std::snprintf(line,sizeof(line),"Extra allowance: %.1f ms. Expired deliveries: %llu",
+                state.runtime.pacing_allowance_ns*1e-6,static_cast<unsigned long long>(state.runtime.pacing_expired));
+            reason(p,line);
+        }
+    }
+    ImGui::BeginDisabled(!controls_enabled);
+    if(!draft.independent_pacing) {
     int pacing=framework_only ? 0 : draft.pacing_mode;
     const bool picked_pacing=draft.advanced_mode
-        ? segmented(p,"Pacing","Pacing",pacing,{{"Framework"},{"Director"},{"Framework+director"}},kHelpPacingAdvanced,framework_only)
-        : segmented(p,"Pacing","Pacing",pacing,{{"Framework"},{"Director"}},kHelpPacing,framework_only);
+        ? segmented(p,"Pacing","Pacing",pacing,{{"Framework"},{"Director"},{"Framework+director"}},kHelpPacingAdvanced,framework_only || draft.independent_pacing)
+        : segmented(p,"Pacing","Pacing",pacing,{{"Framework"},{"Director"}},kHelpPacing,framework_only || draft.independent_pacing);
     if(picked_pacing) {draft.pacing_mode=pacing;changed=true;}
-    if(framework_only)reason(p,"VDXR transport uses Framework pacing. Change Pacing in the tray and restart the game to use director pacing.");
+    if(framework_only && !draft.independent_pacing)reason(p,"VDXR transport uses Framework pacing. Change Pacing in the tray and restart the game to use director pacing.");
     const float half=(ImGui::GetContentRegionAvail().x-ImGui::GetStyle().ItemSpacing.x)*.5F,second=ImGui::GetCursorPosX()+half+ImGui::GetStyle().ItemSpacing.x;
-    changed|=toggle_box(p,"Increase buffer","Increase buffer",draft.increase_buffer,kHelpBuffer,half,framework_only);
+    changed|=toggle_box(p,"Increase buffer","Increase buffer",draft.increase_buffer,kHelpBuffer,half,framework_only || draft.independent_pacing);
     ImGui::SameLine(second);
     bool fast=draft.lower_vram!=0;
-    if(toggle_box(p,"Fast mode","Fast mode",fast,kHelpFast,half,state.runtime.luke_detected)) {
+    if(toggle_box(p,"Fast mode","Fast mode",fast,kHelpFast,half,state.runtime.luke_detected || draft.independent_pacing)) {
         draft.lower_vram=draft.separate_synthesis=fast ? 1 : 0;
         changed=true;
     }
     if(state.runtime.luke_detected)reason(p,"Fast mode has no effect with Luke Ross.");
     if(state.connected && state.runtime.buffer_capacity) {
-        char line[64];std::snprintf(line,sizeof(line),"Active bridge buffer: %u deliveries",state.runtime.buffer_capacity);
+        char line[64];std::snprintf(line,sizeof(line),state.runtime.pacing_mode==kIndependentPacingMode?"Independent output capacity: %u images":"Active bridge buffer: %u deliveries",state.runtime.buffer_capacity);
         reason(p,line);
     }
 
+    }
     // Disclosures come last, so opening one pushes no primary control away.
     if(show_flow) {
         constexpr const char* qualities[]{"Slow","Medium","Fast"};
@@ -819,7 +859,8 @@ bool generation(Panel& p) {
     if(dlssg)dlssg_preset_details(p);
     generation_details(p);
     ImGui::EndDisabled();
-    if(!controls_enabled) {draft=saved;changed=enable_changed;}
+    if(draft.independent_pacing) {draft.pacing_mode=saved.pacing_mode;draft.increase_buffer=saved.increase_buffer;draft.lower_vram=saved.lower_vram;draft.separate_synthesis=saved.separate_synthesis;}
+    if(!controls_enabled) {const bool independent=draft.independent_pacing;const int buffer=draft.pacing_buffer;draft=saved;draft.independent_pacing=independent;draft.pacing_buffer=buffer;changed=enable_changed || independent!=saved.independent_pacing || buffer!=saved.pacing_buffer;}
     return changed;
 }
 
@@ -895,6 +936,8 @@ bool framewarp(Panel& p) {
     if(!aer && draft.afw_mode!=0 && draft.luke_osr!=2 && r.uevr_osr)
         notice(p,Tone::warn,"UEVR is reconstructed by OSR only: select OSR to reconstruct its missing eye.");
     changed|=toggle_row(p,"Frame Reconstruction only","Frame Reconstruction only",draft.afw_only,kHelpOnly,false,"Restart game");
+    if(state.connected && (state.runtime.pacing_mode==kIndependentPacingMode)!=draft.independent_pacing)
+        notice(p,Tone::warn,"Restart the game to apply the selected delivery route.");
     if(state.connected && (state.runtime.pacing_mode==kAfwOnlyPacingMode)!=draft.afw_only)
         reason(p,"Frame Reconstruction only change saved. Restart the game to apply it.");
     if(draft.afw_mode!=0 && draft.luke_osr==2) {
@@ -1095,6 +1138,11 @@ bool logging(Panel& p) {
     const auto& state=p.state;
     bool changed=false;
     title(p,"Logging");
+    if(draft.independent_pacing || (state.connected && state.runtime.pacing_mode==kIndependentPacingMode)) {
+        constexpr Help acquire_help{"V1103 acquire fix","Temporary live A/B test for native D3D12 Independent. On uses the V1103 private-acquire correction; Off restores the V1102 binding-queue wait. Generator history and automatic buffer are retained."};
+        changed|=toggle_row(p,"V1103 acquire fix","V1103 acquire fix",draft.independent_acquire_fix,acquire_help);
+        reason(p,draft.independent_acquire_fix ? "A/B: V1103 correction ON" : "A/B: V1102 acquire wait restored");
+    }
     changed|=toggle_row(p,"Diagnostic logging","Diagnostic logging",draft.diagnostics,kHelpLogging);
     if(state.connected) reason(p,state.runtime.logging_active
         ? (draft.diagnostics ? "Logging active" : "Stopping logging...")
@@ -1155,8 +1203,8 @@ bool tests(Panel& p) {
     if(active) {
         const auto& b=state.benchmark;
         const auto remaining=b.started_ms && GetTickCount64()>=b.started_ms
-            ? std::max(0.0,double(kBenchmarkDurationMs)/1000.0-double(GetTickCount64()-b.started_ms)/1000.0)
-            : double(kBenchmarkDurationMs)/1000.0;
+            ? std::max(0.0,double(benchmark_duration_ms(state.runtime.pacing_mode==kIndependentPacingMode))/1000.0-double(GetTickCount64()-b.started_ms)/1000.0)
+            : double(benchmark_duration_ms(state.runtime.pacing_mode==kIndependentPacingMode))/1000.0;
         char line[192];
         std::snprintf(line,sizeof(line),"%u / %u: %s (%s, %.1f s)",b.index+1,b.count,b.label,
             b.phase==BenchmarkPhase::applying ? "applying" : "running",remaining);
@@ -1172,12 +1220,22 @@ bool tests(Panel& p) {
     if(state.benchmark.message[0])reason(p,state.benchmark.message);
     if(state.benchmark.csv_path[0]) reason(p,(std::string("CSV: ")+state.benchmark.csv_path).c_str());
     const bool modern=pacing_comparison_runtime(state.runtime);
-    if(draft.ofr_enabled)notice(p,Tone::idle,"Turn AER framegen off before running the ordinary benchmark suites.");
-    const bool locked=active||!permitted||!state.connected||draft.ofr_enabled;
+    const bool independent=draft.independent_pacing;
+    const bool aer=independent && draft.ofr_enabled;
+    const bool route_pending=state.connected && ((state.runtime.pacing_mode==kIndependentPacingMode)!=independent);
+    if(route_pending)notice(p,Tone::warn,"Restart the game to apply the selected delivery route before running tests.");
+    if(draft.ofr_enabled && !independent)notice(p,Tone::idle,"Turn AER framegen off before running the ordinary benchmark suites.");
+    if(aer)notice(p,Tone::idle,"Independent AER suites compare 2X and 4X with reconstruction disabled. Use Without vectors or Complete, including Luke Ross games.");
+    const bool locked=active||!permitted||!state.connected||(draft.ofr_enabled && !independent)||route_pending||state.runtime.afw_only_session;
+    const auto count=[&](bool full,bool luke) {
+        return independent?benchmark_execution_plan(full,luke,modern,draft.advanced_mode,state.runtime.eye_long_side,
+            state.connected?state.runtime.rife_max_multiplier:4,draft.rife_resolution,true,aer,state.runtime.dlssg_max_multiplier).size()
+            :benchmark_plan(full,luke,modern,draft.advanced_mode,draft.rife_resolution).size();
+    };
     group_title(p,"Suites");
-    const bool optical=suite(p,"Without vectors","Run###Tests without vectors",benchmark_plan(false,false,modern,draft.advanced_mode).size(),locked);
-    const bool complete=suite(p,"Complete","Run###Complete tests",benchmark_plan(true,false,modern,draft.advanced_mode).size(),locked);
-    const bool luke=suite(p,"Luke Ross","Run###Test Luke Ross",benchmark_plan(false,true,modern,draft.advanced_mode).size(),locked||!state.runtime.luke_detected);
+    const bool optical=suite(p,"Without vectors","Run###Tests without vectors",count(false,false),locked);
+    const bool complete=suite(p,"Complete","Run###Complete tests",count(true,false),locked);
+    const bool luke=suite(p,"Luke Ross","Run###Test Luke Ross",count(false,true),locked||!state.runtime.luke_detected||aer);
     if(optical || complete || luke) {
         ui.dirty|=changed;finish_settings_widget_edits(ui);
         if(!ui.dirty) static_cast<void>(start_benchmark(complete,luke));
@@ -1185,12 +1243,19 @@ bool tests(Panel& p) {
     }
     changed|=toggle_row(p,"Auto pick best one","Auto pick best one",draft.benchmark_auto_pick,kHelpAuto,active);
     if(disclosure(p,"How tests work","")) {
-        reason(p,"7.5 seconds per configuration: 2.5 seconds settling, then 5 seconds measured. CSV: min / median / max Output FPS and Cycle minimum. Works with diagnostic logging off. Neural and AFW choices are kept.");
-        reason(p,modern ? "Framework and Director: Normal, Fast and Buffer. RIFE and vector routes also test Fast + Buffer."
-            : "Legacy VDXR: Normal/Fast, using your selected RIFE Quality.");
-        reason(p,"Luke Ross: OSR normal/cheap only, using your selected RIFE Quality.");
-        reason(p,"RIFE uses one Quality selected before the suite: 2X, then 3X only if no preceding result holds full headset refresh. No Djules 3X or automatic 4X. TensorRT optimization completes before settling and measurement.");
-        reason(p,"Suite length adjusts to measured results and session capabilities. Skipped configurations remain n.a. in CSV.");
+        if(independent) {
+            reason(p,"10 seconds per configuration: 2.5 seconds settling, then 7.5 seconds measured. Compilation and route setup finish before this interval. Diagnostic logging can remain off.");
+            reason(p,"One Independent route: no Framework, Director, Fast or Buffer combinations. Standalone FidelityFX is excluded. OFXR/RIFE and Hybrid NVIDIA/DLSS-G use supported 2X/3X/4X; FSR is 2X in stereo. AER compares 2X/4X for all methods, including FSR.");
+            reason(p,"Luke Ross suite: OSR normal and faster, each alone or with OFXR/RIFE. For raw AER framegen use the other suites. One RIFE Quality is captured before the suite.");
+            reason(p,"All 2X candidates finish first. Only if none holds headset refresh does the suite test 3X, then 4X if still needed. AER skips 3X. Skipped or unsupported configurations remain n.a. in CSV.");
+        } else {
+            reason(p,"7.5 seconds per configuration: 2.5 seconds settling, then 5 seconds measured. CSV: min / median / max Output FPS and Cycle minimum. Works with diagnostic logging off. Neural and AFW choices are kept.");
+            reason(p,modern ? "Framework and Director: Normal, Fast and Buffer. RIFE and vector routes also test Fast + Buffer."
+                : "Legacy VDXR: Normal/Fast, using your selected RIFE Quality.");
+            reason(p,"Luke Ross: OSR normal/cheap only, using your selected RIFE Quality.");
+            reason(p,"RIFE uses one Quality selected before the suite: 2X, then 3X only if no preceding result holds full headset refresh. No Djules 3X or automatic 4X. TensorRT optimization completes before settling and measurement.");
+            reason(p,"Suite length adjusts to measured results and session capabilities. Skipped configurations remain n.a. in CSV.");
+        }
         reason(p,"Close the menu and keep the same test scene. Stop restores original settings. Completion restores them unless Auto pick best one selects a valid result. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
         disclosure_end();
     }

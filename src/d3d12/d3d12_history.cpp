@@ -104,6 +104,7 @@ struct D3D12SwapchainHistory::Impl {
         D3D12HistoryCaptureTicket ticket{};
         std::uint64_t capture_fence_value{};
         std::uint64_t active_lease_serial{};
+        unsigned source_pins{};
         ComPtr<ID3D12Fence> consumer_fence;
         std::uint64_t consumer_fence_value{};
         bool valid{};
@@ -116,7 +117,7 @@ struct D3D12SwapchainHistory::Impl {
     HANDLE fence_event{};
     HANDLE busy_event{};
     HANDLE busy_timer{};
-    std::array<HistorySlot, D3D12SwapchainHistory::kSlotCount> slots;
+    std::vector<HistorySlot> slots;
     D3D12_RESOURCE_DESC history_description{};
     D3D12_RESOURCE_STATES release_state{};
     std::uint64_t next_serial{1};
@@ -188,7 +189,15 @@ struct D3D12SwapchainHistory::Impl {
         // DRED reports this stable name if a device removal stops inside the bridge's
         // history copy, distinguishing it from game, NGX and synthesis work.
         slot.capture_list->SetName(L"OFXR History Capture");
-        slot.ram_gpu.initialize(device.Get(),queue.Get(),BridgeFlightOperation::gpu_history);
+        auto& logger=bridge_flight_logger();
+        const bool disk_gpu=logger.gpu_instrumentation_enabled();
+        slot.ram_gpu.initialize(device.Get(),queue.Get(),BridgeFlightOperation::gpu_history,disk_gpu);
+        if(disk_gpu) {
+            LARGE_INTEGER frequency{},counter{};
+            if(QueryPerformanceFrequency(&frequency) && QueryPerformanceCounter(&counter))
+                logger.event(BridgeFlightOperation::gpu_history,4,
+                    frequency.QuadPart,counter.QuadPart,logger.microseconds_for_counter(counter.QuadPart));
+        }
         result = slot.capture_list->Close();
         if (FAILED(result) && failure_stage != nullptr) {
             *failure_stage =
@@ -202,7 +211,9 @@ struct D3D12SwapchainHistory::Impl {
         ID3D12CommandQueue* input_queue,
         std::span<ID3D12Resource* const> inputs,
         D3D12_RESOURCE_STATES input_release_state,
-        D3D12HistoryInitializationStage* failure_stage) {
+        D3D12HistoryInitializationStage* failure_stage,unsigned slot_count) {
+        if(slot_count<3 || slot_count>32)return E_INVALIDARG;
+        slots.resize(slot_count);
         if (failure_stage != nullptr) {
             *failure_stage = D3D12HistoryInitializationStage::complete;
         }
@@ -377,7 +388,7 @@ struct D3D12SwapchainHistory::Impl {
     [[nodiscard]] HRESULT wait_for_busy_slot(
         HistorySlot& slot,
         std::uint32_t limit_us) noexcept {
-        if (slot.active_lease_serial != 0 || limit_us == 0) {
+        if (slot.active_lease_serial != 0 || slot.source_pins || limit_us == 0) {
             return HRESULT_FROM_WIN32(ERROR_BUSY);
         }
         if (busy_event == nullptr) {
@@ -415,7 +426,7 @@ struct D3D12SwapchainHistory::Impl {
     }
 
     [[nodiscard]] HRESULT prepare_slot_for_capture(HistorySlot& slot) noexcept {
-        if (slot.active_lease_serial != 0) {
+        if (slot.active_lease_serial != 0 || slot.source_pins) {
             return HRESULT_FROM_WIN32(ERROR_BUSY);
         }
         if (slot.consumer_fence_value != 0) {
@@ -594,7 +605,7 @@ struct D3D12SwapchainHistory::Impl {
         pending_ticket = {};
         has_pending_capture = false;
         ++next_serial;
-        next_slot = (next_slot + 1U) % D3D12SwapchainHistory::kSlotCount;
+        next_slot = (next_slot + 1U) % static_cast<unsigned>(slots.size());
         return S_OK;
     }
 
@@ -714,7 +725,7 @@ struct D3D12SwapchainHistory::Impl {
             return HRESULT_FROM_WIN32(ERROR_IO_INCOMPLETE);
         }
         for (const HistorySlot& slot : slots) {
-            if (slot.active_lease_serial != 0) {
+            if (slot.active_lease_serial != 0 || slot.source_pins) {
                 return HRESULT_FROM_WIN32(ERROR_BUSY);
             }
         }
@@ -780,12 +791,26 @@ D3D12SwapchainHistory::~D3D12SwapchainHistory() {
     }
 }
 
+HRESULT D3D12SwapchainHistory::pin_capture(const D3D12HistoryCaptureTicket& ticket) noexcept {
+    std::scoped_lock lock(mutex_);
+    if(!impl_ || ticket.slot>=impl_->slots.size())return E_INVALIDARG;
+    auto& slot=impl_->slots[ticket.slot];
+    if(!slot.valid || !impl_->matching_ticket(slot.ticket,ticket))return HRESULT_FROM_WIN32(ERROR_BUSY);
+    ++slot.source_pins;return S_OK;
+}
+void D3D12SwapchainHistory::unpin_capture(const D3D12HistoryCaptureTicket& ticket) noexcept {
+    std::scoped_lock lock(mutex_);
+    if(!impl_ || ticket.slot>=impl_->slots.size())return;
+    auto& slot=impl_->slots[ticket.slot];
+    if(slot.source_pins && impl_->matching_ticket(slot.ticket,ticket))--slot.source_pins;
+}
+
 HRESULT D3D12SwapchainHistory::initialize(
     ID3D12Device* device,
     ID3D12CommandQueue* queue,
     std::span<ID3D12Resource* const> source_images,
     D3D12_RESOURCE_STATES release_state,
-    D3D12HistoryInitializationStage* failure_stage) noexcept {
+    D3D12HistoryInitializationStage* failure_stage,unsigned slot_count) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ != nullptr) {
@@ -793,7 +818,7 @@ HRESULT D3D12SwapchainHistory::initialize(
         }
         auto candidate = std::make_unique<Impl>();
         const HRESULT result = candidate->initialize(
-            device, queue, source_images, release_state, failure_stage);
+            device, queue, source_images, release_state, failure_stage,slot_count);
         if (FAILED(result)) {
             return result;
         }

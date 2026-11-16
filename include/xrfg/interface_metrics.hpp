@@ -24,10 +24,11 @@ struct InterfaceDeliveryReceipt {
     std::uint64_t capture_cycle{},capture_owner{},capture_serial{};
     std::uint32_t capture_generated_index{};
     std::atomic<bool> synthetic_confirmed{false};
-    std::atomic<int> outcome{0}; // 0 pending, 1 nonempty native success, -1 failure/empty
+    std::atomic<int> outcome{0}; // 0 pending, 1 native success, -1 failure/empty, -2 expired
     std::int64_t entered_ns{},returned_ns{},display_ns{},prepared_ns{};
     explicit InterfaceDeliveryReceipt(bool generated,bool mixed=false) noexcept
         :synthetic(generated),mixed_reference(mixed) {}
+    void discarded() noexcept {outcome.store(-2,std::memory_order_release);}
     void completed(bool success,std::int64_t entered,std::int64_t returned,
                    std::int64_t display,std::int64_t prepared=0) noexcept {
         entered_ns=entered;returned_ns=returned;display_ns=display;prepared_ns=prepared;
@@ -207,6 +208,7 @@ public:
             bool has_synthetic{};
             for(std::size_t i=0;i<native_count_;++i) {
                 const auto& r=native_[i];if(!r->synthetic && !r->mixed_reference)continue;
+                if(r->outcome.load(std::memory_order_acquire)==-2)continue;
                 has_synthetic=true;
                 if(r->outcome.load(std::memory_order_acquire)!=1 ||
                    !r->synthetic_confirmed.load(std::memory_order_acquire) ||
@@ -259,6 +261,7 @@ struct InterfaceFrameStamp {
     std::shared_ptr<AerFramegenEvidence> aer_evidence;
     unsigned aer_delivery{}; // release pattern, not pixel-freshness proof
     bool aer_mixed{};
+    bool aer_generated_pair{}; // complete temporal stereo pair; AER evidence,not a half-real output
     std::int64_t aer_history_started_ns{};
     void mark_aer_mixed() noexcept {
         aer_mixed=true;

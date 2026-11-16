@@ -65,7 +65,8 @@ public:
         // Native OpenXR resources use their attachment state. Same-adapter
         // D3D11 interop mirrors use COMMON at both API ownership boundaries.
         D3D12_RESOURCE_STATES release_state,
-        D3D12HistoryInitializationStage* failure_stage = nullptr) noexcept;
+        D3D12HistoryInitializationStage* failure_stage = nullptr,
+        unsigned slot_count=kSlotCount) noexcept;
 
     // Queues the source-to-history copy and returns after signaling its fence;
     // The default never waits. An explicit wait budget applies only to a
@@ -100,6 +101,11 @@ public:
         std::uint64_t completion_value) noexcept;
 
     void cancel_consumer(const D3D12HistoryConsumerLease& lease) noexcept;
+
+    // Immutable queued source retention. Multiple jobs may retain the same AER
+    // eye; pins block overwrites but do not exclude the GPU consumer lease.
+    [[nodiscard]] HRESULT pin_capture(const D3D12HistoryCaptureTicket&) noexcept;
+    void unpin_capture(const D3D12HistoryCaptureTicket&) noexcept;
 
     [[nodiscard]] HRESULT wait_for_idle() noexcept;
 

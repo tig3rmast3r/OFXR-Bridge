@@ -74,15 +74,16 @@ XrResult XRAPI_CALL private_overlay_get_proc(XrInstance instance,const char* nam
 }
 
 HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
-    if(state->afw_only || !comparison_delivery_runtime(*state))return S_FALSE;
+    if((state->afw_only && !state->independent_pacing) || !comparison_delivery_runtime(*state))return S_FALSE;
     // The endpoint owns D3D images. A session still on a non-D3D binding (a
     // Vulkan session the bridge declined, OpenGL) has no device for it: pass
     // the valid runtime session through instead of failing xrCreateSession.
     if(state->graphics_binding!=SessionGraphicsBinding::d3d11 &&
-        state->graphics_binding!=SessionGraphicsBinding::d3d12)return S_FALSE;
+        state->graphics_binding!=SessionGraphicsBinding::d3d12)return state->independent_pacing?E_NOTIMPL:S_FALSE;
     state->uevr_application=GetModuleHandleW(L"UEVRBackend.dll")!=nullptr;
     auto original=state->dispatch;
     xrfg::PrivateOpenXrRuntime::Options options;
+    options.independent_pacing=state->independent_pacing;
     options.director_enabled=state->menu_enabled && xrfg::embedded::snapshot().desired.pacing_mode!=0;
     options.clean_bypass=all_image_effects_off();
     options.capacity=xrfg::embedded::snapshot().desired.increase_buffer?3:2;
@@ -92,6 +93,12 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     options.native_director_only=original->steamvr_runtime;
     options.native_wait_for_prepared=original->steamvr_runtime &&
         xrfg::embedded::snapshot().desired.enabled && requested_ordered_multiframe(xrfg::embedded::snapshot().desired);
+    if(state->independent_pacing) {
+        options.director_enabled=false;options.adaptive_buffer=false;
+        options.capacity=xrfg::kIndependentOutputCredits;
+        options.native_frame_contract=false;options.native_director_only=false;
+        options.native_adaptive_wait_lookahead=false;options.native_wait_for_prepared=false;
+    }
     const auto initial_presentation=xrfg::embedded::snapshot().desired;
     options.native_aer_optical_handoff=state->luke_afw_enabled && initial_presentation.enabled &&
         initial_presentation.ofr && !initial_presentation.hybrid &&
@@ -107,7 +114,9 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         options.producer_queue12=runtime_queue(*state);
         options.queue12=state->private_delivery_queue?state->private_delivery_queue.Get():options.producer_queue12;
     } else {options.device11=state->d3d11_device.Get();options.context11=state->d3d11_context.Get();}
-    options.d11_release_readiness=options.device11 && state->luke_afw_enabled && original->steamvr_runtime;
+    options.delivery_device11=state->private_delivery_device11.Get();
+    options.delivery_context11=state->private_delivery_context11.Get();
+    options.d11_release_readiness=options.device11 && (state->independent_pacing || (state->luke_afw_enabled && original->steamvr_runtime));
     // Common private admission, independent of pacing. Image storage is
     // unchanged; Legacy/AFW-only bypass installation of this endpoint.
     const std::weak_ptr<SessionState> weak=state;
@@ -126,10 +135,15 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         return {};
     };
     options.trace=[](int stage,std::uint64_t sequence,std::int64_t at,std::int64_t hold) {
+#if defined(XRFG_SOFTWARE_OPTICAL_FIXTURE)
+        if(stage==66)std::fprintf(stderr,"SHIPPING_DROP seq=%llu late_ms=%.4f due=%lld now=%lld\n",sequence,(hold-at)/1e6,at,hold);
+        if(stage==1 || stage==4 || stage==5 || stage==10)
+            std::fprintf(stderr,"SHIPPING_STAGE stage=%d seq=%llu at=%lld\n",stage,sequence,at);
+#endif
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
             stage<0?5719:5710+stage,sequence,at,hold);
     };
-    if(original->virtual_desktop_runtime || original->runtime_name.find("Pimax OpenXR")!=std::string::npos) {
+    if(state->independent_pacing || original->virtual_desktop_runtime || original->runtime_name.find("Pimax OpenXR")!=std::string::npos) {
         state->runtime_acceptance=std::make_shared<xrfg::RuntimeAcceptanceRate>();
         const auto rate=state->runtime_acceptance;
         options.accepted_output=[rate](auto at){rate->accepted(at);};

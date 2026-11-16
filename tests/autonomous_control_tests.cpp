@@ -79,6 +79,32 @@ void codec() {
         require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(restored)).luke_osr==expected,
             "reconstruction migration stays stable after profile save/reload");
     }
+    require(desired.pacing_buffer==0,"independent pacing reserve defaults to None");
+    require(desired.independent_acquire_fix,"V1103 A/B defaults to current correction");
+    for(bool active:{false,true}) {
+        auto ab=desired;ab.independent_acquire_fix=active;
+        require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(ab)).independent_acquire_fix==active,"A/B persists per game");
+        auto concurrent=desired;concurrent.overlay_enabled=!desired.overlay_enabled;
+        const auto merged=xrfg::autonomous::merge_changes(concurrent,desired,ab);
+        require(merged.independent_acquire_fix==active && merged.overlay_enabled==concurrent.overlay_enabled,"A/B delta merge preserves concurrent controls");
+    }
+    for(int factor:{2,3,4}) {
+        auto optical=desired;optical.independent_pacing=true;optical.frame_generation=0;optical.backend=3;optical.frame_multiplier=factor;
+        require(xrfg::autonomous::generation_multiplier(optical)==factor && xrfg::autonomous::runtime_multiplier(optical)==factor,"minimal OFXR honors selected normal multiplier despite saved legacy engine");
+        optical.ofr_enabled=true;
+        require(xrfg::autonomous::generation_multiplier(optical)==(factor==4?4:2) && xrfg::autonomous::runtime_multiplier(optical)==2,"AER first stage remains2 while4 selects coherent second stage");
+    }
+    for(int level:{0,1,2,3}) {
+        auto cap=desired;cap.pacing_buffer=level;
+        require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(cap)).pacing_buffer==level,"pacing cap roundtrips per game");
+        auto concurrent=desired;concurrent.overlay_enabled=!desired.overlay_enabled;
+        const auto merged=xrfg::autonomous::merge_changes(concurrent,desired,cap);
+        require(merged.pacing_buffer==level && merged.overlay_enabled==concurrent.overlay_enabled,"pacing cap merges without overwriting concurrent edits");
+    }
+    auto invalid_cap=desired;invalid_cap.pacing_buffer=99;
+    require(xrfg::autonomous::sanitize(invalid_cap).pacing_buffer==3,"oversized cap clamps to High");
+    invalid_cap.pacing_buffer=-1;
+    require(xrfg::autonomous::sanitize(invalid_cap).pacing_buffer==0,"negative cap clamps to None");
     require(desired.benchmark_auto_pick,"automatic benchmark choice defaults on");
     require(!desired.status_json,"status export defaults off");
     auto hidden_counter=desired;hidden_counter.overlay_enabled=false;hidden_counter.overlay_position=5;

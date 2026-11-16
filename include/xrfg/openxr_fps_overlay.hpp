@@ -40,7 +40,7 @@ public:
     using NativeSwapchainCount=std::function<std::optional<unsigned>()>;
     void set_native_swapchain_count_source(NativeSwapchainCount source);
     void set_runtime_acceptance_source(std::function<std::optional<float>(std::int64_t)> source, bool direct=false,
-        std::function<DeliveryCadenceBatch(std::int64_t)> cadence={}) noexcept;
+        std::function<DeliveryCadenceBatch(std::int64_t)> cadence={},bool native_confirmation=false) noexcept;
     using ObservedEndFrame=std::function<XrResult(const XrFrameEndInfo*,const std::shared_ptr<InterfaceDeliveryReceipt>&)>;
     struct PreparedEndFrame { XrResult result{XR_SUCCESS}; ObservedEndFrame submit; };
     using PrepareEndFrame=std::function<PreparedEndFrame()>;

@@ -70,7 +70,7 @@ struct D3D12SynthesisInputs {
         Microsoft::WRL::ComPtr<ID3D12Fence> fence;
         std::uint64_t value{};
     };
-    std::array<Dependency,3> dependencies{}; // A, B (pairs only), XR acquire
+    std::array<Dependency,4> dependencies{}; // A, B, binding acquire, interop reuse
     bool captured{};
     [[nodiscard]] bool ready() const noexcept {
         if (!captured || !dependencies[0].fence || !dependencies[0].value) return false;
@@ -107,6 +107,7 @@ struct D3D12FrameSynthesisTicket {
     // frame - a native DLSS FG pair NGX skipped - so its synthetics show B's
     // camera and go to the runtime with B's pose.
     bool synthetics_in_target_camera{};
+    bool aer_streamed{}; // split AER synthetic receipt may precede current output
     bool aer_retimed{}; // accepted AER output transaction, distinct from provider bypass
     bool held_capture{}; // repeated history sample; valid unchanged peer in AER
     bool used_game_motion{}; // this submitted consumer transaction used exact game guides
@@ -264,7 +265,9 @@ public:
         D3D12FrameGenerationMode generation_mode =
             D3D12FrameGenerationMode::ofxr,
         bool allow_luke_guide_device_alias = false,
-        bool defer_flow_resources = false) noexcept;
+        // Keep this engine's GPU waits off sibling projection engines.
+        bool defer_flow_resources = false,
+        bool isolated_submission_queue = false) noexcept;
 
     // Bit-exact transport of one immutable history capture. This does not
     // seed or dispatch any temporal/optical-flow backend. The history lease is
@@ -322,7 +325,11 @@ public:
         D3D12PresentationTransform presentation_transform = {},
         std::optional<D3D12ExtraSynthetic> extra_synthetic = std::nullopt,
         bool allow_synthetic_camera = false,
-        unsigned ofr_fresh_mask = 3) noexcept;
+        unsigned ofr_fresh_mask = 3,
+        // Caller guarantees this current output is not presented. Only raw
+        // single-fresh-eye AER may omit its write; all ownership stays valid.
+        bool current_output_unused = false,
+        bool split_aer_first = false) noexcept;
 
     // Executes the current output's copy, which submit_pair records but
     // deliberately leaves unsubmitted. The synthetic frame is handed to the

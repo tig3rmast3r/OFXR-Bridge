@@ -1,0 +1,312 @@
+#include "xrfg/independent_pacing.hpp"
+#include <cstdlib>
+#include <cstdio>
+#include <array>
+#include <deque>
+#include <vector>
+#define check(condition) do {if(!(condition)){std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#condition);std::abort();}}while(false)
+void automatic_buffer_tests();
+void source_phase_tests();
+int main(){
+ source_phase_tests();
+ // Captured-shaped startup backlog: older work completes in19ms and the
+ // current job in44ms, followed by25ms/source. Keep exactly the same GPU
+ // service and output schedule. A source budget can still remove19ms of
+ // steady source age by admitting the next render later, not its output.
+ const auto pipeline=[](bool bounded) {
+  std::array<std::array<long long,2>,512> samples{};
+  std::deque<long long> gpu{19,44};long long previous_end=0,tail=44;
+  for(auto& sample:samples) {
+   const auto requested=previous_end;auto start=requested;
+   while(!gpu.empty() && gpu.front()<=start)gpu.pop_front();
+   while(bounded && !xrfg::independent_source_budget_available(gpu.size(),false,0,false)) {
+    start=gpu.front();gpu.pop_front();
+   }
+   const auto rendered=start+25;tail=std::max(tail,rendered)+25;
+   gpu.push_back(tail);sample={tail,tail-requested};previous_end=rendered;
+  }
+  return samples;
+ };
+ const auto old_pipeline=pipeline(false),bounded_pipeline=pipeline(true);
+ for(std::size_t i=0;i<old_pipeline.size();++i) {
+  check(old_pipeline[i][0]==bounded_pipeline[i][0]); // same frames, same delivery times
+  if(i){check(old_pipeline[i][1]==69);check(bounded_pipeline[i][1]==50);}
+ }
+ std::puts("SOURCE_BUDGET_MODEL unchanged25ms output cadence,512 outputs; steady input age69->50ms PASS (model,not game evidence)");
+ for(auto p:{8'333'333LL,11'111'111LL,13'888'889LL})for(unsigned factor:{1U,2U,3U,4U}){
+  xrfg::IndependentSourceClock clock;long long now=1'000'000'000,previous=0;
+  for(int i=0;i<1000;++i){auto at=clock.claim(now,p,factor);if(previous)check(at-previous==p*factor);previous=at;now=at+100;}
+  auto late=clock.claim(previous+p*factor*5+123,p,factor);
+  check(late==previous+p*factor*5+123);
+  check(clock.claim(late+1,p,factor)==late+p*factor);
+  clock.reset();check(clock.claim(late,p,1)==late);
+ }
+ const long long p=11'111'111,base=1'000'000'000;
+ check(xrfg::independent_first_deadline(base,p,base)==base+p);
+ check(xrfg::independent_first_deadline(base+1,p,base)==base+2*p);
+ check(xrfg::independent_first_deadline(base+3*p+1,p,base+8*p)==base+5*p);
+ check(!xrfg::independent_expired(base+p,base+p,0,p));
+ check(!xrfg::independent_expired(base+p,base+p+180'000,0,p));
+ check(xrfg::independent_expired(base+p,base+2*p,0,p));
+ check(!xrfg::independent_expired(base+p,base+2*p,p,p));
+ check(xrfg::independent_expired(base+p,base+3*p,p,p));
+ check(xrfg::independent_window_end(base,base+3*p,p)==base+p);
+ check(xrfg::independent_window_end(base,base+p/2,p)==base+p/2);
+ check(xrfg::independent_window_end(base,0,p)==base+p);
+ check(xrfg::independent_window_end(base,base-p,p)==base-p);
+ xrfg::IndependentDeliveryReserve high;high.set_limit(3*p);
+ high.observe(base+3*p+p*3/5,base+p,p);high.observe(base+3*p+p*3/5,base+p,p);
+ check(high.reserve()==3*p);
+ // Captured DetNoir pattern: late S (~2.8P) alternates with B (~1.8P).
+ // Low must earn its ONE period, even though it cannot cover every miss.
+ // The selected limit is a ceiling, never a loading/stall classifier.
+ for(auto physical:{8'333'333LL,11'111'111LL,13'888'889LL})for(unsigned cap=0;cap<=3;++cap) {
+  xrfg::IndependentDeliveryReserve captured;captured.set_limit(cap*physical);
+  for(unsigned pair=0;pair<32;++pair) {
+   for(auto late:{physical*28/10,physical*18/10}) {
+    captured.observe(base+late,base+captured.reserve(),physical);
+    check(captured.reserve()<=cap*physical);
+   }
+   check(captured.reserve()==cap*physical);
+  }
+  check(captured.take_refill()==cap*physical && !captured.take_refill());
+  captured.observe(base+captured.reserve()+9*physical,base+captured.reserve(),physical);
+  check(captured.reserve()==cap*physical && !captured.take_refill()); // pause holds learned margin
+  captured.set_limit(0);
+  for(int i=0;i<64;++i)captured.observe(base+physical*3,base,physical);
+  check(captured.reserve()==0 && !captured.take_refill());
+ }
+ for(unsigned queued=0;queued<4;++queued)for(bool submit:{false,true})
+  for(unsigned ready_queue=0;ready_queue<4;++ready_queue)for(bool completing:{false,true})
+   check(xrfg::independent_source_budget_available(queued,submit,ready_queue,completing)==
+       (queued+unsigned(submit)+ready_queue+unsigned(completing)<2));
+ xrfg::IndependentSourceClock clock;check(clock.claim(base,p,2)==base);
+ clock.defer_to(base+6*p);check(clock.claim(base+6*p+1,p,2)==base+8*p);
+ check(xrfg::independent_recovery_delay(2,2,p,0)==0);
+ check(xrfg::independent_recovery_delay(4,2,p,0)==2*p);
+ check(xrfg::independent_recovery_delay(8,2,p,0)==6*p);
+ check(xrfg::independent_recovery_delay(3,1,p,p/2)==2*p-p/2);
+ // Owner packet12846 was prepared and discarded BEFORE its due timestamp.
+ check(!xrfg::independent_expired(166666720271833LL,166666715211900LL,0,p));
+ for(auto physical:{8'333'333LL,11'111'111LL,13'888'889LL}) {
+  xrfg::IndependentDeliveryClock grid;
+  check(grid.claim(base,physical)==base);
+  grid.finish(base); // first native handoff seeds the phase only once
+  long long last=base;
+  for(int i=1;i<=3000;++i) {
+   const auto target=grid.claim(last+1,physical);
+   check(target==base+i*physical);
+   const auto entry=grid.entry(last+1);
+   check(entry==target-grid.lead() && grid.lead()==300'000);
+   const auto overhead=150'000+(i%7)*30'000; // measured-scale Wait/Begin/Release cost
+   last=entry+overhead;
+   grid.finish(last);
+  }
+  check(grid.target()==base+3001*physical); // no accumulated +0.2ms/frame
+  const auto delayed=last+7*physical;
+  auto recovered=grid.claim(delayed,physical);
+  check(recovered>=delayed-physical/2 && recovered<=delayed+physical/2);
+  grid.finish(delayed);
+  check(grid.claim(delayed+1,physical)>=delayed+physical/2); // no short catch-up burst
+ }
+ xrfg::IndependentDeliveryReserve reserve;reserve.set_limit(p);
+ for(int i=0;i<256;++i)reserve.observe(base,base+p,p);
+ check(!reserve.reserve() && !reserve.take_refill());
+ for(int i=0;i<64;++i)reserve.observe(base+p+180'000,base+p,p);
+ check(!reserve.reserve()); // same-slot scheduling jitter is not a miss
+ reserve.observe(base+2*p+180'000,base+p,p);check(!reserve.reserve());
+ reserve.observe(base+2*p+180'000,base+p,p);check(reserve.reserve()==p);
+ check(reserve.take_refill()==p && !reserve.take_refill());
+ const auto before=reserve.reserve();for(int i=0;i<128;++i)reserve.observe(base,base+p,p);
+ check(reserve.reserve()==before); // observations alone cannot lower allowance
+ for(int i=0;i<256;++i)reserve.observe(base+2*p,base+p,p);
+ check(reserve.reserve()<=p);
+ const auto held=reserve.reserve();reserve.observe(base+10*p,base+p,p);check(reserve.reserve()==held);
+ for(int frames=0;frames<=3;++frames) {
+  xrfg::IndependentDeliveryReserve capped;capped.set_limit(frames*p);
+  for(int i=0;i<100;++i){capped.observe(base+2*p,base+p,p);check(capped.reserve()<=frames*p);}
+  check(capped.reserve()==frames*p);
+  check(capped.take_refill()<=frames*p && !capped.take_refill());
+  capped.set_limit(p);check(capped.reserve()<=p);
+  capped.set_limit(0);check(!capped.reserve() && !capped.take_refill());
+  for(int i=0;i<64;++i)capped.observe(base+2*p,base+p,p);
+  check(!capped.reserve() && !capped.take_refill());
+  capped.set_limit(3*p);capped.observe(base+2*p,base+p,p);capped.observe(base+2*p,base+p,p);
+  capped.set_limit(0);check(!capped.take_refill());
+ }
+ automatic_buffer_tests();
+ for(unsigned factor=1;factor<=4;++factor)for(unsigned extra=0;extra<=4;++extra)
+  for(unsigned ready=0;ready<=16;++ready)for(unsigned native=0;native<=8;++native)
+   check(xrfg::independent_delivery_budget_available(0,ready,native,factor,extra*p,p)==
+       (ready+native+factor<=2*factor+extra));
+ check(!xrfg::independent_delivery_budget_available(0,0,2,1,0,p));
+ check(xrfg::independent_delivery_budget_available(0,0,1,1,0,p));
+ check(xrfg::independent_delivery_budget_available(0,0,2,1,p,p));
+ check(!xrfg::independent_delivery_budget_available(1,2,1,2,0,p));
+ std::puts("DELIVERY_BUDGET 1X..4X: GPU batches plus ready/native ownership; two-batch baseline and bounded earned credits PASS");
+ std::puts("Independent source clock:72/90/120Hz,1X..4X,late return/no rounding skip/no burst/reset PASS");
+}
+struct RecoverySample {long long at{},age{};};
+std::vector<RecoverySample> transient_queue_model(long long p,bool recover) {
+ struct Frame {long long ready{},origin{};unsigned id{};};
+ constexpr long long base=1'000'000'000;
+ std::deque<Frame> queue;
+ for(unsigned n=0;n<4;++n)queue.push_back({base-p/2,base-p,n});
+ unsigned produced=4,delivered=0,idle=0,pauses=0;
+ long long residence=0,native=base,previous_source=0;
+ xrfg::IndependentSourceClock clock;xrfg::IndependentSourcePhase phase;
+ auto source=clock.claim(base,p,2);
+ std::vector<RecoverySample> out;
+ unsigned slot=0;
+ const auto consume=[&] {
+  // Two finite missed native appointments leave queued age, not a permanent
+  // extra generator cost. Afterwards the runtime has its original capacity.
+  if(slot==static_cast<unsigned>(2'000'000'000/p) || slot==static_cast<unsigned>(4'000'000'000/p)) {
+   ++idle;++pauses;
+  } else if(!queue.empty() && queue.front().ready<=native) {
+   auto frame=queue.front();queue.pop_front();check(frame.id==delivered++);
+   const auto age=native-frame.ready;
+   residence=residence?residence+(age-residence)/16:age;
+   out.push_back({native-base,native-frame.origin});
+  } else ++idle;
+  ++slot;native+=p;
+ };
+ while(native<base+12'000'000'000LL) {
+  if(source<=native) {
+   unsigned ready=0;for(const auto& frame:queue)if(frame.ready<=source)++ready;
+   const auto step=recover?phase.observe(source,p,2,ready,residence,delivered,0,idle):0;
+   check(step>=0 && step<=200'000 && step<=2*p*8/1000+2000);
+   clock.postpone(step);const auto actual=source+step;
+   if(previous_source)check(actual-previous_source>=2*p); // never a producer catch-up
+   previous_source=actual;
+   while(native<actual)consume();
+   for(unsigned n=0;n<2;++n)queue.push_back({actual+p/2,actual,produced++});
+   source=clock.claim(actual+100,p,2);
+  }else consume();
+ }
+ check(pauses==2 && idle==2); // all other native appointments deliver fresh work
+ while(!queue.empty())consume();
+ check(delivered==produced); // no lost/invented/reordered frame IDs
+ return out;
+}
+void source_phase_tests() {
+ for(const auto p:{8'333'333LL,11'111'111LL,13'888'889LL}) {
+  const auto old=transient_queue_model(p,false),recovered=transient_queue_model(p,true);
+  const auto age=[](const auto& values,long long first,long long last) {
+   std::vector<long long> window;for(auto sample:values)if(sample.at>=first && sample.at<last)window.push_back(sample.age);
+   check(!window.empty());std::sort(window.begin(),window.end());return window[window.size()/2];
+  };
+  const auto old_late=age(old,10'000'000'000LL,11'000'000'000LL);
+  const auto recovered_late=age(recovered,10'000'000'000LL,11'000'000'000LL);
+  std::printf("TRANSIENT_QUEUE Hz=%.1f old=%.3fms recovered=%.3fms improvement=%.3fms;every output ID/native appointment retained\n",1e9/p,old_late/1e6,recovered_late/1e6,(old_late-recovered_late)/1e6);
+  check(old_late-recovered_late>=2*p);
+  check(recovered_late<3*p);
+  xrfg::IndependentSourcePhase phase;
+  constexpr long long base=1'000'000'000;
+  const auto gap_interval=static_cast<unsigned>(1'000'000'000LL/(2*p))+1;
+  long long shift=0;
+  for(unsigned n=0;n<1200;++n) {
+   // Isolated zero-ready and idle samples every~1s used to reset the whole
+   // 2s qualification. Native progress is otherwise full rate.
+   const bool gap=n%gap_interval==0;
+   const auto step=phase.observe(base+n*2*p,p,2,gap?0:2,3*p,2*n-n/gap_interval,0,n/gap_interval);
+   check(step>=0 && step<=200'000);
+   if(gap)check(!step);
+   shift+=step;
+  }
+  check(phase.trimmed()==shift && shift>2*p); // no lifetime one-P lockout
+  const auto before=phase.trimmed();
+  check(!phase.observe(base+2500*p,p,2,2,3*p,2402,0,42)); // pause invalidates stale qualification
+  check(phase.trimmed()==before);
+  for(unsigned divisor:{1U,3U,4U})check(!phase.observe(base+2600*p,p,divisor,4,4*p,2404,0,42));
+  check(!phase.trimmed());
+  for(unsigned ready:{0U,1U}) {
+   phase.reset();
+   for(unsigned n=0;n<1200;++n)check(!phase.observe(base+n*2*p,p,2,ready,3*p,2*n,0,0));
+  }
+  phase.reset();
+  for(unsigned n=0;n<1200;++n)check(!phase.observe(base+n*2*p,p,2,2,3*p,2*n,n/8,0));
+  phase.reset();
+  for(unsigned n=0;n<1200;++n)check(!phase.observe(base+n*2*p,p,2,2,p/2+2'000'000,2*n,0,0));
+ }
+ std::puts("SOURCE_PHASE_RECOVERY 72/90/120Hz:repeated transient queues drain with no extra native misses or lost IDs;500ms evidence,8ms/s,200us steps,two-ready/current-loss/pause/overload veto PASS (model,not game)");
+}
+void automatic_buffer_tests() {
+ check(xrfg::kIndependentMaximumReserveFrames==4);
+ for(auto p:{8'333'333LL,11'111'111LL,13'888'889LL}) {
+  const long long start=1'000'000'000;
+  xrfg::IndependentDeliveryReserve automatic;automatic.set_limit(3*p);
+  automatic.observe(start+2*p,start,p);check(!automatic.reserve());
+  automatic.observe(start+2*p,start,p);check(automatic.reserve()==2*p);
+  automatic.observe(start+5*p,start+2*p,p);
+  automatic.observe(start+5*p,start+2*p,p);check(automatic.reserve()==3*p);
+  automatic.take_refill();
+  // Provider failure, priming and idle/replay produce no successful receipt:
+  // neither FPS equality nor elapsed wall time alone authorizes a reduction.
+  for(int i=0;i<1000;++i)automatic.observe(start,start+3*p,p);
+  check(automatic.reserve()==3*p);
+  long long at=start,first_reduction=0;
+  for(int i=0;i<120;++i) {
+   at+=p;const auto before=automatic.reserve();
+   automatic.delivered(at-p,at+p,at,p);
+   const auto change=before-automatic.reserve();
+   check(change>=0 && change<=200'000 && change<=p*8/1000);
+   if(change && !first_reduction)first_reduction=at;
+   if(at-start<500'000'000LL)check(!change);
+  }
+  check(first_reduction>=start+500'000'000LL && first_reduction<start+750'000'000LL && automatic.reserve()>0 && automatic.reserve()<3*p);
+  check(3*p-automatic.reserve()<=(at-start-500'000'000LL)*8/1000+200'000);
+  // Losing spare readiness, or a slow native presenter, immediately vetoes
+  // further shrinkage even though images still count as delivered.
+  const auto held=automatic.reserve();
+  for(int i=0;i<2500;++i) {
+   at+=p;automatic.delivered(at,at,at,p);
+  }
+  check(automatic.reserve()==held);
+  for(int i=0;i<2500;++i) {
+   at+=p;automatic.delivered(at-p,at,at+p/2,p);
+  }
+  check(automatic.reserve()==held);
+  // New deadline loss cancels a previously qualified downward ramp.
+  automatic.observe(at+p,at,p);
+  for(int i=0;i<10;++i){at+=p;automatic.delivered(at-p,at+p,at,p);}
+  check(automatic.reserve()==held);
+  // A loading pause keeps the last good margin. It cannot cause a large
+  // latency cut, and the first post-pause delivery starts a fresh hold.
+  automatic.observe(at+20*p,at,p);check(automatic.reserve()==held);
+  at+=20'000'000'000LL;automatic.delivered(at-p,at+p,at,p);
+  check(automatic.reserve()==held);
+  automatic.observe(at+2*p,at,p);automatic.observe(at+2*p,at,p);
+  check(automatic.reserve()<=3*p);
+  xrfg::IndependentDeliveryReserve four;four.set_limit(xrfg::kIndependentMaximumReserveFrames*p);
+  check(!four.reserve());
+  four.observe(start+3*p,start,p);four.observe(start+3*p,start,p);
+  check(four.reserve()==3*p);
+  four.observe(start+4*p,start+four.reserve(),p);
+  four.observe(start+4*p,start+four.reserve(),p);
+  check(four.reserve()==4*p && four.take_refill()==4*p);
+  for(int n=0;n<10;++n)four.observe(start+8*p,start+four.reserve(),p);
+  check(four.reserve()==4*p);
+  // A fast recovery may approach an already-queued frame's expiry boundary,
+  // but must stop before invalidating that frame. Margin alone cannot remove
+  // the queue's age: a changed source phase has to recover the rest.
+  xrfg::IndependentDeliveryReserve queued;queued.set_limit(4*p);
+  queued.observe(start+3*p,start,p);queued.observe(start+3*p,start,p);
+  check(queued.reserve()==3*p);queued.take_refill();
+  long long now=start;
+  for(int n=0;n<2000;++n) {
+   now+=p;
+   const auto due=now-3*p;
+   queued.delivered(now-p,due+queued.reserve(),now,p);
+   check(!xrfg::independent_expired(due,now,queued.reserve(),p));
+  }
+  check(queued.reserve()<3*p && queued.reserve()>3*p-p/2);
+  // Half-rate output is not evidence for reducing latency even if each
+  // delivered frame was ready early. Idle time cannot qualify recovery.
+  xrfg::IndependentDeliveryReserve half;half.set_limit(3*p);
+  half.observe(start+3*p,start,p);half.observe(start+3*p,start,p);
+  for(int n=0;n<2000;++n){now+=2*p;half.delivered(now-p,now+p,now,p);}
+  check(half.reserve()==3*p);
+ }
+ std::puts("AUTO_BUFFER 72/90/120Hz: deadline rise/cap3P,successful receipts only,500ms evidence,8ms-per-second slew,late-presenter veto,pause hold PASS");
+}

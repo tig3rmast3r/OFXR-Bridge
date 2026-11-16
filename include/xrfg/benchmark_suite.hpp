@@ -14,6 +14,10 @@ inline constexpr std::uint64_t kBenchmarkSettleMs=2500;
 inline constexpr std::uint64_t kBenchmarkMeasureMs=5000;
 inline constexpr std::uint64_t kBenchmarkDurationMs=kBenchmarkSettleMs+kBenchmarkMeasureMs;
 inline constexpr std::uint64_t kBenchmarkMemoryRequestMs=kBenchmarkDurationMs-500;
+inline constexpr std::uint64_t benchmark_measure_ms(bool independent) noexcept {return independent?7500:kBenchmarkMeasureMs;}
+inline constexpr std::uint64_t benchmark_duration_ms(bool independent) noexcept {return kBenchmarkSettleMs+benchmark_measure_ms(independent);}
+inline constexpr std::uint64_t benchmark_memory_request_ms(bool independent) noexcept {return benchmark_duration_ms(independent)-500;}
+
 // A missing frame heartbeat is not proof that the game process exited.
 // RIFE cold startup has a 60s worker handshake; other route rebuilds get 30s.
 inline bool benchmark_reconfiguration_grace(const RuntimeStatus& runtime,
@@ -85,20 +89,56 @@ inline bool benchmark_afw_quality_allowed(int shading,std::uint32_t eye_long_sid
     (void)eye_long_side;
     return shading==0 || shading==4; // both supported AFW options at every resolution;4x4 retired
 }
+inline std::vector<BenchmarkStep> benchmark_independent_plan(bool full,bool luke,int quality,bool aer) {
+    std::vector<BenchmarkStep> steps;
+    const bool reconstruct=luke && !aer;
+    const auto add=[&](int method,int backend,int factor,const std::string& name,bool disabled,int cheap) {
+        BenchmarkStep step{};step.generation=method;step.backend=backend;step.rife_multiplier=factor;
+        step.rife_quality=quality;step.disabled=disabled;
+        step.label="Independent "+(reconstruct?std::string(cheap?"OSR faster / ":"OSR / "):std::string(aer?"AER / ":""))+name;
+        if(!disabled)step.label+=" "+std::to_string(factor)+"X";
+        if(reconstruct){step.afw=3;step.shading=0;step.osr=2;step.osr_lower_quality=cheap;}
+        if(aer)step.afw=0; // raw AER including the FG-off reference
+        steps.push_back(std::move(step));
+    };
+    const int variants=reconstruct?2:1;
+    for(int cheap=0;cheap<variants;++cheap)add(0,1,2,reconstruct?"only":"disabled",true,cheap);
+    // One NVIDIA optical engine per method. Standalone FidelityFX is excluded.
+    for(int factor:{2,3,4}) {
+        if(aer && factor==3)continue;
+        for(int cheap=0;cheap<variants;++cheap) {
+            add(0,1,factor,"OFXR",false,cheap);
+            add(4,2,factor,"RIFE "+std::string(benchmark_rife_quality_label(quality)),false,cheap);
+            if(full && !reconstruct){add(3,1,factor,"Hybrid NVIDIA",false,cheap);add(2,0,factor,"DLSS-G",false,cheap);}
+        }
+        if(full && !reconstruct && (factor==2 || aer))add(1,0,factor,"FSR",false,0);
+    }
+    return steps;
+}
+inline void benchmark_limit_independent(std::vector<BenchmarkStep>& steps,std::size_t next,
+    unsigned rife_max_multiplier,unsigned dlssg_max_multiplier,bool aer) {
+    const auto begin=steps.begin()+std::min(next,steps.size());
+    steps.erase(std::remove_if(begin,steps.end(),[&](const auto& step) {
+        return (step.generation==4 && unsigned(step.rife_multiplier)>rife_max_multiplier) ||
+            (!aer && step.generation==2 && dlssg_max_multiplier && unsigned(step.rife_multiplier)>dlssg_max_multiplier);
+    }),steps.end());
+}
 inline std::vector<BenchmarkStep> benchmark_execution_plan(bool full,bool luke,bool steamvr,bool advanced,
-    std::uint32_t eye_long_side,unsigned rife_max_multiplier=4,int rife_quality=18) {
-    auto steps=benchmark_plan(full,luke,steamvr,advanced,rife_quality);
-    std::erase_if(steps,[&](const auto& step){return step.generation==4 && unsigned(step.rife_multiplier)>rife_max_multiplier;});
+    std::uint32_t eye_long_side,unsigned rife_max_multiplier=4,int rife_quality=18,bool independent=false,bool aer=false,
+    unsigned dlssg_max_multiplier=0) {
+    auto steps=independent?benchmark_independent_plan(full,luke,rife_quality,aer):benchmark_plan(full,luke,steamvr,advanced,rife_quality);
+    if(independent)benchmark_limit_independent(steps,0,rife_max_multiplier,dlssg_max_multiplier,aer);
+    else std::erase_if(steps,[&](const auto& step){return step.generation==4 && unsigned(step.rife_multiplier)>rife_max_multiplier;});
     if(luke)std::erase_if(steps,[&](const auto& step) {
-        return !benchmark_afw_quality_allowed(step.shading,eye_long_side);
+        return !(independent && aer) && !benchmark_afw_quality_allowed(step.shading,eye_long_side);
     });
     return steps;
 }
-inline std::vector<BenchmarkStep> benchmark_export_plan(bool full,bool luke,bool steamvr,bool advanced=false,int rife_quality=18) {
-    auto steps=benchmark_plan(full,luke,steamvr,advanced,rife_quality);
-    return steps;
+inline std::vector<BenchmarkStep> benchmark_export_plan(bool full,bool luke,bool steamvr,bool advanced=false,int rife_quality=18,bool independent=false,bool aer=false) {
+    return independent?benchmark_independent_plan(full,luke,rife_quality,aer):benchmark_plan(full,luke,steamvr,advanced,rife_quality);
 }
 inline Settings benchmark_settings(Settings saved,const BenchmarkStep& step) {
+    const auto original=saved;
     select_generation(saved,step.generation,step.backend);
     if(step.generation==3)saved.hybrid_backend=step.backend;
     saved.enabled=!step.disabled;
@@ -106,12 +146,17 @@ inline Settings benchmark_settings(Settings saved,const BenchmarkStep& step) {
     if(step.generation==4){saved.rife_model=3;saved.rife_resolution=step.rife_quality;saved.rife_multiplier=step.rife_multiplier;}
     saved.separate_synthesis=step.a;saved.lower_vram=step.b;
     saved.triple_frame_gen=step.triple;saved.prefer_fps=step.prefer;
+    if(saved.independent_pacing && step.generation!=4){saved.frame_multiplier=step.rife_multiplier;saved.triple_frame_gen=step.rife_multiplier>=3;}
     if(step.pacing>=0)saved.pacing_mode=step.pacing;
     if(step.buffer>=0)saved.increase_buffer=step.buffer!=0;
     if(step.afw>=0)saved.afw_mode=step.afw;
     if(saved.afw_mode!=0)saved.afw_shading_rate=step.shading>=0?step.shading:0;
     if(step.osr>=0)saved.luke_osr=step.osr;
     if(step.osr_lower_quality>=0)saved.luke_osr_lower_quality=step.osr_lower_quality!=0;
+    if(original.independent_pacing) {
+        saved.pacing_mode=original.pacing_mode;saved.increase_buffer=original.increase_buffer;
+        saved.lower_vram=original.lower_vram;saved.separate_synthesis=original.separate_synthesis;
+    }
     return sanitize(saved);
 }
 inline double benchmark_median(std::vector<double> values) {
@@ -324,6 +369,20 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         if(!best || order(score)<order(scores[*best]))best=i;
     }
     return best;
+}
+// Independent compares every candidate in a multiplier tier before deciding
+// whether the next tier is needed. Plain FG-off is only a reference; confirmed
+// reconstruction-only is a valid way to reach refresh without generation.
+inline void benchmark_prune_independent(std::vector<BenchmarkStep>& plan,std::size_t next,
+    const std::vector<BenchmarkScore>& scores) {
+    if(next==0 || next>=plan.size())return;
+    const auto factor=plan[next].rife_multiplier;
+    if(factor<=2 || plan[next-1].rife_multiplier==factor)return;
+    for(std::size_t i=0;i<std::min({next,scores.size(),plan.size()});++i) {
+        if((!plan[i].disabled || scores[i].afw_only) && benchmark_at_refresh(scores[i])) {
+            plan.erase(plan.begin()+next,plan.end());return;
+        }
+    }
 }
 // Cross a multiplier boundary only after every candidate in the prior tier.
 // A single 90FPS median with a deep drop does not suppress the next tier.

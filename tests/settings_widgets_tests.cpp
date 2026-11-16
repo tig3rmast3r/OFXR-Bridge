@@ -88,7 +88,7 @@ struct Context {
     // model stays a dropdown, reached through its popup.
     void choose(const char* label, int index, const char* item, const char* child = "/Generation_") {
         ImGui::SetCurrentContext(context);
-        if (std::strcmp(label, "RIFE model") != 0) {
+        if (std::strcmp(label, "RIFE model") != 0 && std::strcmp(label,"Pacing buffer") != 0) {
             for (auto* window : context->Windows) {
                 if (std::strstr(window->Name, child)) {
                     ImGui::ActivateItemByID(ImHashStr(item, 0, window->GetID(label)));
@@ -99,7 +99,7 @@ struct Context {
             }
             throw std::runtime_error("expected settings child was not rendered");
         }
-        activate(child, "##RIFE model");
+        activate(child, std::strcmp(label,"Pacing buffer")==0 ? "##Pacing buffer" : "##RIFE model");
         draw();
         draw();
         ImGui::SetCurrentContext(context);
@@ -730,6 +730,136 @@ void desktop_header_is_not_a_headset_control() {
     require(called==1,"desktop may render its profile header");
 }
 
+void independent_benchmark_widgets() {
+    std::filesystem::create_directories(configuration_path().parent_path());
+    require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable Independent widget fixture");
+    const auto original=snapshot().desired;
+    for(bool compact:{false,true}) {
+        auto settings=original;settings.independent_pacing=true;settings.ofr_enabled=false;
+        settings.afw_only=false;settings.rife_resolution=36;settings.benchmark_auto_pick=false;
+        require(request(settings),"Independent benchmark widget setup");settings=snapshot().desired;
+        RuntimeStatus runtime{};runtime.process_id=GetCurrentProcessId();runtime.sessions=1;
+        runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;runtime.pacing_mode=kIndependentPacingMode;
+        runtime.luke_detected=true;runtime.rife_max_multiplier=4;runtime.dlssg_max_multiplier=4;report_runtime(runtime);
+        Context view({compact?1024.f:690.f,1400},compact);view.draw();view.select_tab("Tests");view.draw(true);
+        require(view.rendered_text.find("Up to 7 tests")!=std::string::npos && view.rendered_text.find("Up to 14 tests")!=std::string::npos,"desktop/VR show Independent counts rather than legacy35/59/42");
+        view.activate("/Tests_","###Tests without vectors");view.draw();view.draw();
+        require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==7,"Independent without-vectors button starts its actual compact plan");
+        view.activate("/Tests_","###Stop tests");view.draw();view.draw();
+        require(snapshot().desired==settings,"Independent widget Stop restores exact preferences");
+        runtime.dlssg_max_multiplier=2;report_runtime(runtime);view.draw(true);
+        require(view.rendered_text.find("Up to 12 tests")!=std::string::npos,"known DLSS-G cap removes duplicate stereo modes from displayed count");
+        settings.ofr_enabled=true;require(request(settings),"raw AER benchmark widgets");report_runtime(runtime);view.draw();view.draw(true);
+        require(view.rendered_text.find("Up to 5 tests")!=std::string::npos && view.rendered_text.find("Up to 11 tests")!=std::string::npos,"AER shows its two/four-only compact matrices");
+        view.activate("/Tests_","###Complete tests");view.draw();view.draw();
+        require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==11 && snapshot().desired.afw_mode==0,"AER Complete starts even in Luke and keeps reconstruction disabled");
+        view.activate("/Tests_","###Stop tests");view.draw();view.draw();
+        view.activate("/Tests_","How tests work");view.draw();view.draw(true);
+        require(view.rendered_text.find("10 seconds per configuration")!=std::string::npos && view.rendered_text.find("All 2X candidates finish first")!=std::string::npos,"desktop/VR describe actual Independent duration and tier gating");
+        require(view.rendered_text.find("Framework and Director:")==std::string::npos && view.rendered_text.find("7.5 seconds per configuration")==std::string::npos,"Independent help omits legacy plan/timing");
+    }
+    require(request(original),"restore after Independent benchmark widgets");
+}
+
+void independent_widgets() {
+    const auto saved=snapshot().desired;
+    for(bool compact:{false,true}) {
+        auto settings=saved;settings.enabled=false;settings.independent_pacing=false;
+        settings.frame_generation=0;settings.backend=0;settings.pacing_mode=1;
+        settings.increase_buffer=true;settings.lower_vram=settings.separate_synthesis=1;
+        require(request(settings),"independent UI setup");
+        Context view(ImVec2(compact?1024:690,1400),compact);view.draw();view.draw(true);
+        require(view.rendered_text.find("Independent pacing")!=std::string::npos,"startup switch is visible");
+        view.activate("/Generation_","Independent pacing");view.draw();view.draw();
+        require(snapshot().desired.independent_pacing,"startup switch works with FG disabled");
+        view.draw(true);
+        require(view.rendered_text.find("Automatic pacing buffer")!=std::string::npos &&
+            view.rendered_text.find("Pacing buffer")==std::string::npos,
+            "automatic buffer replaces manual dropdown with FG disabled");
+        auto enabled=snapshot().desired;enabled.enabled=true;require(request(enabled),"enable clean route");view.draw();view.draw(true);
+        require(view.rendered_text.find("restart the game")!=std::string::npos,"startup requirement is explicit");
+        require(view.rendered_text.find("Automatic pacing buffer")!=std::string::npos &&
+            view.rendered_text.find("Pacing buffer")==std::string::npos,
+            "automatic buffer replaces manual dropdown on desktop and headset");
+        require(view.rendered_text.find("FidelityFX")!=std::string::npos &&
+            view.rendered_text.find("DLSS-G")!=std::string::npos && view.rendered_text.find("FSR 3.1")!=std::string::npos,
+            "Independent exposes all generators without legacy pacing routes: "+view.rendered_text);
+        const auto runtime_before=snapshot().runtime;
+        auto runtime=runtime_before;runtime.sessions=1;runtime.pacing_mode=kIndependentPacingMode;
+        runtime.pacing_expired=7;runtime.pacing_allowance_ns=11'111'111;report_runtime(runtime);
+        view.draw();view.draw(true);
+        require(view.rendered_text.find("Expired deliveries: 7")!=std::string::npos &&
+            view.rendered_text.find("Extra allowance: 11.1 ms")!=std::string::npos,
+            "actual native allowance and expired delivery count are visible");
+        report_runtime(runtime_before);view.draw();
+        const auto before=snapshot().desired;
+        view.draw(true);
+        require(view.rendered_text.find("Framework")==std::string::npos &&
+            view.rendered_text.find("Director")==std::string::npos &&
+            view.rendered_text.find("Increase buffer")==std::string::npos &&
+            view.rendered_text.find("Fast mode")==std::string::npos,"Independent hides old pacing, buffer and Fast widgets");
+        require(snapshot().desired==before,"hidden legacy controls preserve preferences");
+        view.activate("/Generation_","Independent pacing");view.draw();view.draw(true);
+        require(view.rendered_text.find("Framework")!=std::string::npos && view.rendered_text.find("Increase buffer")!=std::string::npos && view.rendered_text.find("Fast mode")!=std::string::npos,"legacy controls return after deselecting Independent");
+        require(snapshot().desired.pacing_mode==before.pacing_mode && snapshot().desired.increase_buffer==before.increase_buffer && snapshot().desired.lower_vram==before.lower_vram,"legacy preferences restored unchanged");
+        view.activate("/Generation_","Independent pacing");view.draw();view.draw();
+        for(int backend:{1,2}) {
+            auto hybrid=snapshot().desired;select_generation(hybrid,3,0);hybrid.hybrid_backend=backend;
+            require(request(hybrid),"Independent Hybrid UI setup");view.draw();view.draw(true);
+            require(view.rendered_text.find("NVIDIA")!=std::string::npos && view.rendered_text.find("0.2.1")==std::string::npos && view.rendered_text.find("0.3.0")==std::string::npos,"Independent Hybrid has one NVIDIA engine, without legacy versions");
+            view.choose("Optical flow engine",0,"FidelityFX");
+            require(snapshot().desired.hybrid_backend==0,"Hybrid Fidelity selection works");
+            view.choose("Optical flow engine",1,"NVIDIA");
+            require(snapshot().desired.hybrid_backend==1,"Hybrid single NVIDIA selection works");
+        }
+        view.select_tab("Reconstruction");view.draw(true);
+        require(view.rendered_text.find("reconstruction is bypassed")==std::string::npos && view.rendered_text.find("Frame Reconstruction only")!=std::string::npos,"Independent exposes restored reconstruction controls");
+        view.select_tab("Neural Rendering");view.draw(true);
+        require(view.rendered_text.find("Strength")!=std::string::npos &&
+            view.rendered_text.find("Neural Rendering is bypassed")==std::string::npos,
+            "independent route exposes ordinary NR controls");
+        for(bool generation:{false,true}) {
+            auto settings=snapshot().desired;settings.enabled=generation;settings.nr_enabled=false;
+            require(request(settings),"independent NR UI state");view.draw();view.draw(true);
+            const auto before_nr=snapshot().desired;
+            view.activate("/Neural_","Enable Neural Rendering");view.draw();view.draw();
+            auto expected=before_nr;expected.nr_enabled=true;
+            require(snapshot().desired==expected,"independent NR checkbox changes only NR, with FG on or off");
+            view.activate("/Neural_","Enable Neural Rendering");view.draw();view.draw();
+            require(snapshot().desired==before_nr,"independent NR OFF preserves cadence/FG settings");
+        }
+        require(parse_settings(serialize_settings(snapshot().desired,true)).independent_pacing,"startup switch persists");
+        settings=snapshot().desired;settings.enabled=true;settings.advanced_mode=false;settings.ofr_enabled=false;
+        settings.frame_generation=0;settings.backend=3;settings.frame_multiplier=2;
+        require(request(settings),"normal optical multipliers with stale hidden backend");
+        view.select_tab("Frame generation");view.draw();view.draw(true);
+        require(view.rendered_text.find("FidelityFX")!=std::string::npos,"Independent generator choices rendered");
+        for(int factor:{3,4,2}) {
+            view.choose("Multiplier",factor-2,(std::to_string(factor)+"X").c_str());
+            require(snapshot().desired.frame_multiplier==factor && generation_multiplier(snapshot().desired)==factor,
+                "Independent OFXR stereo multiplier reaches production settings wanted="+std::to_string(factor)+" actual="+std::to_string(snapshot().desired.frame_multiplier));
+        }
+        for(int method:{0,4}) {
+            settings=snapshot().desired;settings.frame_generation=method;settings.ofr_enabled=true;
+            require(request(settings),"Independent AER multiplier setup");view.draw();view.draw(true);
+            for(int factor:{4,2}) {
+                view.choose("AER multiplier",factor==4?1:0,factor==4?"4X":"2X");
+                require(generation_multiplier(snapshot().desired)==factor && runtime_multiplier(snapshot().desired)==2,
+                    "AER has two/four output cadence while first reconstruction stays 2X");
+            }
+        }
+        view.select_tab("Logging");view.draw();view.draw(true);
+        require(view.rendered_text.find("V1103 acquire fix")!=std::string::npos,"temporary A/B visible without Advanced on desktop and headset");
+        const auto before_ab=snapshot().desired;
+        view.activate("/Logging_","V1103 acquire fix");view.draw();view.draw();
+        auto ab=before_ab;ab.independent_acquire_fix=!ab.independent_acquire_fix;
+        require(snapshot().desired==ab,"A/B changes only the acquire flag");
+        view.activate("/Logging_","V1103 acquire fix");view.draw();view.draw();
+        require(snapshot().desired==before_ab,"A/B restores the exact saved settings");
+    }
+    require(request(saved),"restore after independent UI test");
+}
+
 void aer_framegen_widgets() {
     auto saved=snapshot().desired;auto settings=saved;
     settings.frame_generation=4;settings.enabled=true;settings.advanced_mode=false;
@@ -867,7 +997,9 @@ int main(int argc, char** argv) {
             L"-" + std::to_wstring(GetTickCount64()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", profile.c_str());
     try {
-        if (argc == 2 && std::strcmp(argv[1], "--radeon-routes") == 0) radeon_routes();
+        if (argc == 2 && std::strcmp(argv[1], "--independent-bench") == 0) independent_benchmark_widgets();
+        else if (argc == 2 && std::strcmp(argv[1], "--independent") == 0) independent_widgets();
+        else if (argc == 2 && std::strcmp(argv[1], "--radeon-routes") == 0) radeon_routes();
         else if (argc == 2 && std::strcmp(argv[1], "--aer-framegen") == 0) {aer_framegen_widgets();aer_native_guide_widgets();}
         else if (argc == 2 && std::strcmp(argv[1], "--gpu-telemetry") == 0) gpu_telemetry_and_quality();
         else if (argc == 2 && std::strcmp(argv[1], "--desktop-header") == 0) desktop_header_is_not_a_headset_control();

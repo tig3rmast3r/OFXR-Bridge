@@ -1,8 +1,8 @@
 // The original XR runtime is mocked; session routing and native terminal
 // submission below are the shipping layer. AFW provider image math has separate
 // pinned-provider GPU coverage. Never opens or edits the owner's active profile.
-int afw_only_session_test(std::string_view route,const char* fixture) {
-    xrfg_fixture::ControlProfile profile;
+int afw_only_session_test(std::string_view route,const char* fixture,bool independent=false) {
+    xrfg_fixture::ControlProfile profile(independent);
     xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
     const auto ini=current_layer_directory()/L"ofxr_bridge.ini";
     struct Restore {
@@ -19,7 +19,7 @@ int afw_only_session_test(std::string_view route,const char* fixture) {
     check(nonluke || marker,"load actual Luke detection marker");
     check(WritePrivateProfileStringW(L"ofxr",L"afw_only",shared_session?L"0":L"1",ini.c_str())!=0,"isolated startup flag");
     auto desired=xrfg::autonomous::snapshot().desired;
-    desired.afw_only=!shared_session;
+    desired.independent_pacing=independent;desired.afw_only=!shared_session;
     desired.enabled=true;desired.frame_generation=2;desired.backend=0;desired.afw_mode=3;desired.nr_enabled=true;
     desired.pacing_mode=2;desired.triple_frame_gen=true;desired.luke_shared_swapchains=shared_session;
     check(xrfg::autonomous::request(desired),"preserve requested OFXR/DLSS-G and DLSS5");xrfg::autonomous::apply_runtime_settings();
@@ -51,6 +51,18 @@ int afw_only_session_test(std::string_view route,const char* fixture) {
         f.transport=transport;xr_ok(layer_destroy_session_impl(handle),"shared Luke session cleanup");
         {std::scoped_lock lock(g_state_mutex);g_instances.clear();}
         FreeLibrary(marker);std::puts("Luke startup-only shared publication, live choice remains pending PASS");return 0;
+    }
+    if(independent && !nonluke) {
+        check(state && state->afw_only && state->independent_pacing && state->private_runtime && !state->menu_enabled,
+            "reconstruction-only retains Independent native endpoint without frame generation");
+        f.transport=state->private_runtime;f.expected_views=1;
+        xr_ok(f.transport->start(),"reconstruction-only endpoint starts");
+        const auto chain=f.make_chain();f.write(chain,88);f.begin_virtual();xr_ok(f.submit(chain,17),"reconstruction-only content admission");
+        f.wait_count(1);xr_ok(f.transport->drain(),"reconstruction-only native copy completes");
+        check(f.pixels==std::vector<unsigned>({88}) && f.positions==std::vector<float>({17}),"Independent reconstruction-only exact native pixels/pose");
+        xr_ok(f.transport->destroy_swapchain(chain),"reconstruction-only cleanup");xr_ok(layer_destroy_session_impl(handle),"reconstruction-only session teardown");
+        {std::scoped_lock lock(g_state_mutex);g_instances.clear();}FreeLibrary(marker);
+        std::puts("INDEPENDENT_RECONSTRUCTION_ONLY native endpoint retained,FG paused,exact pixels/pose PASS");return 0;
     }
     if(nonluke) {
         check(state && !state->afw_only && state->private_runtime,"non-Luke keeps normal OFXR transport");

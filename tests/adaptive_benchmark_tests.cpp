@@ -171,10 +171,12 @@ void cancellation(){
     report(r);require(start_benchmark(false),"start disconnect case");r.sessions=0;report(r);tick_benchmark();
     require(snapshot().benchmark.phase==BenchmarkPhase::error,"disconnect never applies a partial winner");
 }
-int main(){
+#include "independent_benchmark_controller_tests.inc"
+int main(int argc,char** argv){
     const auto root=std::filesystem::temp_directory_path()/(L"ofxr-adaptive-"+std::to_wstring(GetCurrentProcessId()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",root.c_str());
     try{
+        if(argc==2 && std::string_view(argv[1])=="--independent"){independent_controller_cases();return 0;}
         for(bool modern:{false,true})for(bool full:{false,true})for(bool luke:{false,true})
             controller(modern,full,luke,70,90,90,90);
         controller(true,false,false,70,85,90,90,4,true,true);

@@ -153,6 +153,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
     case BridgeFlightOperation::synthesis_gpu_span:
         return "synthesis_gpu_span";
+    case BridgeFlightOperation::gpu_history: return "gpu_history";
+    case BridgeFlightOperation::gpu_timing_error: return "gpu_timing_error";
     case BridgeFlightOperation::virtual_clock_clamp:
         return "virtual_clock_clamp";
     case BridgeFlightOperation::session_state:
@@ -410,16 +412,20 @@ struct BridgeFlightLogger::Impl {
         const bool fsr_description=record.operation>=BridgeFlightOperation::fsr_eye_binding &&
             record.operation<=BridgeFlightOperation::fsr_hudless_pair;
         const bool pacing_receipt=record.operation==BridgeFlightOperation::presenter_transition &&
-            (record.result==5711 || record.result==5712 || record.result==5715 || record.result==5718 || record.result==5743 ||
+            ((record.result>=5770 && record.result<=5783) || record.result==113500 || record.result==5796 || record.result==5797 || record.result==5798 || record.result==5711 || record.result==5712 || record.result==5715 || record.result==5718 || record.result==5743 ||
              record.result==5716 || record.result==5717 || record.result==5733 ||
              record.result==5734 || record.result==5741 || record.result==5750 || record.result==5751 || record.result==9230 ||
-             record.result==5756 || record.result==5757 || record.result==5758);
+             record.result==5756 || record.result==5757 || record.result==5758 || record.result==110010 || (record.result>=112900 && record.result<=112903) || record.result==98610 || record.result==112000 ||
+             (record.result>=5793 && record.result<=5795) || (record.result>=111000 && record.result<=111119) || record.result==110740 || record.result==110741 ||
+             (record.result>=110100 && record.result<=110141) || record.result==110400);
         const bool rife_timing=record.phase=='E' &&
             (record.operation==BridgeFlightOperation::rife_pack_wait ||
              record.operation==BridgeFlightOperation::rife_infer ||
              record.operation==BridgeFlightOperation::rife_compose_wait ||
              record.operation==BridgeFlightOperation::rife_worker ||
              record.operation==BridgeFlightOperation::timing_worker_run ||
+             record.operation==BridgeFlightOperation::timing_worker_build ||
+             record.operation==BridgeFlightOperation::timing_synthesis_complete ||
              record.operation==BridgeFlightOperation::timing_publication_complete);
         const bool rife_dependency=record.operation==BridgeFlightOperation::gpu_fence_snapshot &&
             record.result>=86700 && record.result<=86799;
@@ -432,7 +438,12 @@ struct BridgeFlightLogger::Impl {
         // the owner cannot capture a one-frame flash on demand.
         const bool osr_continuity = record.operation==BridgeFlightOperation::luke_afw_stage &&
             (record.a==1352 || (record.a==1310 && record.result>=256 && record.result<512));
-        const bool benchmark = osr_continuity || record.operation==BridgeFlightOperation::vram_usage || hybrid_guide_receipt || allocation_failure || ui_progress || control_transition || rife_dependency || pacing_receipt || rife_timing || eye_changed || fsr_description ||
+        const bool input_gpu=record.operation==BridgeFlightOperation::gpu_history ||
+            record.operation==BridgeFlightOperation::synthesis_gpu_span ||
+            record.operation==BridgeFlightOperation::nvidia_gpu_stages || record.operation==BridgeFlightOperation::nvidia_gpu_total ||
+            (record.operation==BridgeFlightOperation::gpu_fence_snapshot && record.result==110402);
+        const bool benchmark = osr_continuity || input_gpu || record.operation==BridgeFlightOperation::vram_usage || hybrid_guide_receipt || allocation_failure || ui_progress || control_transition || rife_dependency || pacing_receipt || rife_timing || eye_changed || fsr_description ||
+            record.operation==BridgeFlightOperation::composition_layer || record.operation==BridgeFlightOperation::composition_publish ||
             record.operation==BridgeFlightOperation::generation_prepare ||
             record.operation==BridgeFlightOperation::continuity_reset ||
             record.operation==BridgeFlightOperation::fsr_recovery ||
