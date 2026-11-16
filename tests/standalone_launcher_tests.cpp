@@ -158,7 +158,18 @@ int main(int argc,char** argv) {
             if (!contains(build_runtime_ini(queue_settings, controls), separate ? "steamvr_separate_queue=1" : "steamvr_separate_queue=0")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
         }
     }
-    xrfg::autonomous::Settings autonomous;
+    {
+        auto launcher=release_defaults;launcher.pacing=RuntimePacing::force_vdxr;
+        xrfg::autonomous::Settings basic;basic.independent_pacing=false;
+        const auto migrated=build_runtime_ini(launcher,basic);
+        if(!contains(migrated,"independent_pacing=1") || !contains(migrated,"AdvancedMode=0") ||
+            !contains(migrated,"pacing=auto") || launcher.pacing!=RuntimePacing::force_vdxr)return (std::cerr<<"Basic route migration failed\n",1);
+        basic.advanced_mode=true;basic.independent_pacing=false;
+        const auto legacy=build_runtime_ini(launcher,basic);
+        if(!contains(legacy,"independent_pacing=0") || !contains(legacy,"AdvancedMode=1") ||
+            !contains(legacy,"pacing=force_vdxr"))return (std::cerr<<"Advanced route restore failed\n",1);
+    }
+    xrfg::autonomous::Settings autonomous;autonomous.advanced_mode=true;
     autonomous.backend = 3;
     autonomous.frame_generation = 1;
     autonomous.afw_mode = 2;
@@ -207,7 +218,7 @@ int main(int argc,char** argv) {
         parse_settings("[tray]\ndlssg_resolution=7\n").native_scale != 100) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     if (release_defaults.overlay_position != xrfg::FpsOverlayPosition::elliott_bottom ||
         !contains(default_runtime_ini, "[overlay]\r\nposition=elliott_bottom")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
-    xrfg::autonomous::Settings rife_settings;
+    xrfg::autonomous::Settings rife_settings;rife_settings.advanced_mode=true;
     rife_settings.frame_generation=4;rife_settings.rife_model=3;rife_settings.scale=4;
     const auto rife_ini=build_runtime_ini(release_defaults,rife_settings);
     if(!contains(rife_ini,"nvidia_input_scale=20") || !contains(rife_ini,"rife_model=3")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);

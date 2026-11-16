@@ -31,7 +31,7 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     s.prefer_fps=pipeline.prefer_fps; s.triple_frame_gen=pipeline.triple_frame_gen;
     if (!xrfg::autonomous::request(s)) return false;
     xrfg::autonomous::apply_runtime_settings();
-    auto effective=desired;
+    auto effective=desired;effective.independent_acquire_fix=true;
     effective.independent_aer_double=desired.independent_pacing && desired.ofr && desired.independent_aer_double;
     if(effective.ofr)effective.rife_multiplier=2;
     effective.hybrid=canonical_generation==3;

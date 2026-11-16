@@ -1740,8 +1740,8 @@ int main(int argc,char** argv) {
                 auto settings=xrfg::autonomous::snapshot().desired;settings.independent_acquire_fix=enabled;
                 check(xrfg::autonomous::request(settings),"live acquire A/B request");xrfg::autonomous::apply_runtime_settings();
                 ok(apply_embedded_control(state),"live acquire A/B apply");
-                check(find_swapchain(chain)->frame_generation==generation && state->applied_generation_settings->independent_acquire_fix==enabled,
-                    "A/B flag reset the warmed generator or failed to apply");
+                check(find_swapchain(chain)->frame_generation==generation && state->applied_generation_settings->independent_acquire_fix==true,
+                    "retired acquire key must not disable the correction or reset the warmed generator");
             }
         }
         if(rife_overlap && n==4) {
@@ -2141,7 +2141,7 @@ int main(int argc,char** argv) {
             // Always release before any assertion/teardown. The final consumer
             // may still need this queue; only generation must be independent.
             ok(independent_runtime_gate->Signal(1),"release binding-tail probe");
-            check((ready!=independent_runtime_tail_legacy) && XR_SUCCEEDED(state->presenter_failure),"A/B mode did not select the expected private-acquire binding-tail dependency");
+            check(ready && XR_SUCCEEDED(state->presenter_failure),"retired acquire setting restored the unrelated binding-tail dependency");
             std::printf("INDEPENDENT_RUNTIME_TAIL AB fix=%d gated_completion=%d exact capture/ownership PASS\n",!independent_runtime_tail_legacy,ready);
         }
         if(independent_tickets && n>=3) {
