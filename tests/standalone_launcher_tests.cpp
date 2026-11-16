@@ -70,17 +70,17 @@ static int status_json_tests() {
             !contains(without, "\"session\": null\n}\n") ||
             !contains(with, "\"deep_pipeline\": false\n  }\n}\n")) {
             std::cerr << "status.json was not as documented\n";
-            return 1;
+            return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
         }
         for(unsigned multiplier:{2U,3U,4U}) {
             auto configured=idle;configured.configured_multiplier=multiplier;
             configured.settings.triple_frame_gen=false;
             if(!contains(build_status_json(configured),"\"multiplier\": "+std::to_string(multiplier)+",")) {
-                std::cerr<<"status.json ignored modern configured multiplier\n";return 1;
+                std::cerr<<"status.json ignored modern configured multiplier\n";return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
             }
             auto active=running;active.configured_multiplier=4;active.session.multiplier=multiplier;
             if(!contains(build_status_json(active),"\"multiplier\": "+std::to_string(multiplier)+",")) {
-                std::cerr<<"status.json ignored actual layer multiplier/fallback\n";return 1;
+                std::cerr<<"status.json ignored actual layer multiplier/fallback\n";return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
             }
         }
         auto optimizing = running;
@@ -111,7 +111,7 @@ static int status_json_tests() {
             !contains(paused_json, "\"rife_backend\": null,") ||
             !contains(disconnected_json, "\"rife_backend\": null,")) {
             std::cerr << "status.json must export only a known active RIFE backend\n";
-            return 1;
+            return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
         }
     }
     std::cout<<"status.json configured and effective2X/3X/4X, fallback and rates PASS\n";
@@ -123,39 +123,39 @@ int main(int argc,char** argv) {
     using namespace xrfg::standalone;
 
     const LauncherSettings release_defaults;
-    if(!contains(build_runtime_ini(release_defaults,xrfg::autonomous::Settings{}),"luke_osr=2\r\n"))return 1;
+    if(!contains(build_runtime_ini(release_defaults,xrfg::autonomous::Settings{}),"luke_osr=2\r\n"))return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     for(int saved:{0,1,2}) {
         auto controls=xrfg::autonomous::Settings{};controls.luke_osr=saved;
-        if(!contains(build_runtime_ini(release_defaults,controls),saved==0?"luke_osr=0\r\n":"luke_osr=2\r\n"))return 1;
+        if(!contains(build_runtime_ini(release_defaults,controls),saved==0?"luke_osr=0\r\n":"luke_osr=2\r\n"))return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
-    if(release_defaults.crash_debug)return 1;
+    if(release_defaults.crash_debug)return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     for(bool enabled:{false,true}) {
         auto choice=release_defaults;choice.crash_debug=enabled;
         const auto key=enabled?"crash_debug=1":"crash_debug=0";
         if(parse_settings(serialize_settings(choice)).crash_debug!=enabled ||
-            !contains(build_runtime_ini(choice),key))return 1;
+            !contains(build_runtime_ini(choice),key))return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
-    if (!release_defaults.steamvr_separate_queue || release_defaults.afw_only) return 1;
-    if(release_defaults.pacing!=RuntimePacing::automatic)return 1;
+    if (!release_defaults.steamvr_separate_queue || release_defaults.afw_only) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
+    if(release_defaults.pacing!=RuntimePacing::automatic)return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     for(auto mode:{RuntimePacing::automatic,RuntimePacing::force_vdxr,RuntimePacing::force_steamvr}) {
         auto choice=release_defaults;choice.pacing=mode;
-        if(parse_settings(serialize_settings(choice)).pacing!=mode)return 1;
+        if(parse_settings(serialize_settings(choice)).pacing!=mode)return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
     if(director_transport(RuntimePacing::automatic,true) || !director_transport(RuntimePacing::automatic,false) ||
-       director_transport(RuntimePacing::force_vdxr,false) || !director_transport(RuntimePacing::force_steamvr,true))return 1;
+       director_transport(RuntimePacing::force_vdxr,false) || !director_transport(RuntimePacing::force_steamvr,true))return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     for(bool enabled:{false,true}) {
         xrfg::autonomous::Settings controls;controls.afw_only=enabled;
-        if(!contains(build_runtime_ini(release_defaults,controls),enabled?"afw_only=1":"afw_only=0"))return 1;
+        if(!contains(build_runtime_ini(release_defaults,controls),enabled?"afw_only=1":"afw_only=0"))return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
     for (bool separate : {false, true}) {
         auto queue_settings = release_defaults;
         queue_settings.steamvr_separate_queue = separate;
         if (parse_settings(serialize_settings(queue_settings)).steamvr_separate_queue != separate ||
-            !contains(build_runtime_ini(queue_settings), separate ? "steamvr_separate_queue=1" : "steamvr_separate_queue=0")) return 1;
+            !contains(build_runtime_ini(queue_settings), separate ? "steamvr_separate_queue=1" : "steamvr_separate_queue=0")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
         for (int generator : {0, 1, 2}) for (int backend : {0, 1, 2, 3}) {
             xrfg::autonomous::Settings controls;
             controls.backend = backend; controls.frame_generation = generator;
-            if (!contains(build_runtime_ini(queue_settings, controls), separate ? "steamvr_separate_queue=1" : "steamvr_separate_queue=0")) return 1;
+            if (!contains(build_runtime_ini(queue_settings, controls), separate ? "steamvr_separate_queue=1" : "steamvr_separate_queue=0")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
         }
     }
     xrfg::autonomous::Settings autonomous;
@@ -172,69 +172,69 @@ int main(int argc,char** argv) {
         !contains(autonomous_ini, "luke_afw_mode=2") ||
         contains(autonomous_ini, "luke_afw=1") ||
         !contains(autonomous_ini, "max_file_mb=128") ||
-        !contains(autonomous_ini, "single_swapchain_rings=0")) return 1;
+        !contains(autonomous_ini, "single_swapchain_rings=0")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     autonomous.lower_vram = 1;
-    if (!contains(build_runtime_ini(release_defaults, autonomous), "single_swapchain_rings=1")) return 1;
+    if (!contains(build_runtime_ini(release_defaults, autonomous), "single_swapchain_rings=1")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     autonomous.lower_vram = 0;
     for (int separate : {0,1}) for (int reduce : {0,1}) {
         autonomous.separate_synthesis = separate; autonomous.lower_vram = reduce;
         const auto ini = build_runtime_ini(release_defaults, autonomous);
         if (!contains(ini, reduce ? "separate_synthesis=1" : "separate_synthesis=0") ||
-            !contains(ini, reduce ? "single_swapchain_rings=1" : "single_swapchain_rings=0")) return 1;
+            !contains(ini, reduce ? "single_swapchain_rings=1" : "single_swapchain_rings=0")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
     autonomous.separate_synthesis = 0; autonomous.lower_vram = 0;
     if (!parse_settings("[tray]\nsingle_swapchain_rings=1\n").separate_synthesis ||
-        parse_settings("[tray]\nsingle_swapchain_rings=1\nseparate_synthesis=0\n").separate_synthesis) return 1;
+        parse_settings("[tray]\nsingle_swapchain_rings=1\nseparate_synthesis=0\n").separate_synthesis) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
 
     const std::string default_runtime_ini = build_runtime_ini(release_defaults);
     if (!contains(default_runtime_ini,"timing_capture=0") ||
         !contains(default_runtime_ini,"pose_cadence_capture=0") ||
-        !contains(default_runtime_ini,"gpu_instrumentation_enabled=0")) return 1;
+        !contains(default_runtime_ini,"gpu_instrumentation_enabled=0")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     if (release_defaults.frame_generation != FrameGeneration::ofxr ||
-        !contains(default_runtime_ini, "frame_generation=ofxr")) return 1;
+        !contains(default_runtime_ini, "frame_generation=ofxr")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     LauncherSettings native_settings;
     native_settings.frame_generation = FrameGeneration::native_dlss;
     if (parse_settings(serialize_settings(native_settings)).frame_generation != FrameGeneration::native_dlss ||
         !contains(build_runtime_ini(native_settings), "frame_generation=dlss") ||
-        parse_settings("[tray]\nframe_generation=unknown\n").frame_generation != FrameGeneration::ofxr) return 1;
+        parse_settings("[tray]\nframe_generation=unknown\n").frame_generation != FrameGeneration::ofxr) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     // Native DLSS FG runs at full resolution unless chosen otherwise.
     if (release_defaults.native_scale != 100 ||
-        !contains(default_runtime_ini, "dlssg_resolution=100")) return 1;
+        !contains(default_runtime_ini, "dlssg_resolution=100")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     LauncherSettings reduced_settings;
     reduced_settings.native_scale = 67;
     if (parse_settings(serialize_settings(reduced_settings)).native_scale != 67 ||
         !contains(build_runtime_ini(reduced_settings), "dlssg_resolution=67") ||
-        parse_settings("[tray]\ndlssg_resolution=7\n").native_scale != 100) return 1;
+        parse_settings("[tray]\ndlssg_resolution=7\n").native_scale != 100) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     if (release_defaults.overlay_position != xrfg::FpsOverlayPosition::elliott_bottom ||
-        !contains(default_runtime_ini, "[overlay]\r\nposition=elliott_bottom")) return 1;
+        !contains(default_runtime_ini, "[overlay]\r\nposition=elliott_bottom")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     xrfg::autonomous::Settings rife_settings;
     rife_settings.frame_generation=4;rife_settings.rife_model=3;rife_settings.scale=4;
     const auto rife_ini=build_runtime_ini(release_defaults,rife_settings);
-    if(!contains(rife_ini,"nvidia_input_scale=20") || !contains(rife_ini,"rife_model=3")) return 1;
-    if(!contains(rife_ini,"rife_resolution=18"))return 1;
+    if(!contains(rife_ini,"nvidia_input_scale=20") || !contains(rife_ini,"rife_model=3")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
+    if(!contains(rife_ini,"rife_resolution=18"))return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     rife_settings.rife_multiplier=4;rife_settings.scale=5;
     const auto sixth_ini=build_runtime_ini(release_defaults,rife_settings);
-    if(!contains(sixth_ini,"nvidia_input_scale=1/6") || !contains(sixth_ini,"rife_multiplier=4"))return 1;
+    if(!contains(sixth_ini,"nvidia_input_scale=1/6") || !contains(sixth_ini,"rife_multiplier=4"))return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     for (auto position : {xrfg::FpsOverlayPosition::upper_left,
         xrfg::FpsOverlayPosition::upper_right, xrfg::FpsOverlayPosition::lower_left, xrfg::FpsOverlayPosition::lower_right}) {
         LauncherSettings option;
         option.overlay_position = position;
         if (parse_settings(serialize_settings(option)).overlay_position != position ||
             !contains(build_runtime_ini(option), std::string("[overlay]\r\nposition=") +
-                xrfg::overlay_position_name(position))) return 1;
+                xrfg::overlay_position_name(position))) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
     LauncherSettings hidden_counter;hidden_counter.overlay_position=xrfg::FpsOverlayPosition::elliott_controller;
     hidden_counter.overlay_enabled=false;
     const auto counter_restored=parse_settings(serialize_settings(hidden_counter));
     if(counter_restored.overlay_enabled || counter_restored.overlay_position!=hidden_counter.overlay_position ||
-        !contains(build_runtime_ini(hidden_counter),"[overlay]\r\nposition=off"))return 1;
+        !contains(build_runtime_ini(hidden_counter),"[overlay]\r\nposition=off"))return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     auto hidden_profile=rife_settings;hidden_profile.overlay_enabled=false;hidden_profile.overlay_position=5;
-    if(!contains(build_runtime_ini(release_defaults,hidden_profile),"[overlay]\r\nposition=off"))return 1;
+    if(!contains(build_runtime_ini(release_defaults,hidden_profile),"[overlay]\r\nposition=off"))return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     const auto legacy_counter=parse_settings("[tray]\noverlay_position=off\n");
-    if(legacy_counter.overlay_enabled || legacy_counter.overlay_position!=xrfg::FpsOverlayPosition::elliott_bottom)return 1;
-    if(runtime_keybinds(release_defaults)[xrfg::KeybindAction::fps_counter]!=xrfg::KeybindChord{0,0x75})return 1;
+    if(legacy_counter.overlay_enabled || legacy_counter.overlay_position!=xrfg::FpsOverlayPosition::elliott_bottom)return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
+    if(runtime_keybinds(release_defaults)[xrfg::KeybindAction::fps_counter]!=xrfg::KeybindChord{0,0x75})return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     hidden_counter.fps_counter_hotkey="ctrl+f6";
-    if(parse_settings(serialize_settings(hidden_counter)).fps_counter_hotkey!="ctrl+f6")return 1;
+    if(parse_settings(serialize_settings(hidden_counter)).fps_counter_hotkey!="ctrl+f6")return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     if (release_defaults.backend != FlowBackend::nvidia ||
         release_defaults.nvidia_preset != NvidiaPerformancePreset::medium ||
         release_defaults.nvidia_input_scale != NvidiaInputScale::half ||
@@ -261,7 +261,7 @@ int main(int argc,char** argv) {
         !contains(default_runtime_ini, "nvidia_input_scale=50") ||
         !contains(default_runtime_ini, "[diagnostics]\r\nlogging_enabled=0")) {
         std::cerr << "release defaults failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     // The two diagnostics knobs the tray has no UI for. They were hardcoded
@@ -271,13 +271,13 @@ int main(int argc,char** argv) {
     if (!contains(default_runtime_ini, "max_file_mb=32") ||
         !contains(default_runtime_ini, "flush_each_event=0")) {
         std::cerr << "diagnostics defaults failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
     const std::string carried = build_runtime_ini(release_defaults, 512, true);
     if (!contains(carried, "max_file_mb=512") ||
         !contains(carried, "flush_each_event=1")) {
         std::cerr << "diagnostics overrides not carried into the runtime ini\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     LauncherSettings settings;
@@ -309,7 +309,7 @@ int main(int argc,char** argv) {
         parsed.capture_at_end_frame || !parsed.diagnostics ||
         !contains(build_runtime_ini(parsed), "capture_at_end_frame=0")) {
         std::cerr << "standalone settings round-trip failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
     using xrfg::standalone::Hotkey;
     using xrfg::standalone::hotkey_display_name;
@@ -345,14 +345,14 @@ int main(int argc,char** argv) {
         std::string(xrfg::standalone::kDefaultPauseHotkey) != release_defaults.pause_hotkey ||
         !hotkey_display_name("off").empty()) {
         std::cerr << "pause hotkey parsing failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
     for (const char* refused : {"", "off", "none", "ctrl", "ctrl+", "+f7",
              "ctrl+ctrl+f7", "f7+ctrl", "f0", "f25", "ctrl+f7+f8", "ctrl+banana",
              "vk00", "vkff", "vkzz", "vk1"}) {
         if (parse_hotkey(refused)) {
             std::cerr << "pause hotkey accepted: " << refused << '\n';
-            return 1;
+            return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
         }
     }
 
@@ -365,7 +365,7 @@ int main(int argc,char** argv) {
         !contains(serialize_settings(LauncherSettings{}), "\r\nvulkan_bridge=1\r\n") ||
         contains(serialize_settings(LauncherSettings{}), "vulkan_support")) {
         std::cerr << "vulkan setting migration failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     const std::filesystem::path layer_path =
@@ -380,7 +380,7 @@ int main(int argc,char** argv) {
         contains(manifest, "XR_ENABLE_API_LAYERS") ||
         contains(manifest, "XR_API_LAYER_PATH")) {
         std::cerr << "manual implicit manifest contract failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     const std::string runtime_ini = build_runtime_ini(settings);
@@ -399,7 +399,7 @@ int main(int argc,char** argv) {
         contains(runtime_ini, "one_shot") ||
         contains(runtime_ini, "manifest=")) {
         std::cerr << "manual runtime INI contract failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     const std::filesystem::path runtime_directory =
@@ -415,7 +415,7 @@ int main(int argc,char** argv) {
                 L"XR_APILAYER_OFXRBridge_manual-42-99.json",
             runtime_directory)) {
         std::cerr << "owned manifest path validation failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     const std::wstring test_subkey =
@@ -449,7 +449,7 @@ int main(int argc,char** argv) {
         !unregistered || !removed) {
         std::wcerr << L"manual registry lifetime contract failed: "
                    << registry_error << L'\n';
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     const auto backend_directory =
@@ -498,9 +498,9 @@ int main(int argc,char** argv) {
         ini << rife_ini;
     }
     if(xrfg::implicit_layer::read_nvidia_options(backend_directory).input_scale !=
-        xrfg::implicit_layer::ConfiguredNvidiaInputScale::fifth) return 1;
+        xrfg::implicit_layer::ConfiguredNvidiaInputScale::fifth) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     {std::ofstream ini(backend_directory / L"ofxr_bridge.ini",std::ios::trunc);ini << sixth_ini;}
-    if(xrfg::implicit_layer::read_nvidia_options(backend_directory).input_scale != xrfg::implicit_layer::ConfiguredNvidiaInputScale::sixth)return 1;
+    if(xrfg::implicit_layer::read_nvidia_options(backend_directory).input_scale != xrfg::implicit_layer::ConfiguredNvidiaInputScale::sixth)return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     std::error_code cleanup_error;
     std::filesystem::remove_all(backend_directory, cleanup_error);
     if (!backend_from_ini || !preset_round_trips ||
@@ -510,7 +510,7 @@ int main(int argc,char** argv) {
             xrfg::implicit_layer::ConfiguredNvidiaInputScale::three_quarter ||
         !nvidia_options.bidirectional || cleanup_error) {
         std::cerr << "backend INI selection failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     const auto default_nvidia_options =
@@ -521,14 +521,14 @@ int main(int argc,char** argv) {
             xrfg::implicit_layer::ConfiguredNvidiaInputScale::half ||
         default_nvidia_options.bidirectional) {
         std::cerr << "NVIDIA option defaults failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     const std::filesystem::path version_directory =
         runtime_version_directory(L"C:\\Users\\Test\\OFXR Bridge", 62);
     if (version_directory.filename() != L"v062") {
         std::cerr << "runtime version directory failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     const auto replacement_directory =
@@ -558,7 +558,7 @@ int main(int argc,char** argv) {
     std::filesystem::remove_all(replacement_directory, cleanup_error);
     if (!replaced || replaced_text != "new-layer" || cleanup_error) {
         std::cerr << "runtime DLL replacement failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     // A cached layer some process still has loaded: overwriting it fails,
@@ -627,7 +627,7 @@ int main(int argc,char** argv) {
                   << identical_while_loaded << " replaced="
                   << replaced_while_loaded << " kept=" << kept_while_loaded
                   << " cleaned=" << cleaned_after_release << '\n';
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     // Complete helper staging is file-only: never load or register a runtime.
@@ -640,17 +640,17 @@ int main(int argc,char** argv) {
     std::wstring support_error;
     if (stage_runtime_support_files(support_source, support_cache, &support_error) ||
         support_error.find(L"ofxr_amd_fidelityfx_framegeneration_dx12.dll") == std::wstring::npos ||
-        std::filesystem::exists(support_cache)) return 1;
+        std::filesystem::exists(support_cache)) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     const wchar_t* required_support[]{L"ofxr_amd_fidelityfx_framegeneration_dx12.dll",
         L"PDAFWPlugin.dll", L"nvngx.dll_dlssnr.dll", L"nvngx.dll_dlssg.dll"};
     for (const auto* name : required_support) write_file(support_source / name, "required-helper");
     if (!stage_runtime_support_files(support_source, support_cache, &support_error) ||
-        std::filesystem::exists(support_cache / L"nvngx_dlssnr.dll")) return 1;
+        std::filesystem::exists(support_cache / L"nvngx_dlssnr.dll")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     for (const auto* name : required_support)
-        if (read_file(support_cache / name) != "required-helper") return 1;
+        if (read_file(support_cache / name) != "required-helper") return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     write_file(support_source / L"nvngx_dlssnr.dll", "user-supplied-NR");
     if (!stage_runtime_support_files(support_source, support_cache, &support_error) ||
-        read_file(support_cache / L"nvngx_dlssnr.dll") != "user-supplied-NR") return 1;
+        read_file(support_cache / L"nvngx_dlssnr.dll") != "user-supplied-NR") return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     for (const auto* name : required_support) {
         std::filesystem::remove(support_source / name);
         std::filesystem::remove(support_cache / name);
@@ -662,7 +662,7 @@ int main(int argc,char** argv) {
         L"nvngx.dll_dlssnr.dll", L"nvngx.dll_dlssg.dll"};
     for (const auto* name : without_provider) write_file(support_source / name, "required-helper");
     if (!stage_runtime_support_files(support_source, support_cache, &support_error) ||
-        std::filesystem::exists(support_cache / L"PDAFWPlugin.dll")) return 1;
+        std::filesystem::exists(support_cache / L"PDAFWPlugin.dll")) return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     for (const auto* name : without_provider) {
         std::filesystem::remove(support_source / name);
         std::filesystem::remove(support_cache / name);
@@ -678,7 +678,7 @@ int main(int argc,char** argv) {
         quote_windows_argument(L"C:\\Path With Space\\") !=
             L"\"C:\\Path With Space\\\\\"") {
         std::cerr << "Windows argument quoting failed\n";
-        return 1;
+        return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
 
     if(const int result=status_json_tests())return result;
@@ -687,13 +687,13 @@ int main(int argc,char** argv) {
         using namespace xrfg::standalone;
         const auto defaults=parse_settings("[tray]\n");
         if(contains(serialize_settings(defaults),"rife_runtime_dir=") ||
-           contains(build_runtime_ini(defaults),"rife_runtime_dir="))return 1;
+           contains(build_runtime_ini(defaults),"rife_runtime_dir="))return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
         const std::string manual="D:/developer folder/RIFE runtime";
         const auto configured=parse_settings("[tray]\nrife_runtime_dir="+manual+"\n");
         const auto restored=parse_settings(serialize_settings(configured));
         if(restored.rife_runtime_dir!=manual ||
-           !contains(build_runtime_ini(restored),"\r\nrife_runtime_dir="+manual+"\r\n"))return 1;
-        if(!parse_settings("[ofxr]\nrife_runtime_dir="+manual+"\n").rife_runtime_dir.empty())return 1;
+           !contains(build_runtime_ini(restored),"\r\nrife_runtime_dir="+manual+"\r\n"))return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
+        if(!parse_settings("[ofxr]\nrife_runtime_dir="+manual+"\n").rife_runtime_dir.empty())return (std::cerr<<"FAIL launcher line "<<__LINE__<<"\n",1);
     }
     std::cout << "OFXR manual persistent launcher support tests passed\n";
     return 0;

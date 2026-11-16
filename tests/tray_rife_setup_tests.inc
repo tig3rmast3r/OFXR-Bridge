@@ -41,8 +41,10 @@ void rife_setup_ui_tests() {
         require(IsDlgButtonChecked(window,IDC_RIFE_NVIDIA)==BST_CHECKED,"NVIDIA remains the default with the optional payload");
         require(IsWindowEnabled(GetDlgItem(window,IDC_RIFE_NVIDIA))!=FALSE,"NVIDIA remains available with the optional payload");
         CheckRadioButton(window,IDC_RIFE_NVIDIA,IDC_RIFE_AMD,IDC_RIFE_AMD);
+        require(IsDlgButtonChecked(window,IDC_RIFE_AMD)==BST_CHECKED,"Radeon radio selection is actually checked");
         SendMessageW(window,WM_COMMAND,IDOK,0);
     });
+    std::cout<<"Radeon dialog answer="<<answer<<" available="<<dialog.vulkan_available<<" selected="<<dialog.vulkan_selected<<"\n";
     require(answer==IDOK&&dialog.vulkan_selected,"packaged Radeon selection accepts Install");
     answer=run_rife_dialog(dialog,[](HWND window){
         require(IsDlgButtonChecked(window,IDC_RIFE_NVIDIA)==BST_CHECKED,"NVIDIA remains the default on reopening the dialog");

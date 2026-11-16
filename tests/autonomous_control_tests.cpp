@@ -320,7 +320,7 @@ void route_profiles() {
         "Basic retains visible Hybrid and inactive optical flow size choices");
     older.scale=2;older=parse_settings(serialize_settings(older));
     require(older.scale==2,"Hybrid's chosen flow resolution survives a save");
-    Settings multiplied;select_generation(multiplied,0,2);multiplied.frame_multiplier=4;multiplied=sanitize(multiplied);
+    Settings multiplied;multiplied.advanced_mode=true;select_generation(multiplied,0,2);multiplied.frame_multiplier=4;multiplied=sanitize(multiplied);
     select_generation(multiplied,3,0);multiplied.frame_multiplier=3;multiplied=sanitize(multiplied);
     select_generation(multiplied,0,3);multiplied.frame_multiplier=4;multiplied=sanitize(multiplied);
     multiplied=parse_settings(serialize_settings(multiplied));
