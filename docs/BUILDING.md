@@ -1,5 +1,16 @@
 Current shared routing: read [shared Autonomous handoff](../../docs/ofxr-autonomous/README.md). Build with `tools/Build-Autonomous.ps1` from the shared repository root; prepared dependencies are in `.local/ofxr-autonomous-deps` and outputs in `builds/ofxr-autonomous-new`. Earlier laboratory build paths below are historical.
 
+## Fork 0.3.3 Windows candidate
+
+The [Windows candidate workflow](../.github/workflows/windows-candidate.yml) runs
+on pushes to `fix/ghost-osr-033`. It prepares pinned SDKs, builds the current
+source, runs the native WARP canvas regression plus canvas geometry and optical
+flow tests, and overlays the compiled binaries onto the official 0.3.3 package.
+The resulting **OFXR-Ghost-033** Actions artifact is unsigned and includes source
+identity and SHA-256 checksums. Download it directly on the Windows game PC,
+extract separately, and keep an official rollback. Do not use it in anti-cheat
+games. Passing GPU tests is not actual headset validation.
+
 ## V483 candidate: Luke stereo continuity
 
 Horizon stationary flicker: repeated-eye source gaps collapse AFW stereo; real provider regression reproduced and corrected with current-source stereo warp for that transition. Ghost/Crimson native motion supports signed perspective W; actual game recovery pending. Focused30/30 pass. See docs/V483_LUKE_STEREO.md (V483_LUKE_STEREO.md within docs). FSR/OFA/providers/shaders/pacing retained; V474 fallback.

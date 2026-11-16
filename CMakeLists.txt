@@ -2199,6 +2199,7 @@ add_test(NAME xrfg_afw_provider_lifetime_gpu COMMAND xrfg_afw_provider_lifetime_
 set_tests_properties(xrfg_afw_provider_lifetime_gpu PROPERTIES TIMEOUT 30)
 
 add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
+  add_test(NAME xrfg_luke_osr_canvas_gpu COMMAND xrfg_luke_kcd_quality_tests --osr-canvas-only)
   target_include_directories(xrfg_luke_kcd_quality_tests PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}/generated-shaders")
   target_compile_features(xrfg_luke_kcd_quality_tests PRIVATE cxx_std_20)
   target_compile_definitions(xrfg_luke_kcd_quality_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

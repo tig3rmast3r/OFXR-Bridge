@@ -225,10 +225,37 @@ FARPROC WINAPI quality_get_proc_address(HMODULE module,LPCSTR name) {
 
 #include "luke_capture_replay.inc"
 #include "luke_color_scale_checks.inc"
+#include "luke_osr_canvas_checks.inc"
 
 int main(int argc,char** argv) {try {
     if(argc==4 && std::filesystem::is_directory(argv[2]))return replay::run(argv[1],argv[2],argv[3]);
     using namespace quality;
+    if(argc==2&&std::string_view(argv[1])=="--osr-canvas-only") {
+        std::cout<<std::unitbuf;
+        const auto root=std::filesystem::current_path()/"Testing/Temporary/osr-canvas";
+        std::filesystem::create_directories(root);
+        {std::ofstream ini(root/"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\nflush_each_event=1\nmax_file_mb=16\n";}
+        xrfg::bridge_flight_logger().initialize(root);
+        ComPtr<ID3D12Debug> debug;check(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)),"canvas debug layer");
+        debug->EnableDebugLayer();
+        ComPtr<IDXGIFactory4> factory;check(CreateDXGIFactory2(0,IID_PPV_ARGS(&factory)),"canvas factory");
+        ComPtr<IDXGIAdapter> adapter;check(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)),"canvas WARP");
+        ComPtr<ID3D12Device> device;
+        check(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)),"canvas device");
+        ComPtr<ID3D12CommandQueue> queue;D3D12_COMMAND_QUEUE_DESC q{};
+        check(device->CreateCommandQueue(&q,IID_PPV_ARGS(&queue)),"canvas queue");
+        for(bool unequal_height:{false,true})for(unsigned first_eye:{0u,1u})
+            osr_canvas_checks(device.Get(),queue.Get(),unequal_height,first_eye);
+        ComPtr<ID3D12InfoQueue> messages;check(device.As(&messages),"canvas debug messages");
+        for(UINT64 i=0;i<messages->GetNumStoredMessages();++i) {
+            SIZE_T size{};check(messages->GetMessage(i,nullptr,&size),"canvas message size");
+            std::vector<unsigned char> storage(size);auto* message=reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+            check(messages->GetMessage(i,message,&size),"canvas message");
+            require(message->Severity!=D3D12_MESSAGE_SEVERITY_ERROR&&
+                message->Severity!=D3D12_MESSAGE_SEVERITY_CORRUPTION,message->pDescription);
+        }
+        return 0;
+    }
     require(argc>=2 && argc<=4,"provider path argument missing");
     native_peer_camera=GetEnvironmentVariableW(L"XRFG_TEST_GTA_HEADLOCK",nullptr,0)!=0;
     const bool osr_cheap_test=GetEnvironmentVariableW(L"XRFG_TEST_OSR_CHEAP",nullptr,0)!=0;
