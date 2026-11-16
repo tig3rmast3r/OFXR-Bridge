@@ -908,7 +908,7 @@ void aer_framegen_widgets() {
 
 void aer_native_guide_widgets() {
     const auto saved=snapshot().desired;
-    constexpr const char* cards[]{"OFXR","FSR 3.1","DLSS-G","Hybrid","RIFE"};
+    constexpr const char* cards[]{"OpticalFlow","FSR 3.1","DLSS-G","Hybrid","RIFE"};
     constexpr int ui_indices[]{0,2,3,1,4};
     for(bool compact:{false,true})for(int method:{0,1,2,3,4}) {
         auto settings=saved;settings.advanced_mode=true;settings.independent_pacing=false;settings.ofr_enabled=true;
