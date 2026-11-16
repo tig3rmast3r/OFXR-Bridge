@@ -99,3 +99,11 @@
 ## Nightly V987 (2026/11/13)
 
 - [fix] Neural Rendering accepts padded DLSS output textures, including DetNoir with UEVR.
+
+## V 0.4.0 (Unreleased)
+
+- [new] Added Independent pacing with automatic delivery buffering.
+- [changed] Updated generator selection and meter labels.
+- [fix] Fixed DLSS-G guide validation with ReShade in MSFS 2024.
+- [fix] Fixed Neural Rendering submission tracking with ReShade.
+- [fix] Removed global warnings for unrelated swapchain diagnostics.

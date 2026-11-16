@@ -1,6 +1,6 @@
 #pragma once
 #include "xrfg/dlss_motion_vectors.hpp"
-#include "xrfg/native_ingress/D3D_DeviceOwner.h"
+#include "xrfg/d3d12_native_binding.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include <atomic>
 
@@ -51,6 +51,16 @@ inline bool guide_resource_on_device(ID3D12Device* consumer,
         return false;
     }
     if(expected_identity.Get()==reported_identity.Get())return true;
+    // ReShade/Streamline can report a device proxy for an otherwise native
+    // resource. Require the same canonical COM owner; sharing an adapter or
+    // merely presenting a compatible descriptor is never sufficient.
+    IUnknown *native_consumer{},*native_reported{};
+    ComPtr<IUnknown> canonical_consumer,canonical_reported;
+    if(d3d_native::get_borrowed(consumer,&native_consumer) &&
+        d3d_native::get_borrowed(reported.Get(),&native_reported) &&
+        SUCCEEDED(native_consumer->QueryInterface(IID_PPV_ARGS(&canonical_consumer))) &&
+        SUCCEEDED(native_reported->QueryInterface(IID_PPV_ARGS(&canonical_reported))) &&
+        canonical_consumer.Get()==canonical_reported.Get())return true;
     if(!allow_luke_alias)return false;
     auto* allocation=resource==frame.motion_vectors.Get()?frame.motion_snapshot_device.Get():
         resource==frame.depth.Get()?frame.depth_snapshot_device.Get():nullptr;

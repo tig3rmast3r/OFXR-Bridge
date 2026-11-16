@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1000.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1001.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -3077,4 +3077,13 @@ if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
         add_test(NAME xrfg_native_pimax_${vram_case} COMMAND xrfg_private_runtime_layer_tests native-pimax-${vram_case})
         set_tests_properties(xrfg_native_pimax_${vram_case} PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
     endforeach()
+endif()
+
+if(XRFG_BUILD_TESTS AND WIN32 AND NOT XRFG_X86 AND TARGET xrfg_bridge_flight_logger)
+    add_executable(xrfg_guide_device_proxy_tests tests/guide_device_proxy_tests.cpp)
+    target_include_directories(xrfg_guide_device_proxy_tests PRIVATE "${XRFG_OPENXR_SDK_ROOT}/include")
+    target_compile_features(xrfg_guide_device_proxy_tests PRIVATE cxx_std_20)
+    target_compile_definitions(xrfg_guide_device_proxy_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(xrfg_guide_device_proxy_tests PRIVATE xrfg_bridge_flight_logger d3d12 dxgi)
+    add_test(NAME xrfg_guide_device_proxy_tests COMMAND xrfg_guide_device_proxy_tests)
 endif()
