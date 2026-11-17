@@ -906,6 +906,8 @@ int main(int argc,char** argv) {
     const auto overlap_tag=route.find("-app-overlap");
     const bool rife_app_overlap=overlap_tag!=std::string::npos || rife_msfs;
     if(overlap_tag!=std::string::npos)route.erase(overlap_tag,std::string("-app-overlap").size());
+    const bool panel_publication_test=route.starts_with("panel-pooled-");
+    if(panel_publication_test)route="panel-budget-"+route.substr(13);
     const bool budget_fallback_test=route.starts_with("budget-fallback-");
     if(budget_fallback_test)route="panel-budget-"+route.substr(16);
     const bool panel_lifecycle_test=route.starts_with("panel-close-");
@@ -925,6 +927,8 @@ int main(int argc,char** argv) {
     if(route=="auxiliary-slot-lazy")return auxiliary_slot_selection_test(1);
     if(route=="auxiliary-slot-all-busy")return auxiliary_slot_selection_test(2);
     if(route=="uevr-auxiliary-pooled-budget")return auxiliary_slot_selection_test(3);
+    if(route=="auxiliary-retirement")return auxiliary_slot_selection_test(4);
+    if(route=="auxiliary-retirement-pooled")return auxiliary_slot_selection_test(5);
     if(route=="overlay-admission" || route=="overlay-admission-measured")
         return overlay_admission_test(route.ends_with("measured"));
     if(route=="admission-credit")return admission_credit_test();
@@ -1125,6 +1129,22 @@ int main(int argc,char** argv) {
     ComPtr<ID3D12Debug> debug;
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     Fixture f(native12);f.independent_mode=independent;f.transport->stop();if(route!="memory" && route!="scope" && !framework_session_probe)f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
+    std::atomic_uint panel_identity_checks{};
+    if(panel_publication_test) {
+        f.native_image_count=3;
+        f.inspect_layers=[&](const XrFrameEndInfo* info) {
+            std::array<const XrCompositionLayerQuad*,2> quads{};unsigned count{};
+            for(unsigned i=0;i<info->layerCount;++i)if(info->layers[i]->type==XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                if(count<2)quads[count]=reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[i]);++count;
+            }
+            if(count!=2)return;
+            check(quads[0]->subImage.swapchain!=quads[1]->subImage.swapchain,"independent panels aliased a native publication sink");
+            const auto left=f.read_pixel(f.chains.at(quads[0]->subImage.swapchain));
+            const auto right=f.read_pixel(f.chains.at(quads[1]->subImage.swapchain));
+            check(left>=31 && left<=38 && right>=71 && right<=78,"source-pooled publication exchanged or overwrote panel pixels");
+            ++panel_identity_checks;
+        };
+    }
     if(rife_latency)f.frame_wait_us=[](unsigned){return 11111;};
     if(rife_factor)f.prediction_horizon_ns=period*3; // cold-model/GPU-load fixture, unchanged physical refresh
 
@@ -1447,7 +1467,7 @@ int main(int argc,char** argv) {
         state->afw_only=true;check(presenter_forbidden(*state),"AFW-only enters OFXR worker");state->afw_only=false;
         state->dispatch->steamvr_runtime=false;if(!rife_luke)check(presenter_forbidden(*state),"VDXR pacing changed");state->dispatch->steamvr_runtime=true;
     }
-    f.transport=state->private_runtime;state->uevr_application=pooled;
+    f.transport=state->private_runtime;state->uevr_application=pooled || panel_publication_test || budget_fallback_test;
     if(rife_overlap)check(single_director_pacing(*state)==bool(rife_pacing) &&
         f.transport->director_enabled()==bool(rife_pacing),
         "overlap probe did not select its actual Framework/Director delivery policy");
@@ -1622,6 +1642,7 @@ int main(int argc,char** argv) {
     }
     XrSwapchain panel_chain{},second_panel_chain{},budget_meter{};
     unsigned independent_panel_checks{},independent_panel_fractional{};
+    std::vector<XrSwapchain> extra_budget_meters;
     if(panel_test) {
         const auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
         auto ci=info;ci.arraySize=1;
@@ -1638,6 +1659,10 @@ int main(int argc,char** argv) {
             xr_ok(layer_enumerate_swapchain_images_impl(second_panel_chain,3,&pc,
                 reinterpret_cast<XrSwapchainImageBaseHeader*>(pi.data())),"second panel capture setup");
             f.native_chain_limit=argc>2?std::stoul(argv[2]):budget_fallback_test?6:panel_lifecycle_test?32:10;
+            // Exercise exhausted world-generation recovery after optional panel
+            // generation has already stood down; there is no optional bank
+            // left to return when the late second menu needs its copy sink.
+            if(budget_fallback_test)state->panel_budget_refused=true;
         }
     }
     ComPtr<IDXGIAdapter3> memory_adapter;
@@ -2183,7 +2208,13 @@ int main(int argc,char** argv) {
                 check(!ack.pending && !ack.errors && rife_frames(*state)==3,"RIFE3 must finish Applying settings and activate the requested multiplier");
             }
             xr_ok(submitted,"shipping OFXR End handoff");
-            if(budget_fallback_test && n==4)budget_meter=f.make_chain(false,1);
+            if(budget_fallback_test && n==4) {
+                budget_meter=f.make_chain(false,1);
+                // Pooling saves native handles. Fill the actual remaining
+                // budget so the late second UI still exercises refusal and
+                // safe real-frame recovery instead of becoming a success test.
+                while(f.chains.size()<f.native_chain_limit)extra_budget_meters.push_back(f.make_chain(false,1));
+            }
             if(panel_lifecycle_test && n==5) {
                 check(!find_swapchain(second_panel_chain)->frame_generation,
                     "closed UEVR panel retained optional native generation rings");
@@ -2782,8 +2813,38 @@ int main(int argc,char** argv) {
             "budget fallback changed a late real frame's own pose");
         std::puts("UEVR meter + late menu: exhausted budget keeps real frame delivery PASS");
     } else if(panel_budget_test) {
-        if(f.native_chain_limit<=14)check(state->panel_budget_refused,
-            "native panel allocation refusal must disable optional panel generation");
+        if(panel_publication_test) {
+            check(!state->panel_budget_refused,"two 4X panels must fit the source-pooled native budget");
+            auto mapping=f.transport->native_swapchain_mapping();
+            for(unsigned retry=0;!mapping && retry<100;++retry){std::this_thread::sleep_for(1ms);mapping=f.transport->native_swapchain_mapping();}
+            check(bool(mapping),"drained panel allocation inventory available");
+            std::vector<XrSwapchain> panel_sinks;
+            for(auto source:{panel_chain,second_panel_chain}) {
+                const auto panel=find_swapchain(source);
+                check(panel && panel->panel_source && panel->pooled_publication && panel->frame_generation,
+                    "each panel must retain its independent generator and source-scoped publication");
+                const auto gen=panel->frame_generation;std::vector<XrSwapchain> handles;
+                for(unsigned i=0;i<gen->current_runtime_rings;++i)handles.push_back(gen->current[i].handle);
+                for(unsigned i=0;i<gen->synthetic_runtime_rings;++i)handles.push_back(gen->synthetic[i].handle);
+                check(handles.size()==8,"4X panel must retain two real and six independent synthetic work images");
+                XrSwapchain sink{};UINT64 work_bytes{};
+                for(auto handle:handles) {
+                    const auto found=std::find_if(mapping->begin(),mapping->end(),[&](const auto& entry){return entry.handle==handle;});
+                    check(found!=mapping->end() && (!sink || sink==found->native),"one source must use one native output sink");sink=found->native;
+                    XrSwapchainImageD3D12KHR image{XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};unsigned count{};
+                    xr_ok(f.transport->enumerate_images(handle,1,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(&image)),"independent panel work image");
+                    check(count==1,"panel work-image count changed");const auto desc=image.texture->GetDesc();
+                    work_bytes+=f.device12->GetResourceAllocationInfo(0,1,&desc).SizeInBytes;
+                }
+                const auto& native=f.chains.at(sink);check(native.d12.size()==3,"measured panel runtime has three native images");
+                UINT64 native_bytes{};for(const auto& image:native.d12){const auto desc=image->GetDesc();native_bytes+=f.device12->GetResourceAllocationInfo(0,1,&desc).SizeInBytes;}
+                check(std::find(panel_sinks.begin(),panel_sinks.end(),sink)==panel_sinks.end(),"different source panels shared a sink");panel_sinks.push_back(sink);
+                std::printf("PANEL_VRAM work_images=8 native_images=3 allocated_output_bytes=%llu direct_bank_equivalent_bytes=%llu\n",work_bytes+native_bytes,work_bytes+native_bytes*8);
+            }
+            check(panel_identity_checks>=input_count,"native panel pixel identity was not exercised");
+            check(f.chains.size()<=10,"pooled menu sources exceeded the tested native handle budget");
+        } else if(f.native_chain_limit>=8 && f.native_chain_limit<=14)check(!state->panel_budget_refused,
+            "source-pooled panels should fit the ordinary small native budget");
         if(panel_lifecycle_test)check(find_swapchain(second_panel_chain)->frame_generation!=nullptr,
             "reopened UEVR panel failed to rearm its generation");
         check(!state->generation_budget_exhausted,"optional panels must preserve world generation budget");
@@ -2836,6 +2897,7 @@ int main(int argc,char** argv) {
     if(panel_test)xr_ok(layer_destroy_swapchain_impl(panel_chain),"panel atlas cleanup");
     if(panel_budget_test)xr_ok(layer_destroy_swapchain_impl(second_panel_chain),"second panel cleanup");
     if(budget_meter)xr_ok(f.transport->destroy_swapchain(budget_meter),"meter budget reservation cleanup");
+    for(auto meter:extra_budget_meters)xr_ok(f.transport->destroy_swapchain(meter),"additional budget reservation cleanup");
     if(split_eyes){xr_ok(layer_destroy_swapchain_impl(right),"shipping right destroy");check(f.chains.empty(),"shipping pool cleanup leaves no native handles");}
     if(steady_memory) {
         depth.Reset();motion.Reset();f.release_callback={};sample_memory("application-teardown",input_count);

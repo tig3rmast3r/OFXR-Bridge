@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1004.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1005.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1706,6 +1706,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             set_tests_properties(xrfg_private_auxiliary_slot_${auxiliary_case}
                 PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
         endforeach()
+        foreach(retirement_case auxiliary-retirement auxiliary-retirement-pooled)
+            add_test(NAME xrfg_${retirement_case} COMMAND xrfg_private_runtime_layer_tests ${retirement_case})
+            set_tests_properties(xrfg_${retirement_case} PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
+        endforeach()
+        add_test(NAME xrfg_panel_pooled_4x COMMAND xrfg_private_runtime_layer_tests panel-pooled-multi4-fidelity-director)
+        set_tests_properties(xrfg_panel_pooled_4x PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         # OFXR and Hybrid at 3X/4X on RIFE's ordered private route.
         foreach(multi_case multi3-new multi4-new multi3-fidelity multi4-fidelity multi3-ref multi4-ref multi3-hybrid multi4-hybrid)
             add_test(NAME xrfg_private_${multi_case}_gpu COMMAND xrfg_private_runtime_layer_tests ${multi_case})

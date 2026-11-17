@@ -1,7 +1,9 @@
 // Exercise production auxiliary capture/selection against real endpoint reader
 // leases. The preparer gate is before its source copy, not a synthetic sleep.
 static int auxiliary_slot_selection_test(unsigned mode) {
-    const bool pooled_budget=mode==3;if(pooled_budget)mode=2;
+    const bool retirement_test=mode>=4;
+    const bool pooled_budget=mode==3 || mode==5;
+    if(retirement_test)mode=1;else if(pooled_budget)mode=2;
     xrfg_fixture::ControlProfile profile;
     const bool independent_route=mode>=4 && mode<=6, luke=mode==6 || mode==7, d11=mode==5 || luke;
     Fixture f(!d11,true,{},false,true,independent_route && d11); f.throttled=false;
@@ -150,6 +152,33 @@ static int auxiliary_slot_selection_test(unsigned mode) {
     }
     for(auto& packet:retained)packet.reset();
     check(app->composition_capture->outputs[0].use_count()==1,"CPU descriptor is free while its endpoint source reader remains held");
+    if(retirement_test) {
+        XrCompositionLayerProjection projection_layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        const auto* header=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection_layer);
+        XrFrameEndInfo without_ui{XR_TYPE_FRAME_END_INFO};without_ui.layerCount=1;without_ui.layers=&header;
+        auto retirement=std::async(std::launch::async,[&]{retire_unused_composition_outputs(state,&without_ui);});
+        const bool nonblocking=retirement.wait_for(100ms)==std::future_status::ready;
+        bool protected_output{};
+        if(nonblocking){retirement.get();protected_output=bool(app->composition_capture->outputs[0]);}
+        release_preparer.set_value();f.unblock();
+        if(!nonblocking){check(retirement.wait_for(4s)==std::future_status::ready,"retirement unblocks after native reader release");retirement.get();}
+        f.wait_count(1);xr_ok(f.transport->drain(),"retirement native readers drained");
+        retire_unused_composition_outputs(state,&without_ui);
+        // The try-destroy contract may also defer on a briefly busy endpoint
+        // mutex. Model subsequent application frames; production never polls.
+        for(unsigned retry=0;app->composition_capture->outputs[0] && retry<100;++retry) {
+            std::this_thread::sleep_for(1ms);retire_unused_composition_outputs(state,&without_ui);
+        }
+        check(!app->composition_capture->outputs[0],"idle retry must release unused auxiliary snapshot");
+        check(f.overlay_pixels==std::vector<unsigned>{40},"retirement corrupted the in-flight UI pixels");
+        destroy_composition_capture(app);
+        {std::scoped_lock lock(g_state_mutex);g_swapchains.erase(source);g_sessions.erase(state->handle);}
+        xr_ok(f.transport->destroy_swapchain(source),"retirement source cleanup");
+        xr_ok(f.transport->destroy_swapchain(projection),"retirement projection cleanup");
+        check(f.chains.empty(),"retirement leaves no native handles");
+        check(nonblocking && protected_output,"unused UI retirement must defer while native readers own its image");
+        std::printf("Unused auxiliary retirement pooled=%u: nonblocking, retained pixels, deferred release and native cleanup PASS\n",unsigned(pooled_budget));return 0;
+    }
     auto newest=snapshot(200);
     auto selection=std::async(std::launch::async,[&]{return own_composition_images(state,*newest);});
     const bool independent=selection.wait_for(mode==2?60ms:500ms)==std::future_status::ready;

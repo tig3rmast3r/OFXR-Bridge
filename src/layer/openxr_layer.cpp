@@ -14520,6 +14520,13 @@ bool arm_panel_generation(const std::shared_ptr<SessionState>& state,std::span<c
         // frame has gone downstream and the preceding presenter is drained.
         bool replace_existing{};
         {std::scoped_lock lock(chain->mutex);replace_existing=!chain->panel_source&&bool(chain->frame_generation);chain->panel_source=true;chain->composition_referenced=true;}
+        // Panel work banks retain independent GPU images and FIFO leases just
+        // like eye outputs. Share only this source's final native destination;
+        // eight 4X work images must not require eight runtime swapchains.
+        if(!state->independent_pacing && state->private_runtime && !state->luke_afw_enabled &&
+            state->graphics_binding==SessionGraphicsBinding::d3d12 &&
+            !state->d3d11_bridge && !state->vulkan_bridge)
+            chain->pooled_publication=true;
         if(replace_existing) {
             destroy_frame_generation_swapchains(chain);
             chain->generation_eligible_pending=true;
@@ -15361,9 +15368,14 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                     slot.reset();continue;
                 }
                 const auto retired=slot->image.handle;
-                const auto result=with_runtime_entry(state.get(),[&] {
-                    return state->dispatch->destroy_swapchain(retired);
-                });
+                // A free CPU descriptor does not prove that the endpoint's
+                // native consumer has retired its source reader. Optional UI
+                // cleanup must defer, never wait on that reader in EndFrame.
+                const auto result=state->private_runtime
+                    ? state->private_runtime->try_destroy_swapchain(retired)
+                    : with_runtime_entry(state.get(),[&] {
+                        return state->dispatch->destroy_swapchain(retired);
+                    });
                 if(XR_SUCCEEDED(result)) {
                     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::composition_publish,
                         S_FALSE,handle_value(chain->handle),handle_value(retired),slot->ready_value);
