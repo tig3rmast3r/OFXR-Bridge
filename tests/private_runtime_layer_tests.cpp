@@ -444,6 +444,12 @@ static int independent_source_admission_test() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    const bool binding_probe=route.starts_with("binding-probe-");
+    bool binding_probe_pair{};
+    if(binding_probe) {
+        route.erase(0,14);binding_probe_pair=route.starts_with("pair-");
+        route.erase(0,binding_probe_pair?5:6);route="separate-"+route;
+    }
     const bool invalid_live=route.starts_with("invalid-live-");
     if(invalid_live)route.erase(0,13);
     if(route=="invalid-private-rect")return invalid_private_rect_test();
@@ -2087,6 +2093,73 @@ int main(int argc,char** argv) {
                 invalid_views[1].subImage.imageRect={{INT_MIN,INT_MIN},{INT_MIN,INT_MIN}};
                 invalid_projection.views=invalid_views.data();end.layerCount=2;end.layers=invalid_layers.data();
             }
+        }
+        if(binding_probe && n==4) {
+            xr_ok(wait_for_synthesis_handoff(state),"binding probe prior worker done");
+            if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"binding probe prior presenter idle");
+            xr_ok(f.transport->drain(),"binding probe private readers retired");
+            ProjectionSnapshot snapshot;check(capture_projection_snapshot(&end,&snapshot),"probe source metadata");
+            auto mapping=build_projection_resource_mappings(snapshot);check(!mapping.mappings.empty(),"probe source mapping");
+            ComPtr<ID3D12Fence> gate,app_progress;
+            ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"runtime gate");
+            ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&app_progress)),"independent app receipt");
+            ok(state->binding_queue->Wait(gate.Get(),1),"hold unrelated runtime queue");
+            ok(f.queue->Signal(app_progress.Get(),1),"game queue keeps progressing");
+            const bool app_independent=SUCCEEDED(wait_composition_fence(app_progress.Get(),1,100));
+            // Production prepare submits real GPU work and its exact fence.
+            auto prepared=prepare_projection_frame(snapshot,mapping.mappings,binding_probe_pair,.5F,true,&state->presentation_transform);
+            bool submitted=prepared.kind!=PreparedGenerationKind::none && !prepared.resources.empty();
+            bool independent=submitted;
+            for(const auto& resource:prepared.resources) {
+                const auto& g=resource.generation;
+                independent &= g.worker_fence && g.worker_fence_value &&
+                    SUCCEEDED(wait_composition_fence(g.worker_fence.Get(),g.worker_fence_value,100));
+            }
+            // Always release the fault before cleanup/assertions. No forged
+            // synthesis completion or signal of the producer's own fence.
+            const bool gate_held=gate->GetCompletedValue()==0;
+            ok(gate->Signal(1),"release injected native backlog");
+            bool completed=submitted && finish_worker_outputs(state,prepared,400);
+            unsigned pixel{};
+            if(completed) {
+                const auto output=prepared.resources.front().generation.current_handle;
+                unsigned count{};xr_ok(f.transport->enumerate_images(output,0,&count,nullptr),"probe private output count");
+                std::vector<XrSwapchainImageD3D12KHR> result(count,{XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+                xr_ok(f.transport->enumerate_images(output,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(result.data())),"probe private output resources");
+                Chain image;image.state=D3D12_RESOURCE_STATE_COMMON;image.d12.emplace_back(result[0].texture);
+                pixel=f.read_pixel(image);
+            }
+            std::printf("BINDING_PROBE pair=%u submitted=%u app_independent=%u synthesis_independent=%u gate_held=%u recovered=%u pixel=%u expected=%u\n",
+                unsigned(binding_probe_pair),unsigned(submitted),unsigned(app_independent),unsigned(independent),unsigned(gate_held),unsigned(completed),pixel,color);
+            prepared={};
+            // Negative control: an actual pending source-history copy MUST
+            // still gate synthesis, independently of the runtime exemption.
+            ComPtr<ID3D12Fence> source_gate;
+            ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&source_gate)),"source dependency gate");
+            auto source=find_swapchain(chain);auto history=source->d3d12_history;
+            ok(f.queue->Wait(source_gate.Get(),1),"withhold actual history producer");
+            xrfg::D3D12HistoryCaptureTicket source_ticket;
+            ok(history->capture(*source->last_released_index,&source_ticket),"pending source history copy");
+            ok(history->commit(source_ticket),"pending source history commit");
+            {std::scoped_lock lock(source->mutex);source->last_released_capture=source_ticket;}
+            auto protected_output=prepare_projection_frame(snapshot,mapping.mappings,false,.5F,true,&state->presentation_transform);
+            bool source_protected=protected_output.kind!=PreparedGenerationKind::none && !protected_output.resources.empty();
+            for(const auto& resource:protected_output.resources) {
+                const auto& g=resource.generation;
+                source_protected &= g.worker_fence && g.worker_fence_value &&
+                    wait_composition_fence(g.worker_fence.Get(),g.worker_fence_value,100)==HRESULT_FROM_WIN32(ERROR_BUSY);
+            }
+            ok(source_gate->Signal(1),"complete actual history producer");
+            const bool source_resumed=finish_worker_outputs(state,protected_output,401);
+            std::printf("SOURCE_CONTROL protected=%u resumed=%u\n",unsigned(source_protected),unsigned(source_resumed));
+            protected_output={};stop_continuous_presenter(state);f.transport->stop();
+            for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
+            xr_ok(layer_destroy_swapchain_impl(chain),"probe application source cleanup");
+            {std::scoped_lock lock(g_state_mutex);g_sessions.clear();g_swapchains.clear();g_instances.clear();}
+            check(app_independent && gate_held && submitted && completed && pixel==color,"fault probe input/completion/pixels invalid");
+            check(source_protected && source_resumed,"private source ownership/fence protection lost");
+            check(independent,"private synthesis inherited unrelated runtime queue backlog");
+            return 0;
         }
         std::array<XrCompositionLayerQuad,2> panel_quads;
         std::array<const XrCompositionLayerBaseHeader*,3> panel_layers{layer};

@@ -13666,6 +13666,13 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             release_private_image(state->session.get(),state->session->dispatch,current_image);
             output.reason=GenerationPrepareReason::synthetic_private_acquire_failed;return output;
         }
+        // Private acquire already retires the exact image's endpoint readers.
+        // Source history supplies its own producer fence. Joining the entire
+        // native binding queue here imports unrelated compositor backlog into
+        // synthesis, including the real-only recovery prime.
+        const bool private_owned_outputs=state->session->private_runtime && !state->session->independent_pacing &&
+            state->session->graphics_binding==SessionGraphicsBinding::d3d12 &&
+            !state->session->luke_afw_enabled && !state->session->d3d11_bridge && !state->session->vulkan_bridge;
         // Private native-D12 acquire returns an image only after its old GPU
         // readers have completed. It needs no REAL binding-queue tail receipt:
         // that tail can contain unrelated app/presentation work and otherwise
@@ -13692,7 +13699,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 state->d3d12_history?state->d3d12_history->diagnostic_completed_value():0);
         }
         HRESULT acquire_result=S_OK;
-        if (!generation->staged_outputs && !generation->pooled_native_outputs && !private_acquire_complete && (generation->panel_queue || state->session->d3d12_synthesis_queue)) {
+        if (!private_owned_outputs && !generation->staged_outputs && !generation->pooled_native_outputs && !private_acquire_complete && (generation->panel_queue || state->session->d3d12_synthesis_queue)) {
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
             acquire_result=synthesizer->synchronize_producer_queue(runtime_queue(*state->session));
         }
