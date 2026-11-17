@@ -2005,6 +2005,14 @@ unsigned rife_frames(const SessionState& state) noexcept {
     return reduced_native_outputs(state) && !private_triple && !native_rife ? 1U : 2U;
 }
 
+// Completion recovery follows image ownership, not multiplier/provider choice.
+// This transport owns the images and exact readiness fence independently of XR.
+[[nodiscard]] bool private_completion_recovery_enabled(const SessionState& state) noexcept {
+    return !state.independent_pacing && state.private_runtime && state.dispatch->steamvr_runtime &&
+        state.graphics_binding==SessionGraphicsBinding::d3d12 &&
+        !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled;
+}
+
 [[nodiscard]] bool optical_pressure_recovery_enabled(const SessionState& state) noexcept {
     return !state.independent_pacing && state.private_runtime && state.dispatch->steamvr_runtime &&
         state.graphics_binding==SessionGraphicsBinding::d3d12 &&
@@ -10861,6 +10869,10 @@ void continuous_presenter_main(
 // Fresh-output consumer for the NVIDIA three-slot director, legacy NVIDIA
 // S/B queue, and SteamVR FSR S/B queue. It never submits a retained real twice
 // and never emits empty frames just to keep a counter moving.
+[[nodiscard]] HRESULT wait_recoverable_private_fence(
+    const std::shared_ptr<SessionState>& state,ID3D12Fence* fence,std::uint64_t value,
+    bool& delayed) noexcept;
+
 void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexcept {
     try {
         std::uint64_t clock_anchor_tick{};
@@ -10946,11 +10958,23 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                         S_OK,552,ready_frame->input_release_value,ready_frame->app_release_value);
                 const auto ready_token = xrfg::bridge_flight_logger().begin(
                     xrfg::BridgeFlightOperation::timing_synthesis_complete, 524, ready.value);
-                const auto ready_result = wait_composition_fence(ready.fence.Get(), ready.value,
-                    kFrameStartSynthesisWaitMilliseconds);
+                bool delayed_readiness{};
+                const auto ready_result = wait_recoverable_private_fence(state,
+                    ready.fence.Get(),ready.value,delayed_readiness);
                 xrfg::bridge_flight_logger().end(ready_token,
                     xrfg::BridgeFlightOperation::timing_synthesis_complete, ready_result);
-                if (FAILED(ready_result)) { fail(XR_ERROR_RUNTIME_FAILURE); readiness_failed = true; break; }
+                if (FAILED(ready_result)) {
+                    bool stopped{};
+                    {std::scoped_lock lock(state->presenter_mutex);
+                     stopped=ready_result==E_ABORT && state->presenter_stop_requested;
+                     if(stopped && borrowed) {
+                         borrowed->result=XR_ERROR_SESSION_NOT_RUNNING;borrowed->completed=true;
+                         if(state->outstanding_presenter_submissions)--state->outstanding_presenter_submissions;
+                     }}
+                    if(stopped)state->presenter_condition.notify_all();
+                    else fail(XR_ERROR_RUNTIME_FAILURE);
+                    readiness_failed=true;break;
+                }
             }
             if (readiness_failed) break;
             // Do not also wait for auxiliary copies or application queue work.
@@ -14213,12 +14237,12 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
 
 // A healthy device can finish late under residency pressure. Retain the exact
 // in-flight transaction while polling; never recycle its outputs at timeout.
-[[nodiscard]] HRESULT wait_recoverable_optical_fence(
+[[nodiscard]] HRESULT wait_recoverable_private_fence(
     const std::shared_ptr<SessionState>& state,ID3D12Fence* fence,std::uint64_t value,
     bool& delayed) noexcept {
     HRESULT result=fence && value ? wait_composition_fence(fence,value,
         kFrameStartSynthesisWaitMilliseconds) : E_INVALIDARG;
-    if(result!=HRESULT_FROM_WIN32(ERROR_BUSY) || !optical_pressure_recovery_enabled(*state))return result;
+    if(result!=HRESULT_FROM_WIN32(ERROR_BUSY) || !private_completion_recovery_enabled(*state))return result;
     if(!state->d3d12_device)return E_INVALIDARG;
     delayed=true;
     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
@@ -14265,7 +14289,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             source_sequence, handle_value(resource.application_swapchain));
         bool delayed{};
         const auto completion_started=std::chrono::steady_clock::now();
-        const HRESULT ready = wait_recoverable_optical_fence(state,g.worker_fence.Get(),
+        const HRESULT ready = wait_recoverable_private_fence(state,g.worker_fence.Get(),
             g.worker_fence_value,delayed);
         if(SUCCEEDED(ready) && optical_pressure_recovery_enabled(*state)) {
             const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(

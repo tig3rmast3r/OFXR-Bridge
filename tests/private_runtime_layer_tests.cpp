@@ -18,6 +18,7 @@
 #include "independent_features_test.inc"
 #include "aer4_phase_recovery_test.inc"
 #include "private_input_resource_test.inc"
+#include "private_completion_recovery_test.inc"
 
 // Model the native timing owner used by the shipping SteamVR endpoint. The old
 // fixture's instantaneous Wait only tested a consumer that imposed its own CPU
@@ -444,6 +445,9 @@ static int independent_source_admission_test() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route.starts_with("late-2x-"))return private_completion_recovery_test(route.substr(8));
+    const bool late_shipping=route.starts_with("late-shipping-");
+    if(late_shipping)route=route.substr(14);
     const bool binding_probe=route.starts_with("binding-probe-");
     bool binding_probe_pair{};
     if(binding_probe) {
@@ -500,7 +504,7 @@ int main(int argc,char** argv) {
         check(slow_retained && slow_completed && slow_delayed && optical_pressure_real_only(*state),
             "measured sub-timeout GPU delay must initiate bounded backoff");
         bool missing_delayed{};
-        check(wait_recoverable_optical_fence(state,nullptr,1,missing_delayed)==E_INVALIDARG && !missing_delayed,
+        check(wait_recoverable_private_fence(state,nullptr,1,missing_delayed)==E_INVALIDARG && !missing_delayed,
             "structural error must not enter recovery");
         state->nvidia_options.rife_multiplier=2;
         check(!optical_pressure_real_only(*state),"2X excluded from trial admission policy");
@@ -508,11 +512,11 @@ int main(int argc,char** argv) {
         check(!optical_pressure_recovery_enabled(*state),"RIFE excluded from trial recovery");
         state->nvidia_options.rife_model=-1;
         ok(fence->Signal(3),"normal worker fence");bool normal_delayed{};
-        check(wait_recoverable_optical_fence(state,fence.Get(),3,normal_delayed)==S_OK && !normal_delayed,
+        check(wait_recoverable_private_fence(state,fence.Get(),3,normal_delayed)==S_OK && !normal_delayed,
             "normal completed work must retain fast path");
         {std::scoped_lock lock(state->presenter_mutex);state->presenter_stop_requested=true;}
         bool stopped_delayed{};
-        check(wait_recoverable_optical_fence(state,fence.Get(),4,stopped_delayed)==E_ABORT,
+        check(wait_recoverable_private_fence(state,fence.Get(),4,stopped_delayed)==E_ABORT,
             "recovery must be interruptible by session stop");
         std::puts("Memory-only admission, bounded retry at persistent high VRAM, actual delayed D3D12 completion, normal/error/excluded paths and stop PASS");return 0;
     }
@@ -1999,6 +2003,12 @@ int main(int argc,char** argv) {
             check(single_director_pacing(*state)==(desired.pacing_mode==1),"active policy matches live Framework/Director/combined choice");
             check(state->private_runtime==f.transport && f.transport->director_enabled()==(desired.pacing_mode!=0),"live bypass retains the sole physical endpoint");
         }
+        if(late_shipping && n==6) {
+            auto desired=xrfg::embedded::snapshot().desired;desired.backend=route=="fidelity"?2:0;
+            check(xrfg_fixture::request_control(desired),"actual provider change after late completion");
+            ok(apply_embedded_control(state),"late work drained before provider reconciliation");
+            check(XR_SUCCEEDED(state->presenter_failure),"provider change inherited late-completion failure");
+        }
         if(switching && (n==3 || n==5 || n==7)) {
             auto desired=xrfg::embedded::snapshot().desired;desired.enabled=true;desired.backend=n==3?1:n==5?3:0;
             desired.frame_generation=0;desired.separate_synthesis=0;desired.lower_vram=0;
@@ -2225,7 +2235,22 @@ int main(int argc,char** argv) {
         if(hfw) std::fprintf(stderr,"HFW before%u active%u worker%u request%u forbidden%u mode%u enabled%u\n",n,
             unsigned(continuous_presenter_active(state)),unsigned(state->three_slot_director),unsigned(state->presenter_start_requested),
             unsigned(presenter_forbidden(*state)),unsigned(state->single_director_requested.load()),unsigned(state->menu_enabled.load()));
-        if(hfw && !toggling && !hfw_gate_proven && n>=4 && state->three_slot_director && continuous_presenter_active(state)) {
+        if(late_shipping && n==4) {
+            xr_ok(wait_for_synthesis_handoff(state),"late shipping previous worker idle");
+            if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"late shipping previous consumer idle");
+            xr_ok(f.transport->drain(),"late shipping previous private readers retired");
+            ComPtr<ID3D12Fence> gate;
+            ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"late shipping GPU gate");
+            ok(state->d3d12_synthesis_queue->Wait(gate.Get(),1),"hold real 2X synthesis commands");
+            auto accepted=std::async(std::launch::async,[&]{return layer_end_frame_impl(state->handle,&end);});
+            std::this_thread::sleep_for(1150ms);
+            bool healthy{};{std::scoped_lock lock(state->presenter_mutex);healthy=XR_SUCCEEDED(state->presenter_failure);}
+            const bool held=gate->GetCompletedValue()==0;
+            ok(gate->Signal(1),"finish delayed actual synthesis commands");
+            xr_ok(accepted.get(),"shipping End returns after late 2X completion");
+            check(held && healthy,"shipping 2X path latched failure at one second");
+            std::puts("Shipping 2X timeout survives and actual provider switch follows PASS");
+        } else if(hfw && !toggling && !hfw_gate_proven && n>=4 && state->three_slot_director && continuous_presenter_active(state)) {
             xr_ok(wait_for_synthesis_handoff(state),"prior HFW generation finished");
             xr_ok(wait_for_presenter_idle(state),"prior HFW upper output retired");
             xr_ok(f.transport->drain(),"prior HFW native delivery drained");

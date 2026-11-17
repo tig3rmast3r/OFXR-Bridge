@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1009.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1010.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -915,6 +915,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_private_content_refusal_gpu COMMAND xrfg_private_openxr_runtime_tests content-refusal)
         add_test(NAME xrfg_private_framework_expired_clock_gpu COMMAND xrfg_private_openxr_runtime_tests bypass-expired)
         set_tests_properties(xrfg_private_framework_expired_clock_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        foreach(late_provider IN ITEMS fidelity ref)
+            add_test(NAME xrfg_private_late_shipping_${late_provider}_gpu COMMAND xrfg_private_runtime_layer_tests late-shipping-${late_provider})
+            set_tests_properties(xrfg_private_late_shipping_${late_provider}_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        endforeach()
+        foreach(late_case IN ITEMS worker-fidelity worker-reference worker-rife presenter cancel presenter-stop)
+            add_test(NAME xrfg_private_late2x_${late_case}_gpu COMMAND xrfg_private_runtime_layer_tests late-2x-${late_case})
+            set_tests_properties(xrfg_private_late2x_${late_case}_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        endforeach()
         foreach(probe_case IN ITEMS prime-fidelity pair-fidelity prime-new pair-new)
             add_test(NAME xrfg_private_binding_${probe_case}_gpu COMMAND xrfg_private_runtime_layer_tests binding-probe-${probe_case})
             set_tests_properties(xrfg_private_binding_${probe_case}_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
