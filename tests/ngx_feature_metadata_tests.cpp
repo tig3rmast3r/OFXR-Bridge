@@ -33,6 +33,32 @@ struct EvaluationMap {
 }
 int main() {
     try {
+    {
+        xrfg::NgxApplicationCadence cadence;
+        require(cadence.frame_time(0.F,1000000000)==0.F,"unmeasured cadence admitted");
+        cadence.begin(1,1000000000);
+        require(cadence.frame_time(0.F,1001000000)==0.F,"first frame invented timing");
+        cadence.begin(1,1022000000);
+        for(float invalid:{0.F,-1.F,std::numeric_limits<float>::quiet_NaN(),
+                std::numeric_limits<float>::infinity()})
+            require(cadence.frame_time(invalid,1023000000)==22.F,"invalid timing did not use measured application cadence");
+        require(cadence.frame_time(0.F,1024000000)==22.F,"second eye changed frame cadence");
+        require(cadence.frame_time(11.111F,1024000000)==11.111F,"native timing overwritten");
+        require(cadence.frame_time(0.F,1021000000)==0.F,"backward sample admitted");
+        require(cadence.frame_time(0.F,1300000000)==0.F,"stale cadence admitted");
+        cadence.begin(2,1044000000);
+        require(cadence.frame_time(0.F,1045000000)==0.F,"cadence crossed session boundary");
+        cadence.begin(2,1066000000);
+        require(cadence.frame_time(0.F,1067000000)==22.F,"new session failed to warm");
+        cadence.begin(2,2000000000);
+        require(cadence.frame_time(0.F,2001000000)==0.F,"loading pause reused cadence");
+        cadence.begin(2,2022000000);
+        require(cadence.frame_time(0.F,2023000000)==22.F,"cadence failed to recover after pause");
+        cadence.begin(2,2022000000);
+        require(cadence.frame_time(0.F,2023000000)==0.F,"duplicate frame start admitted");
+        cadence.begin(0,2044000000);
+        require(cadence.frame_time(0.F,2045000000)==0.F,"ownerless sample admitted");
+    }
     for(const float legacy_value:{0.F,-1.F,std::numeric_limits<float>::quiet_NaN(),
             std::numeric_limits<float>::infinity()})
         require(xrfg::ngx_luke_frame_time_ms(legacy_value)==16.6667F,

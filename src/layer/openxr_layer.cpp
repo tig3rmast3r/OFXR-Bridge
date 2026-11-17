@@ -20409,6 +20409,8 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_begin_frame(
     const XrResult result = guard_c_api_boundary([&] {
         return layer_begin_frame_impl(session, begin_info, &interface_call);
     });
+    if (result == XR_SUCCESS)
+        xrfg::observe_ngx_application_begin(handle_value(session));
     xrfg::bridge_flight_logger().end(
         token,
         xrfg::BridgeFlightOperation::application_begin_frame,

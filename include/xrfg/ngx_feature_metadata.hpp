@@ -4,6 +4,25 @@
 #include <cmath>
 
 namespace xrfg {
+// Application starts, rather than SR evaluations, define cadence: stereo can
+// evaluate SR twice in one game frame. Never reuse a sample across sessions,
+// a loading pause, or an out-of-order clock. Units are monotonic nanoseconds.
+struct NgxApplicationCadence {
+    std::uint64_t session{}, started_ns{};
+    float interval_ms{};
+    void begin(std::uint64_t owner, std::uint64_t now) noexcept {
+        interval_ms = owner && owner == session && now > started_ns && started_ns
+            && now - started_ns <= 250000000ULL
+            ? static_cast<float>(now - started_ns) / 1000000.F : 0.F;
+        session = owner;
+        started_ns = now;
+    }
+    float frame_time(float supplied, std::uint64_t now) const noexcept {
+        if (std::isfinite(supplied) && supplied > 0.F) return supplied;
+        return session && now >= started_ns && now - started_ns <= 250000000ULL
+            && interval_ms > 0.F ? interval_ms : supplied;
+    }
+};
 // Older SR integrations can successfully return zero for the optional
 // frame-time parameter. Luke's established D3D12 capture policy uses a nominal
 // positive interval in that case; Vulkan must use the same admission policy.

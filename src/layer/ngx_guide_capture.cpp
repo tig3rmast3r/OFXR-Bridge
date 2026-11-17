@@ -37,6 +37,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cmath>
+#include <chrono>
 #include <share.h>
 #include <mutex>
 #include <memory>
@@ -98,10 +99,16 @@ struct Capture {
     DWORD debug_cookie{};
     float camera_near{}, camera_far{};
     bool depth_inverted{}, depth_infinite{}, camera_valid{}, camera_from_xr{};
+    NgxApplicationCadence application_cadence;
+    std::atomic_uint64_t timing_fallbacks{0};
 };
 // Hooks retain their trampolines and pin this module for process lifetime.
 // No CRT static destructor tries to unhook under the Windows loader lock.
 Capture& state() { static auto* s=new Capture; return *s; }
+std::uint64_t cadence_clock_ns() noexcept {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 constexpr std::uint64_t kKcdPublicStreamNamespace=std::uint64_t{1}<<63;
 bool public_guide_stream(std::uint64_t stream) noexcept {
     return (stream&kKcdPublicStreamNamespace)!=0;
@@ -1279,8 +1286,22 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     g.reset=get<int>(p,NVSDK_NGX_Parameter_Reset)!=0;
     g.resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     g.depth_resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    g.frame_time_delta_ms=get<float>(p,NVSDK_NGX_Parameter_FrameTimeDeltaInMsec,16.6667F);
+    const bool uevr_timing=!luke && GetModuleHandleW(L"UEVRBackend.dll");
+    g.frame_time_delta_ms=get<float>(p,NVSDK_NGX_Parameter_FrameTimeDeltaInMsec,uevr_timing?0.F:16.6667F);
     if(luke)g.frame_time_delta_ms=ngx_luke_frame_time_ms(g.frame_time_delta_ms);
+    else if(uevr_timing &&
+        (!std::isfinite(g.frame_time_delta_ms) || g.frame_time_delta_ms<=0.F)) {
+        const float supplied=g.frame_time_delta_ms;
+        { std::scoped_lock lock(s.mutex);
+          g.frame_time_delta_ms=s.application_cadence.frame_time(supplied,cadence_clock_ns()); }
+        if(std::isfinite(g.frame_time_delta_ms) && g.frame_time_delta_ms>0.F) {
+            const auto count=++s.timing_fallbacks;
+            if(count<=8 || count%300==0)
+                log("uevr_frame_time_fallback",call,g.stream,
+                    std::bit_cast<std::uint32_t>(supplied),
+                    std::bit_cast<std::uint32_t>(g.frame_time_delta_ms));
+        }
+    }
     g.camera_near=get<float>(p,"DLSSG.CameraNear",camera_near);
     g.camera_far=get<float>(p,"DLSSG.CameraFar",camera_far);
     // Unknown flags defer to the camera's own depth convention.
@@ -2205,7 +2226,12 @@ void set_ngx_capture_steamvr_runtime(bool steamvr) noexcept {
 void stop_ngx_guide_capture(ID3D12CommandQueue* queue) noexcept {
     native_ingress::stop_queue(queue);
     auto& s=state(); std::scoped_lock lock(s.mutex);
-    if(s.queue.Get()==queue) {s.active=false;s.queue.Reset();}
+    if(s.queue.Get()==queue) {s.active=false;s.queue.Reset();s.application_cadence={};}
+}
+void observe_ngx_application_begin(std::uint64_t session) noexcept {
+    if(!GetModuleHandleW(L"UEVRBackend.dll"))return;
+    auto& s=state();std::scoped_lock lock(s.mutex);
+    s.application_cadence.begin(session,cadence_clock_ns());
 }
 void update_ngx_guide_depth(float near_z,float far_z,float min_depth,float max_depth) noexcept {
     if(min_depth!=0.F||max_depth!=1.F||!std::isfinite(near_z)||!std::isfinite(far_z)||
@@ -2226,6 +2252,7 @@ namespace xrfg {
 void configure_ngx_guide_capture(ID3D12CommandQueue*,bool) noexcept {}
 void set_ngx_capture_steamvr_runtime(bool) noexcept {}
 void stop_ngx_guide_capture(ID3D12CommandQueue*) noexcept {}
+void observe_ngx_application_begin(std::uint64_t) noexcept {}
 void update_ngx_guide_depth(float,float,float,float) noexcept {}
 void prepare_ngx_feature_discovery(const wchar_t*) noexcept {}
 }
