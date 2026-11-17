@@ -897,13 +897,31 @@ struct PrivateOpenXrRuntime::Impl {
         return {};
     }
     bool renewals_stalled() const noexcept {return stalled_renewals>=stalled_renewal_limit;}
-    // True for a renewed Wait that blocked 4+ refreshes and still returned a
-    // cycle already shown when it returned: deliver this packet on it. A
+    // Bound each packet's clock-only retry phase even when the runtime returns
+    // rapidly with an expired prediction. Never discard its prepared images.
+    bool renewal_budget_exhausted(unsigned renewed,std::int64_t started,std::uint64_t sequence,const XrFrameState& prediction) {
+        const auto at=prediction_qpc(prediction);
+        if(!at || *at>clock_ns())return false;
+        if(!renewed || (renewed<8 && clock_ns()-started<100'000'000))return false;
+        if(options.trace)options.trace(56,sequence,clock_ns()-started,renewed);
+        return true;
+    }
+    // True for a replacement Wait/Begin that consumed 4+ refreshes and left
+    // its prediction expired after Begin: deliver this packet on it. A
     // normal SteamVR hitch returns late but current, and resets the count.
-    bool renewal_stalled(const WaitResult& fresh,std::int64_t physical,std::uint64_t sequence) {
+    bool renewal_stalled(const WaitResult& fresh,std::int64_t physical,std::uint64_t sequence,std::int64_t completed) {
         const auto at=prediction_qpc(fresh.prediction);
         if(!at || physical<=0)return false;
-        if(*at>fresh.returned){stalled_renewals=0;return false;}
+        if(*at>fresh.returned) {
+            // Preserve the established Wait-recovery reset. A subsequent slow
+            // Begin escapes this packet without altering the Wait-stall latch.
+            stalled_renewals=0;
+            if(*at<=completed && completed-fresh.returned>4*physical) {
+                if(options.trace)options.trace(56,sequence,completed-fresh.returned,1);
+                return true;
+            }
+            return false;
+        }
         const auto blocked=fresh.returned-fresh.entered;
         if(blocked<=4*physical)return false;
         if(fresh.returned-last_stalled_renewal>stalled_renewal_window)stalled_renewals=0;
@@ -975,13 +993,15 @@ struct PrivateOpenXrRuntime::Impl {
                 if(XR_SUCCEEDED(result))result=options.real.begin(options.real.session,&begin);
                 auto begin_done=clock_ns();
                 if(XR_SUCCEEDED(result)){waited=false;begun=true;}
+                const auto renewal_started=clock_ns();
                 unsigned renewed{};
                 // Sparse-input regression from V592: a native Wait completed
                 // before slow source work can be stale by Begin. Preserve the
                 // same FIFO packet and renew only that unsubmitted XR cycle.
                 // Do not renew a CURRENT prediction to satisfy an invented
                 // CPU deadline or reserve another physical display slot.
-                while(!stopping && XR_SUCCEEDED(result) && prediction.shouldRender && !renewals_stalled()) {
+                while(!stopping && XR_SUCCEEDED(result) && prediction.shouldRender && !renewals_stalled() &&
+                      !renewal_budget_exhausted(renewed,renewal_started,packet->sequence,prediction)) {
                     const auto target=prediction_qpc(prediction);
                     if(!target || *target>clock_ns())break;
                     if(tracing())options.trace(23,packet->sequence,*target,clock_ns());
@@ -993,7 +1013,7 @@ struct PrivateOpenXrRuntime::Impl {
                     prediction=fresh->prediction;clock=std::move(fresh);
                     waited=true;begin_at=clock_ns();result=options.real.begin(options.real.session,&begin);begin_done=clock_ns();
                     if(XR_SUCCEEDED(result)){waited=false;begun=true;++renewed;}
-                    if(XR_SUCCEEDED(result) && renewal_stalled(*clock,period(prediction.predictedDisplayPeriod),packet->sequence))break;
+                    if(XR_SUCCEEDED(result) && renewal_stalled(*clock,period(prediction.predictedDisplayPeriod),packet->sequence,begin_done))break;
                 }
                 if(XR_FAILED(result) || stopping) {
                     if(XR_FAILED(result) && !stopping)fail(result);
@@ -1437,8 +1457,10 @@ struct PrivateOpenXrRuntime::Impl {
                     // handoff chain/FIFO retains that margin; do not charge the
                     // historical reserve to every already-ready output.
                     const auto deadline=phased?std::max(clock_ns(),clock->handoff):(early?clock_ns():std::max(clock_ns(),last_handoff+physical))+refill;
+                    const auto renewal_started=clock_ns();
                     unsigned renewed{};
-                    while(!stopping && prediction.shouldRender && !renewals_stalled()) {
+                    while(!stopping && prediction.shouldRender && !renewals_stalled() &&
+                      !renewal_budget_exhausted(renewed,renewal_started,packet->sequence,prediction)) {
                         const auto at=prediction_qpc(prediction);
                         const auto handoff=std::max(clock_ns(),deadline);
                         // SteamVR's prediction may be several periods ahead,
@@ -1460,7 +1482,7 @@ struct PrivateOpenXrRuntime::Impl {
                         if(XR_FAILED(result))break;
                         waited=false;begun=true;begun_at=clock_ns();++renewed;
                         if(diagnostic)options.trace(33,packet->sequence,entered,begun_at);
-                        if(renewal_stalled(*fresh,physical,packet->sequence))break;
+                        if(renewal_stalled(*fresh,physical,packet->sequence,begun_at))break;
                     }
                     if(stopping || XR_FAILED(result)) {
                         if(!stopping)fail(result);retire(packet);fifo->retire();break;
@@ -1573,9 +1595,11 @@ struct PrivateOpenXrRuntime::Impl {
                     // XR_FRAME_DISCARDED path; no source frame or layer is discarded.
                     // Do this before posting lookahead, so the worker remains the
                     // sole Wait caller and Begin/End stay serialized here.
+                    const auto renewal_started=clock_ns();
                     unsigned renewed{};
                     bool renewed_window{};
-                    while(!stopping && prediction.shouldRender && !renewals_stalled()) {
+                    while(!stopping && prediction.shouldRender && !renewals_stalled() &&
+                      !renewal_budget_exhausted(renewed,renewal_started,packet->sequence,prediction)) {
                         const auto at=prediction_qpc(prediction);
                         if(!at)break;
                         const auto target=std::max(clock_ns(),deadline);
@@ -1615,7 +1639,7 @@ struct PrivateOpenXrRuntime::Impl {
                             schedule.runtime_ready(begun_at,PrivateRuntimeBudget::presentation_margin);
                             deadline=schedule.deadline();
                         }
-                        if(renewal_stalled(*fresh,physical,packet->sequence))break;
+                        if(renewal_stalled(*fresh,physical,packet->sequence,begun_at))break;
                     }
                     if(stopping || XR_FAILED(result)) {
                         if(!stopping)fail(result);
@@ -1650,8 +1674,10 @@ struct PrivateOpenXrRuntime::Impl {
                     // GPU preparation may outlive the Wait already in flight.
                     // Renew only that expired Begin; retain the same FIFO image
                     // and never introduce the director's pacing/delay here.
+                    const auto renewal_started=clock_ns();
                     unsigned renewed{};
-                    while(!stopping && prediction.shouldRender && !renewals_stalled()) {
+                    while(!stopping && prediction.shouldRender && !renewals_stalled() &&
+                      !renewal_budget_exhausted(renewed,renewal_started,packet->sequence,prediction)) {
                         const auto at=prediction_qpc(prediction);
                         if(!at || *at>std::max(clock_ns(),deadline)+PrivateOutputSchedule::preparation_lead)break;
                         if(diagnostic)options.trace(23,packet->sequence,*at,clock_ns());
@@ -1666,7 +1692,7 @@ struct PrivateOpenXrRuntime::Impl {
                         result=options.real.begin(options.real.session,&begin);
                         if(XR_FAILED(result))break;
                         waited=false;begun=true;begun_at=clock_ns();++renewed;
-                        if(renewal_stalled(*fresh,physical,packet->sequence))break;
+                        if(renewal_stalled(*fresh,physical,packet->sequence,begun_at))break;
                     }
                     if(stopping || XR_FAILED(result)) {
                         if(!stopping)fail(result);

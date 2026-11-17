@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1005.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1006.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -915,6 +915,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_private_content_refusal_gpu COMMAND xrfg_private_openxr_runtime_tests content-refusal)
         add_test(NAME xrfg_private_framework_expired_clock_gpu COMMAND xrfg_private_openxr_runtime_tests bypass-expired)
         set_tests_properties(xrfg_private_framework_expired_clock_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        add_test(NAME xrfg_private_begin_renewal_gpu COMMAND xrfg_private_openxr_runtime_tests begin-renewal)
+        set_tests_properties(xrfg_private_begin_renewal_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         add_test(NAME xrfg_private_stalled_renewal_gpu COMMAND xrfg_private_openxr_runtime_tests stalled-renewal)
         add_test(NAME xrfg_private_stalled_renewal_native_gpu COMMAND xrfg_private_openxr_runtime_tests stalled-renewal-native)
         set_tests_properties(xrfg_private_stalled_renewal_gpu xrfg_private_stalled_renewal_native_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)

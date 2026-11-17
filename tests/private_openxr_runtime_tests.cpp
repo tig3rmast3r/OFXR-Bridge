@@ -1004,6 +1004,28 @@ void stalled_native_renewal(bool d12,bool directed,int pattern) {
     static constexpr const char* names[]{"two in a row latch","a current renewal resets","2s apart do not latch"};
     std::printf("%s %s stalled native renewal: %s%s PASS\n",d12?"D12":"D11",directed?"Director":"Framework",names[pattern],latch_checked?"":" (latch not asserted)");
 }
+// Reproduce fast Wait followed by a Begin that consumes the prediction horizon.
+// The failure injection bounds the old-code reproduction without hanging ctest.
+void begin_delayed_renewal(bool d12,bool directed,bool short_expired) {
+    Fixture f(d12,true,{},true);f.unblock();f.throttled=false;f.allow_expired_end=true;
+    if(!directed)xr_ok(f.transport->set_director_enabled(false),"Framework delayed Begin");
+    if(short_expired)f.prediction_horizon_ns=-period;
+    else f.begin_callback=[](unsigned){std::this_thread::sleep_for(60ms);};
+    f.fail_wait_call=40;
+    auto chain=f.make_chain();std::vector<unsigned> expected;
+    for(unsigned n=0;n<2;++n) {
+        f.write(chain,51+n*31);expected.push_back(51+n*31);f.begin_virtual();
+        xr_ok(f.submit(chain,float(n)),"source with expired-after-Begin prediction");
+        f.wait_count(n+1);xr_ok(f.transport->drain(),"bounded delayed-Begin drain");
+    }
+    f.transport->stop();
+    check(f.pixels==expected && f.real_ends==2,"renewal escape retains both exact GPU images once");
+    check(f.positions==std::vector<float>({0,1}),"renewal escape retains source poses in FIFO order");
+    check(f.discarded_clocks>0 && f.discarded_clocks<=16,"at most eight replacement Begins per packet");
+    check(!f.cycle_waited && !f.cycle_begun,"renewal escape balances native ownership");
+    check(f.real_begins==f.real_ends+f.empty_ends+f.discarded_clocks,"native Begins ended or explicitly discarded");
+    std::printf("%s %s %s renewal escape PASS\n",d12?"D12":"D11",directed?"Director":"Framework",short_expired?"fast expired":"delayed Begin");
+}
 void native_renewal_failure() {
     Fixture f(true,true,{},true);f.unblock();f.throttled=false;
     auto chain=f.make_chain();f.write(chain,70);f.begin_virtual();xr_ok(f.submit(chain,1),"before native renewal failure");
@@ -2089,6 +2111,15 @@ int main(int argc,char** argv){
     }
     if(const auto r=rife_aer_handoff_test(argc,argv);r>=0)return r;if(argc>1 && std::string_view(argv[1])=="rife-handoff"){rife_handoff_matrix();return 0;}if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
+if(argc>1 && std::string_view(argv[1])=="begin-renewal"){
+    for(bool native:{false,true})for(bool director_only:{false,true}) {
+        if(!native && director_only)continue;
+        native_contract_fixture_mode=native;native_director_only_fixture_mode=director_only;
+        for(bool d12:{true,false})for(bool directed:{true,false})for(bool fast:{false,true})
+            begin_delayed_renewal(d12,directed,fast);
+    }
+    return 0;
+}
 if(argc>1 && std::string_view(argv[1])=="stalled-renewal"){
     for(bool d12:{true,false})for(bool directed:{true,false})stalled_native_renewal(d12,directed,0);
     for(bool directed:{true,false})for(int pattern:{1,2})stalled_native_renewal(true,directed,pattern);
