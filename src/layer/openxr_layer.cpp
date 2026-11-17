@@ -11,6 +11,7 @@
 #include "xrfg/d3d12_history.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
 #include "xrfg/three_slot_buffer.hpp"
+#include "xrfg/native_batch_admission.hpp"
 #include "xrfg/djules_triple_release.hpp"
 #include "xrfg/two_output_schedule.hpp"
 #include "xrfg/optical_pacing_reserve.hpp"
@@ -786,6 +787,7 @@ struct SessionState {
     std::atomic_bool uevr_osr_active{};
     bool steamvr_separate_queue{true}; // immutable session preference, tray-only
     bool afw_only{}; // immutable session transport; does not disable Neural Rendering
+    xrfg::NativeBatchAdmission native_batch_admission; // presenter_mutex
     bool vdxr_legacy{true}; // immutable native/Legacy transport (VDXR and Pimax Auto)
     // SteamVR and native Pimax D12 use a binding queue independent of game work.
     // Shared non-pacing support for both advanced NVIDIA routes.
@@ -841,6 +843,8 @@ struct SessionState {
             CloseHandle(presenter_pace_timer);
         }
         if (optical_reserve_timer) CloseHandle(optical_reserve_timer);
+        if(source_admission_timer)CloseHandle(source_admission_timer);
+        if(source_admission_event)CloseHandle(source_admission_event);
     }
 
     SessionState(const SessionState&) = delete;
@@ -1231,6 +1235,37 @@ struct SessionState {
     // millisecond without changing the process-wide timer period, which a
     // layer has no business doing to its host.
     HANDLE presenter_pace_timer{};
+    // Separate from the consumer timer: application WaitFrame may overlap output pacing.
+    // All creation/signalling is protected by presenter_mutex; adaptive_wait_mutex
+    // serializes the sole waiter. Session teardown joins workers before destruction.
+    HANDLE source_admission_timer{}, source_admission_event{};
+    void wake_source_admission_locked() noexcept {
+        if(source_admission_event) SetEvent(source_admission_event);
+    }
+    void wait_source_admission_until_locked(std::unique_lock<std::mutex>& lock,std::int64_t due) {
+        if(!source_admission_event)
+            source_admission_event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+        if(!source_admission_timer)
+            source_admission_timer=CreateWaitableTimerExW(nullptr,nullptr,
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+        LARGE_INTEGER relative{};
+        relative.QuadPart=-std::max<LONGLONG>(1,(due-xrfg::NativeBatchAdmission::now()+99)/100);
+        if(source_admission_event && source_admission_timer &&
+           SetWaitableTimer(source_admission_timer,&relative,0,nullptr,nullptr,FALSE)) {
+            HANDLE handles[]{source_admission_event,source_admission_timer};
+            lock.unlock();
+            const auto waited=WaitForMultipleObjects(2,handles,FALSE,INFINITE);
+            lock.lock();
+            CancelWaitableTimer(source_admission_timer);
+            if(waited==WAIT_FAILED)
+                presenter_condition.wait_for(lock,std::chrono::nanoseconds(std::max<std::int64_t>(1,due-xrfg::NativeBatchAdmission::now())));
+        } else {
+            // Preserve cancellation and the former behavior if high-resolution
+            // timers are unavailable; never change the host's timer resolution.
+            presenter_condition.wait_for(lock,std::chrono::nanoseconds(std::max<std::int64_t>(1,due-xrfg::NativeBatchAdmission::now())));
+        }
+    }
+
     // The smallest display period the runtime has reported, which is the one
     // the hardware actually scans at. Not the latest reported value: SteamVR
     // returns a multiple of the true period when it considers the caller
@@ -1877,6 +1912,13 @@ private:
 [[nodiscard]] bool native_optical_batch_overlap(const SessionState& state) noexcept {
     return native_runtime_multiframe(state) && optical_multiframe_requested(state) &&
         !state.luke_afw_enabled && !state.nvidia_options.ofr;
+}
+// Shared source admission is measured at native retirement for both transports.
+// Private Framework/Director differ in their clocks, not source credits.
+[[nodiscard]] bool optical_source_admission(const SessionState& state) noexcept {
+    return !state.independent_pacing && (native_optical_batch_overlap(state) || (state.private_runtime &&
+        optical_multiframe_requested(state) && state.graphics_binding==SessionGraphicsBinding::d3d12 &&
+        !state.luke_afw_enabled && !state.nvidia_options.ofr && !state.d3d11_bridge && !state.vulkan_bridge));
 }
 // Match 0.2's native presenter contract: Pimax and other native runtimes
 // own cadence through WaitFrame, with only a half-period handover floor.
@@ -7337,6 +7379,42 @@ XrResult layer_wait_frame_impl(
             use_provisional_pipelined_wait = true;
         }
     }
+    const bool batch_admission=use_continuous_presenter && optical_source_admission(*state);
+    if(batch_admission) {
+        const auto outputs=native_frame_multiplier(*state);
+        // Do not sample/start a future source while this application's previous
+        // End still owns its source. EndFrame never waits for the next Wait.
+        state->frame_call_condition.wait(frame_call_lock,[&] {
+            return !state->application_frame_in_progress;
+        });
+        frame_call_lock.unlock();
+        const auto admission_started=xrfg::NativeBatchAdmission::now();
+        {
+            std::unique_lock lock(state->presenter_mutex);
+            for(;;) {
+                if(state->presenter_stop_requested || XR_FAILED(state->presenter_failure)) {
+                    const auto failure=state->presenter_failure;
+                    lock.unlock();frame_call_lock.lock();
+                    return XR_FAILED(failure)?failure:XR_ERROR_SESSION_NOT_RUNNING;
+                }
+                if(!state->three_slot_director)break;
+                const auto at=xrfg::NativeBatchAdmission::now();
+                const auto due=state->native_batch_admission.release_at(at,state->presenter_display_period,outputs);
+                if(due<=at) {
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                        5792,state->native_batch_admission.pending(),
+                        state->native_batch_admission.budget(state->presenter_display_period,outputs),at-admission_started);
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                        5793,state->native_batch_admission.first_output_at(at,state->presenter_display_period),
+                        state->native_batch_admission.budget(state->presenter_display_period,outputs),
+                        state->native_batch_admission.pending());
+                    break;
+                }
+                state->wait_source_admission_until_locked(lock,due);
+            }
+        }
+        frame_call_lock.lock();
+    }
     if(state->private_runtime) {
         if(!valid_optional_frame_info(wait_info,XR_TYPE_FRAME_WAIT_INFO))return XR_ERROR_VALIDATION_FAILURE;
         const bool virtual_only=use_continuous_presenter || state->luke_fresh_only;
@@ -7583,6 +7661,10 @@ XrResult layer_wait_frame_impl(
                 add_display_duration(frame_state->predictedDisplayTime,promise_shift);
         }
         state->application_wait_returned_at = std::chrono::steady_clock::now();
+        if(batch_admission) {
+            std::scoped_lock presenter_lock(state->presenter_mutex);
+            state->native_batch_admission.released(xrfg::NativeBatchAdmission::now(),state->presenter_display_period);
+        }
         // Do not even enter a synthesizer mutex from the virtual D3D11 wait:
         // the worker can hold it while waiting for GPU completion. Producer
         // ownership is resolved only at the release/EndFrame handoffs.
@@ -9375,6 +9457,10 @@ XrResult layer_release_swapchain_image_impl(XrSwapchain swapchain,
     if (state && interface_call.started_ns()) {
         interface_call.cycle = state->session->interface_active_cycle.load();
     }
+    if(state && optical_source_admission(*state->session)) {
+        std::scoped_lock lock(state->session->presenter_mutex);
+        state->session->native_batch_admission.source_ready(xrfg::NativeBatchAdmission::now());
+    }
     // Snapshot before any worker wait. The reader never touches application pixels.
     return release_swapchain_with_identity(state, release_info, xrfg::query_luke_render_identity());
 }
@@ -9501,6 +9587,8 @@ struct DirectOutputPublication {
 };
 
 struct GeneratedFrameEndInfo {
+    std::int64_t first_output_target{};
+    bool batch_admission_credit{};
     BlackBarPoseTime blackbar_pose{};
     xrfg::InterfaceFrameStamp interface_stamp{};
     std::int64_t independent_due_ns{}; // frozen before generation; final consumer alone expires it
@@ -9709,6 +9797,8 @@ struct PanelInput {
 };
 
 struct SynthesisJob {
+    std::int64_t first_output_target{};
+    unsigned admission_outputs{};
     bool first_published{};
     bool aer_double{}; // immutable requested second-stage mode for this source
     std::int64_t independent_source_ns{},independent_period_ns{},independent_first_due_ns{};
@@ -9889,6 +9979,7 @@ void fail_pending_presenter_submissions_locked(
     }
     state.presenter_submissions.clear();
     state.outstanding_presenter_submissions = 0;
+    state.wake_source_admission_locked();
 }
 
 // Holds the presenter to one submission per display period.
@@ -11085,6 +11176,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
             const auto pace_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::presenter_pace);
             std::chrono::steady_clock::time_point submission_slot{};
+            const auto source_pace_started=optical_source_admission(*state)?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
             const bool runtime_paced_multiframe=native_multiframe_runtime_pacing(*state);
             if(!state->private_runtime) {
                 const auto period = std::chrono::nanoseconds(state->presenter_display_period);
@@ -11146,6 +11238,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
             }
             xrfg::bridge_flight_logger().end(pace_token,
                 xrfg::BridgeFlightOperation::presenter_pace, runtime_paced_multiframe ? 5 : 0);
+            const auto native_paced_at=optical_source_admission(*state)?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
             const auto epoch=state->djules_configuration_epoch.load();
             if(epoch!=configuration_epoch) {
                 optical_reserve = {};
@@ -11186,6 +11279,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                 xrfg::BridgeFlightOperation::internal_end_frame, handle_value(state->handle),
                 end.displayTime, end.layerCount);
             std::chrono::nanoseconds phase_step{};
+            auto native_handover_ready=std::chrono::steady_clock::time_point{};
             {
                 std::scoped_lock content_lock(state->presenter_content_mutex);
                 result = with_runtime_entry(state, [&] {
@@ -11221,11 +11315,20 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                         if(!publication->publish()) return XR_ERROR_RUNTIME_FAILURE;
                     if(owned && !handover_djules_outputs(state.get(),owned->pending_outputs)) return XR_ERROR_RUNTIME_FAILURE;
                     log_native_delivery_probe(*state, owned, probe_sequence, 2, end.displayTime);
+                    if(optical_source_admission(*state) && state->private_runtime)
+                        state->private_runtime->tag_next_end_for_source_batch(owned && owned->batch_admission_credit && !repeat_held,
+                            owned && !repeat_held?owned->first_output_target:0);
                     phase_step = state->independent_pacing?std::chrono::nanoseconds{}:sample_djules_phase_step(state, !synthetic && !repeat_held && owned,
                         selected ? selected->source_sequence : borrowed->pair_sequence);
                     if(state->independent_pacing && state->private_runtime)
                         state->private_runtime->set_next_independent_deadline(owned?owned->independent_due_ns:0);
                     if(!repeat_held) report_native_frame_content(state.get(),owned);
+                    if(optical_source_admission(*state))native_handover_ready=std::chrono::steady_clock::now();
+                    if(!state->private_runtime && !repeat_held && owned && owned->batch_admission_credit) {
+                        std::scoped_lock lock(state->presenter_mutex);
+                        state->native_batch_admission.delivery_started(std::chrono::duration_cast<std::chrono::nanoseconds>(native_handover_ready.time_since_epoch()).count());
+                        state->wake_source_admission_locked();
+                    }
                     return state->fps_overlay ? state->fps_overlay->end_frame(&end, synthetic,!repeat_held && (!owned || owned->new_content),native_frame_results(owned),owned?owned->native_output:0, owned ? owned->interface_stamp : borrowed ? borrowed->interface_stamp : xrfg::InterfaceFrameStamp{})
                         : content_end_frame(state->handle, &end);
                 });
@@ -11310,6 +11413,14 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                 std::scoped_lock lock(state->presenter_mutex);
                 if (selected) {
                     if(!repeat_held) {
+                        if(!state->private_runtime && selected->frame->batch_admission_credit) {
+                            const auto entered=std::chrono::duration_cast<std::chrono::nanoseconds>(native_handover_ready.time_since_epoch()).count();
+                            state->native_batch_admission.delivered(entered);
+                            state->native_batch_admission.prepared(std::chrono::duration_cast<std::chrono::nanoseconds>(native_handover_ready-native_paced_at).count());
+                            state->native_batch_admission.first_output(entered,selected->frame->first_output_target,
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(native_paced_at-source_pace_started).count());
+                            state->wake_source_admission_locked();
+                        }
                         if(XR_SUCCEEDED(result) && djules_deep_active(*state))
                             djules_last_owned=selected->frame;
                         if(state->independent_pacing)state->independent_outputs.pop_front();
@@ -11385,6 +11496,25 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
         state->queued_nvidia_presenter = queued_nvidia_session(state);
         state->three_slots.configure(state->three_slot_director?native_frame_multiplier(*state):2);
       state->director_anchor_sequence = 0;
+        if(optical_source_admission(*state)) {
+            state->native_batch_admission.reset();
+            if(state->private_runtime) {
+                const std::weak_ptr<SessionState> weak=state;
+                state->private_runtime->set_output_start_observer([weak](std::int64_t at) {
+                    if(auto owner=weak.lock()) {std::scoped_lock lock(owner->presenter_mutex);
+                        owner->native_batch_admission.delivery_started(at);owner->wake_source_admission_locked();}
+                });
+                state->private_runtime->set_output_retirement_observer([weak](std::int64_t at,std::int64_t preparation,std::int64_t target,std::int64_t spare) {
+                    if(auto owner=weak.lock()) {
+                        {std::scoped_lock lock(owner->presenter_mutex);
+                         if(at){owner->native_batch_admission.delivered(at);owner->native_batch_admission.prepared(preparation);owner->native_batch_admission.first_output(at,target,spare);}
+                         else owner->native_batch_admission.cancelled(1);
+                         owner->wake_source_admission_locked();}
+                        owner->presenter_condition.notify_all();
+                    }
+                });
+            }
+        }
         state->synthesis_job.reset();
         state->independent_sources.clear();state->independent_outputs.clear();
         state->independent_completions.clear();state->independent_completion_busy=false;
@@ -11462,6 +11592,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
         {
             std::scoped_lock lock(state->presenter_mutex);
             state->presenter_stop_requested = true;
+            state->wake_source_admission_locked();
             if(!state->synthesis_thread.joinable())state->independent_submission_finished=true;
         }
         state->presenter_condition.notify_all();
@@ -11495,6 +11626,7 @@ void stop_continuous_presenter(
                            XR_FAILED(state->presenter_failure);
                 }));
             state->presenter_stop_requested = true;
+            state->wake_source_admission_locked();
         }
         state->presenter_condition.notify_all();
         if (state->synthesis_thread.joinable()) state->synthesis_thread.join();
@@ -14455,6 +14587,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             success = SUCCEEDED(published) && success;
         }
         if (g.staging_generation || g.direct_current_publication) continue;
+
         // If publication is still pending, ordinary private Release freezes
         // readiness on the SAME D11 context after those copies. The endpoint
         // waits that exact GPU signal before copying its owned image. Do not
@@ -14819,6 +14952,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             audit={1,static_cast<unsigned>(job->pair)|(static_cast<unsigned>(job->triple)<<1)|(static_cast<unsigned>(job->quad)<<2),
                 job->current->source_sequence,job->current->previous_sequence};
             const auto work_started=std::chrono::steady_clock::now();
+            const auto admission_work_started=job->admission_outputs?std::chrono::duration_cast<std::chrono::nanoseconds>(work_started.time_since_epoch()).count():0;
             xrfg::BridgeFlightToken worker_token{};
             PreparedProjectionFrame prepared;
             if(completion)prepared=std::move(pending->prepared);
@@ -15031,6 +15165,14 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             xrfg::bridge_flight_logger().end(build_token,
                 xrfg::BridgeFlightOperation::timing_worker_build, success ? 0 : -1,
                 job->current->source_sequence, job->current->previous_sequence);
+            if(job->admission_outputs) {
+                std::scoped_lock lock(state->presenter_mutex);
+                const unsigned actual=job->pair?(job->quad?4:job->triple?3:2):1;
+                if(success && actual<job->admission_outputs)
+                    state->native_batch_admission.cancelled(job->admission_outputs-actual);
+                state->native_batch_admission.generated(xrfg::NativeBatchAdmission::now()-admission_work_started);
+                state->wake_source_admission_locked();
+            }
             if(!completion)xrfg::bridge_flight_logger().end(worker_token,
                 xrfg::BridgeFlightOperation::timing_worker_run, success ? 0 : -1,
                 job->current->source_sequence, job->current->previous_sequence);
@@ -15103,6 +15245,12 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             // handles let C use the other ring while B is delivered. Native
             // optical batches also have independent synthetic banks. Fast2 and
             // shared Luke configurations retain their original handoff waits.
+            if(job->admission_outputs) {
+                real->batch_admission_credit=true;
+                if(synthetic){synthetic->batch_admission_credit=true;synthetic->first_output_target=job->first_output_target;}
+                if(extra_synthetic)extra_synthetic->batch_admission_credit=true;
+                if(third_synthetic)third_synthetic->batch_admission_credit=true;
+            }
             const bool overlap_source = (state->nvidia_options.rife_model >= 0 || job->deferred_real) &&
                 native_current_rings(*state) >= 2 && !prepared.resources.empty() &&
                 std::all_of(prepared.resources.begin(), prepared.resources.end(), [](const auto& resource) {
@@ -16151,6 +16299,11 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         state->synthesis_capture_ready=false;
         ++state->synthesis_capture_sequence;
         state->synthesis_busy = true;
+        if(optical_source_admission(*state)) {
+            job->first_output_target=state->native_batch_admission.first_target();
+            job->admission_outputs=job->pair?native_frame_multiplier(*state):1;
+            state->native_batch_admission.admitted(job->admission_outputs);
+        }
         state->synthesis_job = job;
     }
     xrfg::bridge_flight_logger().end(token, xrfg::BridgeFlightOperation::three_slot_buffer_wait,
@@ -17605,6 +17758,7 @@ HRESULT reconcile_multiplier_outputs(const std::shared_ptr<SessionState>& state)
         ++state->djules_configuration_epoch;
         state->djules_triple_release={};
         state->three_slots.configure(state->three_slot_director?native_frame_multiplier(*state):2);
+        if(!state->independent_pacing){state->native_batch_admission.reset();state->wake_source_admission_locked();}
       state->director_anchor_sequence = 0;
         state->application_served_serial=state->presenter_frame_serial;
         state->presenter_last_frame.reset();
@@ -18223,6 +18377,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     ++state->djules_configuration_epoch;
     { std::scoped_lock lock(state->presenter_mutex);
       state->three_slots.configure(state->three_slot_director?native_frame_multiplier(*state):2);
+      if(!state->independent_pacing){state->native_batch_admission.reset();state->wake_source_admission_locked();}
       state->director_anchor_sequence = 0;
       state->djules_triple_release={}; }
 
@@ -18637,6 +18792,10 @@ XrResult layer_end_frame_impl(
     if(state->independent_pacing)xrfg::trace_hud_geometry(end_info,0,handle_value(session));
     PrivateDepthStrip valid_projection_storage;
     end_info=filter_invalid_private_projections(*state,end_info,valid_projection_storage);
+    if(optical_source_admission(*state)) {
+        std::scoped_lock lock(state->presenter_mutex);
+        state->native_batch_admission.source_ready(xrfg::NativeBatchAdmission::now());
+    }
     xrfg::InterfaceFrameStamp interface_stamp{
         state->interface_serial.fetch_add(1, std::memory_order_relaxed) + 1,
         interface_entered_ns,
@@ -18776,6 +18935,7 @@ XrResult layer_end_frame_impl(
             interface_stamp.cycle=interface_call.cycle=begun_cycle;
     }
     state->application_frame_in_progress = false;
+    state->frame_call_condition.notify_all();
     state->application_frame_has_overlapping_wait = false;
     if (!frame_had_overlapping_wait && !pipelined_presenter_mode) {
         state->pipelined_wait_streak = 0;

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1011.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1012.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -3130,4 +3130,16 @@ endif()
 if(TARGET xrfg_d3d12_history_tests)
     add_test(NAME xrfg_native_private_context_warp COMMAND xrfg_d3d12_history_tests native-context-isolation)
     set_tests_properties(xrfg_native_private_context_warp PROPERTIES RUN_SERIAL TRUE TIMEOUT 30)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS)
+    add_executable(xrfg_native_batch_admission_tests tests/native_batch_admission_tests.cpp)
+    target_include_directories(xrfg_native_batch_admission_tests PRIVATE include)
+    target_compile_features(xrfg_native_batch_admission_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_native_batch_admission COMMAND xrfg_native_batch_admission_tests)
+endif()
+
+if(TARGET xrfg_private_runtime_layer_tests)
+    add_test(NAME xrfg_legacy_latency_scope COMMAND xrfg_private_runtime_layer_tests legacy-latency-scope)
+    set_tests_properties(xrfg_legacy_latency_scope PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()

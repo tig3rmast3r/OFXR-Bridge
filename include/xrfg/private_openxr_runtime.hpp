@@ -156,6 +156,10 @@ public:
     // Drain accepted packets and change only final delivery policy. Session,
     // native binding, private images and worker ownership remain unchanged.
     XrResult set_director_enabled(bool);
+    // Legacy optical credits retire only after native End; Independent ignores this API.
+    void tag_next_end_for_source_batch(bool tracked,std::int64_t first_target=0) noexcept;
+    void set_output_start_observer(std::function<void(std::int64_t)>);
+    void set_output_retirement_observer(std::function<void(std::int64_t,std::int64_t,std::int64_t,std::int64_t)>);
     void set_clean_bypass(bool);
     [[nodiscard]] bool clean_bypass_enabled() const noexcept;
     // Admission only: virtual callers retain their presenter's Wait/Begin owner.

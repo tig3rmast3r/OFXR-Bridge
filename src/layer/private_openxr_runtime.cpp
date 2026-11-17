@@ -61,6 +61,16 @@ struct LayerCopy {
 } // namespace
 
 struct PrivateOpenXrRuntime::Impl {
+    using RetirementObserver=std::function<void(std::int64_t,std::int64_t,std::int64_t,std::int64_t)>;
+    std::atomic<std::shared_ptr<RetirementObserver>> output_retired;
+    std::atomic_bool next_batch_credit{};
+    std::atomic<std::int64_t> next_batch_target{};
+    std::atomic_uint source_credits{};
+    std::atomic<std::shared_ptr<std::function<void(std::int64_t)>>> output_started;
+    void notify_output_retired(std::int64_t returned,std::int64_t preparation=0,std::int64_t target=0,std::int64_t spare=0) {
+        --source_credits;
+        if(auto observer=output_retired.load())(*observer)(returned,preparation,target,spare);
+    }
     struct PreparedTarget;
     struct Image {
         ComPtr<ID3D12Resource> d12;
@@ -108,6 +118,8 @@ struct PrivateOpenXrRuntime::Impl {
         bool acquired{},waited{},complete{},released{};
     };
     struct Packet {
+        bool batch_credit{};
+        std::int64_t first_output_target{},spare_ns{},copy_ns{};
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
         std::shared_ptr<InterfaceDeliveryReceipt> delivery;
         std::vector<LayerCopy> copies;
@@ -397,6 +409,7 @@ struct PrivateOpenXrRuntime::Impl {
              }
          }
          if(pending)--pending;}
+        if(!options.independent_pacing && std::exchange(packet->batch_credit,false))notify_output_retired(0);
         changed.notify_all();
     }
     XrResult lease(Packet& packet,XrSwapchain handle) {
@@ -700,7 +713,8 @@ struct PrivateOpenXrRuntime::Impl {
                 if(SUCCEEDED(copied))copied=await(copy11.Get(),copy_serial,false);
             }
             if(!packet.copy_value) {
-                packet.work_ns+=clock_ns()-copy_started;
+                const auto elapsed=clock_ns()-copy_started;packet.work_ns+=elapsed;
+                if(!options.independent_pacing)packet.copy_ns+=elapsed;
                 if(diagnostic)trace(14,packet.sequence);
                 if(SUCCEEDED(copied))for(auto& target:targets)target->complete=true;
             }
@@ -1043,11 +1057,14 @@ struct PrivateOpenXrRuntime::Impl {
                     prefetched=true;
                 }
                 if(adaptive && tracing())options.trace(38,packet->sequence,prefetch_next?1:0,prefetched?1:0);
-                const auto entered=clock_ns();result=options.real.end(options.real.session,&end);const auto returned=clock_ns();begun=false;
+                const auto entered=clock_ns();if(packet->batch_credit)if(auto observer=output_started.load())(*observer)(entered);
+                    result=options.real.end(options.real.session,&end);const auto returned=clock_ns();begun=false;
                 observe_capture(*packet,end,result,entered,returned);
                 if(packet->delivery)packet->delivery->completed(result==XR_SUCCESS && end.layerCount,
                     entered,returned,prediction_qpc(prediction).value_or(0),packet->prepared_at);
                 if(options.accepted_output && result==XR_SUCCESS && end.layerCount)options.accepted_output(returned);
+                    if(!options.independent_pacing && std::exchange(packet->batch_credit,false))notify_output_retired(entered,
+                    packet->copy_ns+release_done-release_at,packet->first_output_target,packet->spare_ns);
                 if(options.trace)options.trace(8,packet->sequence,entered,0);
                 if(XR_SUCCEEDED(result))trace(2,packet->sequence);
                 result=drop_refused_frame(packet->sequence,result);
@@ -1503,8 +1520,11 @@ struct PrivateOpenXrRuntime::Impl {
                     auto end=packet->info;end.displayTime=prediction.predictedDisplayTime;
                     if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
                     if(options.trace)options.trace(3,packet->sequence,end.displayTime,prediction.predictedDisplayTime);
+                    const auto source_sleep_started=clock_ns();
                     if(!sleep_until(deadline,1'250'000)){retire(packet);fifo->retire();break;}
-                    const auto entered=clock_ns();result=options.real.end(options.real.session,&end);const auto returned=clock_ns();begun=false;
+                    packet->spare_ns+=clock_ns()-source_sleep_started;
+                    const auto entered=clock_ns();if(packet->batch_credit)if(auto observer=output_started.load())(*observer)(entered);
+                    result=options.real.end(options.real.session,&end);const auto returned=clock_ns();begun=false;
                     if(witnessed_gate)rife_gate_at=witnessed_gate;
                     observe_capture(*packet,end,result,entered,returned);
                     if(packet->adaptive_buffer && result==XR_SUCCESS && end.layerCount) {
@@ -1521,6 +1541,8 @@ struct PrivateOpenXrRuntime::Impl {
                     if(packet->delivery)packet->delivery->completed(result==XR_SUCCESS && end.layerCount,
                         entered,returned,prediction_qpc(prediction).value_or(0),packet->prepared_at);
                     if(options.accepted_output && result==XR_SUCCESS && end.layerCount)options.accepted_output(returned);
+                    if(!options.independent_pacing && std::exchange(packet->batch_credit,false))notify_output_retired(entered,
+                        packet->copy_ns+release_leave-release_enter,packet->first_output_target,packet->spare_ns);
                     last_handoff=entered;
                     if(options.trace)options.trace(8,packet->sequence,entered,0);
                     if(XR_SUCCEEDED(result))trace(2,packet->sequence);
@@ -1755,10 +1777,13 @@ struct PrivateOpenXrRuntime::Impl {
                     // Include the edge guard in this final spin window. A
                     // second tiny timer wait for that2us tail would reintroduce
                     // scheduler jitter instead of preserving the early wakeup.
+                    const auto source_sleep_started=clock_ns();
                     if((directed || packet->adaptive_buffer || phased || packet->aer_optical_handoff) && !sleep_until(deadline+2'000,packet->adaptive_buffer?1'252'000:PrivateOutputSchedule::preparation_lead+2'000)) {
                         retire(packet);fifo->retire();break;
                     }
+                    packet->spare_ns+=clock_ns()-source_sleep_started;
                     const auto at_end=clock_ns();
+                    if(packet->batch_credit)if(auto observer=output_started.load())(*observer)(at_end);
                     result=options.real.end(options.real.session,&end);begun=false;
                     const auto returned=clock_ns();
                     if(witnessed_gate)rife_gate_at=witnessed_gate;
@@ -1796,6 +1821,8 @@ struct PrivateOpenXrRuntime::Impl {
                     if(packet->delivery)packet->delivery->completed(result==XR_SUCCESS && end.layerCount!=0,
                         at_end,returned,observed_display,packet->prepared_at);
                     if(options.accepted_output && result==XR_SUCCESS && end.layerCount)options.accepted_output(returned);
+                    if(!options.independent_pacing && std::exchange(packet->batch_credit,false))notify_output_retired(at_end,
+                        packet->copy_ns+release_leave-release_enter,packet->first_output_target,packet->spare_ns);
                     last_handoff=at_end;
                     // This consumer exclusively owns the schedule. Commit its
                     // saved edge after the call too, leaving no bookkeeping
@@ -1966,6 +1993,13 @@ void PrivateOpenXrRuntime::stop() {
              c->latest_target->complete && c->latest_target->released)c->latest_target->users=0;
          else c->latest_target.reset();
          c->pending_target.reset();c->retained_targets.clear();}}
+    // FIFO stop discards packets that never reached the consumer's retire().
+    // All workers and acceptance transactions have joined, so return exactly
+    // those remaining source credits without claiming a native submission.
+    if(!s.options.independent_pacing) {
+        const auto cancelled=s.source_credits.exchange(0);
+        if(auto observer=s.output_retired.load())for(unsigned i=0;i<cancelled;++i)(*observer)(0,0,0,0);
+    }
     s.changed.notify_all();
 }
 XrResult PrivateOpenXrRuntime::drain() {
@@ -2007,6 +2041,18 @@ XrResult PrivateOpenXrRuntime::set_director_enabled(bool enabled) {
 }
 bool PrivateOpenXrRuntime::director_enabled() const noexcept {
     return impl_->director_enabled.load(std::memory_order_relaxed);
+}
+void PrivateOpenXrRuntime::tag_next_end_for_source_batch(bool tracked,std::int64_t target) noexcept {
+    if(impl_->options.independent_pacing)return;
+    impl_->next_batch_credit=tracked;impl_->next_batch_target=target;
+}
+void PrivateOpenXrRuntime::set_output_start_observer(std::function<void(std::int64_t)> observer) {
+    if(impl_->options.independent_pacing)return;
+    impl_->output_started.store(observer?std::make_shared<std::function<void(std::int64_t)>>(std::move(observer)):nullptr);
+}
+void PrivateOpenXrRuntime::set_output_retirement_observer(std::function<void(std::int64_t,std::int64_t,std::int64_t,std::int64_t)> observer) {
+    if(impl_->options.independent_pacing)return;
+    impl_->output_retired.store(observer?std::make_shared<Impl::RetirementObserver>(std::move(observer)):nullptr);
 }
 void PrivateOpenXrRuntime::set_clean_bypass(bool enabled) {
     auto& s=*impl_;
@@ -2157,7 +2203,9 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
             if(packet)for(auto& lease:packet->leases) {
                 if(!lease.source_released)--lease.chain->images[lease.image].readers;
                 --lease.chain->consumers;
-            }}s.changed.notify_all();}
+            }}
+            if(!s.options.independent_pacing && packet && std::exchange(packet->batch_credit,false))s.notify_output_retired(0);
+            s.changed.notify_all();}
     } transaction{s,packet};
     packet=std::make_shared<Impl::Packet>();packet->delivery=delivery;
     packet->independent_due=s.options.independent_pacing?s.next_independent_due.exchange(0):0;
@@ -2166,6 +2214,11 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
     packet->rife_handoff=!packet->clean_bypass && s.rife_handoff.load();
     packet->aer_optical_handoff=!packet->clean_bypass && s.aer_optical_handoff.load();
     packet->adaptive_buffer=!packet->clean_bypass && s.buffered.load();packet->policy_epoch=s.policy_epoch;XrResult result;
+    if(!s.options.independent_pacing) {
+        packet->batch_credit=s.next_batch_credit.exchange(false);
+        packet->first_output_target=s.next_batch_target.exchange(0);
+        if(packet->batch_credit)++s.source_credits;
+    }
     const auto paired=s.pair_next.exchange(false);const auto content=s.next_content_time.exchange(0);
     packet->pair_previous=!packet->clean_bypass && paired;
     packet->content_time=packet->clean_bypass?0:content;

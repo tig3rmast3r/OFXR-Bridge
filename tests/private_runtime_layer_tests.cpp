@@ -443,7 +443,45 @@ static int independent_source_admission_test() {
     return 0;
 }
 
+static int legacy_latency_scope_test() {
+    xrfg_fixture::ControlProfile profile;
+    {Fixture f(true);auto dispatch=std::make_shared<Dispatch>();
+     auto state=std::make_shared<SessionState>(dispatch);
+     state->private_runtime=f.transport;state->graphics_binding=SessionGraphicsBinding::d3d12;
+     state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::ofxr;
+     state->nvidia_options.rife_model=-1;
+     for(unsigned multiplier:{3U,4U}) {
+         state->nvidia_options.rife_multiplier=multiplier;
+         for(bool director:{false,true}) {
+             state->single_director_requested=director;state->independent_pacing=false;
+             check(optical_source_admission(*state),"legacy Framework/Director admits ordinary optical multiframe");
+             state->independent_pacing=true;
+             check(!optical_source_admission(*state),"Independent cannot enter the legacy source gate");
+             check(!state->source_admission_timer && !state->source_admission_event && !state->native_batch_admission.pending(),
+                 "Independent receives no legacy timer or output credits");
+         }
+     }
+     state->independent_pacing=false;state->nvidia_options.rife_multiplier=2;
+     check(!optical_source_admission(*state),"2X retains its existing source admission");
+     state->nvidia_options.rife_multiplier=3;state->nvidia_options.rife_model=0;
+     check(!optical_source_admission(*state),"RIFE retains its existing source admission");
+    }
+    independent_fixture_mode=true;
+    {Fixture f(true);independent_fixture_mode=false;f.throttled=false;f.unblock();
+     std::atomic<unsigned> started{},retired{};
+     f.transport->set_output_start_observer([&](std::int64_t){++started;});
+     f.transport->set_output_retirement_observer([&](std::int64_t,std::int64_t,std::int64_t,std::int64_t){++retired;});
+     auto chain=f.make_chain();f.write(chain,40);f.begin_virtual();
+     f.transport->tag_next_end_for_source_batch(true,ns()+period);
+     xr_ok(f.submit(chain,1),"Independent ignores legacy output tagging");f.wait_count(1);
+     xr_ok(f.transport->drain(),"Independent drain after ignored tagging");f.transport->stop();
+     check(!started && !retired,"Independent must not invoke legacy timing/credit observers");
+    }
+    std::puts("Legacy optical admission scope: Framework/Director only; Independent/2X/RIFE preserved PASS");return 0;
+}
+
 int main(int argc,char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="legacy-latency-scope")return legacy_latency_scope_test();
     std::string route=argc>1?argv[1]:"new";
     if(route.starts_with("late-2x-"))return private_completion_recovery_test(route.substr(8));
     if(route=="reclaim-sampling")return private_pressure_sampling_test();
