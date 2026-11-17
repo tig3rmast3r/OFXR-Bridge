@@ -18322,6 +18322,41 @@ struct PrivateDepthStrip {
     std::deque<ProjectionLayerCopy> projections;
 };
 
+// A UEVR reinitialization can submit INT_MIN rectangles. Do not forward
+// these to the transport (which latches downstream errors), invent a crop,
+// or split a stereo projection. Retain other layers and resume on valid input.
+[[nodiscard]] const XrFrameEndInfo* filter_invalid_private_projections(
+    SessionState& state,const XrFrameEndInfo* info,PrivateDepthStrip& storage) {
+    if(state.independent_pacing || !state.private_runtime || !state.uevr_application || !info ||
+       info->type!=XR_TYPE_FRAME_END_INFO || !info->layers)return info;
+    unsigned dropped{};
+    for(unsigned i=0;i<info->layerCount;++i) {
+        const auto* layer=info->layers[i];bool invalid{};
+        if(layer && layer->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+            const auto* projection=reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+            for(unsigned v=0;projection->views && v<projection->viewCount;++v) {
+                const auto& sub=projection->views[v].subImage;
+                const auto chain=find_swapchain(sub.swapchain);
+                if(!chain || chain->session.get()!=&state)continue; // normal handle validation
+                const auto& rect=sub.imageRect;const auto& shape=chain->create_info;
+                invalid |= rect.offset.x<0 || rect.offset.y<0 || rect.extent.width<=0 || rect.extent.height<=0 ||
+                    sub.imageArrayIndex>=shape.arraySize ||
+                    std::int64_t(rect.offset.x)+rect.extent.width>shape.width ||
+                    std::int64_t(rect.offset.y)+rect.extent.height>shape.height;
+            }
+        }
+        if(invalid)++dropped;
+        else storage.layers.push_back(layer);
+    }
+    if(!dropped)return info;
+    storage.info=*info;storage.info.layerCount=static_cast<unsigned>(storage.layers.size());
+    storage.info.layers=storage.layers.empty()?nullptr:storage.layers.data();
+    state.generation_continuity_reset_pending.store(true,std::memory_order_release);
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+        98480,dropped,storage.info.layerCount,0);
+    return &storage.info;
+}
+
 [[nodiscard]] bool names_private_depth_swapchain(const void* next) noexcept {
     const auto* header = static_cast<const XrBaseInStructure*>(next);
     if (header == nullptr ||
@@ -18491,6 +18526,8 @@ XrResult layer_end_frame_impl(
     }
 
     if(state->independent_pacing)xrfg::trace_hud_geometry(end_info,0,handle_value(session));
+    PrivateDepthStrip valid_projection_storage;
+    end_info=filter_invalid_private_projections(*state,end_info,valid_projection_storage);
     xrfg::InterfaceFrameStamp interface_stamp{
         state->interface_serial.fetch_add(1, std::memory_order_relaxed) + 1,
         interface_entered_ns,

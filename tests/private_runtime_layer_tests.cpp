@@ -17,6 +17,7 @@
 #include "producer_timelines_test.inc"
 #include "independent_features_test.inc"
 #include "aer4_phase_recovery_test.inc"
+#include "private_input_resource_test.inc"
 
 // Model the native timing owner used by the shipping SteamVR endpoint. The old
 // fixture's instantaneous Wait only tested a consumer that imposed its own CPU
@@ -443,6 +444,9 @@ static int independent_source_admission_test() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    const bool invalid_live=route.starts_with("invalid-live-");
+    if(invalid_live)route.erase(0,13);
+    if(route=="invalid-private-rect")return invalid_private_rect_test();
     if(route=="optical-pressure-recovery") {
         xrfg_fixture::ControlProfile profile;Fixture f(true);f.unblock();
         auto dispatch=std::make_shared<Dispatch>();dispatch->steamvr_runtime=true;
@@ -2059,6 +2063,30 @@ int main(int argc,char** argv) {
         if(layout_alternation && n%2==0)for(unsigned eye=0;eye<2;++eye){views[eye].subImage.swapchain=packed_layout;views[eye].subImage.imageArrayIndex=0;views[eye].subImage.imageRect.offset.x=int(eye*image_width);}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
+        auto invalid_views=views;
+        XrCompositionLayerProjection invalid_projection=projection;
+        std::array<const XrCompositionLayerBaseHeader*,2> invalid_layers{layer,reinterpret_cast<const XrCompositionLayerBaseHeader*>(&invalid_projection)};
+        if(invalid_live) {
+            f.inspect_layers=[](const XrFrameEndInfo* submitted) {
+                for(unsigned l=0;l<submitted->layerCount;++l) {
+                    if(submitted->layers[l]->type!=XR_TYPE_COMPOSITION_LAYER_PROJECTION)continue;
+                    const auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(submitted->layers[l]);
+                    check(p->viewCount==2,"a stereo projection was partially forwarded");
+                    for(unsigned v=0;v<p->viewCount;++v) {
+                        const auto& rect=p->views[v].subImage.imageRect;
+                        check(rect.offset.x>=0 && rect.offset.y>=0 && rect.extent.width>0 && rect.extent.height>0,
+                            "native runtime received invalid application rectangle");
+                    }
+                }
+            };
+            state->uevr_application=true;
+            if(n==6) {
+                // One invalid eye removes this whole additional stereo layer;
+                // the valid scene and its subsequent generation must survive.
+                invalid_views[1].subImage.imageRect={{INT_MIN,INT_MIN},{INT_MIN,INT_MIN}};
+                invalid_projection.views=invalid_views.data();end.layerCount=2;end.layers=invalid_layers.data();
+            }
+        }
         std::array<XrCompositionLayerQuad,2> panel_quads;
         std::array<const XrCompositionLayerBaseHeader*,3> panel_layers{layer};
         if(panel_test) {
