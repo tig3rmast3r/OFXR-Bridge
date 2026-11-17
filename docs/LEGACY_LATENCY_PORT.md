@@ -35,3 +35,14 @@ existing completion recovery or runtime prediction renewal checks.
 Validation: held-generation 3X/4X tests pass (descriptors visible, resources held,
 no incomplete native delivery). Tagged private clock checks pass in Framework
 and Director with exact output pixels and native Wait overlapping copy work.
+
+## Native GPU overlap budget
+
+Eligible fenced native batches may overlap at most min(one third of a display
+period, three quarters of measured generation time) with CPU submission. This
+requires a successful XR-time-to-QPC conversion and at least two periods of
+remaining native prediction headroom. Unknown/short windows, private transport,
+non-fenced work, refresh changes and reset retain or restore the full budget.
+Independent performs no new prediction conversion or budget accounting.
+Controller tests cover unknown/short/ample predictions, bounded allowance,
+private/unfenced fallback and reset.

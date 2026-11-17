@@ -11141,8 +11141,22 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
             if (XR_FAILED(result)) { fail(result); break; }
             log_native_delivery_probe(*state, ready_frame, probe_sequence, 1,
                 prediction.predictedDisplayTime);
+            // Only a legacy native optical prediction with verified display
+            // headroom may overlap part of GPU work with CPU submission.
+            const bool observe_native_window=!state->private_runtime && optical_source_admission(*state);
+            std::int64_t native_gpu_window{};
+            if(observe_native_window && state->dispatch->convert_time_to_qpc) {
+                LARGE_INTEGER predicted_counter{};
+                if(XR_SUCCEEDED(state->dispatch->convert_time_to_qpc(state->dispatch->instance,
+                    prediction.predictedDisplayTime,&predicted_counter)))
+                    native_gpu_window=xrfg::interface_qpc_ns(predicted_counter.QuadPart)-xrfg::interface_clock_ns();
+            }
             {
                 std::scoped_lock lock(state->presenter_mutex);
+                if(observe_native_window) {
+                    state->native_batch_admission.observe_gpu_submission_window(native_gpu_window);
+                    state->wake_source_admission_locked();
+                }
                 state->presenter_frame_state = prediction;
                 state->presenter_frame_state.next = nullptr;
                 state->presenter_frame_state_valid = true;
@@ -15031,6 +15045,13 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             }
             const auto first_result=completion?publish_independent_aer_first(state,prepared,job):S_FALSE;
             const bool deferred_completion=!completion && job->pair && job->triple && fenced_optical_batch(*state,prepared);
+            if(job->admission_outputs) {
+                std::scoped_lock lock(state->presenter_mutex);
+                // Native End retains GPU joins. Private transport keeps its
+                // complete readiness budget, including late-work recovery.
+                state->native_batch_admission.set_async_gpu_handoff(!state->private_runtime && deferred_completion);
+                state->wake_source_admission_locked();
+            }
             bool delayed_completion{};
             const auto preparation_us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now()-work_started).count());

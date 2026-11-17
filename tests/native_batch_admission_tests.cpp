@@ -112,5 +112,20 @@ int main(){
         gate.delivered(native_entry);
         require(gate.first_output_at(native_entry+refresh/3,refresh)==expected,"native return preserves the in-flight target");
     }
+    {
+        xrfg::NativeBatchAdmission gate;gate.released(origin,refresh);
+        gate.source_ready(origin+7'000'000);gate.generated(5'000'000);
+        const auto conservative=gate.budget(refresh,3);
+        gate.set_async_gpu_handoff(true);
+        require(!gate.gpu_overlap_allowance(refresh),"unknown native prediction cannot authorize GPU overlap");
+        gate.observe_gpu_submission_window(refresh);
+        require(!gate.gpu_overlap_allowance(refresh),"short native prediction cannot authorize GPU overlap");
+        gate.observe_gpu_submission_window(refresh*4);
+        require(gate.gpu_overlap_allowance(refresh)==refresh/3,"fenced GPU overlap is bounded to a third-refresh");
+        require(gate.budget(refresh,3)==conservative-refresh/3,"native CPU submission may overlap retained GPU execution");
+        gate.set_async_gpu_handoff(false);
+        require(gate.budget(refresh,3)==conservative,"private/unfenced paths retain full readiness lead");
+        gate.reset();require(!gate.gpu_overlap_allowance(refresh),"reset cannot retain old asynchronous ownership eligibility");
+    }
     std::puts("Shared optical admission: credits, first-slot targeting, work budget, bounded margin and refresh reset PASS");
 }
