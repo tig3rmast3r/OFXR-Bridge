@@ -1150,6 +1150,8 @@ struct SessionState {
     std::uint64_t optical_reserve_pair{}, optical_reserve_served{};
     HANDLE optical_reserve_timer{}; // application publication thread only
     bool synthesis_busy{};
+    std::mutex optical_pressure_mutex;
+    xrfg::OpticalGpuPressure optical_pressure;
     std::uint64_t synthesis_prepared_sequence{}; // presenter_mutex; GPU-ready native batch awaiting slots
     // presenter_mutex: after every source has been snapshotted and leased, a
     // native RIFE producer may capture one next image while GPU work finishes.
@@ -2003,6 +2005,31 @@ unsigned rife_frames(const SessionState& state) noexcept {
     return reduced_native_outputs(state) && !private_triple && !native_rife ? 1U : 2U;
 }
 
+[[nodiscard]] bool optical_pressure_recovery_enabled(const SessionState& state) noexcept {
+    return !state.independent_pacing && state.private_runtime && state.dispatch->steamvr_runtime &&
+        state.graphics_binding==SessionGraphicsBinding::d3d12 &&
+        !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled &&
+        !state.nvidia_options.ofr && state.nvidia_options.rife_model<0 &&
+        state.frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr && rife_frames(state)>2;
+}
+
+[[nodiscard]] bool optical_pressure_real_only(SessionState& state) noexcept {
+    if(!optical_pressure_recovery_enabled(state))return false;
+    std::scoped_lock lock(state.optical_pressure_mutex);
+    return state.optical_pressure.real_only(GetTickCount64());
+}
+
+void observe_optical_memory_pressure(SessionState& state,std::uint64_t usage,std::uint64_t budget) noexcept {
+    if(!optical_pressure_recovery_enabled(state))return;
+    bool before{},after{};
+    {std::scoped_lock lock(state.optical_pressure_mutex);
+     before=state.optical_pressure.memory_pressure;
+     state.optical_pressure.observe(usage,budget,GetTickCount64());
+     after=state.optical_pressure.memory_pressure;}
+    if(before!=after)xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,98470,after?1:0,usage,budget);
+}
+
 [[nodiscard]] bool djules_triple_active(const SessionState& state) noexcept {
     if(state.nvidia_options.ofr)return false;
     if(ordered_multiframe(state))return state.menu_enabled && rife_frames(state)>2;
@@ -2575,6 +2602,7 @@ void log_video_memory(
             xrfg::autonomous::report_cpu_usage(session.gpu_usage.cpu_usage());
         }
         const auto total=local.CurrentUsage+(rife_memory.valid?rife_memory.private_bytes:0);
+        observe_optical_memory_pressure(session,total,local.Budget);
         xrfg::autonomous::report_video_memory({GetTickCount64(),total,local.Budget,
             local.CurrentUsage,rife_memory.private_bytes,rife_memory.reserved_bytes,
             rife_memory.process_id,rife_memory.active,rife_memory.valid});
@@ -14167,11 +14195,49 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     }
 }
 
+// A healthy device can finish late under residency pressure. Retain the exact
+// in-flight transaction while polling; never recycle its outputs at timeout.
+[[nodiscard]] HRESULT wait_recoverable_optical_fence(
+    const std::shared_ptr<SessionState>& state,ID3D12Fence* fence,std::uint64_t value,
+    bool& delayed) noexcept {
+    HRESULT result=fence && value ? wait_composition_fence(fence,value,
+        kFrameStartSynthesisWaitMilliseconds) : E_INVALIDARG;
+    if(result!=HRESULT_FROM_WIN32(ERROR_BUSY) || !optical_pressure_recovery_enabled(*state))return result;
+    if(!state->d3d12_device)return E_INVALIDARG;
+    delayed=true;
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+        98471,value,fence->GetCompletedValue());
+    // One registration for the entire recovery. Re-registering every poll
+    // would accumulate outstanding events on the same slow GPU submission.
+    HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+    if(!event)return HRESULT_FROM_WIN32(GetLastError());
+    result=fence->SetEventOnCompletion(value,event);
+    if(FAILED(result)){CloseHandle(event);return result;}
+    do {
+        {std::scoped_lock lock(state->presenter_mutex);
+         if(state->presenter_stop_requested || XR_FAILED(state->presenter_failure)){result=E_ABORT;break;}}
+        const auto removed=state->d3d12_device->GetDeviceRemovedReason();
+        if(FAILED(removed)){result=removed;break;}
+        const auto waited=WaitForSingleObject(event,20);
+        result=waited==WAIT_OBJECT_0 ? S_OK : waited==WAIT_TIMEOUT ? HRESULT_FROM_WIN32(ERROR_BUSY) : E_FAIL;
+    } while(result==HRESULT_FROM_WIN32(ERROR_BUSY));
+    CloseHandle(event);
+    if(SUCCEEDED(result) && fence->GetCompletedValue()==UINT64_MAX)
+        result=DXGI_ERROR_DEVICE_REMOVED;
+    if(SUCCEEDED(result)) {
+        {std::scoped_lock lock(state->optical_pressure_mutex);
+         state->optical_pressure.delayed(GetTickCount64());}
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+            98472,value,fence->GetCompletedValue());
+    }
+    return result;
+}
+
 // Complete a stereo transaction on thread 2. No session GPU/call lock is
 // held across a GPU fence wait; the producer may render its next frame.
 [[nodiscard]] bool finish_worker_outputs(
     const std::shared_ptr<SessionState>& state, PreparedProjectionFrame& prepared,
-    std::uint64_t source_sequence) noexcept {
+    std::uint64_t source_sequence,bool* delayed_completion=nullptr) noexcept {
     bool success = prepared.kind != PreparedGenerationKind::none;
     for (auto& resource : prepared.resources) {
         auto& g = resource.generation;
@@ -14181,9 +14247,23 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         const auto completion_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::timing_synthesis_complete,
             source_sequence, handle_value(resource.application_swapchain));
-        const HRESULT ready = g.worker_fence && g.worker_fence_value
-            ? wait_composition_fence(g.worker_fence.Get(),g.worker_fence_value,
-                kFrameStartSynthesisWaitMilliseconds) : E_INVALIDARG;
+        bool delayed{};
+        const auto completion_started=std::chrono::steady_clock::now();
+        const HRESULT ready = wait_recoverable_optical_fence(state,g.worker_fence.Get(),
+            g.worker_fence_value,delayed);
+        if(SUCCEEDED(ready) && optical_pressure_recovery_enabled(*state)) {
+            const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-completion_started).count());
+            bool backoff{};
+            {std::scoped_lock lock(state->optical_pressure_mutex);
+             backoff=state->optical_pressure.completed(elapsed,prepared.kind==PreparedGenerationKind::pair,GetTickCount64());}
+            if(backoff) {
+                delayed=true;
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                    98473,source_sequence,elapsed,2000);
+            }
+        }
+        if(delayed && delayed_completion)*delayed_completion=true;
         xrfg::bridge_flight_logger().end(completion_token,
             xrfg::BridgeFlightOperation::timing_synthesis_complete, ready,
             source_sequence, handle_value(resource.application_swapchain));
@@ -14689,7 +14769,17 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             }
             }
             const auto first_result=completion?publish_independent_aer_first(state,prepared,job):S_FALSE;
-            bool success = SUCCEEDED(first_result) && finish_worker_outputs(state, prepared, job->current->source_sequence);
+            bool delayed_completion{};
+            bool success = SUCCEEDED(first_result) && finish_worker_outputs(state, prepared, job->current->source_sequence,&delayed_completion);
+            if(success && delayed_completion) {
+                // Both eyes have completed and their private Releases succeeded.
+                // Publish this batch's own real image/pose, discard late S1/S2/S3.
+                job->pair=false;job->triple=false;job->quad=false;
+                prepared.kind=PreparedGenerationKind::prime;
+                state->generation_status=xrfg::autonomous::GenerationState::recovering;
+                std::scoped_lock lock(state->presenter_mutex);
+                state->director_anchor_sequence=0;
+            }
             if(success && state->nvidia_options.ofr && job->pair &&
                !std::all_of(prepared.resources.begin(),prepared.resources.end(),[](const auto& r){
                    return r.panel || (r.generation.aer_retimed && (!r.generation.native_result ||
@@ -14833,6 +14923,12 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                 handle_value(prepared.failed_swapchain), static_cast<std::uint64_t>(prepared.kind),
                 job->current->source_sequence);
             if (!success) {
+                {std::scoped_lock lock(state->presenter_mutex);
+                 if(state->presenter_stop_requested) {
+                     state->synthesis_busy=false;
+                     state->presenter_condition.notify_all();
+                     break;
+                 }}
                 save_synthesis_failure(state,audit,&prepared,"worker transaction refused");
                 std::scoped_lock lock(state->presenter_mutex);
                 if(completion)state->independent_completion_busy=false;else state->synthesis_busy = false;
@@ -15917,13 +16013,15 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         job->pair = independent_synthesis_anchor(*state)
             ? metadata_pairable && state->director_anchor_sequence != 0
             : !state->three_slots.empty();
+        const bool pressure_bypass=optical_pressure_real_only(*state);
+        if(pressure_bypass)job->pair=false;
         job->triple=djules_triple_director(*state);
         job->quad=job->triple && rife_frames(*state)==4;
         job->current->source_sequence = state->next_source_sequence++;
         job->current->previous_sequence = job->pair
             ? independent_synthesis_anchor(*state) ? state->director_anchor_sequence
                 : state->three_slots.slot(0)->value->source_sequence : 0;
-        state->director_anchor_sequence = job->current->source_sequence;
+        state->director_anchor_sequence = pressure_bypass ? 0 : job->current->source_sequence;
         // Native optical batches defer descriptor admission until GPU-ready;
         // their independent destination bank lets compute overlap old delivery.
         // Other routes keep the existing atomic source/output handoff.

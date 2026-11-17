@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1003.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1004.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -3025,6 +3025,12 @@ if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
         add_test(NAME xrfg_steamvr_framework_${framework_case} COMMAND xrfg_private_runtime_layer_tests steamvr-framework-${framework_case})
         set_tests_properties(xrfg_steamvr_framework_${framework_case} PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
     endforeach()
+    add_test(NAME xrfg_optical_pressure_recovery COMMAND xrfg_private_runtime_layer_tests optical-pressure-recovery)
+    set_tests_properties(xrfg_optical_pressure_recovery PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    add_test(NAME xrfg_optical_pressure_delivery COMMAND xrfg_private_runtime_layer_tests pressure-delivery-multi4-solo-fidelity-director)
+    set_tests_properties(xrfg_optical_pressure_delivery PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    add_test(NAME xrfg_optical_high_memory_fast COMMAND xrfg_private_runtime_layer_tests pressure-fast-multi4-solo-fidelity-director)
+    set_tests_properties(xrfg_optical_high_memory_fast PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 endif()
 
 if(WIN32 AND XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)

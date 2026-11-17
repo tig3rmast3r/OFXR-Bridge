@@ -443,6 +443,72 @@ static int independent_source_admission_test() {
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route=="optical-pressure-recovery") {
+        xrfg_fixture::ControlProfile profile;Fixture f(true);f.unblock();
+        auto dispatch=std::make_shared<Dispatch>();dispatch->steamvr_runtime=true;
+        auto state=std::make_shared<SessionState>(dispatch);
+        state->d3d12_device=f.device12;state->d3d12_queue=f.queue;state->private_runtime=f.transport;
+        state->graphics_binding=SessionGraphicsBinding::d3d12;
+        state->nvidia_options.rife_model=-1;state->nvidia_options.rife_multiplier=4;
+        state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::ofxr;
+        check(optical_pressure_recovery_enabled(*state),"shipping optical 4X recovery scope");
+        observe_optical_memory_pressure(*state,96,100);
+        check(!optical_pressure_real_only(*state),"high memory alone must not disable generation");
+        {
+            xrfg::OpticalGpuPressure policy;
+            policy.observe(99,100,100);
+            check(!policy.real_only(100),"resident memory invented a delay");
+            check(policy.completed(150000,true,100),"slow synthetic completion must back off");
+            for(std::uint64_t t=101;t<2100;t+=100){policy.observe(99,100,t);check(policy.real_only(t),"bounded backoff ended early");}
+            check(!policy.completed(200000,false,2000),"real-only prime extended backoff");
+            policy.observe(99,100,2100);
+            check(!policy.real_only(2100),"high resident memory blocked retry after cooldown");
+            check(!policy.completed(30000,true,2100) && !policy.real_only(2100),"healthy retry must restore generation");
+        }
+        ComPtr<ID3D12Fence> fence;ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)),"late worker fence");
+        PreparedProjectionFrame prepared;prepared.kind=PreparedGenerationKind::pair;
+        PreparedGeneration generation;generation.kind=PreparedGenerationKind::pair;
+        generation.worker_generation=std::make_shared<FrameGenerationSwapchainState>();
+        generation.worker_fence=fence;generation.worker_fence_value=1;
+        prepared.resources.push_back({reinterpret_cast<XrSwapchain>(7),std::move(generation),false});
+        bool delayed{};
+        auto waiting=std::async(std::launch::async,[&]{return finish_worker_outputs(state,prepared,1,&delayed);});
+        const bool retained=waiting.wait_for(1150ms)==std::future_status::timeout;
+        ok(fence->Signal(1),"complete delayed GPU submission");
+        const bool completed=waiting.get();
+        check(retained,"one-second timeout must not fail or return unfinished output");
+        check(completed && delayed,"late complete must recover the shipping worker completion path");
+        check(XR_SUCCEEDED(state->presenter_failure) && optical_pressure_real_only(*state),"late completion must enter cooldown without latching failure");
+        {std::scoped_lock lock(state->optical_pressure_mutex);state->optical_pressure.recover_after_ms=0;}
+        prepared.resources.front().generation.worker_fence_value=2;bool slow_delayed{};
+        std::promise<void> entered;auto entered_future=entered.get_future();
+        auto slow=std::async(std::launch::async,[&]{entered.set_value();return finish_worker_outputs(state,prepared,2,&slow_delayed);});
+        entered_future.wait();const bool slow_retained=slow.wait_for(250ms)==std::future_status::timeout;
+        ok(fence->Signal(2),"complete sub-timeout slow synthetic batch");
+        const bool slow_completed=slow.get();
+        check(slow_retained && slow_completed && slow_delayed && optical_pressure_real_only(*state),
+            "measured sub-timeout GPU delay must initiate bounded backoff");
+        bool missing_delayed{};
+        check(wait_recoverable_optical_fence(state,nullptr,1,missing_delayed)==E_INVALIDARG && !missing_delayed,
+            "structural error must not enter recovery");
+        state->nvidia_options.rife_multiplier=2;
+        check(!optical_pressure_real_only(*state),"2X excluded from trial admission policy");
+        state->nvidia_options.rife_multiplier=4;state->nvidia_options.rife_model=3;
+        check(!optical_pressure_recovery_enabled(*state),"RIFE excluded from trial recovery");
+        state->nvidia_options.rife_model=-1;
+        ok(fence->Signal(3),"normal worker fence");bool normal_delayed{};
+        check(wait_recoverable_optical_fence(state,fence.Get(),3,normal_delayed)==S_OK && !normal_delayed,
+            "normal completed work must retain fast path");
+        {std::scoped_lock lock(state->presenter_mutex);state->presenter_stop_requested=true;}
+        bool stopped_delayed{};
+        check(wait_recoverable_optical_fence(state,fence.Get(),4,stopped_delayed)==E_ABORT,
+            "recovery must be interruptible by session stop");
+        std::puts("Memory-only admission, bounded retry at persistent high VRAM, actual delayed D3D12 completion, normal/error/excluded paths and stop PASS");return 0;
+    }
+    const bool optical_pressure_delivery=route.starts_with("pressure-delivery-");
+    if(optical_pressure_delivery)route.erase(0,18);
+    const bool optical_high_memory_fast=route.starts_with("pressure-fast-");
+    if(optical_high_memory_fast)route.erase(0,14);
     if(route=="pimax-ready-queue")return pimax_ready_queue_test();
     if(route.starts_with("native-vdxr-") || route.starts_with("native-pimax-") || route.starts_with("native-other-") || route.starts_with("steamvr-framework-"))return vdxr_multiframe_test(route);
     if(route=="producer-timelines")return producer_timelines_test();
@@ -1744,6 +1810,17 @@ int main(int argc,char** argv) {
                     "retired acquire key must not disable the correction or reset the warmed generator");
             }
         }
+        if(optical_pressure_delivery && n==3) {
+            observe_optical_memory_pressure(*state,96,100);
+            std::scoped_lock lock(state->optical_pressure_mutex);
+            state->optical_pressure.completed(150000,true,GetTickCount64());
+        }
+        if(optical_high_memory_fast)observe_optical_memory_pressure(*state,99,100);
+        if(optical_pressure_delivery && n==6) {
+            {std::scoped_lock lock(state->optical_pressure_mutex);state->optical_pressure.recover_after_ms=0;}
+            observe_optical_memory_pressure(*state,96,100);
+            check(!optical_pressure_real_only(*state),"retry must not require a menu or lower memory usage");
+        }
         if(rife_overlap && n==4) {
             xr_ok(wait_for_synthesis_handoff(state),"overlap probe drains the previous compute job");
             xr_ok(wait_for_presenter_idle(state),"overlap probe drains previous upper descriptors");
@@ -2545,7 +2622,16 @@ int main(int argc,char** argv) {
             route.c_str(),ofxr_factor,f.real_ends.load(),unsigned(state->generation_status.load()),state->three_slots.capacity(),
             state->three_slot_director,state->private_runtime->ready_clock_enabled());
         // The worker has stopped by now (three_slot_director is cleared): judge by the frames.
-        if(!ofxr_switch)check(f.real_ends+(independent?state->private_runtime->independent_load().expired:0)==2+(input_count-2)*ofxr_factor,"OFXR multiplier lost, duplicated or skipped intermediate/real outputs");
+        if(optical_pressure_delivery) {
+            check(f.real_ends==2+4+(input_count-6)*ofxr_factor,"pressure must retain each real, skip only pressured synthetics, re-prime then restore 4X");
+            for(unsigned source=3;source<=6;++source)
+            {
+                const auto found=std::find_if(f.positions.begin(),f.positions.end(),[&](float x){return std::abs(x-(float(source)-.032F))<.001F;});
+                check(found!=f.positions.end(),"pressure bypass lost the real source's own pose");
+                check(f.pixels[std::size_t(found-f.positions.begin())]==source*20,"pressure bypass changed the real source's own pixels");
+            }
+            check(!XR_FAILED(state->presenter_failure),"pressure bypass latched runtime failure");
+        } else if(!ofxr_switch)check(f.real_ends+(independent?state->private_runtime->independent_load().expired:0)==2+(input_count-2)*ofxr_factor,"OFXR multiplier lost, duplicated or skipped intermediate/real outputs");
     }
     check(generated,"actual generator must produce synthetic outputs beyond accepted real inputs");
     if(sole) {
