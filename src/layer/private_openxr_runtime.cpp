@@ -168,6 +168,7 @@ struct PrivateOpenXrRuntime::Impl {
     std::uint64_t policy_epoch{}; // under accept_mutex
     std::mutex mutex,accept_mutex,copy_mutex,stop_mutex;
     std::condition_variable changed;
+    bool independent_frame_requested{}; // mutex; reset for each session start
     std::unordered_map<XrSwapchain,std::shared_ptr<Chain>> chains;
     std::vector<std::weak_ptr<Chain>> publication_pools;
     static Chain& destination(Chain& chain) noexcept {
@@ -868,7 +869,7 @@ struct PrivateOpenXrRuntime::Impl {
             WaitJob job;
             std::shared_ptr<Packet> phase_packet;
             {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping ||
-                (wait_job && (wait_job->accepted_ordinal==0 ||
+                (wait_job && (!options.independent_pacing || independent_frame_requested) && (wait_job->accepted_ordinal==0 ||
                     (ready_clock.load() ? (!prepared.empty() || (!options.independent_pacing && optical_wait_ordinals.contains(wait_job->accepted_ordinal))) :
                      (director_enabled.load() || buffered.load()) ? accepted_packets>=wait_job->accepted_ordinal : !prepared.empty())));});
              if(stopping)break;job=*wait_job;wait_job.reset();wait_active=true;
@@ -1960,7 +1961,7 @@ XrResult PrivateOpenXrRuntime::start() {
     s.copying.clear();s.preparer_done=false;for(auto& bank:s.copy_banks)bank.busy=false;
     s.independent_delivered_count=0;s.independent_idle_count=0;s.independent_ready_residence=0;
     s.refresh_wait_policy=PrivateRefreshWaitPolicy{};s.independent_period=0;s.independent_reserve=0;s.independent_expired_count=0;s.independent_cycle_at=0;
-    s.failure=XR_SUCCESS;s.stopping=false;s.seeded=false;s.running=true;s.waits=s.begun=0;s.virtual_time=0;
+    s.failure=XR_SUCCESS;s.stopping=false;s.seeded=false;s.independent_frame_requested=false;s.running=true;s.waits=s.begun=0;s.virtual_time=0;
     if(s.options.independent_pacing || !s.options.native_frame_contract || s.options.native_adaptive_wait_lookahead || s.options.native_director_only)s.waiter=std::thread([&s]{s.wait_loop();});
     if(s.pipelined_copy())s.copy_completer=std::thread([&s]{s.complete_copies();});
     s.preparer=std::thread([&s]{s.prepare();});
@@ -2144,6 +2145,14 @@ XrResult PrivateOpenXrRuntime::predict_frame(XrFrameState* output) {
     if(!output || output->type!=XR_TYPE_FRAME_STATE || output->next)return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::unique_lock lock(s.mutex);
     if(!s.running)return XR_ERROR_SESSION_NOT_RUNNING;
+    // OpenComposite begins a temporary D3D11 session, then replaces it with
+    // Vulkan without ever requesting a frame. Driving that unused session
+    // makes VDXR time out and leaves old STOPPING events for the replacement.
+    // Seed only on application frame demand, not xrBeginSession. The waiter
+    // still wakes on stop, so unused sessions need no native frame cleanup.
+    if(s.options.independent_pacing && !s.stopping && !s.independent_frame_requested) {
+        s.independent_frame_requested=true;s.changed.notify_all();
+    }
     s.changed.wait(lock,[&]{return s.stopping || s.seeded;});
     if(XR_FAILED(s.failure))return s.failure;if(s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
     const auto interval=s.period(s.anchor.predictedDisplayPeriod);

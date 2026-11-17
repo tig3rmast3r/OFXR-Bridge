@@ -787,6 +787,32 @@ void overlapped_native_wait(bool cancel) {
     for(unsigned n=1;n<f.handoffs.size();++n)check(f.handoffs[n]-f.handoffs[n-1]>=period,"overlapped native Wait cannot shorten the physical interval");
     std::puts(cancel?"Overlapped native Wait stop/join/cleanup/restart PASS":"Blocked next native Wait does not block current delivery PASS");
 }
+void independent_startup_session_test(bool d12) {
+    independent_fixture_mode=true;
+    {
+        Fixture f(d12);f.throttled=false;f.unblock();
+        const auto quiet=[&] {
+            std::this_thread::sleep_for(75ms);
+            check(f.real_waits==0 && f.real_begins==0 && f.empty_ends==0 && f.real_ends==0,
+                "Independent must not drive a temporary session before application frame demand");
+        };
+        quiet();
+        auto stopped=std::async(std::launch::async,[&]{f.transport->stop();});
+        check(stopped.wait_for(1s)==std::future_status::ready,"unused startup session stops without a native frame wait");stopped.get();
+        check(!f.cycle_waited && !f.cycle_begun,"unused startup session has no native cycle to close");
+        xr_ok(f.transport->start(),"restart unused startup session");quiet();
+        // Invalid prediction requests must not activate the native frame loop.
+        check(f.transport->predict_frame(nullptr)==XR_ERROR_VALIDATION_FAILURE,"invalid startup prediction refused");quiet();
+        auto chain=f.make_chain();f.write(chain,70);
+        f.begin_virtual();xr_ok(f.submit(chain,1),"first application frame activates Independent");
+        f.wait_count(1);xr_ok(f.transport->drain(),"first application frame drains");
+        check(!f.pixels.empty() && f.pixels.front()==70,"first requested frame keeps exact pixels");
+        f.transport->stop();
+        check(!f.cycle_waited && !f.cycle_begun,"active session still balances native cycles on stop");
+    }
+    independent_fixture_mode=false;
+    std::printf("INDEPENDENT_STARTUP d12=%d unused session quiet; stop/restart/first frame PASS\n",d12);
+}
 void independent_wait_overlap(bool d12,bool cancel) {
     independent_fixture_mode=true;
     std::promise<void> entered,release;auto seen=entered.get_future();auto gate=release.get_future();
@@ -1780,6 +1806,8 @@ void independent_window_test(bool d12,bool early_due=false) {
     independent_fixture_mode=true;independent_fixture_buffer=0;
     Fixture f(d12,true,[](unsigned){return int(period*3/4/1000);},false,true,false,8,false);
     auto chain=f.make_chain();f.unblock();
+    XrFrameState initial_prediction{XR_TYPE_FRAME_STATE};
+    xr_ok(f.transport->predict_frame(&initial_prediction),"application requests initial Independent delivery window");
     std::int64_t window{};
     {std::unique_lock lock(f.mutex);
      check(f.changed.wait_for(lock,1s,[&] {
@@ -2115,6 +2143,7 @@ void independent_copy_pipeline_test(bool cancel,bool diagnostics) {
 }
 int main(int argc,char** argv){
     if(argc>1 && std::string_view(argv[1])=="legacy-optical-clock"){for(bool directed:{false,true})optical_tagged_clock_checks(directed);return 0;}
+    if(argc>1 && std::string_view(argv[1])=="independent-startup"){independent_startup_session_test(true);independent_startup_session_test(false);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-copy-pipeline"){for(bool cancel:{false,true})for(bool diagnostics:{true,false})independent_copy_pipeline_test(cancel,diagnostics);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-native-preparation"){for(bool d12:{true,false})for(bool cancel:{false,true})independent_native_preparation_test(d12,cancel);publication_lane_budget_test(true);publication_lane_budget_test(false);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-native-wait"){for(bool d12:{true,false})for(bool cancel:{false,true})independent_wait_overlap(d12,cancel);independent_wait_failure();return 0;}
