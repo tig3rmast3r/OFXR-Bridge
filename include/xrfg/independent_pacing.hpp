@@ -44,7 +44,7 @@ public:
         return qualified_;
     }
 };
-// Consume surplus ready ownership by postponing future source appointments,
+// Consume surplus output ownership by postponing future source appointments,
 // never by accelerating native End or discarding rendered images. Qualification
 // survives isolated empty-ready/idle samples. Each actual step still needs two
 // ready outputs, fresh native progress and measured residence above the target.
@@ -58,7 +58,7 @@ public:
     std::int64_t observe(std::int64_t now,std::int64_t physical,unsigned divisor,
         std::size_t ready,std::int64_t residence,std::uint64_t delivered,
         std::uint64_t expired,std::uint64_t idle) noexcept {
-        if(divisor!=2 || physical<2'000'000 || physical>50'000'000 || now<=0){reset();return 0;}
+        if((divisor<2 || divisor>4) || physical<2'000'000 || physical>50'000'000 || now<=0){reset();return 0;}
         if(period_!=physical || delivered<delivered_ || expired<expired_ || idle<idle_) {
             reset();period_=physical;
         }

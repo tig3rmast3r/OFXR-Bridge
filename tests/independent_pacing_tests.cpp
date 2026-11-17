@@ -147,7 +147,7 @@ int main(){
  std::puts("Independent source clock:72/90/120Hz,1X..4X,late return/no rounding skip/no burst/reset PASS");
 }
 struct RecoverySample {long long at{},age{};};
-std::vector<RecoverySample> transient_queue_model(long long p,bool recover) {
+std::vector<RecoverySample> transient_queue_model(long long p,bool recover,unsigned factor=2) {
  struct Frame {long long ready{},origin{};unsigned id{};};
  constexpr long long base=1'000'000'000;
  std::deque<Frame> queue;
@@ -155,7 +155,7 @@ std::vector<RecoverySample> transient_queue_model(long long p,bool recover) {
  unsigned produced=4,delivered=0,idle=0,pauses=0;
  long long residence=0,native=base,previous_source=0;
  xrfg::IndependentSourceClock clock;xrfg::IndependentSourcePhase phase;
- auto source=clock.claim(base,p,2);
+ auto source=clock.claim(base,p,factor);
  std::vector<RecoverySample> out;
  unsigned slot=0;
  const auto consume=[&] {
@@ -174,14 +174,14 @@ std::vector<RecoverySample> transient_queue_model(long long p,bool recover) {
  while(native<base+12'000'000'000LL) {
   if(source<=native) {
    unsigned ready=0;for(const auto& frame:queue)if(frame.ready<=source)++ready;
-   const auto step=recover?phase.observe(source,p,2,ready,residence,delivered,0,idle):0;
-   check(step>=0 && step<=200'000 && step<=2*p*8/1000+2000);
+   const auto step=recover?phase.observe(source,p,factor,ready,residence,delivered,0,idle):0;
+   check(step>=0 && step<=200'000 && step<=factor*p*8/1000+2000);
    clock.postpone(step);const auto actual=source+step;
-   if(previous_source)check(actual-previous_source>=2*p); // never a producer catch-up
+   if(previous_source)check(actual-previous_source>=factor*p); // never a producer catch-up
    previous_source=actual;
    while(native<actual)consume();
-   for(unsigned n=0;n<2;++n)queue.push_back({actual+p/2,actual,produced++});
-   source=clock.claim(actual+100,p,2);
+   for(unsigned n=0;n<factor;++n)queue.push_back({actual+p/2,actual,produced++});
+   source=clock.claim(actual+100,p,factor);
   }else consume();
  }
  check(pauses==2 && idle==2); // all other native appointments deliver fresh work
@@ -201,6 +201,14 @@ void source_phase_tests() {
   std::printf("TRANSIENT_QUEUE Hz=%.1f old=%.3fms recovered=%.3fms improvement=%.3fms;every output ID/native appointment retained\n",1e9/p,old_late/1e6,recovered_late/1e6,(old_late-recovered_late)/1e6);
   check(old_late-recovered_late>=2*p);
   check(recovered_late<3*p);
+  for(unsigned factor:{3U,4U}) {
+   const auto baseline=transient_queue_model(p,false,factor);
+   const auto multiframe=transient_queue_model(p,true,factor);
+   const auto before=age(baseline,10'000'000'000LL,11'000'000'000LL);
+   const auto after=age(multiframe,10'000'000'000LL,11'000'000'000LL);
+   check(before-after>=p);
+   std::printf("MULTIFRAME_RECOVERY factor=%u Hz=%.1f old=%.3fms recovered=%.3fms; all output IDs/native appointments retained\n",factor,1e9/p,before/1e6,after/1e6);
+  }
   xrfg::IndependentSourcePhase phase;
   constexpr long long base=1'000'000'000;
   const auto gap_interval=static_cast<unsigned>(1'000'000'000LL/(2*p))+1;
@@ -218,7 +226,7 @@ void source_phase_tests() {
   const auto before=phase.trimmed();
   check(!phase.observe(base+2500*p,p,2,2,3*p,2402,0,42)); // pause invalidates stale qualification
   check(phase.trimmed()==before);
-  for(unsigned divisor:{1U,3U,4U})check(!phase.observe(base+2600*p,p,divisor,4,4*p,2404,0,42));
+  for(unsigned divisor:{1U,5U})check(!phase.observe(base+2600*p,p,divisor,4,4*p,2404,0,42));
   check(!phase.trimmed());
   for(unsigned ready:{0U,1U}) {
    phase.reset();

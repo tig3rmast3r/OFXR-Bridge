@@ -7327,9 +7327,12 @@ XrResult layer_wait_frame_impl(
         const auto nominal_remaining=target-xrfg::interface_clock_ns();
         if(nominal_remaining>0)state->frame_call_condition.wait_for(frame_call_lock,std::chrono::nanoseconds(nominal_remaining),[]{return false;});
         const auto load=state->private_runtime->independent_load();
-        if(state->menu_enabled && !state->nvidia_options.ofr && divisor==2 && temporal_generation_requested()) {
+        if(state->menu_enabled && !state->nvidia_options.ofr && divisor>=2 && divisor<=4 && temporal_generation_requested()) {
             const auto step=state->independent_source_phase.observe(xrfg::interface_clock_ns(),physical,divisor,
-                load.prepared,load.ready_residence,load.delivered,load.expired,load.idle);
+                // Pending ownership includes outputs awaiting native copying.
+                // Actual completed-delivery residence supplies the age evidence;
+                // packet acceptance age would also count unfinished work.
+                load.pending,load.ready_residence,load.delivered,load.expired,load.idle);
             if(step>0) {
                 state->independent_source_clock.postpone(step);target+=step;
                 xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,

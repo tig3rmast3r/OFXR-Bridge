@@ -1281,7 +1281,11 @@ struct PrivateOpenXrRuntime::Impl {
                 if(result==XR_SUCCESS && end.layerCount)cycle.handed=entered;
                 const auto returned=clock_ns();begun=false;
                 if(result==XR_SUCCESS && end.layerCount && packet->independent_due) {
-                    reserve.delivered(packet->independent_available_at,packet->independent_due+reserve.reserve(),entered,physical);
+                    // GPU readiness alone does not prove that native queue age
+                    // has drained. Preserve expiry allowance while source-phase
+                    // recovery consumes that age, using its same residence goal.
+                    if(independent_ready_residence.load()<=physical/2+2'000'000)
+                        reserve.delivered(packet->independent_available_at,packet->independent_due+reserve.reserve(),entered,physical);
                     independent_reserve=reserve.reserve();
                 }
                 if(result==XR_SUCCESS && end.layerCount) {
