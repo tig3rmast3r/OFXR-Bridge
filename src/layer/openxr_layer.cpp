@@ -1152,6 +1152,8 @@ struct SessionState {
     bool synthesis_busy{};
     std::mutex optical_pressure_mutex;
     xrfg::OpticalGpuPressure optical_pressure;
+    xrfg::PrivateResourceRecovery resource_recovery;
+    std::atomic_bool pressure_resources_active{};
     std::uint64_t synthesis_prepared_sequence{}; // presenter_mutex; GPU-ready native batch awaiting slots
     // presenter_mutex: after every source has been snapshotted and leased, a
     // native RIFE producer may capture one next image while GPU work finishes.
@@ -1267,6 +1269,15 @@ bool all_image_effects_off() {
     return !xrfg::embedded::snapshot().desired.enabled &&
         xrfg::embedded::afw_snapshot().desired.mode==0 &&
         !xrfg::autonomous::snapshot().desired.nr_enabled;
+}
+
+bool private_clean_presentation(const SessionState& state) {
+    // Independent reconstruction keeps its image-processing policy. Resource
+    // recovery changes only the generator's internal transport, never controls.
+    const bool recovery=!state.independent_pacing && state.pressure_resources_active.load(std::memory_order_acquire) &&
+        xrfg::embedded::afw_snapshot().desired.mode==0 &&
+        !xrfg::autonomous::snapshot().desired.nr_enabled;
+    return recovery || (all_image_effects_off() && !state.menu_enabled);
 }
 
 bool blackbar_gate(SessionState& state) {
@@ -2011,6 +2022,19 @@ unsigned rife_frames(const SessionState& state) noexcept {
     return !state.independent_pacing && state.private_runtime && state.dispatch->steamvr_runtime &&
         state.graphics_binding==SessionGraphicsBinding::d3d12 &&
         !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled;
+}
+
+void observe_private_completion(SessionState& state,std::uint64_t us,bool paired) noexcept {
+    if(!private_completion_recovery_enabled(state))return;
+    const auto physical=state.history_capture_wait_period.load(std::memory_order_relaxed);
+    const auto budget_us=physical>0 ? static_cast<std::uint64_t>(physical)/1000*rife_frames(state) : 0;
+    bool requested{};
+    {std::scoped_lock lock(state.optical_pressure_mutex);
+     const auto before=state.resource_recovery.requested;
+     state.resource_recovery.completed(us,paired,GetTickCount64(),budget_us);
+     requested=!before && state.resource_recovery.requested;}
+    if(requested)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+        98485,handle_value(state.handle),us,budget_us);
 }
 
 [[nodiscard]] bool optical_pressure_recovery_enabled(const SessionState& state) noexcept {
@@ -2942,7 +2966,7 @@ void configure_session_guide_capture(const SessionState& state) {
     const bool raw_luke_ofxr = state.luke_afw_enabled &&
         state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr &&
         !state.hybrid_requested && selected_afw_mode() == 0;
-    const bool outputs_needed=temporal_generation_requested() ||
+    const bool outputs_needed=(!state.pressure_resources_active.load(std::memory_order_acquire) && temporal_generation_requested()) ||
         (state.luke_afw_enabled && selected_afw_mode()!=0);
     const bool enabled=xrfg::neural_rendering::status().enabled ||
         state.uevr_osr_active.load(std::memory_order_acquire) ||
@@ -4574,6 +4598,28 @@ void release_session_generation_budget(
     }
 }
 
+bool release_pressure_generation_resources(const std::shared_ptr<SessionState>& state) {
+    const auto worker=wait_for_synthesis_handoff(state);
+    if(XR_FAILED(worker))return false;
+    if(XR_FAILED(state->private_runtime->drain()))return false;
+    clear_generation_continuity(state);
+    {std::scoped_lock lock(state->presenter_mutex);state->presenter_last_frame.reset();}
+    state->panel_generated.clear();
+    release_session_generation_budget(state);
+    bool released=true;
+    for(const auto& chain:find_swapchains(state)) {
+        std::scoped_lock call_lock(chain->call_mutex);
+        std::scoped_lock lock(chain->mutex);
+        if(chain->d3d12_history && FAILED(chain->d3d12_history->release_snapshots())) {released=false;continue;}
+        chain->last_released_capture.reset();chain->last_released_motion_vectors.reset();
+        chain->projection_history_needed.store(false,std::memory_order_release);
+        chain->panel_source=false;
+        chain->generation_declined=false;chain->generation_eligible_pending=true;
+        chain->generation_refusal=SwapchainEligibilityReason::awaiting_projection_use;
+    }
+    return released;
+}
+
 void log_rife_memory_refusal(const std::shared_ptr<SessionState>& session,HRESULT failure) noexcept {
     auto& logger=xrfg::bridge_flight_logger();
     if(failure!=E_OUTOFMEMORY || !logger.enabled())return;
@@ -4597,6 +4643,7 @@ void log_rife_memory_refusal(const std::shared_ptr<SessionState>& session,HRESUL
         if (!state || !state->session) {
             return true;
         }
+        if(state->session->pressure_resources_active.load(std::memory_order_acquire))return true;
         std::scoped_lock call_lock(state->call_mutex);
         if(state->session->luke_afw_enabled && state->session->graphics_binding==SessionGraphicsBinding::d3d11 &&
             (state->session->graphics_binding_capabilities&8ULL)==0 &&
@@ -7216,7 +7263,7 @@ XrResult layer_wait_frame_impl(
     observe_application_frame_thread(*state, false);
     seal_outlaws_initialization(*state);
     initialize_late_luke_context(state);
-    if(state->private_runtime)state->private_runtime->set_clean_bypass(all_image_effects_off() && !state->menu_enabled);
+    if(state->private_runtime)state->private_runtime->set_clean_bypass(private_clean_presentation(*state));
     XrResult result = XR_SUCCESS;
     if(state->independent_pacing && state->private_runtime) {
         XrFrameState seed{XR_TYPE_FRAME_STATE};
@@ -7293,7 +7340,10 @@ XrResult layer_wait_frame_impl(
     if(state->private_runtime) {
         if(!valid_optional_frame_info(wait_info,XR_TYPE_FRAME_WAIT_INFO))return XR_ERROR_VALIDATION_FAILURE;
         const bool virtual_only=use_continuous_presenter || state->luke_fresh_only;
-        result=virtual_only ? state->private_runtime->predict_frame(frame_state)
+        // Virtual prediction must honor the same all-Off admission gate without
+        // manufacturing a downstream Wait/Begin ticket owned by the presenter.
+        result=virtual_only ? state->private_runtime->wait_for_clean_admission() : XR_SUCCESS;
+        if(XR_SUCCEEDED(result))result=virtual_only ? state->private_runtime->predict_frame(frame_state)
             : state->dispatch->wait_frame(session,wait_info,frame_state);
         if(XR_SUCCEEDED(result)) {
             state->last_inline_frame_state=*frame_state;state->last_inline_frame_state.next=nullptr;
@@ -8762,7 +8812,7 @@ XrResult release_swapchain_image_locked(
     std::unique_lock<std::mutex> gpu_lock;
     const bool captures_needed=temporal_generation_requested() ||
         (state->session->luke_afw_enabled && selected_afw_mode()!=0);
-    if (state->session->manual_control.stop_requested() || !captures_needed ||
+    if (state->session->pressure_resources_active.load(std::memory_order_acquire) || state->session->manual_control.stop_requested() || !captures_needed ||
         !state->projection_history_needed.load(std::memory_order_acquire)) {
         // Preserve the application's acquire/wait/release bookkeeping, but
         // stop recording new bridge history after the manual arm is revoked.
@@ -10875,7 +10925,7 @@ void continuous_presenter_main(
 
 void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexcept {
     try {
-        std::uint64_t clock_anchor_tick{};
+        std::uint64_t clock_anchor_tick{},last_pressure_readiness_sequence{};
         LARGE_INTEGER qpc_frequency{};
         static_cast<void>(QueryPerformanceFrequency(&qpc_frequency));
         // Both consumers use a fixed grid rather than anchoring each deadline
@@ -10937,6 +10987,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
             const auto probe_sequence = selected ? selected->source_sequence : borrowed->sequence;
             log_native_delivery_probe(*state, ready_frame, probe_sequence, 0);
             bool readiness_failed = false;
+            const auto readiness_started=std::chrono::steady_clock::now();
             if (ready_frame) for (const auto& ready : ready_frame->reference_readiness) {
                 const auto app_completed=state->app_release_fence ? state->app_release_fence->GetCompletedValue() : 0;
                 const bool application_released=state->binding_queue && state->app_release_fence &&
@@ -10977,6 +11028,15 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                 }
             }
             if (readiness_failed) break;
+            // Worker outputs were measured at completed stereo work. Empty
+            // readiness here is presentation bookkeeping, not healthy GPU work.
+            // Reference batches share receipts across S1/S2/S3: sample once.
+            if(ready_frame && ready_frame->synthetic && !ready_frame->reference_readiness.empty() &&
+               probe_sequence!=last_pressure_readiness_sequence) {
+                last_pressure_readiness_sequence=probe_sequence;
+                observe_private_completion(*state,static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now()-readiness_started).count()),true);
+            }
             // Do not also wait for auxiliary copies or application queue work.
             // Those keep their existing GPU-side dependencies and image leases.
             XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};
@@ -14277,8 +14337,10 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
 // held across a GPU fence wait; the producer may render its next frame.
 [[nodiscard]] bool finish_worker_outputs(
     const std::shared_ptr<SessionState>& state, PreparedProjectionFrame& prepared,
-    std::uint64_t source_sequence,bool* delayed_completion=nullptr) noexcept {
+    std::uint64_t source_sequence,bool* delayed_completion=nullptr,std::uint64_t preparation_us=0) noexcept {
     bool success = prepared.kind != PreparedGenerationKind::none;
+    std::uint64_t total_completion_us{preparation_us};
+    bool observed_work{};
     for (auto& resource : prepared.resources) {
         auto& g = resource.generation;
         if (!g.worker_generation) continue;
@@ -14291,6 +14353,9 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         const auto completion_started=std::chrono::steady_clock::now();
         const HRESULT ready = wait_recoverable_private_fence(state,g.worker_fence.Get(),
             g.worker_fence_value,delayed);
+        observed_work|=g.worker_fence && g.worker_fence_value;
+        total_completion_us+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now()-completion_started).count());
         if(SUCCEEDED(ready) && optical_pressure_recovery_enabled(*state)) {
             const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now()-completion_started).count());
@@ -14320,6 +14385,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             return false;
         }
     }
+    if(success && observed_work)observe_private_completion(*state,total_completion_us,prepared.kind==PreparedGenerationKind::pair);
     for (auto& resource : prepared.resources) {
         auto& g = resource.generation;
         if (!g.worker_generation) continue;
@@ -14752,6 +14818,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             }
             audit={1,static_cast<unsigned>(job->pair)|(static_cast<unsigned>(job->triple)<<1)|(static_cast<unsigned>(job->quad)<<2),
                 job->current->source_sequence,job->current->previous_sequence};
+            const auto work_started=std::chrono::steady_clock::now();
             xrfg::BridgeFlightToken worker_token{};
             PreparedProjectionFrame prepared;
             if(completion)prepared=std::move(pending->prepared);
@@ -14817,7 +14884,9 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             }
             const auto first_result=completion?publish_independent_aer_first(state,prepared,job):S_FALSE;
             bool delayed_completion{};
-            bool success = SUCCEEDED(first_result) && finish_worker_outputs(state, prepared, job->current->source_sequence,&delayed_completion);
+            const auto preparation_us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-work_started).count());
+            bool success = SUCCEEDED(first_result) && finish_worker_outputs(state, prepared, job->current->source_sequence,&delayed_completion,preparation_us);
             if(success && delayed_completion) {
                 // Both eyes have completed and their private Releases succeeded.
                 // Publish this batch's own real image/pose, discard late S1/S2/S3.
@@ -19082,6 +19151,50 @@ XrResult layer_end_frame_impl(
 
     if(state->luke_fresh_only && !state->luke_source_filter_armed)
         return bypass_generation(GenerationPrepareReason::missing_capture);
+
+    if(private_completion_recovery_enabled(*state)) {
+        bool active{},drained{};
+        {std::scoped_lock lock(state->optical_pressure_mutex);
+         if(state->resource_recovery.requested && !state->resource_recovery.active) {
+             state->resource_recovery.begin();
+             state->pressure_resources_active.store(true,std::memory_order_release);
+         }
+         active=state->resource_recovery.active;drained=state->resource_recovery.drained;}
+        if(active) {
+            if(!drained) {
+                const auto idle=enter_presenter_exclusive();if(XR_FAILED(idle))return idle;
+                if(release_pressure_generation_resources(state)) {
+                    {std::scoped_lock lock(state->optical_pressure_mutex);
+                     state->resource_recovery.released(GetTickCount64());state->optical_pressure.recover_after_ms=0;}
+                    configure_session_guide_capture(*state);
+                    state->private_runtime->set_clean_bypass(private_clean_presentation(*state));
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,98483,handle_value(session),state->private_runtime->clean_bypass_enabled()?1:0,0);
+                }
+            }
+            bool projection{};
+            if(end_info)for(unsigned i=0;end_info->layers && i<end_info->layerCount;++i)
+                projection|=end_info->layers[i] && end_info->layers[i]->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION;
+            bool resume{};
+            const auto physical=state->history_capture_wait_period.load(std::memory_order_relaxed);
+            const auto budget_ns=static_cast<std::uint64_t>(std::max<XrDuration>(0,physical))*rife_frames(*state);
+            const auto limit_ns=budget_ns+budget_ns/4;
+            const auto real_ns=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+            {std::scoped_lock lock(state->optical_pressure_mutex);
+             resume=projection && physical>0 && state->resource_recovery.real_frame(GetTickCount64(),real_ns,limit_ns);
+             if(resume)state->resource_recovery.resumed();}
+            if(!resume) {
+                const auto result=bypass_generation(GenerationPrepareReason::cooldown_active,true);
+                if(XR_SUCCEEDED(result))state->generation_status=xrfg::autonomous::GenerationState::recovering;
+                return result;
+            }
+            state->pressure_resources_active.store(false,std::memory_order_release);
+            state->private_runtime->set_clean_bypass(private_clean_presentation(*state));
+            for(const auto& chain:find_swapchains(state))chain->projection_history_needed.store(true,std::memory_order_release);
+            configure_session_guide_capture(*state);
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,98484,handle_value(session),0,0);
+        }
+    }
 
     // Menu backend changes can happen after a presenter already exists. End
     // this virtual application frame through its current owner before stopping

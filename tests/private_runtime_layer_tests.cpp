@@ -446,6 +446,73 @@ static int independent_source_admission_test() {
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
     if(route.starts_with("late-2x-"))return private_completion_recovery_test(route.substr(8));
+    if(route=="reclaim-sampling")return private_pressure_sampling_test();
+    const bool reclaim_test=route.starts_with("reclaim-");
+    if(reclaim_test)route=route.substr(8);
+    const bool reclaim_transport=reclaim_test && route.starts_with("transport-");
+    const bool reclaim_budget=reclaim_test && route.starts_with("budget-");
+    if(reclaim_transport)route=route.substr(10);
+    if(reclaim_budget)route=route.substr(7);
+    const bool reclaim_held=reclaim_test && route.starts_with("held-");
+    if(reclaim_held)route=route.substr(5);
+    if(reclaim_test && route=="policy") {
+        xrfg_fixture::ControlProfile profile;
+        auto controls=xrfg::autonomous::snapshot().desired;controls.enabled=true;controls.afw_mode=0;controls.nr_enabled=false;
+        check(xrfg::autonomous::request(controls),"recovery policy controls");xrfg::autonomous::apply_runtime_settings();
+        xrfg::PrivateResourceRecovery p;
+        p.completed(150000,true,100);p.completed(150000,false,200);check(!p.requested,"prime counted as generation pressure");
+        p.completed(150000,true,2500);p.completed(150000,true,4800);check(p.requested,"repeated slow work did not request release");
+        p.begin();p.released(5000);std::uint64_t tick=1000000000;
+        for(unsigned n=0;n<32;++n){tick+=8000000;check(!p.real_frame(6000,tick,50000000),"stable frames bypassed minimum recovery interval");}
+        tick+=200000000;check(!p.real_frame(9000,tick,50000000),"long gap counted as stable progress");
+        for(unsigned n=0;n<15;++n){tick+=8000000;check(!p.real_frame(9000,tick,50000000),"too few stable observations triggered rebuild");}
+        tick+=8000000;check(p.real_frame(9000,tick,50000000),"fast high-resolution observations failed to rearm");
+        p.resumed();check(!p.active && !p.requested,"rearm retained stale pressure");
+        for(unsigned n=0;n<3;++n){p.completed(150000,true,10000+n*11000);check(!p.requested,"isolated stalls triggered resource cycling");}
+        // 120Hz: a 60ms stereo completion misses 2X/3X/4X budgets,
+        // although all samples remain below the old 100ms trigger.
+        for(const auto mult:{2U,3U,4U}) {
+            p.resumed();const auto budget=8333*mult;
+            for(unsigned n=0;n<5;++n){p.completed(60000,true,100+n*60,budget);check(!p.requested,"budget recovery is not sustained");}
+            p.completed(60000,false,450,budget);check(!p.requested,"prime advanced budget streak");
+            p.completed(60000,true,460,budget);check(p.requested,"below-100ms sustained deficit missed selected frame budget");
+            p.resumed();
+            for(unsigned n=0;n<12;++n)p.completed(budget,true,100+n*30,budget);
+            check(!p.requested,"on-budget completion cycled resources");
+            for(unsigned n=0;n<5;++n)p.completed(60000,true,500+n*60,budget);
+            p.completed(budget,true,900,budget);p.completed(60000,true,960,budget);
+            check(!p.requested,"healthy completion failed to reset deficit streak");
+            p.resumed();for(unsigned n=0;n<5;++n)p.completed(60000,true,100+n*60,budget);
+            p.completed(60000,true,3000,budget);check(!p.requested,"separated bursts combined into sustained pressure");
+            p.resumed();for(unsigned n=0;n<5;++n)p.completed(60000,true,100+n*60,budget);
+            p.completed(60000,true,500,budget+10000);check(!p.requested,"changed multiplier budget inherited old streak");
+        }
+        p.resumed();
+        for(unsigned n=0;n<6;++n)p.completed(60000,true,100+n*60,33332+(n%2?4:0));
+        check(p.requested,"tiny physical-clock measurement jitter erased sustained pressure");
+        // Replay consecutive paired worker costs from PID5628 at 120Hz/4X.
+        // Preparation plus completion matters: fence wait alone misses the
+        // sustained deficit until much later in this reporter capture.
+        p.resumed();
+        const std::uint64_t folios_us[]={49853,67210,51410,48111,63012,45576};
+        for(unsigned n=0;n<6;++n)p.completed(folios_us[n],true,225167+n*85,33332);
+        check(p.requested,"Folios recorded worker-cost replay failed to request recovery");
+        // Recovery must respect independent AFW/NR rather than force them off.
+        { SessionState state(std::make_shared<Dispatch>());state.menu_enabled=true;
+          state.pressure_resources_active=true;
+          check(private_clean_presentation(state),"recovery did not select the Off presentation policy");
+          state.independent_pacing=true;
+          check(!private_clean_presentation(state),"Framework recovery policy leaked into Independent transport");
+          state.independent_pacing=false;
+          controls.afw_mode=1;check(xrfg::autonomous::request(controls),"independent AFW policy");xrfg::autonomous::apply_runtime_settings();
+          check(!private_clean_presentation(state),"recovery forced independent AFW into effects-Off policy");
+          controls.afw_mode=0;controls.nr_enabled=true;check(xrfg::autonomous::request(controls),"independent NR policy");xrfg::autonomous::apply_runtime_settings();
+          check(!private_clean_presentation(state),"recovery forced independent NR into effects-Off policy");
+          controls.nr_enabled=false;check(xrfg::autonomous::request(controls),"restore raw recovery policy");xrfg::autonomous::apply_runtime_settings();
+          state.pressure_resources_active=false;check(!private_clean_presentation(state),"restart retained Off transport"); }
+        std::puts("Resource recovery thresholds, prime exclusion, minimum time, hitch reset, sub-millisecond clock independence and retry PASS");return 0;
+    }
+
     const bool late_shipping=route.starts_with("late-shipping-");
     if(late_shipping)route=route.substr(14);
     const bool binding_probe=route.starts_with("binding-probe-");
@@ -1038,6 +1105,11 @@ int main(int argc,char** argv) {
     const bool independent_nvidia=independent && route.starts_with("nvidia-");if(independent_nvidia)route=route.substr(7);
     const bool triple=route.ends_with('3');if(triple)route.pop_back();
     xrfg_fixture::ControlProfile profile(independent);
+    if(reclaim_test) {
+        auto controls=xrfg::autonomous::snapshot().desired;controls.afw_mode=0;controls.nr_enabled=false;
+        check(xrfg::autonomous::request(controls),"ordinary recovery fixture has no independent reconstruction");
+        xrfg::autonomous::apply_runtime_settings();
+    }
     if(independent) {
         auto desired=xrfg::autonomous::snapshot().desired;
         xrfg::autonomous::select_generation(desired,route=="fsr"?1:route=="dlssg"?2:route=="hybrid"?3:0,route=="fidelity"?0:route=="ref"?1:2);
@@ -1771,7 +1843,7 @@ int main(int argc,char** argv) {
     // SDK limited to one generated frame it would instead test an unrelated
     // prefer_fps scheduling change while repeating the same 2X Fast policy.
     const unsigned benchmark_policy_phases=benchmark_dlssg_sequence && !benchmark_dlssg_transition && state->native_dlss_generated_frames<2?6:7;
-    const unsigned input_count=(independent && blocked) || layout_alternation || independent_offon || independent_tickets || independent_input_timing || (independent && panel_budget_test)?24:independent_aer4 && !native12?16:rife_latency?64:phase_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:rife_msfs?64:panel_lifecycle_test?16:8;
+    const unsigned input_count=reclaim_test?32:late_shipping?16:(independent && blocked) || layout_alternation || independent_offon || independent_tickets || independent_input_timing || (independent && panel_budget_test)?24:independent_aer4 && !native12?16:rife_latency?64:phase_switch?5*rife_phase_frames:benchmark_sequence?benchmark_policy_phases*trial_frames:steady_memory?16:rife_msfs?64:panel_lifecycle_test?16:8;
     if(independent && panel_test)f.inspect_layers=[&](const XrFrameEndInfo* frame) {
         check(frame->layerCount>=3,"Independent output lost one of its original panels");
         const auto progress=reinterpret_cast<const XrCompositionLayerQuad*>(frame->layers[1])->pose.position.x*10.f;
@@ -1816,8 +1888,14 @@ int main(int argc,char** argv) {
     std::optional<XrTime> rife_replay_time;
     unsigned rife_phase_start{},rife_bank_epoch_start{};
     unsigned rife_phase_factor=rife_factor?rife_factor:ofxr_factor;
+    unsigned late_recovery_outputs_before{};
     bool hfw_gate_proven=false;
     bool independent_ahead=false;
+    std::weak_ptr<FrameGenerationSwapchainState> reclaimed_generation;
+    std::optional<xrfg::D3D12HistoryCaptureTicket> reclaimed_capture;
+    std::size_t native_before{};std::uint64_t work_bytes_before{};
+    unsigned rearm_native_before{};bool reclaimed_observed{},rearmed_observed{};
+
     bool rife_overlap_proven=false;
     std::uint64_t rife_overlap_b_sequence{};
     ComPtr<ID3D12Fence> rife_overlap_compute_gate;
@@ -2009,6 +2087,72 @@ int main(int argc,char** argv) {
             ok(apply_embedded_control(state),"late work drained before provider reconciliation");
             check(XR_SUCCEEDED(state->presenter_failure),"provider change inherited late-completion failure");
         }
+        if(late_shipping && n==8) {
+            xr_ok(wait_for_synthesis_handoff(state),"late recovery warm-up worker drained");
+            if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"late recovery warm-up outputs drained");
+            xr_ok(f.transport->drain(),"late recovery warm-up physically retired");
+            late_recovery_outputs_before=f.real_ends.load();
+        }
+        if(reclaim_test && n==4) {
+            xr_ok(wait_for_synthesis_handoff(state),"pressure warm worker complete");
+            if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"pressure warm descriptors drained");
+            xr_ok(f.transport->drain(),"pressure warm endpoint retired");
+            auto source=find_swapchain(chain);reclaimed_generation=source->frame_generation;reclaimed_capture=source->last_released_capture;
+            check(!reclaimed_generation.expired() && reclaimed_capture,"real generation/history must be warm before pressure fault");
+            native_before=f.chains.size();
+            const auto count_work=[&](const auto& outputs) {for(const auto& output:outputs)if(output.handle) {
+                unsigned count{};xr_ok(f.transport->enumerate_images(output.handle,0,&count,nullptr),"pressure work count");
+                std::vector<XrSwapchainImageD3D12KHR> images(count,{XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+                xr_ok(f.transport->enumerate_images(output.handle,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"pressure work images");
+                for(const auto& image:images){const auto desc=image.texture->GetDesc();work_bytes_before+=f.device12->GetResourceAllocationInfo(0,1,&desc).SizeInBytes;}
+            }};
+            count_work(source->frame_generation->current);count_work(source->frame_generation->synthetic);
+            // Repeat real GPU completion delays through the shipping worker
+            // completion boundary. The scene's warmed allocations stay intact.
+            for(unsigned fault=0;fault<(reclaim_budget?6U:3U);++fault) {
+                ComPtr<ID3D12Fence> gate,done;ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"pressure fault gate");
+                ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&done)),"pressure completion");
+                ok(f.queue->Wait(gate.Get(),1),"hold pressure producer");ok(f.queue->Signal(done.Get(),1),"pressure exact completion");
+                PreparedProjectionFrame job;job.kind=PreparedGenerationKind::pair;PreparedGeneration g;g.kind=job.kind;
+                g.worker_generation=std::make_shared<FrameGenerationSwapchainState>();g.worker_fence=done;g.worker_fence_value=1;
+                job.resources.push_back({chain,std::move(g),false});bool delayed{};
+                auto waiter=std::async(std::launch::async,[&]{return finish_worker_outputs(state,job,900+fault,&delayed);});
+                const bool pending=waiter.wait_for(reclaim_budget?60ms:140ms)==std::future_status::timeout;
+                ok(gate->Signal(1),"complete pressure fault safely");check(waiter.get() && pending,"pressure injection must finish exact GPU work");
+            }
+        }
+        if(reclaim_test && n==5) {
+            const auto source=find_swapchain(chain);
+            const bool freed=reclaimed_generation.expired() && !source->frame_generation && f.chains.size()<native_before;
+            xrfg::D3D12HistoryConsumerLease lease;ComPtr<ID3D12Resource> image;ComPtr<ID3D12Fence> producer;
+            const auto old=source->d3d12_history->acquire_consumer(*reclaimed_capture,&lease,&image,&producer);
+            if(SUCCEEDED(old))source->d3d12_history->cancel_consumer(lease);
+            std::printf("RECLAIM native_before=%zu native_after=%zu work_bytes_before=%llu freed=%u old_history_invalid=%u\n",native_before,f.chains.size(),work_bytes_before,freed,unsigned(FAILED(old)));
+            check(freed && FAILED(old),"sustained slow completion retained generation/native/history resources");reclaimed_observed=true;
+            if(reclaim_transport || reclaim_budget) {
+                check(f.transport->clean_bypass_enabled(),"recovery retains generation transport instead of the effects-Off policy");
+                check(xrfg::embedded::snapshot().desired.enabled,"internal recovery changed the saved enable preference");
+            }
+        }
+        if(reclaim_held && n==4) {
+            f.block_end=true;f.end_entered=false;f.begin_virtual();
+            XrFrameState held_clock{XR_TYPE_FRAME_STATE};xr_ok(f.transport->predict_frame(&held_clock),"held native clock");
+            std::array<XrCompositionLayerProjectionView,2> held_views{};
+            for(unsigned eye=0;eye<2;++eye){auto& view=held_views[eye];view={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};view.pose.orientation.w=1;
+                view.subImage={chain,{{0,0},{int(image_width),int(image_height)}},eye};}
+            XrCompositionLayerProjection held_layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};held_layer.viewCount=2;held_layer.views=held_views.data();
+            const auto* held_header=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&held_layer);
+            XrFrameEndInfo held_info{XR_TYPE_FRAME_END_INFO};held_info.displayTime=held_clock.predictedDisplayTime;
+            held_info.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;held_info.layerCount=1;held_info.layers=&held_header;
+            xr_ok(f.transport->end_frame(&held_info),"hold a real native consumer before resource release");f.wait_entered();
+        }
+        if(reclaim_test && n==8)std::this_thread::sleep_for(3100ms);
+        if(reclaim_test && n==10) {
+            check(!find_swapchain(chain)->frame_generation,"elapsed cooldown retried before stable real-frame observations");
+            if(reclaim_transport || reclaim_budget)check(f.transport->clean_bypass_enabled(),"Wait reset recovery transport before real cadence stabilized");
+        }
+        if(reclaim_test && n==24)rearm_native_before=f.real_ends.load();
+        if(reclaim_test && n>=25 && find_swapchain(chain)->frame_generation)rearmed_observed=true;
         if(switching && (n==3 || n==5 || n==7)) {
             auto desired=xrfg::embedded::snapshot().desired;desired.enabled=true;desired.backend=n==3?1:n==5?3:0;
             desired.frame_generation=0;desired.separate_synthesis=0;desired.lower_vram=0;
@@ -2235,7 +2379,13 @@ int main(int argc,char** argv) {
         if(hfw) std::fprintf(stderr,"HFW before%u active%u worker%u request%u forbidden%u mode%u enabled%u\n",n,
             unsigned(continuous_presenter_active(state)),unsigned(state->three_slot_director),unsigned(state->presenter_start_requested),
             unsigned(presenter_forbidden(*state)),unsigned(state->single_director_requested.load()),unsigned(state->menu_enabled.load()));
-        if(late_shipping && n==4) {
+        if(reclaim_held && n==4) {
+            auto returning=std::async(std::launch::async,[&]{return layer_end_frame_impl(state->handle,&end);});
+            const bool waiting=returning.wait_for(100ms)==std::future_status::timeout;
+            const bool retained=!reclaimed_generation.expired() && f.chains.size()==native_before;
+            f.unblock();xr_ok(returning.get(),"resource drain resumes after real native consumer retires");
+            check(waiting && retained,"resource recovery freed an image still owned by native consumer");
+        } else if(late_shipping && n==4) {
             xr_ok(wait_for_synthesis_handoff(state),"late shipping previous worker idle");
             if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"late shipping previous consumer idle");
             xr_ok(f.transport->drain(),"late shipping previous private readers retired");
@@ -2711,6 +2861,9 @@ int main(int argc,char** argv) {
     }
     if(independent) {
         check(state->independent_pacing && state->next_source_sequence>3,"independent source jobs never entered the new queue");
+        check(!state->resource_recovery.active && !state->resource_recovery.requested &&
+            !state->pressure_resources_active.load() && !optical_pressure_real_only(*state),
+            "legacy completion recovery interfered with Independent generation");
         check(state->three_slots.empty() && state->independent_sources.empty() && state->independent_outputs.empty(),"independent queue drain retained an old-slot dependency");
         check(state->independent_completions.empty() && !state->independent_completion_busy,
             "independent drain returned while submitted GPU transactions were still consumer-owned");
@@ -2749,6 +2902,26 @@ int main(int argc,char** argv) {
         std::puts("INDEPENDENT_QUEUE_PROOF source/jobs/drain/native-policy PASS");
         if(independent_tickets)std::puts("INDEPENDENT_TICKETS early/late next Wait and rewritten End time preserve exact begun identity; full generated count PASS");
     }
+    if(reclaim_test) {
+        xr_ok(wait_for_synthesis_handoff(state),"reclaimed generator restart worker complete");
+        if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"reclaimed generator restart descriptors complete");
+        xr_ok(f.transport->drain(),"recovered outputs physically retired");
+        check(reclaimed_observed && rearmed_observed && f.real_ends.load()>rearm_native_before+8,
+            "resource release did not resume sustained generation after stable raw delivery");
+        check(!f.pixels.empty() && f.pixels.back()==160,"recovery lost final real source pixels");
+        if(reclaim_transport || reclaim_budget) {
+            check(!f.transport->clean_bypass_enabled(),"recovery failed to restore generation transport on restart");
+            check(xrfg::embedded::snapshot().desired.enabled,"recovery restart rewrote saved enable preference");
+        }
+        stop_continuous_presenter(state);f.transport->stop();
+        for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
+        xr_ok(layer_destroy_swapchain_impl(chain),"pressure source cleanup");
+        {std::scoped_lock lock(g_state_mutex);g_sessions.clear();g_swapchains.clear();g_instances.clear();}
+        check(f.chains.empty(),"pressure restart leaked native allocations");
+        std::puts("Sustained pressure: actual resource release, raw-frame stabilization, fresh generation and pixels PASS");return 0;
+    }
+    if(late_shipping)check(f.real_ends.load()>late_recovery_outputs_before+9,
+        "late completion/provider transition did not resume synthetic delivery beyond nine subsequent real inputs");
     auto generated=count>0 && (independent ? f.real_ends>=2 && f.real_ends+state->private_runtime->independent_load().expired>=input_count
         : f.real_ends>=(budget_fallback_test?input_count:steady_memory?input_count+4:(switching || hfw_offon)?10:12));
     std::printf("%s physical outputs=%u generation state=%u\n",route.c_str(),f.real_ends.load(),unsigned(state->generation_status.load()));

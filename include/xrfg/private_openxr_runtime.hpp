@@ -158,6 +158,8 @@ public:
     XrResult set_director_enabled(bool);
     void set_clean_bypass(bool);
     [[nodiscard]] bool clean_bypass_enabled() const noexcept;
+    // Admission only: virtual callers retain their presenter's Wait/Begin owner.
+    XrResult wait_for_clean_admission();
     void set_ready_clock(bool) noexcept;
     void set_rife_handoff(bool) noexcept; // SteamVR RIFE physical phase; no effect on other generators
     void set_aer_optical_handoff(bool) noexcept;

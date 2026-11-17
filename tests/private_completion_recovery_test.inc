@@ -96,3 +96,56 @@ static int private_completion_recovery_test(std::string_view mode) {
     check(f.pixels==std::vector<unsigned>({77,94}) && f.positions==std::vector<float>({3,7}),"late recovery lost/repeated pixels or poses");
     return 0;
 }
+
+// Alternate actual completed GPU faults with ordinary presentation of already
+// ready images. Empty readiness must not erase a real worker pressure streak.
+static int private_pressure_sampling_test() {
+    xrfg_fixture::ControlProfile profile;Fixture f(true);f.unblock();f.throttled=false;
+    auto dispatch=std::make_shared<Dispatch>();dispatch->steamvr_runtime=true;
+    dispatch->wait_frame=private_runtime_wait;dispatch->begin_frame=private_runtime_begin;dispatch->end_frame=private_runtime_end;
+    auto state=std::make_shared<SessionState>(dispatch);state->handle=reinterpret_cast<XrSession>(2);
+    state->private_runtime=f.transport;state->graphics_binding=SessionGraphicsBinding::d3d12;
+    state->d3d12_device=f.device12;state->d3d12_queue=f.queue;
+    state->nvidia_options.rife_multiplier=4;state->nvidia_options.rife_model=-1;
+    state->history_capture_wait_period=period;state->presenter_display_period=period;state->presenter_active=true;
+    // Independent uses its own asynchronous completion/admission policy.
+    state->independent_pacing=true;
+    for(unsigned n=0;n<8;++n)observe_private_completion(*state,150000,true);
+    check(!private_completion_recovery_enabled(*state) && !optical_pressure_recovery_enabled(*state) &&
+        !state->resource_recovery.requested && !state->resource_recovery.active,
+        "late/slow completed work armed legacy resource recovery on Independent");
+    state->independent_pacing=false;
+    const auto chain=f.make_chain();
+    {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;}
+    std::thread consumer([&]{three_slot_director_main(state);});
+    bool completed=true;
+    for(unsigned n=1;n<=6 && completed;++n) {
+        ComPtr<ID3D12Fence> gate,done;ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"sample gate");
+        ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&done)),"sample completion");
+        ok(f.queue->Wait(gate.Get(),1),"sample real GPU hold");ok(f.queue->Signal(done.Get(),1),"sample GPU receipt");
+        PreparedProjectionFrame prepared;prepared.kind=PreparedGenerationKind::pair;PreparedGeneration g;g.kind=prepared.kind;
+        g.worker_generation=std::make_shared<FrameGenerationSwapchainState>();g.worker_fence=done;g.worker_fence_value=1;
+        prepared.resources.push_back({chain,std::move(g),false});
+        auto work=std::async(std::launch::async,[&]{return finish_worker_outputs(state,prepared,n);});
+        const bool held=work.wait_for(60ms)==std::future_status::timeout;ok(gate->Signal(1),"retire sample GPU hold");
+        completed=work.get() && held;
+        if(!completed)break;
+        f.write(chain,n*10);
+        auto frame=std::make_shared<GeneratedFrameEndInfo>();frame->synthetic=true;frame->projections.emplace_back();
+        auto& p=frame->projections.back();p.layer.viewCount=1;p.views.resize(1);auto& v=p.views.front();
+        v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.subImage={chain,{{0,0},{1,1}},0};p.layer.views=p.views.data();
+        frame->layer_pointers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&p.layer));
+        frame->info.layerCount=1;frame->info.layers=frame->layer_pointers.data();frame->info.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        auto request=std::make_shared<PresenterSubmission>();request->owned_frame=frame;request->sequence=n;
+        {std::scoped_lock lock(state->presenter_mutex);state->presenter_submissions.push_back(request);++state->outstanding_presenter_submissions;}
+        state->presenter_condition.notify_all();
+        {std::unique_lock lock(state->presenter_mutex);completed=state->presenter_condition.wait_for(lock,2s,[&]{return request->completed;}) && XR_SUCCEEDED(request->result);}
+        if(completed)xr_ok(f.transport->drain(),"already-ready sample physically retires");
+    }
+    bool requested{};{std::scoped_lock lock(state->optical_pressure_mutex);requested=state->resource_recovery.requested;}
+    {std::scoped_lock lock(state->presenter_mutex);state->presenter_stop_requested=true;}
+    state->presenter_condition.notify_all();consumer.join();
+    {std::scoped_lock lock(g_state_mutex);g_sessions.erase(state->handle);}
+    check(completed && requested && f.real_ends==6,"presentation bookkeeping erased actual completed worker pressure");
+    std::puts("Actual GPU pressure survives empty presentation-readiness observations PASS");return 0;
+}

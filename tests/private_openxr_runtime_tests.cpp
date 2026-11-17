@@ -914,11 +914,15 @@ void held_aer_virtual_cycles(bool d12) {
     check(f.pixels==std::vector<unsigned>({80,120}),"fresh coherent images retain exact FIFO order across held polls");
     check(!f.cycle_waited && !f.cycle_begun,"held polls preserve native call ownership");
 }
-void clean_bypass_admission(bool d12,bool reenable=false) {
+void clean_bypass_admission(bool d12,bool reenable=false,bool virtual_prediction=false) {
     Fixture f(d12,true,{},true);f.throttled=false;
     auto chain=f.make_chain();f.transport->set_clean_bypass(true);
     f.write(chain,91);f.begin_virtual();xr_ok(f.submit(chain,1),"clean first input");f.wait_entered();
     auto next=std::async(std::launch::async,[&]{XrFrameState prediction{XR_TYPE_FRAME_STATE};
+        if(virtual_prediction) {
+            auto admitted=f.transport->wait_for_clean_admission();
+            return XR_FAILED(admitted)?admitted:f.transport->predict_frame(&prediction);
+        }
         return f.transport->wait_frame(nullptr,&prediction);});
     const bool blocked=next.wait_for(40ms)==std::future_status::timeout;
     bool resumed=true;
@@ -929,6 +933,10 @@ void clean_bypass_admission(bool d12,bool reenable=false) {
     f.unblock();check(next.wait_for(2s)==std::future_status::ready,"native delivery releases next clean Wait");
     check(resumed,"live reenable wakes clean admission before the held native End returns");
     xr_ok(next.get(),"clean Wait after previous native output");
+    if(virtual_prediction) {
+        check(f.transport->begin_frame(nullptr)==XR_ERROR_CALL_ORDER_INVALID,"admission-only prediction manufactured a native Wait ticket");
+        XrFrameState clock{XR_TYPE_FRAME_STATE};xr_ok(f.transport->wait_frame(nullptr,&clock),"presenter retains actual Wait ownership");
+    }
     xr_ok(f.transport->begin_frame(nullptr),"clean second Begin");f.write(chain,92);
     xr_ok(f.submit(chain,2),"clean second input");f.wait_count(2);
     xr_ok(f.transport->drain(),"clean admission drain");f.transport->stop();
@@ -2109,7 +2117,7 @@ int main(int argc,char** argv){
         for(bool d12:{true,false})for(bool paced:{true,false})aer_optical_handoff_test(d12,paced);
         return 0;
     }
-    if(const auto r=rife_aer_handoff_test(argc,argv);r>=0)return r;if(argc>1 && std::string_view(argv[1])=="rife-handoff"){rife_handoff_matrix();return 0;}if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
+    if(const auto r=rife_aer_handoff_test(argc,argv);r>=0)return r;if(argc>1 && std::string_view(argv[1])=="rife-handoff"){rife_handoff_matrix();return 0;}if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);clean_bypass_admission(true,false,true);clean_bypass_admission(true,true,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
 if(argc>1 && std::string_view(argv[1])=="begin-renewal"){
     for(bool native:{false,true})for(bool director_only:{false,true}) {

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1010.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1011.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -915,6 +915,13 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_private_content_refusal_gpu COMMAND xrfg_private_openxr_runtime_tests content-refusal)
         add_test(NAME xrfg_private_framework_expired_clock_gpu COMMAND xrfg_private_openxr_runtime_tests bypass-expired)
         set_tests_properties(xrfg_private_framework_expired_clock_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        add_test(NAME xrfg_private_reclaim_policy COMMAND xrfg_private_runtime_layer_tests reclaim-policy)
+        add_test(NAME xrfg_private_reclaim_sampling_gpu COMMAND xrfg_private_runtime_layer_tests reclaim-sampling)
+        set_tests_properties(xrfg_private_reclaim_sampling_gpu PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
+        foreach(reclaim_case IN ITEMS multi4-fidelity multi4-new fidelity new held-multi4-fidelity transport-multi4-fidelity transport-fidelity budget-multi4-fidelity budget-fidelity budget-multi4-new budget-new budget-multi3-fidelity budget-multi3-new)
+            add_test(NAME xrfg_private_reclaim_${reclaim_case}_gpu COMMAND xrfg_private_runtime_layer_tests reclaim-${reclaim_case})
+            set_tests_properties(xrfg_private_reclaim_${reclaim_case}_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        endforeach()
         foreach(late_provider IN ITEMS fidelity ref)
             add_test(NAME xrfg_private_late_shipping_${late_provider}_gpu COMMAND xrfg_private_runtime_layer_tests late-shipping-${late_provider})
             set_tests_properties(xrfg_private_late_shipping_${late_provider}_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)

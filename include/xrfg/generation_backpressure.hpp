@@ -28,6 +28,44 @@ struct OpticalGpuPressure {
     }
 };
 
+// Uses actual completed work, never memory percentage alone. Guard with the
+// session pressure mutex; resource lifetimes remain with the application path.
+struct PrivateResourceRecovery {
+    bool requested{},active{},drained{};
+    unsigned slow{},healthy{},stable{},budget_slow{};
+    std::uint64_t last_budget{},budget_value{};
+    std::uint64_t last_slow{},retry_at{},last_real{};
+    void completed(std::uint64_t us,bool paired,std::uint64_t now,std::uint64_t budget_us=0) noexcept {
+        if(active || !paired)return;
+        // Consecutive completed pairs missing the selected real-frame budget
+        // can sustain a collapse without ever reaching the old 100ms trigger.
+        // Allow 25% timing slack; a healthy pair, changed budget, or long gap
+        // clears this streak. No memory percentage or prime can request it.
+        const auto difference=budget_value>budget_us ? budget_value-budget_us : budget_us-budget_value;
+        const bool changed=!budget_value || !budget_us || difference>budget_value/20;
+        if(changed || now-last_budget>2000)budget_slow=0;
+        budget_value=budget_us;last_budget=now;
+        if(budget_us && us>budget_us+budget_us/4) {
+            if(++budget_slow>=6)requested=true;
+        } else budget_slow=0;
+        if(us>=100000) {
+            if(now-last_slow>10000)slow=0;
+            last_slow=now;healthy=0;
+            if(++slow>=3)requested=true;
+        } else if(us<50000 && ++healthy>=8) {slow=0;healthy=0;}
+    }
+    void begin() noexcept {requested=false;active=true;drained=false;stable=0;last_real=0;}
+    void released(std::uint64_t now) noexcept {drained=true;retry_at=now+3000;stable=0;last_real=0;}
+    bool real_frame(std::uint64_t now,std::uint64_t real_ns,std::uint64_t limit_ns) noexcept {
+        if(!active || !drained)return false;
+        if(last_real && real_ns>last_real && real_ns-last_real<=limit_ns)++stable;
+        else stable=0;
+        last_real=real_ns;
+        return now>=retry_at && stable>=16;
+    }
+    void resumed() noexcept {*this={};}
+};
+
 [[nodiscard]] inline bool should_enter_generation_cooldown(
     bool nvidia_backend,
     std::chrono::steady_clock::duration synthetic_end_elapsed,
