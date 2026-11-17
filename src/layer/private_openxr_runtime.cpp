@@ -119,6 +119,7 @@ struct PrivateOpenXrRuntime::Impl {
     };
     struct Packet {
         bool batch_credit{};
+        std::uint64_t accepted_ordinal{};
         std::int64_t first_output_target{},spare_ns{},copy_ns{};
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
         std::shared_ptr<InterfaceDeliveryReceipt> delivery;
@@ -189,6 +190,7 @@ struct PrivateOpenXrRuntime::Impl {
     std::optional<WaitResult> wait_result;
     bool wait_active{};
     std::uint64_t accepted_packets{},content_wait_jobs{};
+    std::unordered_map<std::uint64_t,bool> optical_wait_ordinals; // mutex; bounded by pending packets
     PrivateRefreshWaitPolicy refresh_wait_policy; // guarded by mutex
     bool stabilization_active{true}; // OFXR ON; independent of capacity, guarded by mutex
     std::size_t requested_capacity{}; // preserve Framework2/3 selection across Director switches
@@ -394,6 +396,7 @@ struct PrivateOpenXrRuntime::Impl {
         if(packet->capture_recording){two_frame_capture_finish_delivery_copy(packet->capture_token,E_ABORT);packet->capture_recording=false;}
         if(packet->capture_token)two_frame_capture_complete_delivery(packet->capture_token,XR_ERROR_RUNTIME_FAILURE,0,0,0,0,false);
         {std::scoped_lock lock(mutex);
+         if(!options.independent_pacing)optical_wait_ordinals.erase(packet->accepted_ordinal);
          for(auto& lease:packet->leases) {
              if(!lease.source_released && lease.chain->images[lease.image].readers)
                  --lease.chain->images[lease.image].readers;
@@ -866,9 +869,10 @@ struct PrivateOpenXrRuntime::Impl {
             std::shared_ptr<Packet> phase_packet;
             {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping ||
                 (wait_job && (wait_job->accepted_ordinal==0 ||
-                    (ready_clock.load() ? !prepared.empty() :
+                    (ready_clock.load() ? (!prepared.empty() || (!options.independent_pacing && optical_wait_ordinals.contains(wait_job->accepted_ordinal))) :
                      (director_enabled.load() || buffered.load()) ? accepted_packets>=wait_job->accepted_ordinal : !prepared.empty())));});
              if(stopping)break;job=*wait_job;wait_job.reset();wait_active=true;
+             if(!options.independent_pacing)optical_wait_ordinals.erase(job.accepted_ordinal);
              if(job.accepted_ordinal && !prepared.empty() && prepared.front()->rife_handoff)phase_packet=prepared.front();}
             WaitResult result;
             if(phase_packet){
@@ -1947,6 +1951,7 @@ XrResult PrivateOpenXrRuntime::start() {
     if(s.running)return XR_ERROR_SESSION_RUNNING;
     s.fifo=std::make_unique<PrivateOutputFifo<std::shared_ptr<Impl::Packet>>>(s.options.capacity);
     s.prepared.clear();s.wait_job.reset();s.wait_result.reset();s.wait_active=false;s.accepted_packets=s.content_wait_jobs=0;
+    if(!s.options.independent_pacing)s.optical_wait_ordinals.clear();
     s.independent_misses.clear();s.independent_preparing.reset();
     s.copying.clear();s.preparer_done=false;for(auto& bank:s.copy_banks)bank.busy=false;
     s.independent_delivered_count=0;s.independent_idle_count=0;s.independent_ready_residence=0;
@@ -2240,6 +2245,10 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
             (!s.options.native_director_only || packet->director);
         const auto physical=native_policy && s.options.physical_period?s.options.physical_period():0;
         std::scoped_lock lock(s.mutex);s.begun=0;++s.accepted_packets;
+        if(!s.options.independent_pacing)packet->accepted_ordinal=s.accepted_packets;
+        if(!s.options.independent_pacing && packet->batch_credit && (!s.options.native_frame_contract ||
+           s.options.native_adaptive_wait_lookahead || s.options.native_director_only))
+            s.optical_wait_ordinals.emplace(packet->accepted_ordinal,true);
         if(native_policy && s.stabilization_active)
             s.refresh_wait_policy.observe(packet->accepted_at,physical);
     }s.changed.notify_all();

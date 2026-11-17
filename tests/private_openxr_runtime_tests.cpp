@@ -1655,6 +1655,31 @@ void rife_ready_clock_checks(bool d12,bool directed,std::size_t capacity) {
     std::printf("RIFE ready clock %s %s capacity%zu:8exact outputs, zero age renewals, native Wait after copy PASS\n",
         d12?"D12":"D11",directed?"Director":"Framework",capacity);
 }
+void optical_tagged_clock_checks(bool directed) {
+    native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=true;native_director_only_fixture_mode=true;
+    Fixture f(true,true,{},false,true,false,3,true);f.unblock();f.throttled=false;
+    xr_ok(f.transport->set_director_enabled(directed),"tagged optical selected delivery policy");
+    f.transport->set_ready_clock(true);check(f.transport->ready_clock_enabled(),"tagged optical ready-clock active");
+    f.prediction_horizon_ns=period*3;f.prediction_age_limit=period+500'000;
+    f.slow_image_wait_ms=5; // visible copy work, within the native freshness window
+    const auto chain=f.make_chain();std::vector<unsigned> expected;
+    for(unsigned n=0;n<8;++n){
+        const auto value=35+n*7;expected.push_back(value);f.write(chain,value);f.begin_virtual();
+        f.transport->tag_next_end_for_source_batch(true);
+        xr_ok(f.submit(chain,float(n)),"tagged optical ready-clock source retained");f.wait_count(n+1);
+    }
+    xr_ok(f.transport->drain(),"tagged optical ready-clock drain");f.transport->stop();
+    check(f.pixels==expected && f.real_ends==8,"tagged optical ready-clock preserves every exact GPU image");
+    check(f.discarded_clocks==0,"tagged optical preparation must not age and replace each native cycle");
+    for(const auto& [seq,ready]:f.copy_ready_times){
+        check(f.native_wait_entries.contains(seq),"every prepared image has a native cycle receipt");
+        check(f.native_wait_entries.at(seq)<ready,"tagged optical Wait failed to overlap its own slow private image preparation");
+    }
+    check(f.copy_ready_times.size()==8,"all tagged optical prepared images checked");
+    check(!f.cycle_waited && !f.cycle_begun,"tagged optical stop balances all native cycles");
+    f.transport->set_ready_clock(false);check(!f.transport->ready_clock_enabled(),"ordinary OFXR clock policy restored");
+    std::printf("Tagged optical clock %s: exact images, native Wait overlaps copy PASS\n",directed?"Director":"Framework");
+}
 void director_aged_cycle_checks(bool d12,bool corrected=true) {
     native_contract_fixture_mode=true;native_adaptive_wait_fixture_mode=true;native_director_only_fixture_mode=corrected;
     Fixture f(d12,true,{},false,true,false,2);f.unblock();f.throttled=false;
@@ -2089,6 +2114,7 @@ void independent_copy_pipeline_test(bool cancel,bool diagnostics) {
     std::printf("INDEPENDENT_COPY_PIPELINE cancel=%d diagnostics=%d two submissions before GPU gate; exact ownership/FIFO/pixels/restart PASS\n",cancel,diagnostics);
 }
 int main(int argc,char** argv){
+    if(argc>1 && std::string_view(argv[1])=="legacy-optical-clock"){for(bool directed:{false,true})optical_tagged_clock_checks(directed);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-copy-pipeline"){for(bool cancel:{false,true})for(bool diagnostics:{true,false})independent_copy_pipeline_test(cancel,diagnostics);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-native-preparation"){for(bool d12:{true,false})for(bool cancel:{false,true})independent_native_preparation_test(d12,cancel);publication_lane_budget_test(true);publication_lane_budget_test(false);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-native-wait"){for(bool d12:{true,false})for(bool cancel:{false,true})independent_wait_overlap(d12,cancel);independent_wait_failure();return 0;}

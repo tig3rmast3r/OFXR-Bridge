@@ -14467,15 +14467,28 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
 
 // Complete a stereo transaction on thread 2. No session GPU/call lock is
 // held across a GPU fence wait; the producer may render its next frame.
+[[nodiscard]] bool fenced_optical_batch(const SessionState& state,const PreparedProjectionFrame& prepared) noexcept {
+    const auto outputs=native_frame_multiplier(state);
+    if(state.independent_pacing || private_completion_recovery_enabled(state) || !optical_source_admission(state) || (outputs!=3 && outputs!=4) ||
+        prepared.kind!=PreparedGenerationKind::pair || prepared.resources.empty())return false;
+    return std::all_of(prepared.resources.begin(),prepared.resources.end(),[&state,outputs](const auto& resource) {
+        const auto& g=resource.generation;
+        return g.worker_generation && !g.worker_generation->d3d11_interop && g.worker_fence && g.worker_fence_value &&
+            (g.staging_generation || (g.direct_current_publication && g.direct_synthetic_publication && g.direct_extra_publication && (outputs!=4 || g.direct_third_publication)));
+    });
+}
+
 [[nodiscard]] bool finish_worker_outputs(
     const std::shared_ptr<SessionState>& state, PreparedProjectionFrame& prepared,
-    std::uint64_t source_sequence,bool* delayed_completion=nullptr,std::uint64_t preparation_us=0) noexcept {
+    std::uint64_t source_sequence,bool* delayed_completion=nullptr,std::uint64_t preparation_us=0,
+    bool defer_gpu_completion=false) noexcept {
     bool success = prepared.kind != PreparedGenerationKind::none;
     std::uint64_t total_completion_us{preparation_us};
     bool observed_work{};
     for (auto& resource : prepared.resources) {
         auto& g = resource.generation;
         if (!g.worker_generation) continue;
+        if (defer_gpu_completion) continue;
         if (g.late_luke_publication) continue; // acquire below while dispatched GPU work proceeds
         if(g.staging_generation && (djules_deep_active(*state)||djules_triple_active(*state))) continue;
         const auto completion_token = xrfg::bridge_flight_logger().begin(
@@ -15017,10 +15030,11 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             }
             }
             const auto first_result=completion?publish_independent_aer_first(state,prepared,job):S_FALSE;
+            const bool deferred_completion=!completion && job->pair && job->triple && fenced_optical_batch(*state,prepared);
             bool delayed_completion{};
             const auto preparation_us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now()-work_started).count());
-            bool success = SUCCEEDED(first_result) && finish_worker_outputs(state, prepared, job->current->source_sequence,&delayed_completion,preparation_us);
+            bool success = SUCCEEDED(first_result) && finish_worker_outputs(state, prepared, job->current->source_sequence,&delayed_completion,preparation_us,deferred_completion);
             if(success && delayed_completion) {
                 // Both eyes have completed and their private Releases succeeded.
                 // Publish this batch's own real image/pose, discard late S1/S2/S3.
@@ -15170,7 +15184,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                 const unsigned actual=job->pair?(job->quad?4:job->triple?3:2):1;
                 if(success && actual<job->admission_outputs)
                     state->native_batch_admission.cancelled(job->admission_outputs-actual);
-                state->native_batch_admission.generated(xrfg::NativeBatchAdmission::now()-admission_work_started);
+                if(!deferred_completion)state->native_batch_admission.generated(xrfg::NativeBatchAdmission::now()-admission_work_started);
                 state->wake_source_admission_locked();
             }
             if(!completion)xrfg::bridge_flight_logger().end(worker_token,
@@ -15251,6 +15265,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                 if(extra_synthetic)extra_synthetic->batch_admission_credit=true;
                 if(third_synthetic)third_synthetic->batch_admission_credit=true;
             }
+            const auto publication_started=deferred_completion?xrfg::NativeBatchAdmission::now():0;
             const bool overlap_source = (state->nvidia_options.rife_model >= 0 || job->deferred_real) &&
                 native_current_rings(*state) >= 2 && !prepared.resources.empty() &&
                 std::all_of(prepared.resources.begin(), prepared.resources.end(), [](const auto& resource) {
@@ -15326,6 +15341,36 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                     // no image copies. A is now held in logical slot 1.
                     for(std::size_t i=1;i<state->three_slots.capacity();++i)
                         static_cast<void>(state->three_slots.shift_empty());
+                }
+                if(deferred_completion) {
+                    // Immutable fences permit native preparation to overlap
+                    // generation. Actual outputs retain their GPU queue joins.
+                    const auto publication_wait=xrfg::NativeBatchAdmission::now()-publication_started;
+                    state->synthesis_prepared_sequence=job->current->source_sequence;
+                    lock.unlock();state->presenter_condition.notify_all();
+                    bool completed=true;
+                    for(const auto& resource:prepared.resources) {
+                        const auto& g=resource.generation;
+                        const auto completion=xrfg::bridge_flight_logger().begin(
+                            xrfg::BridgeFlightOperation::timing_synthesis_complete,
+                            job->current->source_sequence,handle_value(resource.application_swapchain));
+                        const auto ready=wait_composition_fence(g.worker_fence.Get(),g.worker_fence_value,
+                            kFrameStartSynthesisWaitMilliseconds);
+                        xrfg::bridge_flight_logger().end(completion,xrfg::BridgeFlightOperation::timing_synthesis_complete,
+                            ready,job->current->source_sequence,handle_value(resource.application_swapchain));
+                        completed=SUCCEEDED(ready)&&completed;
+                    }
+                    const auto completed_at=xrfg::NativeBatchAdmission::now();
+                    lock.lock();
+                    if(!completed) {
+                        state->synthesis_busy=false;
+                        fail_pending_presenter_submissions_locked(*state,XR_ERROR_RUNTIME_FAILURE);
+                        state->presenter_condition.notify_all();break;
+                    }
+                    // Capacity residence is not GPU generation time.
+                    if(publication_wait<=state->presenter_display_period/8)
+                        state->native_batch_admission.generated(completed_at-admission_work_started);
+                    state->wake_source_admission_locked();
                 }
                 if (independent_synthesis_anchor(*state) && !overlap_source) {
                     // No additional ready-pair backlog. The endpoint credit is the

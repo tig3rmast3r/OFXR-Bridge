@@ -19,3 +19,19 @@ Private late-GPU recovery remains enabled and retains its original completion pa
 Validation: eight focused checks pass, including native VDXR and SteamVR 3X/4X,
 Independent paced delivery, admission math and a runtime exclusion test.
 Headset smoothness and physical latency remain hardware observations.
+
+## Fenced batch publication and private preparation
+
+Eligible native optical 3X/4X batches publish immutable output descriptors before
+GPU completion. The worker retains the batch until its completion fence signals;
+each output still joins its own GPU readiness before native use. This path is
+explicitly unavailable to Independent and private completion-recovery sessions.
+
+Legacy private transport tags accepted optical packets by immutable ordinal so
+its native Wait can overlap that packet's copy preparation. Untracked RIFE and
+Independent retain the prepared-output wait condition. This does not bypass the
+existing completion recovery or runtime prediction renewal checks.
+
+Validation: held-generation 3X/4X tests pass (descriptors visible, resources held,
+no incomplete native delivery). Tagged private clock checks pass in Framework
+and Director with exact output pixels and native Wait overlapping copy work.

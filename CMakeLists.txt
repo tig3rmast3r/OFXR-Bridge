@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1012.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1013.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -3142,4 +3142,16 @@ endif()
 if(TARGET xrfg_private_runtime_layer_tests)
     add_test(NAME xrfg_legacy_latency_scope COMMAND xrfg_private_runtime_layer_tests legacy-latency-scope)
     set_tests_properties(xrfg_legacy_latency_scope PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
+if(TARGET xrfg_private_runtime_layer_tests)
+    foreach(factor 3 4)
+        add_test(NAME xrfg_legacy_native_early_${factor} COMMAND xrfg_private_runtime_layer_tests native-vdxr-early-${factor})
+        set_tests_properties(xrfg_legacy_native_early_${factor} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    endforeach()
+endif()
+
+if(TARGET xrfg_private_openxr_runtime_tests)
+    add_test(NAME xrfg_legacy_optical_clock COMMAND xrfg_private_openxr_runtime_tests legacy-optical-clock)
+    set_tests_properties(xrfg_legacy_optical_clock PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()

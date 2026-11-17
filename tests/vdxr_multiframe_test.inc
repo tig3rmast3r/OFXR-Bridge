@@ -78,6 +78,7 @@ static int vdxr_multiframe_test(std::string route) {
     const bool pimax=route.starts_with("native-pimax-");
     const bool other=route.starts_with("native-other-");
     const bool publication=route.find("publication")!=std::string::npos;
+    const bool early=route.find("early")!=std::string::npos;
     const bool batch=route.find("batch")!=std::string::npos;
     const bool vram=route.find("vram")!=std::string::npos;
     const bool packed=route.find("packed")!=std::string::npos;
@@ -136,6 +137,8 @@ static int vdxr_multiframe_test(std::string route) {
     XrSwapchain chain{};xr_ok(layer_create_swapchain_impl(state->handle,&ci,&chain),"native application swapchain");
     std::array<XrSwapchainImageD3D12KHR,3> images;for(auto& i:images)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
     unsigned count{};xr_ok(layer_enumerate_swapchain_images_impl(chain,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"native enumerate");
+    ComPtr<ID3D12Fence> generation_gate;
+    if(early)ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&generation_gate)),"early descriptor generation gate");
     ComPtr<ID3D12Resource> depth,motion;
     if(hybrid){
         D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=256;d.Height=128;d.DepthOrArraySize=2;d.MipLevels=1;d.SampleDesc.Count=1;d.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
@@ -169,6 +172,12 @@ static int vdxr_multiframe_test(std::string route) {
                 xr_ok(wait_for_presenter_idle(state),"batch probe starts without old descriptors");
                 f.end_entered=false;native_batch_hold_after=f.real_ends.load();
             }
+            if((early) && n==4) {
+                xr_ok(wait_for_synthesis_handoff(state),"early previous worker drain");
+                xr_ok(wait_for_presenter_idle(state),"early previous descriptor drain");
+                if(f.transport)xr_ok(f.transport->drain(),"early previous native drain");
+                ok(state->d3d12_synthesis_queue->Wait(generation_gate.Get(),1),"hold synthesis GPU only");
+            }
             XrFrameState prediction{XR_TYPE_FRAME_STATE};
             if(prefetched){prediction=*prefetched;prefetched.reset();}
             else {auto wait=std::async(std::launch::async,[&]{XrFrameState v{XR_TYPE_FRAME_STATE};xr_ok(layer_wait_frame(state->handle,nullptr,&v),"native split Wait");return v;});prediction=wait.get();}
@@ -200,9 +209,29 @@ static int vdxr_multiframe_test(std::string route) {
             XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};layer.space=reinterpret_cast<XrSpace>(9);layer.viewCount=2;layer.views=views.data();
             auto* content=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
             XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&content;
+            std::uint64_t early_sequence{};unsigned prior_deliveries{};
+            if(early && n==4){std::scoped_lock lock(state->presenter_mutex);early_sequence=state->next_source_sequence;prior_deliveries=f.real_ends.load();}
             std::uint64_t preparing{};
             if(batch && n==5){std::scoped_lock lock(state->presenter_mutex);preparing=state->next_source_sequence;}
             xr_ok(layer_end_frame(state->handle,&end),"native generated End");
+            if(early && n==4) {
+                std::unique_lock lock(state->presenter_mutex);
+                const bool descriptors=state->presenter_condition.wait_for(lock,200ms,[&] {
+                    for(std::size_t i=0;i<state->three_slots.capacity();++i) {
+                        const auto& entry=state->three_slots.slot(i);
+                        if(entry && entry->value->source_sequence==early_sequence && entry->value->frame)return true;
+                    }
+                    return false;
+                });
+                const bool held=state->synthesis_busy;
+                const bool unchanged=f.real_ends.load()==prior_deliveries;
+                lock.unlock();
+                ok(generation_gate->Signal(1),"unblock before descriptor assertions");
+                check(descriptors,"multiframe descriptors must be available while generation GPU is still pending");
+                check(held,"worker must retain resources until its GPU fence completes");
+                check(unchanged,"a fenced image must not finish native delivery before generation");
+                std::printf("EARLY_BATCH_DESCRIPTORS source=%llu transport=%s PASS\n",early_sequence,steamvr?"private":"native");
+            }
             if(batch && n==4) {
                 std::unique_lock lock(f.mutex);
                 check(f.changed.wait_for(lock,3s,[&]{return f.end_entered.load();}),"native first synthetic reaches held downstream End");
