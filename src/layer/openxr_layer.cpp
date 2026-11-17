@@ -3634,6 +3634,15 @@ void destroy_frame_generation_swapchains(
     }
 }
 
+// Projection synthesis consumes color history; native depth guides retain
+// their own source resources and capture path. Ordinary private D12 does not
+// consume a second temporal ring of depth copies, regardless of flow backend.
+[[nodiscard]] bool omit_native_depth_history(const SessionState& session) noexcept {
+    return session.nvidia_new_route || (!session.independent_pacing && session.private_runtime && session.dispatch->steamvr_runtime &&
+        session.graphics_binding==SessionGraphicsBinding::d3d12 && !session.luke_afw_enabled &&
+        !session.d3d11_bridge && !session.vulkan_bridge);
+}
+
 [[nodiscard]] std::optional<D3D12_RESOURCE_STATES> required_release_state(
     const SwapchainState& state) noexcept {
     const bool is_color =
@@ -8344,7 +8353,7 @@ XrResult layer_enumerate_swapchain_images_impl(
         // D24 (djules V405-V406): projection synthesis never reads a depth
         // swapchain's color-history ring. Keep the reference allocation intact.
         // Captured native depth guides and runtime images remain independent.
-        const bool omit_depth_history = depth_only && state->session->nvidia_new_route;
+        const bool omit_depth_history = depth_only && omit_native_depth_history(*state->session);
         const bool reused_history =
             !omit_depth_history && !resources_changed && history && history->initialized();
         if (!reused_history) {
@@ -17411,7 +17420,7 @@ void consume_application_frame(
 HRESULT reconcile_depth_history_for_route(SwapchainState& chain) {
     if (chain.session->graphics_binding != SessionGraphicsBinding::d3d12 ||
         required_release_state(chain) != D3D12_RESOURCE_STATE_DEPTH_WRITE) return S_OK;
-    if (chain.session->nvidia_new_route) {
+    if (omit_native_depth_history(*chain.session)) {
         if (chain.d3d12_history) {
             const auto result = chain.d3d12_history->wait_for_idle();
             if (FAILED(result)) return result;

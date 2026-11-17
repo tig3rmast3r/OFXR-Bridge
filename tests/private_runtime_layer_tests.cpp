@@ -447,6 +447,7 @@ int main(int argc,char** argv) {
     const bool invalid_live=route.starts_with("invalid-live-");
     if(invalid_live)route.erase(0,13);
     if(route=="invalid-private-rect")return invalid_private_rect_test();
+    if(route=="private-depth-trim")return private_depth_trim_test();
     if(route=="optical-pressure-recovery") {
         xrfg_fixture::ControlProfile profile;Fixture f(true);f.unblock();
         auto dispatch=std::make_shared<Dispatch>();dispatch->steamvr_runtime=true;
