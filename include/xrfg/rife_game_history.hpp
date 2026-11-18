@@ -78,6 +78,14 @@ inline std::string rife_json_string(const std::string& value) {
     }
     return out+'"';
 }
+// Lab executables never belong to the owner's found-game/precompile list,
+// even if a fixture runs with a real LOCALAPPDATA and no profile override.
+inline bool rife_game_history_process_allowed(const std::filesystem::path& executable) {
+    auto name=executable.filename().wstring();
+    std::transform(name.begin(),name.end(),name.begin(),[](wchar_t c){return std::towlower(c);});
+    return !name.empty() && !name.starts_with(L"xrfg_") &&
+        !name.ends_with(L"_tests.exe") && !name.ends_with(L"_test.exe");
+}
 class RifeGameHistory {
     std::mutex mutex_;
     RifeGameLayout saved_{};
@@ -90,6 +98,7 @@ public:
         const std::filesystem::path& executable,Adapter adapter) noexcept {
         if(!layout.count)return false;
         try {
+            if(!rife_game_history_process_allowed(executable))return false;
             std::scoped_lock lock(mutex_);
             if(saved_==layout || GetTickCount64()<retry_)return false;
             retry_=GetTickCount64()+5000;
@@ -121,12 +130,18 @@ public:
         const auto layout=rife_game_layout(frame);
         if(!layout.count)return;
         try {
-            static const auto folder=[] {wchar_t p[32768]{};
-                const auto n=GetEnvironmentVariableW(L"LOCALAPPDATA",p,32768);
-                return n && n<32768?std::filesystem::path(p)/L"ofxr-bridge/RIFE/games":std::filesystem::path{};}();
             static const auto executable=[] {wchar_t p[32768]{};
                 const auto n=GetModuleFileNameW(nullptr,p,32768);
                 return n && n<32768?std::filesystem::path(p):std::filesystem::path{};}();
+            static const bool allowed=rife_game_history_process_allowed(executable);
+            if(!allowed)return;
+            static const auto folder=[] {wchar_t p[32768]{};
+                // Respect the same explicit profile isolation as settings and
+                // fixture IPC. A lab run cannot leak into the managed profile.
+                auto n=GetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",p,32768);
+                if(n && n<32768)return std::filesystem::path(p)/L"RIFE/games";
+                n=GetEnvironmentVariableW(L"LOCALAPPDATA",p,32768);
+                return n && n<32768?std::filesystem::path(p)/L"ofxr-bridge/RIFE/games":std::filesystem::path{};}();
             if(!folder.empty()&&!executable.empty())observe(layout,folder,executable,adapter);
         }catch(...){}
     }

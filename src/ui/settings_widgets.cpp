@@ -457,8 +457,8 @@ constexpr Help kHelpDepth{"Depth search","Uses the game's depth to keep thin nea
 constexpr Help kHelpHud{"HUD fix","Keeps a HUD and cockpit instruments steady in generated frames, instead of smearing or doubling with the scene when you turn. The effect depends on the game: designed first for Star Citizen, and most useful at 3X and 4X. Uses additional GPU time."};
 constexpr Help kHelpPreset{"DLSS-G preset","C uses Lite blending; A uses Full quality. If the driver rejects C, OFXR tries A. A saved request does not verify the model loaded by NVIDIA; global overrides may still apply."};
 constexpr Help kHelpGenerated{"Generated resolution","Resolution of DLSS-G generated frames. Requires compatible NVIDIA DLSS-G hardware and runtime."};
-constexpr Help kHelpMethod{"Reconstruction","Rebuilds the eye the game skipped this frame. Applies live. Off stops it for every game, Luke Ross and UEVR alike; frame generation and Neural Rendering stay independent."};
-constexpr Help kHelpOsr{"OSR","OFXR Stereo Reconstruction. OFXR renders the missing eye itself from the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame. Used with Luke Ross and UEVR."};
+constexpr Help kHelpMethod{"Reconstruction","Rebuilds the eye the game skipped this frame. Supported with compatible Luke Ross mods and DLSS enabled. Applies live; frame generation and Neural Rendering stay independent."};
+constexpr Help kHelpOsr{"OSR","OFXR Stereo Reconstruction. OFXR renders the missing eye itself from the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame. Supported with compatible Luke Ross mods and DLSS enabled."};
 constexpr Help kHelpOfr{"AER framegen","Declares AER input and alternates real/generated eyes using the selected generator. 2X only. Requires history; source phase is assumed. Saved per game."};
 constexpr Help kHelpOfrSwap{"Swap","Reverses which eye is assumed older. Does not exchange left and right images. Re-primes both histories."};
 constexpr Help kHelpAfw{"AFW","Legacy. Reconstructs the missing eye with the AFW provider. Luke Ross only."};
@@ -931,7 +931,7 @@ bool framewarp(Panel& p) {
     const bool osr=draft.luke_osr==2;
     const bool aer=draft.ofr_enabled && draft.enabled;
     const char* source=!state.connected ? "No active game" : r.luke_detected ? "Luke Ross detected" :
-        r.uevr_osr ? "UEVR Alternating detected" : "None detected";
+        "No compatible Luke Ross game detected";
     const bool active=!aer && state.connected && fresh && draft.afw_mode!=0 && r.afw_running && !r.afw_flat_scene;
     const char* activity=aer ? "Off (AER Frame Gen)" : draft.afw_mode==0 ? "Off" : active ? "Active" :
         state.connected&&fresh&&r.afw_flat_scene ? "2D scene (no stereo source)" : reconstruction_source(r)?"Waiting":"N/A";
@@ -948,8 +948,6 @@ bool framewarp(Panel& p) {
         else {draft.luke_osr=reconstruction==1?2:0;if(draft.afw_mode==0)draft.afw_mode=3;}
         changed=true;
     }
-    if(!aer && draft.afw_mode!=0 && draft.luke_osr!=2 && r.uevr_osr)
-        notice(p,Tone::warn,"UEVR is reconstructed by OSR only: select OSR to reconstruct its missing eye.");
     changed|=toggle_row(p,"Frame Reconstruction only","Frame Reconstruction only",draft.afw_only,kHelpOnly,false,"Restart game");
     if(state.connected && (state.runtime.pacing_mode==kIndependentPacingMode)!=draft.independent_pacing)
         notice(p,Tone::warn,"Restart the game to apply the selected delivery route.");
@@ -964,10 +962,6 @@ bool framewarp(Panel& p) {
     reconstruction_setup(p,"Setup: Luke Ross",r.luke_detected,{
         "In the mod menu, set the render mode to Legacy AER.",
         "Turn off Camera rotation compensation where offered. With it on, turns in vehicles happen in steps."});
-    reconstruction_setup(p,"Setup: UEVR (Alternating / AFR)",r.uevr_osr,{
-        "In UEVR, set the Rendering Method to Alternating/AFR and Synchronization to Very Late. The game must run on D3D12 with DLSS: OSR takes each eye's depth and motion vectors from DLSS. FSR and XeSS games are not supported yet.",
-        "Ghosting Fix on (required): it gives each eye its own history. Without it the reconstructed eye ghosts everywhere.",
-        "If UEVR's Ghosting status stays learning or reads failed closed, turn on Bootstrap Separate View States and restart the game; do not toggle it live. Some games need it, such as Hogwarts Legacy and Atomic Heart. Only some UEVR builds offer this option."});
     // Advanced is for tuning and debugging, shown only with AdvancedMode=1 in the
     // ini. There is no switch for that in the panel, on purpose.
     if(draft.afw_mode!=0 && draft.advanced_mode) {
@@ -1236,17 +1230,17 @@ bool tests(Panel& p) {
     const bool route_pending=state.connected && ((state.runtime.pacing_mode==kIndependentPacingMode)!=independent);
     if(route_pending)notice(p,Tone::warn,"Restart the game to apply the selected delivery route before running tests.");
     if(draft.ofr_enabled && !independent)notice(p,Tone::idle,"Turn AER framegen off before running the ordinary benchmark suites.");
-    if(aer)notice(p,Tone::idle,"Independent AER suites compare 2X and 4X with reconstruction disabled. Use Without vectors or Complete, including Luke Ross games.");
-    const bool locked=active||!permitted||!state.connected||(draft.ofr_enabled && !independent)||route_pending||state.runtime.afw_only_session;
+    if(!independent)notice(p,Tone::idle,"Benchmarks require Independent pacing. Select it and restart the game.");
+    if(aer)notice(p,Tone::idle,"Without vectors and Complete retain AER 2X/4X. Luke Ross also tests OSR with reconstruction enabled.");
+    const bool locked=active||!permitted||!state.connected||!independent||(draft.ofr_enabled && !independent)||route_pending||state.runtime.afw_only_session;
     const auto count=[&](bool full,bool luke) {
-        return independent?benchmark_execution_plan(full,luke,modern,draft.advanced_mode,state.runtime.eye_long_side,
-            state.connected?state.runtime.rife_max_multiplier:4,draft.rife_resolution,true,aer,state.runtime.dlssg_max_multiplier).size()
-            :benchmark_plan(full,luke,modern,draft.advanced_mode,draft.rife_resolution).size();
+        return benchmark_execution_plan(full,luke,modern,draft.advanced_mode,state.runtime.eye_long_side,
+            state.connected?state.runtime.rife_max_multiplier:4,draft.rife_resolution,true,aer,state.runtime.dlssg_max_multiplier).size();
     };
     group_title(p,"Suites");
     const bool optical=suite(p,"Without vectors","Run###Tests without vectors",count(false,false),locked);
     const bool complete=suite(p,"Complete","Run###Complete tests",count(true,false),locked);
-    const bool luke=suite(p,"Luke Ross","Run###Test Luke Ross",count(false,true),locked||!state.runtime.luke_detected||aer);
+    const bool luke=suite(p,"Luke Ross","Run###Test Luke Ross",count(false,true),locked||!state.runtime.luke_detected);
     if(optical || complete || luke) {
         ui.dirty|=changed;finish_settings_widget_edits(ui);
         if(!ui.dirty) static_cast<void>(start_benchmark(complete,luke));
@@ -1254,19 +1248,11 @@ bool tests(Panel& p) {
     }
     changed|=toggle_row(p,"Auto pick best one","Auto pick best one",draft.benchmark_auto_pick,kHelpAuto,active);
     if(disclosure(p,"How tests work","")) {
-        if(independent) {
-            reason(p,"10 seconds per configuration: 2.5 seconds settling, then 7.5 seconds measured. Compilation and route setup finish before this interval. Diagnostic logging can remain off.");
-            reason(p,"One Independent route: no Framework, Director, Fast or Buffer combinations. Standalone FidelityFX is excluded. OFXR/RIFE and Hybrid NVIDIA/DLSS-G use supported 2X/3X/4X; FSR is 2X in stereo. AER compares 2X/4X for all methods, including FSR.");
-            reason(p,"Luke Ross suite: OSR normal and faster, each alone or with OFXR/RIFE. For raw AER framegen use the other suites. One RIFE Quality is captured before the suite.");
-            reason(p,"All 2X candidates finish first. Only if none holds headset refresh does the suite test 3X, then 4X if still needed. AER skips 3X. Skipped or unsupported configurations remain n.a. in CSV.");
-        } else {
-            reason(p,"7.5 seconds per configuration: 2.5 seconds settling, then 5 seconds measured. CSV: min / median / max Output FPS and Cycle minimum. Works with diagnostic logging off. Neural and AFW choices are kept.");
-            reason(p,modern ? "Framework and Director: Normal, Fast and Buffer. RIFE and vector routes also test Fast + Buffer."
-                : "Legacy VDXR: Normal/Fast, using your selected RIFE Quality.");
-            reason(p,"Luke Ross: OSR normal/cheap only, using your selected RIFE Quality.");
-            reason(p,"RIFE uses one Quality selected before the suite: 2X, then 3X only if no preceding result holds full headset refresh. No Djules 3X or automatic 4X. TensorRT optimization completes before settling and measurement.");
-            reason(p,"Suite length adjusts to measured results and session capabilities. Skipped configurations remain n.a. in CSV.");
-        }
+        reason(p,"10 seconds per configuration: 2.5 seconds settling, then 7.5 seconds measured. Compilation and route setup finish before this interval. Diagnostic logging can remain off.");
+        reason(p,"Independent only, without legacy pacing combinations. FidelityFX and AFW are excluded. Hybrid is tested with native vectors, including AER, and excluded with OSR.");
+        reason(p,"Without vectors tests OpticalFlow NVIDIA and RIFE. Complete also tests supported Hybrid NVIDIA, DLSS-G and FSR configurations. These suites retain the stereo/AER mode selected before starting.");
+        reason(p,"Luke Ross tests OSR normal and faster, alone or with OpticalFlow NVIDIA and RIFE, then raw AER with OpticalFlow NVIDIA, RIFE, Hybrid NVIDIA, DLSS-G and FSR. One RIFE Quality is captured before the suite.");
+        reason(p,"All 2X candidates finish first, followed by every supported 3X and 4X configuration, even after reaching headset refresh. AER skips 3X. Unsupported or unavailable configurations remain n.a. in CSV.");
         reason(p,"Close the menu and keep the same test scene. Stop restores original settings. Completion restores them unless Auto pick best one selects a valid result. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
         disclosure_end();
     }

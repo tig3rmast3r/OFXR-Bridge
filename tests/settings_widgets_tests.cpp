@@ -317,8 +317,8 @@ void release_controls() {
     require(snapshot().desired.luke_osr==2 && desktop.rendered_text.find("OSR quality")!=std::string::npos,
         "reset selects OSR in the actual desktop Reconstruction control");
     require(desktop.rendered_text.find("Setup: Luke Ross")!=std::string::npos &&
-        desktop.rendered_text.find("Setup: UEVR (Alternating / AFR)")!=std::string::npos &&
-        desktop.rendered_text.find("Source")!=std::string::npos,"Frame Reconstruction names its sources and their setup");
+        desktop.rendered_text.find("UEVR")==std::string::npos &&
+        desktop.rendered_text.find("Source")!=std::string::npos,"Frame Reconstruction documents only the supported Luke Ross source");
     desktop.choose("Reconstruction",2,"AFW","/Framewarp_");
     require(snapshot().desired.luke_osr==0,"second reconstruction choice selects legacy AFW");
     desktop.choose("Reconstruction",1,"OSR","/Framewarp_");
@@ -600,38 +600,38 @@ void offline_preset() {
 void automatic_buttons() {
     require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable benchmark GUI fixture in single INI");
     // Factory Auto pick is ON since V663. This click test exercises OFF->ON.
-    auto initial=snapshot().desired;initial.advanced_mode=true;initial.afw_mode=3;initial.benchmark_auto_pick=false;
+    auto initial=snapshot().desired;initial.advanced_mode=true;initial.independent_pacing=true;initial.ofr_enabled=false;initial.afw_mode=3;initial.benchmark_auto_pick=false;
     require(request(initial),"explicit unchecked state for auto-pick interaction fixture");
     RuntimeStatus runtime{};runtime.sessions=1;runtime.luke_detected=true;
-    runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;
+    runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;runtime.pacing_mode=kIndependentPacingMode;
     runtime.rife_max_multiplier=4;runtime.dlssg_preset_request=3;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
     const auto prior=snapshot().desired;
     Context tray({690,900},false);tray.draw();tray.draw();tray.select_tab("Tests");tray.draw(true);
     for(const auto label:{"Without vectors","Complete","Luke Ross"})
         require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Tests");
     require(tray.rendered_text.find("Open benchmark folder")==std::string::npos,"shared settings no longer opens shell folders");
-    require(tray.rendered_text.find("Up to 35 tests")!=std::string::npos &&
-        tray.rendered_text.find("Up to 59 tests")!=std::string::npos &&
-        tray.rendered_text.find("Up to 42 tests")!=std::string::npos,
-        "SteamVR Display describes its actual pacing and AFW matrix");
+    require(tray.rendered_text.find("Up to 7 tests")!=std::string::npos &&
+        tray.rendered_text.find("Up to 14 tests")!=std::string::npos &&
+        tray.rendered_text.find("Up to 25 tests")!=std::string::npos,
+        "SteamVR Display describes exhaustive Independent matrix");
     tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==35,
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==7,
         "Display button starts the actual SteamVR optical matrix");
     tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==prior,"Display Stop restores original settings");
     runtime.steamvr_runtime=false;runtime.vdxr_runtime=true;runtime.vdxr_legacy=true;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("Up to 11 tests")!=std::string::npos && tray.rendered_text.find("Up to 17 tests")!=std::string::npos,
-        "VDXR Display describes the Legacy spreadsheet suite");
+    require(tray.rendered_text.find("Up to 7 tests")!=std::string::npos && tray.rendered_text.find("Up to 14 tests")!=std::string::npos,
+        "VDXR Display describes the Independent suite");
     tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==11,
-        "Legacy Display starts Normal/Fast for every optical route");
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==7,
+        "VDXR uses the same Independent matrix");
     tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     runtime.vdxr_legacy=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("Up to 35 tests")!=std::string::npos,
+    require(tray.rendered_text.find("Up to 7 tests")!=std::string::npos,
         "opt-in VDXR exposes the full comparison in the actual Display surface");
     tray.activate("/Tests_","###Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==35,
-        "VDXR Display button starts all three pacing variants");
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==7,
+        "VDXR Display button starts only Independent candidates");
     tray.activate("/Tests_","###Stop tests");tray.draw();tray.draw();
     auto simple=snapshot().desired;simple.advanced_mode=false;require(request(simple),"return to basic UI policy");
     require(simple.afw_mode!=0,"reconstruction stays on for the Advanced check");
@@ -740,8 +740,12 @@ void independent_benchmark_widgets() {
         view.activate("/Tests_","###Complete tests");view.draw();view.draw();
         require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==11 && snapshot().desired.afw_mode==0,"AER Complete starts even in Luke and keeps reconstruction disabled");
         view.activate("/Tests_","###Stop tests");view.draw();view.draw();
+        require(view.rendered_text.find("Up to 25 tests")!=std::string::npos,"combined Luke suite count includes OSR and rawAER");
+        view.activate("/Tests_","###Test Luke Ross");view.draw();view.draw();
+        require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==25 && !snapshot().desired.ofr_enabled && snapshot().desired.afw_mode==3,"Luke starts OSR even when saved mode isAER");
+        view.activate("/Tests_","###Stop tests");view.draw();view.draw();
         view.activate("/Tests_","How tests work");view.draw();view.draw(true);
-        require(view.rendered_text.find("10 seconds per configuration")!=std::string::npos && view.rendered_text.find("All 2X candidates finish first")!=std::string::npos,"desktop/VR describe actual Independent duration and tier gating");
+        require(view.rendered_text.find("10 seconds per configuration")!=std::string::npos && view.rendered_text.find("every supported 3X and 4X configuration")!=std::string::npos,"desktop/VR describe exhaustive Independent duration and tiers");
         require(view.rendered_text.find("Framework and Director:")==std::string::npos && view.rendered_text.find("7.5 seconds per configuration")==std::string::npos,"Independent help omits legacy plan/timing");
     }
     require(request(original),"restore after Independent benchmark widgets");
@@ -855,9 +859,15 @@ void aer_framegen_widgets() {
         require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"Basic shows AER and hides only Swap on desktop and VR");
         view.activate("/Generation_","AER framegen");view.draw();view.draw();
         require(snapshot().desired.ofr_enabled && snapshot().desired.frame_generation==4,"Basic AER toggle works and preserves selected RIFE method");
+        view.draw(true);
+        require(view.rendered_text.find("Separate AER swapchains")==std::string::npos,
+            "retired AER publication test switch is absent on desktop and VR");
+
         settings=snapshot().desired;
         settings.advanced_mode=true;settings.ofr_swap=false;require(request(settings),"AER Advanced setup");view.draw();view.draw(true);
         require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")!=std::string::npos,"Advanced shows both AER flags");
+        require(view.rendered_text.find("Separate AER swapchains")==std::string::npos,
+            "retired AER publication test switch is absent in Advanced too");
         view.activate("/Generation_","AER Swap");view.draw();view.draw();
         require(snapshot().desired.ofr_swap,"Swap toggle saved");
         auto basic=snapshot().desired;basic.advanced_mode=false;

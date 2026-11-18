@@ -34,6 +34,7 @@ struct BenchmarkStep {
     int buffer{-1}; // -1 keeps preference; 0=two, 1=three deliveries (private transport only).
     int rife_multiplier{2},rife_quality{18};
     int osr{-1},osr_lower_quality{-1};
+    int aer{-1}; // per-trial mode; Luke includes reconstruction and raw AER
 };
 // Unsupported NVIDIA routes are omitted rather than benchmarked as a fallback.
 inline void filter_radeon_benchmark_plan(std::vector<BenchmarkStep>& plan,unsigned vendor) {
@@ -91,27 +92,35 @@ inline bool benchmark_afw_quality_allowed(int shading,std::uint32_t eye_long_sid
 }
 inline std::vector<BenchmarkStep> benchmark_independent_plan(bool full,bool luke,int quality,bool aer) {
     std::vector<BenchmarkStep> steps;
-    const bool reconstruct=luke && !aer;
-    const auto add=[&](int method,int backend,int factor,const std::string& name,bool disabled,int cheap) {
+    quality=xrfg::rife_resolution_preset(quality);
+    const auto add=[&](int method,int backend,int factor,const std::string& name,bool disabled,int osr_variant,bool raw_aer) {
         BenchmarkStep step{};step.generation=method;step.backend=backend;step.rife_multiplier=factor;
-        step.rife_quality=quality;step.disabled=disabled;
-        step.label="Independent "+(reconstruct?std::string(cheap?"OSR faster / ":"OSR / "):std::string(aer?"AER / ":""))+name;
+        step.rife_quality=quality;step.disabled=disabled;step.aer=raw_aer?1:0;
+        step.afw=osr_variant>=0?3:0;step.shading=0;
+        if(osr_variant>=0){step.osr=2;step.osr_lower_quality=osr_variant;}
+        step.label="Independent "+(osr_variant>=0?std::string(osr_variant?"OSR faster / ":"OSR / "):std::string(raw_aer?"AER / ":""))+name;
         if(!disabled)step.label+=" "+std::to_string(factor)+"X";
-        if(reconstruct){step.afw=3;step.shading=0;step.osr=2;step.osr_lower_quality=cheap;}
-        if(aer)step.afw=0; // raw AER including the FG-off reference
         steps.push_back(std::move(step));
     };
-    const int variants=reconstruct?2:1;
-    for(int cheap=0;cheap<variants;++cheap)add(0,1,2,reconstruct?"only":"disabled",true,cheap);
-    // One NVIDIA optical engine per method. Standalone FidelityFX is excluded.
+    if(luke) {
+        for(int variant:{0,1})add(0,1,2,"only",true,variant,false);
+        add(0,1,2,"disabled",true,-1,true);
+    } else add(0,1,2,"disabled",true,-1,aer);
+    // Measure every supported tier, even after reaching headset refresh.
     for(int factor:{2,3,4}) {
-        if(aer && factor==3)continue;
-        for(int cheap=0;cheap<variants;++cheap) {
-            add(0,1,factor,"OFXR",false,cheap);
-            add(4,2,factor,"RIFE "+std::string(benchmark_rife_quality_label(quality)),false,cheap);
-            if(full && !reconstruct){add(3,1,factor,"Hybrid NVIDIA",false,cheap);add(2,0,factor,"DLSS-G",false,cheap);}
+        if(luke)for(int variant:{0,1}) {
+            add(0,1,factor,"OpticalFlow NVIDIA",false,variant,false);
+            add(4,2,factor,"RIFE "+std::string(benchmark_rife_quality_label(quality)),false,variant,false);
         }
-        if(full && !reconstruct && (factor==2 || aer))add(1,0,factor,"FSR",false,0);
+        const bool raw_aer=luke || aer;
+        if(raw_aer && factor==3)continue;
+        add(0,1,factor,"OpticalFlow NVIDIA",false,-1,raw_aer);
+        add(4,2,factor,"RIFE "+std::string(benchmark_rife_quality_label(quality)),false,-1,raw_aer);
+        if(full || luke) {
+            add(3,1,factor,"Hybrid NVIDIA",false,-1,raw_aer);
+            add(2,0,factor,"DLSS-G",false,-1,raw_aer);
+            if(factor==2 || raw_aer)add(1,0,factor,"FSR",false,-1,raw_aer);
+        }
     }
     return steps;
 }
@@ -120,7 +129,7 @@ inline void benchmark_limit_independent(std::vector<BenchmarkStep>& steps,std::s
     const auto begin=steps.begin()+std::min(next,steps.size());
     steps.erase(std::remove_if(begin,steps.end(),[&](const auto& step) {
         return (step.generation==4 && unsigned(step.rife_multiplier)>rife_max_multiplier) ||
-            (!aer && step.generation==2 && dlssg_max_multiplier && unsigned(step.rife_multiplier)>dlssg_max_multiplier);
+            (!(step.aer>=0?step.aer!=0:aer) && step.generation==2 && dlssg_max_multiplier && unsigned(step.rife_multiplier)>dlssg_max_multiplier);
     }),steps.end());
 }
 inline std::vector<BenchmarkStep> benchmark_execution_plan(bool full,bool luke,bool steamvr,bool advanced,
@@ -130,7 +139,7 @@ inline std::vector<BenchmarkStep> benchmark_execution_plan(bool full,bool luke,b
     if(independent)benchmark_limit_independent(steps,0,rife_max_multiplier,dlssg_max_multiplier,aer);
     else std::erase_if(steps,[&](const auto& step){return step.generation==4 && unsigned(step.rife_multiplier)>rife_max_multiplier;});
     if(luke)std::erase_if(steps,[&](const auto& step) {
-        return !(independent && aer) && !benchmark_afw_quality_allowed(step.shading,eye_long_side);
+        return !(independent && step.aer==1) && !benchmark_afw_quality_allowed(step.shading,eye_long_side);
     });
     return steps;
 }
@@ -139,6 +148,7 @@ inline std::vector<BenchmarkStep> benchmark_export_plan(bool full,bool luke,bool
 }
 inline Settings benchmark_settings(Settings saved,const BenchmarkStep& step) {
     const auto original=saved;
+    if(step.aer>=0)saved.ofr_enabled=step.aer!=0;
     select_generation(saved,step.generation,step.backend);
     if(step.generation==3)saved.hybrid_backend=step.backend;
     saved.enabled=!step.disabled;
@@ -158,6 +168,13 @@ inline Settings benchmark_settings(Settings saved,const BenchmarkStep& step) {
         saved.lower_vram=original.lower_vram;saved.separate_synthesis=original.separate_synthesis;
     }
     return sanitize(saved);
+}
+inline bool benchmark_requires_game_vectors(const Settings& settings) noexcept {
+    return settings.enabled && settings.frame_generation>0 && settings.frame_generation<4;
+}
+inline double benchmark_mean(const std::vector<double>& values) noexcept {
+    double total{};for(double value:values)total+=value;
+    return values.empty()?0:total/values.size();
 }
 inline double benchmark_median(std::vector<double> values) {
     if(values.empty()) return 0;
@@ -369,20 +386,6 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         if(!best || order(score)<order(scores[*best]))best=i;
     }
     return best;
-}
-// Independent compares every candidate in a multiplier tier before deciding
-// whether the next tier is needed. Plain FG-off is only a reference; confirmed
-// reconstruction-only is a valid way to reach refresh without generation.
-inline void benchmark_prune_independent(std::vector<BenchmarkStep>& plan,std::size_t next,
-    const std::vector<BenchmarkScore>& scores) {
-    if(next==0 || next>=plan.size())return;
-    const auto factor=plan[next].rife_multiplier;
-    if(factor<=2 || plan[next-1].rife_multiplier==factor)return;
-    for(std::size_t i=0;i<std::min({next,scores.size(),plan.size()});++i) {
-        if((!plan[i].disabled || scores[i].afw_only) && benchmark_at_refresh(scores[i])) {
-            plan.erase(plan.begin()+next,plan.end());return;
-        }
-    }
 }
 // Cross a multiplier boundary only after every candidate in the prior tier.
 // A single 90FPS median with a deep drop does not suppress the next tier.

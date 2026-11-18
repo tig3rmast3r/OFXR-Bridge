@@ -1147,7 +1147,7 @@ struct PrivateOpenXrRuntime::Impl {
         };
         const auto pin_held=[&] {
             std::scoped_lock lock(mutex);
-            if(stopping || pending || !held || held->leases.size()!=held_serials.size())return false;
+            if(stopping || (!clean_bypass.load() && pending) || !held || held->leases.size()!=held_serials.size())return false;
             for(std::size_t i=0;i<held->leases.size();++i) {
                 const auto& chain=held->leases[i].chain;
                 const auto found=chains.find(chain->handle);
@@ -1262,7 +1262,8 @@ struct PrivateOpenXrRuntime::Impl {
                     // any pending copy, new release or destroyed owner vetoes
                     // replay. Pins prevent concurrent overwrite/destruction.
                     if(prediction.shouldRender && clock_ns()<entry_deadline && pin_held()) {
-                        auto end=held->info;end.displayTime=prediction.predictedDisplayTime;
+                        auto end=held->info;
+                        if(!held->clean_bypass)end.displayTime=prediction.predictedDisplayTime;
                         const auto entered=clock_ns();
                         result=options.real.end(options.real.session,&end);begun=false;
                         if(result==XR_SUCCESS)cycle.handed=entered;
@@ -1276,7 +1277,8 @@ struct PrivateOpenXrRuntime::Impl {
                 // A smaller final guard protects the actual native call edge;
                 // testing the exact window can pass then enter after prediction.
                 if(clock_ns()>=entry_deadline) {retire_expired(packet);continue;}
-                auto end=packet->info;end.displayTime=prediction.predictedDisplayTime;
+                auto end=packet->info;
+                if(!packet->clean_bypass)end.displayTime=prediction.predictedDisplayTime;
                 if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
                 const auto entered=clock_ns();result=options.real.end(options.real.session,&end);
                 if(result==XR_SUCCESS && end.layerCount)cycle.handed=entered;
@@ -2129,13 +2131,15 @@ XrResult PrivateOpenXrRuntime::wait_frame(const XrFrameWaitInfo* info,XrFrameSta
     std::scoped_lock lock(impl_->mutex);++impl_->waits;return result;
 }
 XrResult PrivateOpenXrRuntime::wait_for_clean_admission() {
-    // With no image effects, apply backpressure before the next game render,
-    // rather than letting virtual Wait run ahead until End fills the FIFO.
+    // With no effects, bound future source production before rendering.
+    // Independent retains one native frame in flight so GPU/copy completion
+    // can overlap the next render, without filling the generation FIFO.
     // An accepted packet keeps its native owner and is never cancelled here.
     {
         auto& s=*impl_;std::unique_lock lock(s.mutex);
         s.changed.wait(lock,[&]{return s.stopping || XR_FAILED(s.failure) ||
-            !s.running || s.options.independent_pacing || !s.clean_bypass.load() || s.pending==0;});
+            !s.running || !s.clean_bypass.load() ||
+            s.pending<=(s.options.independent_pacing?1U:0U);});
         if(XR_FAILED(s.failure))return s.failure;
         if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
     }

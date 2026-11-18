@@ -15,6 +15,11 @@ sys.path.insert(0, str(PACKAGE / "python/rife"))
 QUALITIES = (10, 15, 18, 21, 25, 30, 36)
 
 
+def is_lab_executable(value):
+    name = str(value).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    return name.startswith("xrfg_") or name.endswith(("_tests.exe", "_test.exe"))
+
+
 def read_games(folder):
     games, errors = [], []
     for path in sorted(Path(folder).glob("*.json")):
@@ -24,6 +29,10 @@ def read_games(folder):
             value = json.loads(path.read_text(encoding="utf-8"))
             if value.get("schema") != 1 or not isinstance(value.get("game"), str):
                 raise ValueError("invalid record header")
+            # Ignore legacy fixture records too; neither CUDA nor Vulkan
+            # should schedule engines for a lab executable.
+            if is_lab_executable(value["game"]) or is_lab_executable(value.get("executable", "")):
+                continue
             shapes = value.get("shapes")
             if not isinstance(shapes, list) or not 1 <= len(shapes) <= 4:
                 raise ValueError("invalid shape list")
@@ -210,7 +219,15 @@ def run(args):
     except OverlayRepairRequired as error:
         result.update(status="repair", message=str(error));report(result["message"], "error")
     except Exception as error:
-        result.update(status="error", message=str(error));report(result["message"], "cancelled" if isinstance(error, InterruptedError) else "error")
+        result.update(status="error", message=str(error))
+        if isinstance(error, InterruptedError):
+            try:
+                request = json.loads(args.cancel.read_text(encoding="utf-8"))
+                result["cancellation"] = {key: request[key] for key in ("source", "reason", "requested_utc", "process_id") if key in request}
+                report("Cancellation request origin: " + json.dumps(result["cancellation"], ensure_ascii=True))
+            except (OSError, ValueError, TypeError):
+                report("Cancellation request origin unavailable (legacy/external signal)")
+        report(result["message"], "cancelled" if isinstance(error, InterruptedError) else "error")
     # The final result is mandatory, unlike progress. Never report success to
     # the tray if it could not be published, and never silently ignore errors.
     publish_json(args.result, result)

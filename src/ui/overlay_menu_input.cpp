@@ -1,4 +1,5 @@
 #include "xrfg/overlay_menu_input.hpp"
+#include "xrfg/window_thread_dispatch.hpp"
 #include "xrfg/overlay_menu_input_state.hpp"
 #include "xrfg/autonomous_control.hpp"
 #include "vendor/imgui/imgui.h"
@@ -489,6 +490,8 @@ void install_hooks() {
 }
 
 LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wp,LPARAM lp) {
+    if(window_dispatch_detail::defer_foreign_probe(window,message,wp,lp,
+        window_dispatch_detail::alanwake_process()))return 0;
     WindowDispatch dispatch;
     auto& s=state();WNDPROC previous{};bool open{},has_owners{};
     {std::scoped_lock lock(s.mutex);auto found=s.procedures.find(window);if(found!=s.procedures.end())previous=found->second;open=s.open&&s.target==window;has_owners=!s.owners.empty();}

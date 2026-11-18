@@ -74,6 +74,7 @@ void quality_choice_rules() {
 
 }
 #include "benchmark_cadence_tests.inc"
+#include "exhaustive_independent_plan_tests.inc"
 int main() {
     const auto root=std::filesystem::temp_directory_path()/(L"ofxr-suite-"+std::to_wstring(GetCurrentProcessId()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",root.c_str());
@@ -81,55 +82,7 @@ int main() {
         buffer_plan_contract();automatic_choice_rules();quality_choice_rules();cadence_choice_rules();
         check(benchmark_duration_ms(true)==10000 && benchmark_measure_ms(true)==7500 && benchmark_memory_request_ms(true)==9500,"Independent timing is 2.5 seconds settling +7.5 measured, with memory near end");
         check(benchmark_duration_ms(false)==7500 && benchmark_measure_ms(false)==5000,"legacy timing retained");
-        for(bool aer:{false,true})for(bool full:{false,true}) {
-            const auto plan=benchmark_execution_plan(full,false,true,false,3328,4,18,true,aer);
-            check(plan.size()==std::size_t(aer?(full?11:5):(full?14:7)),"exact compact Independent suite count");
-            std::set<std::tuple<int,int,int,bool,int>> seen;
-            for(const auto& step:plan) {
-                check(seen.emplace(step.generation,step.backend,step.rife_multiplier,step.disabled,step.osr_lower_quality).second,"Independent configurations never duplicate a method/multiplier");
-                if(step.generation==0 || step.generation==3)check(step.backend==1,"standalone Fidelity excluded and Hybrid uses one NVIDIA engine");
-            }
-            const auto capped=benchmark_execution_plan(full,false,true,false,3328,4,18,true,aer,2);
-            check(capped.size()==std::size_t(aer?(full?11:5):(full?12:7)),"native SDK cap removes stereo duplicates without blocking AER4 second stage");
-        }
-        for(bool aer:{false,true}) {
-            auto plan=benchmark_execution_plan(true,false,true,false,3328,4,18,true,aer);
-            check(std::is_sorted(plan.begin(),plan.end(),[](const auto& a,const auto& b){return a.rife_multiplier<b.rife_multiplier;}),"all 2X including FSR finish before higher tiers");
-            const auto boundary=std::find_if(plan.begin(),plan.end(),[](const auto& step){return step.rife_multiplier>2;})-plan.begin();
-            check(boundary==6,"complete suite has reference plus five 2X methods");
-            std::vector<BenchmarkScore> scores(boundary);
-            BenchmarkScore stable{90,40,0,0,true};stable.display_hz=90;stable.fps_min=90;
-            scores[0]=stable;auto reference=plan;benchmark_prune_independent(reference,boundary,scores);
-            check(reference.size()==plan.size(),"plain disabled full-refresh reference does not suppress useful generation tiers");
-            scores[1]=stable;auto within=plan;benchmark_prune_independent(within,2,scores);
-            check(within.size()==plan.size(),"one good 2X method cannot skip the remaining 2X candidates");
-            benchmark_prune_independent(plan,boundary,scores);check(plan.size()==6,"stable full-refresh 2X suppresses all later multipliers only at tier boundary");
-            auto unstable=benchmark_execution_plan(true,false,true,false,3328,4,18,true,aer);scores[1].fps_min=70;
-            benchmark_prune_independent(unstable,boundary,scores);check(unstable.size()>6,"median refresh with dips does not suppress higher multipliers");
-        }
-        check(benchmark_execution_plan(false,true,true,false,3328,4,18,true,false).size()==14,"OSR normal/faster each has reference and six generator choices");
-        {
-            auto plan=benchmark_execution_plan(true,false,true,false,3328,4,18,true,false);
-            const auto first=plan.front().label;benchmark_limit_independent(plan,1,2,2,false);
-            check(plan.front().label==first && plan.size()==10,"late capability update preserves completed prefix and removes only unsupported remaining work");
-        }
-        for(bool aer:{false,true}) {
-            Settings saved;saved.independent_pacing=true;saved.advanced_mode=true;saved.ofr_enabled=aer;
-            saved.pacing_mode=1;saved.increase_buffer=true;saved.lower_vram=saved.separate_synthesis=1;
-            const auto plan=benchmark_execution_plan(true,false,true,true,3500,4,18,true,aer);
-            std::set<int> methods;
-            for(const auto& step:plan) {
-                check(step.pacing==-1 && step.buffer==-1 && step.a==0 && step.b==0,"Independent suite has no legacy pacing variants");
-                const auto effective=benchmark_settings(saved,step);methods.insert(step.generation);
-                check(effective.independent_pacing && effective.pacing_mode==saved.pacing_mode &&
-                    effective.increase_buffer==saved.increase_buffer && effective.lower_vram==saved.lower_vram,
-                    "Independent test preserves dormant legacy preferences");
-                check(effective.frame_generation==step.generation,"Independent benchmark selects actual requested provider");
-                if(!step.disabled)check(generation_multiplier(effective)==step.rife_multiplier,"benchmark multiplier reaches selected provider");
-                if(aer)check(step.rife_multiplier!=3,"no3X AER step");
-            }
-            check(methods==std::set<int>({0,1,2,3,4}),"Independent full plan covers every generator");
-        }
+        exhaustive_independent_plan_cases();
 
         for(int quality:xrfg::kRifeResolutions)for(bool modern:{false,true})for(bool luke:{false,true}) {
             const auto plan=benchmark_execution_plan(true,luke,modern,false,3500,3,quality);
@@ -162,7 +115,7 @@ int main() {
         for(bool aer:{false,true}) {
             const auto luke=benchmark_execution_plan(true,true,true,false,1600,4,18,true,aer);
             check(!luke.empty(),"Independent Luke benchmark retains its supported reconstruction steps");
-            for(const auto& step:luke)check(aer?step.afw==0:step.shading==0 && step.afw==3 && step.osr==2,"Independent Luke steps select reconstruction or raw AER without mixing them");
+            for(const auto& step:luke)check(step.aer?step.afw==0:step.shading==0 && step.afw==3 && step.osr==2,"Independent Luke steps select reconstruction or raw AER without mixing them");
         }
         for(bool modern:{false,true}){
             const auto plan=benchmark_execution_plan(false,true,modern,false,1000,modern?4:2);

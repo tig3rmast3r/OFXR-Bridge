@@ -28,6 +28,23 @@ int main(){try{
     const auto quad=rife_game_layout(&frame);check(quad.count==2 && quad.shapes[0].eyes==1 && quad.shapes[1].eyes==1,"quad views retain distinct focus/periphery shapes, without duplicate opposite-eye jobs");
     const auto folder=std::filesystem::temp_directory_path()/(L"ofxr-game-history-"+std::to_wstring(GetCurrentProcessId()));
     std::filesystem::create_directories(folder);
+    // All implicit layer observations in this test executable must be ignored,
+    // even with a writable profile and a valid projection/adapter callback.
+    unsigned implicit_adapter_calls=0;
+    SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",folder.c_str());
+    RifeGameHistory implicit_history;
+    implicit_history.observe(&frame,[&]{++implicit_adapter_calls;return 123ULL;});
+    check(!implicit_adapter_calls && !std::filesystem::exists(folder/L"RIFE/games"),
+        "real test-process frame observation cannot create found-game records");
+    for(const auto name:{L"xrfg_private_runtime_layer_tests.exe",L"XRFG_CustomProbe.exe",L"custom_tests.exe",L"custom_test.exe"}) {
+        const auto blocked=folder/L"must-not-exist";
+        RifeGameHistory ignored;
+        check(!ignored.observe(single,blocked,std::filesystem::path(L"C:/lab")/name,[&]{++implicit_adapter_calls;return 123ULL;}),
+            "lab executable must not be written even through explicit history API");
+        check(!std::filesystem::exists(blocked) && !implicit_adapter_calls,"rejected fixture has no folder/adapter side effects");
+    }
+    check(rife_game_history_process_allowed(L"C:/Games/AlanWake2.exe") &&
+        rife_game_history_process_allowed(L"C:/Games/TheTestament.exe"),"real-game names remain eligible");
     RifeGameHistory history;unsigned adapter_calls=0;
     const auto adapter=[&]{++adapter_calls;return 123ULL;};
     const auto exe=std::filesystem::path(L"C:/Games/My game/game.exe");

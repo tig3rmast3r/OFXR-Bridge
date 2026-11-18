@@ -80,6 +80,14 @@ void codec() {
             "reconstruction migration stays stable after profile save/reload");
     }
     require(desired.pacing_buffer==0,"independent pacing reserve defaults to None");
+    for(int saved:{0,1}) {
+        const auto legacy=xrfg::autonomous::parse_settings("[ofxr]\naer_separate_publications="+std::to_string(saved)+"\n");
+        const auto serialized=xrfg::autonomous::serialize_settings(legacy);
+        require(serialized.find("aer_separate_publications")==std::string::npos,
+            "retired publication test flag is never written back to a profile");
+        require(serialized==xrfg::autonomous::serialize_settings(xrfg::autonomous::parse_settings("[ofxr]\n")),
+            "both legacy publication choices migrate to the same fixed policy");
+    }
     require(desired.independent_acquire_fix,"V1103 A/B defaults to current correction");
     for(bool active:{false,true}) {
         auto ab=desired;ab.independent_acquire_fix=active;

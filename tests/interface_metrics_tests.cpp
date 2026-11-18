@@ -231,14 +231,14 @@ void wording() {
     s.desired.afw_mode=3;
     check(interface_status_text(s).find("OSR: Luke Ross")==std::string::npos, "Luke selection cannot fake OSR activity");
     {
-        // UEVR's Alternating/AFR as OSR's eye source: shown as Luke Ross OSR is.
+        // Experimental source receipts must not advertise supported UEVR reconstruction.
         Snapshot u=s;
         u.desired.enabled=false;u.runtime.uevr_osr=true;
         check(interface_reconstruction_text(u,GetTickCount64())=="OSR: Off", "UEVR OSR attached, nothing reconstructed yet");
         u.runtime.heartbeat_ms=GetTickCount64();u.runtime.afw_running=true;
         check(interface_state_text(u)=="OSR" && interface_afw_only_active(u,GetTickCount64()), "UEVR OSR running reads as OSR");
-        check(interface_reconstruction_text(u,GetTickCount64())=="OSR: UEVR", "UEVR named as OSR's source");
-        check(interface_status_text(u).find("UEVR Alternating detected")!=std::string::npos, "UEVR detection in the status line");
+        check(interface_reconstruction_text(u,GetTickCount64())=="OSR: Unsupported source", "experimental source is not advertised as supported");
+        check(interface_status_text(u).find("UEVR")==std::string::npos, "experimental UEVR support is not advertised in the status line");
     }
     s.runtime.luke_detected=s.runtime.vulkan_detected=true;
     s.runtime.generation_state=GenerationState::invalid_stereo;
@@ -323,7 +323,7 @@ void wording() {
         auto other=s;other.desired.afw_mode=3;other.desired.luke_osr=2;
         other.runtime.luke_detected=false;other.runtime.afw_running=true;
         other.runtime.afw_flat_scene=false;other.runtime.heartbeat_ms=1000;
-        check(interface_reconstruction_text(other,1001)=="OSR: Other","active reconstruction without Luke is Other");
+        check(interface_reconstruction_text(other,1001)=="OSR: Unsupported source","active reconstruction without Luke is unsupported");
         other.runtime.luke_detected=true;
         check(interface_reconstruction_text(other,1001)=="OSR: Luke Ross","active Luke reconstruction identifies its source");
         other.desired.afw_mode=0;
@@ -333,7 +333,7 @@ void wording() {
         other.runtime.afw_flat_scene=true;
         check(interface_reconstruction_text(other,1001)=="OSR: Off","flat scene is not reconstructed stereo");
         other.runtime.afw_flat_scene=false;other.desired.luke_osr=0;
-        check(interface_reconstruction_text(other,1001)=="AFW: Other","legacy AFW uses the same honest source classification");
+        check(interface_reconstruction_text(other,1001)=="AFW: Unsupported source","legacy AFW uses the same supported-source classification");
         check(interface_status_text(other,false).find("AFW:")==std::string::npos,"dedicated green source row is not duplicated in diagnostics");
         other.desired.enabled=false;other.runtime.applied_revision=other.revision;other.runtime.pending=false;
         other.runtime.heartbeat_ms=GetTickCount64();
@@ -379,7 +379,7 @@ int main() {
                 "missing/future clocks cannot shrink or invent dependency history");
         }
         timing_sample_cohorts();
-        buffer_preferences();minimum_spacing_rules();production_boundaries();timing();complete_cycle();estimated_cycle();native_delivery_cycle();stage_partition_and_baseline();wording();
+        buffer_preferences();minimum_spacing_rules();aer4_minimum_cycle();production_boundaries();timing();complete_cycle();estimated_cycle();native_delivery_cycle();stage_partition_and_baseline();wording();
         const auto before=snapshot();
         check(!interface_telemetry_requested(), "hidden by default");
         set_interface_visible(InterfaceSurface::desktop,true);

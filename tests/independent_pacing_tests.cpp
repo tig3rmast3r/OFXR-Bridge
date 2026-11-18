@@ -7,8 +7,10 @@
 #define check(condition) do {if(!(condition)){std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#condition);std::abort();}}while(false)
 void automatic_buffer_tests();
 void source_phase_tests();
+void aer_copy_overlap_tests();
 int main(){
  source_phase_tests();
+ aer_copy_overlap_tests();
  // Captured-shaped startup backlog: older work completes in19ms and the
  // current job in44ms, followed by25ms/source. Keep exactly the same GPU
  // service and output schedule. A source budget can still remove19ms of
@@ -147,7 +149,7 @@ int main(){
  std::puts("Independent source clock:72/90/120Hz,1X..4X,late return/no rounding skip/no burst/reset PASS");
 }
 struct RecoverySample {long long at{},age{};};
-std::vector<RecoverySample> transient_queue_model(long long p,bool recover,unsigned factor=2) {
+std::vector<RecoverySample> transient_queue_model(long long p,bool recover,unsigned factor=2,bool split_aer=false) {
  struct Frame {long long ready{},origin{};unsigned id{};};
  constexpr long long base=1'000'000'000;
  std::deque<Frame> queue;
@@ -174,7 +176,7 @@ std::vector<RecoverySample> transient_queue_model(long long p,bool recover,unsig
  while(native<base+12'000'000'000LL) {
   if(source<=native) {
    unsigned ready=0;for(const auto& frame:queue)if(frame.ready<=source)++ready;
-   const auto step=recover?phase.observe(source,p,factor,ready,residence,delivered,0,idle):0;
+   const auto step=recover?phase.observe(source,p,factor,ready,residence,delivered,0,idle,split_aer):0;
    check(step>=0 && step<=200'000 && step<=factor*p*8/1000+2000);
    clock.postpone(step);const auto actual=source+step;
    if(previous_source)check(actual-previous_source>=factor*p); // never a producer catch-up
@@ -201,13 +203,21 @@ void source_phase_tests() {
   std::printf("TRANSIENT_QUEUE Hz=%.1f old=%.3fms recovered=%.3fms improvement=%.3fms;every output ID/native appointment retained\n",1e9/p,old_late/1e6,recovered_late/1e6,(old_late-recovered_late)/1e6);
   check(old_late-recovered_late>=2*p);
   check(recovered_late<3*p);
-  for(unsigned factor:{3U,4U}) {
+  for(unsigned factor:{1U,3U,4U}) {
    const auto baseline=transient_queue_model(p,false,factor);
    const auto multiframe=transient_queue_model(p,true,factor);
    const auto before=age(baseline,10'000'000'000LL,11'000'000'000LL);
    const auto after=age(multiframe,10'000'000'000LL,11'000'000'000LL);
    check(before-after>=p);
    std::printf("MULTIFRAME_RECOVERY factor=%u Hz=%.1f old=%.3fms recovered=%.3fms; all output IDs/native appointments retained\n",factor,1e9/p,before/1e6,after/1e6);
+  }
+  for(unsigned factor:{1U,2U,4U}) {
+   const auto baseline=transient_queue_model(p,false,factor);
+   const auto aer=transient_queue_model(p,true,factor,true);
+   const auto before=age(baseline,10'000'000'000LL,11'000'000'000LL);
+   const auto after=age(aer,10'000'000'000LL,11'000'000'000LL);
+   check(before-after>=p);
+   std::printf("AER_BAND_FIFO factor=%u Hz=%.1f old=%.3f recovered=%.3fms;exact IDs/native slots retained\n",factor,1e9/p,before/1e6,after/1e6);
   }
   xrfg::IndependentSourcePhase phase;
   constexpr long long base=1'000'000'000;
@@ -317,4 +327,60 @@ void automatic_buffer_tests() {
   check(half.reserve()==3*p);
  }
  std::puts("AUTO_BUFFER 72/90/120Hz: deadline rise/cap3P,successful receipts only,500ms evidence,8ms-per-second slew,late-presenter veto,pause hold PASS");
+}
+
+void aer_copy_overlap_tests() {
+ for(const long long p:{8'333'333LL,11'111'111LL,13'888'889LL})for(unsigned divisor:{1U,2U,4U}) {
+  xrfg::IndependentSourcePhase prior,corrected;
+  constexpr long long base=1'000'000'000;
+  const auto target=p/2+2'000'000;
+  long long at=base;
+  std::uint64_t delivered=0;
+  for(unsigned n=0;n<1200;++n) {
+   at+=divisor*p;delivered+=divisor;
+   const unsigned prepared=n%5?1:0,pending=2+n%2;
+   const auto age=target+p/8+(n%7)*p/128;
+   const auto old_step=prior.observe(at,p,divisor,pending,age,delivered,0,0);
+   const auto step=corrected.observe(at,p,divisor,
+       xrfg::independent_phase_ready_count(true,pending,prepared),age,delivered,0,0,true);
+   check(old_step>=0 && !step);
+  }
+  check(prior.trimmed()>p && corrected.trimmed()==0);
+  // Model the owner's missed low-latency equilibrium: one completed head,
+  // peer already owned by native End; two-ready gating cannot recover it.
+  xrfg::IndependentSourcePhase strict;
+  const auto before=corrected.trimmed();
+  for(unsigned n=0;n<1200;++n) {
+   at+=divisor*p;delivered+=divisor;
+   const auto age=target+p-(corrected.trimmed()-before);
+   check(!strict.observe(at,p,divisor,1,age,delivered,0,0));
+   const auto step=corrected.observe(at,p,divisor,1,age,delivered,0,0,true);
+   check(step>=0 && step<=200'000);
+  }
+  check(corrected.trimmed()-before>=p && strict.trimmed()==0);
+  const auto settled=corrected.trimmed();
+  // V1022 kept shifting inside normal residence jitter. Once recovered,
+  // the AER band holds phase here even with two ready heads.
+  for(unsigned n=0;n<1200;++n) {
+   at+=divisor*p;delivered+=divisor;
+   check(!corrected.observe(at,p,divisor,1+n%2,target+p/8+(n%7)*p/128,delivered,0,0,true));
+  }
+  check(corrected.trimmed()==settled);
+  for(unsigned n=0;n<1200;++n) {
+   at+=divisor*p;delivered+=divisor;
+   check(!corrected.observe(at,p,divisor,0,3*p,delivered,0,0,true));
+  }
+  check(corrected.trimmed()==settled);
+  // A later genuine backlog re-arms; no lifetime recovery cap.
+  for(unsigned n=0;n<1200;++n) {
+   at+=divisor*p;delivered+=divisor;
+   const auto age=target+p-(corrected.trimmed()-settled);
+   corrected.observe(at,p,divisor,1,age,delivered,0,0,true);
+  }
+  check(corrected.trimmed()-settled>=p);
+  for(std::size_t pending=0;pending<8;++pending)for(std::size_t prepared=0;prepared<=pending;++prepared)
+   check(xrfg::independent_phase_ready_count(false,pending,prepared)==pending);
+  std::printf("AER_BAND Hz=%.1f divisor=%u one-ready recovery %.3fms;settled band/zero-ready hold;later backlog re-arms;stereo unchanged\n",
+      1e9/p,divisor,(settled-before)/1e6);
+ }
 }

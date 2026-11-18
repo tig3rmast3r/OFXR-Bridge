@@ -134,6 +134,21 @@ class PlanTests(unittest.TestCase):
             self.assertIn("No recorded game resolutions", result["message"])
             self.assertNotIn(b"ModuleNotFoundError", done.stderr)
 
+    def test_legacy_lab_records_are_excluded_without_removing_real_games(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real = {**self.game(), "schema": 1, "game": "AlanWake2.exe"}
+            (root / "real.json").write_text(json.dumps(real))
+            for index, name in enumerate(("xrfg_private_runtime_layer_tests.exe", "XRFG_Probe.exe", "custom_tests.exe", "custom_test.exe")):
+                # Also reject records disguising a test executable with a game label.
+                bad = {**real, "executable": "D:/lab/" + name}
+                (root / f"lab{index}.json").write_text(json.dumps(bad))
+            (root / "old.json").write_text(json.dumps({"schema": 1, "game": "xrfg_old_tests.exe"}))
+            games, errors = tool.read_games(root)
+            self.assertEqual(errors, [])
+            self.assertEqual([game["game"] for game in games], ["AlanWake2.exe"])
+            self.assertFalse(tool.is_lab_executable("TheTestament.exe"))
+
     def test_exact_native_dimensions_all_seven_qualities_and_no_extra_eye_batch(self):
         plan = tool.build_plan([self.game()], {123: 0})
         self.assertEqual(len(plan), 7)
@@ -259,7 +274,7 @@ class PlanTests(unittest.TestCase):
                 result = json.loads(args.result.read_text())
                 self.assertEqual((result["completed"], result["total"], result["status"]), (7, 7, "error" if fail_engine else "ready"))
                 self.assertEqual(prepare.call_count, 7)
-                self.assertEqual(args.log.read_text().count("Progress update unavailable"), 1)
+                self.assertEqual(args.log.read_text(encoding="utf-8").count("Progress update unavailable"), 1)
                 if fail_engine: self.assertIn("actual compile failure", args.log.read_text())
 
     def test_unwritable_progress_preserves_cancellation_result(self):

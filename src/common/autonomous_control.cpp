@@ -83,7 +83,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 101601;
+constexpr std::uint32_t kAbi = 102601;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1028,7 +1028,7 @@ void csv_mib(std::ostream& stream,bool valid,std::uint64_t bytes) {
     else stream<<"N/A";
 }
 bool same_trial(const Settings& a,const Settings& b) {
-    return a.independent_acquire_fix==b.independent_acquire_fix && a.pacing_buffer==b.pacing_buffer && a.independent_pacing==b.independent_pacing && a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
+    return a.ofr_enabled==b.ofr_enabled && a.independent_acquire_fix==b.independent_acquire_fix && a.pacing_buffer==b.pacing_buffer && a.independent_pacing==b.independent_pacing && a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
         (a.frame_generation!=4 || (a.rife_resolution==b.rife_resolution && a.rife_model==b.rife_model && a.rife_multiplier==b.rife_multiplier)) &&
         a.triple_frame_gen==b.triple_frame_gen && a.frame_multiplier==b.frame_multiplier && a.prefer_fps==b.prefer_fps &&
         a.separate_synthesis==b.separate_synthesis && a.lower_vram==b.lower_vram &&
@@ -1046,8 +1046,8 @@ void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
         output<<','<<quoted(label);
     }
     output<<'\n'<<std::fixed<<std::setprecision(3);
-    const char* metrics[]{"Output FPS min","Output FPS median","Output FPS max","Cycle minimum min ms","Cycle minimum median ms","Cycle minimum max ms","VRAM end MiB","RAM working set end MiB","RAM private commit end MiB","Shared GPU end MiB"};
-    for(unsigned metric=0;metric<10;++metric) {
+    const char* metrics[]{"Output FPS min","Output FPS median","Output FPS max","Cycle minimum min ms","Cycle minimum median ms","Cycle minimum max ms","VRAM end MiB","RAM working set end MiB","RAM private commit end MiB","Shared GPU end MiB","Output FPS mean","Cycle minimum mean ms"};
+    for(unsigned metric=0;metric<(rec.independent?12U:10U);++metric) {
         output<<quoted(rec.game)<<','<<XRFG_IMPLEMENTATION_VERSION<<','<<metrics[metric];
         for(const auto& step:steps) {
             const auto wanted=benchmark_settings(rec.settings,step);
@@ -1055,6 +1055,11 @@ void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
             for(const auto& candidate:rec.results)if(same_trial(wanted,candidate.settings))result=&candidate;
             output<<',';
             if(!result){output<<"n.a.";continue;}
+            if(metric>=10) {
+                if(metric==10){const auto score=benchmark_score(result->samples,result->complete);if(score.valid)output<<score.fps;else output<<"N/A";}
+                else if(result->samples.latency.empty())output<<"N/A";else output<<benchmark_mean(result->samples.latency);
+                continue;
+            }
             if(metric>=6) {
                 const auto& m=result->memory;
                 const bool valid=metric==6 ? m.vram_valid : metric==9 ? m.shared_gpu_valid : m.ram_valid;
@@ -1103,6 +1108,8 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
             else rec.stream<<"N/A,N/A,N/A,N/A,N/A";
             rec.stream<<','<<measured.cadence_incomplete;
         } else rec.stream<<",N/A,N/A,N/A,N/A,0,N/A,N/A,N/A,N/A,N/A,N/A,1";
+        rec.stream<<','<<s.ofr_enabled<<',';
+        if(rec.samples.latency.empty())rec.stream<<"N/A";else rec.stream<<benchmark_mean(rec.samples.latency);
         rec.stream<<'\n';
         rec.stream.flush();
         if(!rec.stream)throw std::runtime_error("CSV write failed");
@@ -1130,7 +1137,7 @@ void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const Runtim
     rec.stream.open(path,std::ios::out|std::ios::trunc);
     rec.stream.imbue(std::locale::classic());rec.stream<<std::fixed<<std::setprecision(3);
     if(!rec.stream)throw std::runtime_error("Cannot create benchmark CSV");
-    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleMinimumMinMs,CycleMinimumMedianMs,CycleMinimumMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors,BridgeBuffer,OSRMode,OSRLowerQuality,OutputFPSMean,FPSMeanSource,MeanFrameIntervals,MeanObservedSeconds,CadenceValid,CadenceSource,FrameIntervalStdDevMs,FrameIntervalP95Ms,FrameIntervalP99Ms,EstimatedMissedSlots,LongIntervalPercent,CadenceIncomplete\n";
+    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleMinimumMinMs,CycleMinimumMedianMs,CycleMinimumMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors,BridgeBuffer,OSRMode,OSRLowerQuality,OutputFPSMean,FPSMeanSource,MeanFrameIntervals,MeanObservedSeconds,CadenceValid,CadenceSource,FrameIntervalStdDevMs,FrameIntervalP95Ms,FrameIntervalP99Ms,EstimatedMissedSlots,LongIntervalPercent,CadenceIncomplete,AERFramegen,CycleMinimumMeanMs\n";
     rec.stream.flush();if(!rec.stream)throw std::runtime_error("Cannot write benchmark CSV header");
     std::snprintf(b.csv_path,sizeof(b.csv_path),"%s",utf8_path(rec.layout_path).c_str());
 }
@@ -1144,7 +1151,7 @@ std::vector<BenchmarkScore> suite_scores(const SuiteRecorder& rec,bool luke) {
         auto score=benchmark_score(result.samples,result.complete && !fidelity);
         score.vectors=result.vectors;score.afw_only=!settings.enabled && settings.afw_mode!=0 && result.afw_success;
         score.rife=settings.enabled && settings.frame_generation==4;
-        score.osr=settings.luke_osr==2;score.osr_lower_quality=score.osr && settings.luke_osr_lower_quality;
+        score.osr=settings.afw_mode!=0 && !settings.ofr_enabled && settings.luke_osr==2;score.osr_lower_quality=score.osr && settings.luke_osr_lower_quality;
         score.shading=settings.afw_shading_rate;score.eye_long_side=result.eye_long_side;
         score.triple=settings.enabled && settings.triple_frame_gen;
         score.display_hz=benchmark_median(result.samples.refresh_hz);scores.push_back(score);
@@ -1193,7 +1200,6 @@ void suite_advance(Shared& shared,SuiteRecorder& rec,std::uint64_t now) {
     }
     if(rec.independent) {
         benchmark_limit_independent(rec.plan,b.index+1,shared.snapshot.runtime.rife_max_multiplier,shared.snapshot.runtime.dlssg_max_multiplier,rec.aer);
-        benchmark_prune_independent(rec.plan,b.index+1,scores);
     }
     else benchmark_prune_rife(rec.plan,b.index+1,scores);
     b.count=static_cast<unsigned>(rec.plan.size());
@@ -1229,6 +1235,10 @@ bool start_benchmark(bool full,bool luke) noexcept {
         if(luke && !s.runtime.luke_detected) {
             b={};b.phase=BenchmarkPhase::error;
             std::snprintf(b.message,sizeof(b.message),"Luke Ross was not detected in the active game.");return false;
+        }
+        if(s.runtime.pacing_mode!=kIndependentPacingMode) {
+            b={};b.phase=BenchmarkPhase::error;
+            std::snprintf(b.message,sizeof(b.message),"Benchmarks require Independent pacing. Select it and restart the game.");return false;
         }
         shared.benchmark_saved=s.desired;
         const auto now=GetTickCount64();
@@ -1329,7 +1339,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
                             rec.revision=b.revision;rec.index=b.index;rec.started=now;rec.settings=s.desired;
                             rec.label=b.label;rec.samples={};rec.memory={};rec.vector_success=false;rec.afw_success=false;
                             csv_finish(rec,b,now,"RIFE setup unavailable / skipped");
-                            rec.plan.erase(std::remove_if(rec.plan.begin()+b.index+1,rec.plan.end(),[](const auto& step){return step.generation==4;}),rec.plan.end());
+                            if(!rec.independent)rec.plan.erase(std::remove_if(rec.plan.begin()+b.index+1,rec.plan.end(),[](const auto& step){return step.generation==4;}),rec.plan.end());
                             suite_advance(shared,rec,now);
                         }
                     }
@@ -1377,8 +1387,8 @@ void tick_benchmark(std::uint64_t now) noexcept {
             if(shared.benchmark_memory.revision==b.revision && shared.benchmark_memory.updated_ms>=rec.started)
                 rec.memory=shared.benchmark_memory;
             if(now<b.started_ms+benchmark_duration_ms(rec.independent))return;
-            csv_finish(rec,b,now,s.desired.frame_generation==4 && !rec.rife_success ? "no confirmed RIFE output" : b.luke && s.desired.afw_mode && !rec.afw_success ? "no confirmed AFW output" : rec.samples.fps.empty() ? "no measured presentation rate" :
-                s.desired.enabled && !rec.samples.generated ? "no confirmed generation" : rec.independent && s.desired.enabled && s.desired.frame_generation>0 && s.desired.frame_generation<4 && !rec.vector_success ? "no confirmed game-vector generation" : "complete");
+            csv_finish(rec,b,now,s.desired.frame_generation==4 && !rec.rife_success ? "no confirmed RIFE output" : b.luke && s.desired.afw_mode && !rec.afw_success ? "no confirmed OSR output" : rec.samples.fps.empty() ? "no measured presentation rate" :
+                s.desired.enabled && !rec.samples.generated ? "no confirmed generation" : rec.independent && benchmark_requires_game_vectors(s.desired) && !rec.vector_success ? "no confirmed game-vector generation" : "complete");
             suite_advance(shared,rec,now);
         } catch(...) {
             rec.stream.close();suite_restore(shared,BenchmarkPhase::error,"CSV output failed; suite stopped. Check the Benchmarks folder.",now);
@@ -1563,11 +1573,23 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
     if(s.desired.enabled && s.desired.frame_generation==4 && r.rife_optimizing)
         return "Optimizing, please wait";
     if(s.desired.enabled && s.desired.ofr_enabled) {
-        if(r.provider_error)return "AER Frame Gen: Error";
-        if(interface_aer_active(s,GetTickCount64()))
-            return s.desired.nr_enabled && r.nr_running ? "AER Frame Gen + Neural" : "AER Frame Gen";
-        return r.ofr_evidence.last_bypass_ms && r.ofr_evidence.last_bypass_ms>=r.ofr_evidence.last_output_ms
-            ? "AER Frame Gen: Bypass" : "AER Frame Gen: Waiting";
+        const bool active=interface_aer_active(s,GetTickCount64());
+        const int mode=active?r.generation_mode:s.desired.frame_generation;
+        const int route=mode==1?5:mode==2?6:mode==4?7:mode==3?4:std::clamp(s.desired.backend,0,3);
+        // Static labels retain the actual generator and AER output evidence,
+        // including waiting/bypass/error; enabling AER alone never turns green.
+        static constexpr std::string_view names[8][5]={
+            {"AER FidelityFX", "AER FidelityFX + Neural", "AER FidelityFX: Error", "AER FidelityFX: Bypass", "AER FidelityFX: Waiting"},
+            {"AER Nvidia OFA", "AER Nvidia OFA + Neural", "AER Nvidia OFA: Error", "AER Nvidia OFA: Bypass", "AER Nvidia OFA: Waiting"},
+            {"AER Nvidia OFA", "AER Nvidia OFA + Neural", "AER Nvidia OFA: Error", "AER Nvidia OFA: Bypass", "AER Nvidia OFA: Waiting"},
+            {"AER Nvidia OFA", "AER Nvidia OFA + Neural", "AER Nvidia OFA: Error", "AER Nvidia OFA: Bypass", "AER Nvidia OFA: Waiting"},
+            {"AER Hybrid", "AER Hybrid + Neural", "AER Hybrid: Error", "AER Hybrid: Bypass", "AER Hybrid: Waiting"},
+            {"AER FSR", "AER FSR + Neural", "AER FSR: Error", "AER FSR: Bypass", "AER FSR: Waiting"},
+            {"AER DLSS-G", "AER DLSS-G + Neural", "AER DLSS-G: Error", "AER DLSS-G: Bypass", "AER DLSS-G: Waiting"},
+            {"AER RIFE", "AER RIFE + Neural", "AER RIFE: Error", "AER RIFE: Bypass", "AER RIFE: Waiting"}};
+        const int status=r.provider_error?2:active?(s.desired.nr_enabled&&r.nr_running?1:0):
+            r.ofr_evidence.last_bypass_ms && r.ofr_evidence.last_bypass_ms>=r.ofr_evidence.last_output_ms?3:4;
+        return names[route][status];
     }
     const bool active = r.telemetry.updated_ms && GetTickCount64() - r.telemetry.updated_ms < 2000 && r.telemetry.generating;
     if (active && (r.generation_mode == 0 || r.generation_mode == 3) && r.motion_source == 1 &&
@@ -1630,8 +1652,8 @@ std::string_view interface_reconstruction_text(const Snapshot& s,std::uint64_t n
     const bool active=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000 &&
         r.afw_running && !r.afw_flat_scene;
     if(!active)return osr?"OSR: Off":"AFW: Off";
-    if(osr)return r.luke_detected?"OSR: Luke Ross":r.uevr_osr?"OSR: UEVR":"OSR: Other";
-    return r.luke_detected?"AFW: Luke Ross":r.uevr_osr?"AFW: UEVR":"AFW: Other";
+    if(osr)return r.luke_detected?"OSR: Luke Ross":"OSR: Unsupported source";
+    return r.luke_detected?"AFW: Luke Ross":"AFW: Unsupported source";
 }
 std::string interface_status_text(const Snapshot& s,bool include_reconstruction) {
     if (!s.connected) return "No active game";
@@ -1678,7 +1700,6 @@ std::string interface_status_text(const Snapshot& s,bool include_reconstruction)
     }
     if (r.overlay_limit_mask) add("Overlay swapchain limit reached");
     if (r.luke_detected) add("Luke Ross detected");
-    if (r.uevr_osr) add("UEVR Alternating detected");
     if (r.vulkan_detected) add("Vulkan detected");
     if (r.vulkan_capture_suspended) add((r.generation_mode == 0 || r.generation_mode == 3)
         ? "Vulkan game-vector capture suspended: OFXR uses optical flow"

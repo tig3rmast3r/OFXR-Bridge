@@ -16,7 +16,6 @@
 #include "independent_aer4_test.inc"
 #include "producer_timelines_test.inc"
 #include "independent_features_test.inc"
-#include "aer4_phase_recovery_test.inc"
 #include "private_input_resource_test.inc"
 #include "private_completion_recovery_test.inc"
 
@@ -636,11 +635,6 @@ int main(int argc,char** argv) {
     if(route=="independent-feature-settings")return independent_feature_settings_test();
     if(route=="independent-guide-inputs")return independent_feature_inputs_test();
     if(route=="independent-post-afw-inputs")return independent_feature_inputs_test(true);
-    if(route=="aer4-phase")return aer4_phase_recovery_test();
-    if(route=="aer4-phase-bundled")return aer4_phase_recovery_test(4);
-    if(route=="aer4-phase-healthy")return aer4_phase_recovery_test(2,true,1);
-    if(route=="aer4-phase-ready")return aer4_phase_recovery_test(2,true,2,false);
-    if(route=="aer4-phase-control2x")return aer4_phase_recovery_test(2,false);
     if(route=="aer4-stage-native-reader")return independent_aer4_stage_test(true,false,false,1,false,false,false,false,true);
     if(route=="aer4-stage-d11-native-reader")return independent_aer4_stage_test(false,false,false,1,false,false,false,false,true);
     if(route=="aer4-stage")return independent_aer4_stage_test();
@@ -1501,21 +1495,21 @@ int main(int argc,char** argv) {
     if(route=="memory") {
         using namespace xrfg::autonomous;
         check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",global_configuration_path().c_str()),"enable isolated memory benchmark");
-        auto desired=snapshot().desired;desired.benchmark_csv=true;desired.diagnostics=false;
+        auto desired=snapshot().desired;desired.benchmark_csv=true;desired.diagnostics=false;desired.advanced_mode=true;desired.independent_pacing=true;
         check(request(desired),"isolated memory test settings");
-        RuntimeStatus runtime{};runtime.sessions=1;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        RuntimeStatus runtime{};runtime.sessions=1;runtime.pacing_mode=kIndependentPacingMode;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         check(start_benchmark(false),"start isolated memory trial");
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         const auto clock=GetTickCount64();tick_benchmark(clock);
         check(snapshot().benchmark.phase==BenchmarkPhase::running,"memory trial applied");
-        tick_benchmark(clock+kBenchmarkMemoryRequestMs);
+        tick_benchmark(clock+benchmark_memory_request_ms(true));
         sample_benchmark_memory(*state);
         check(!take_benchmark_memory_request(),"game sampler consumes one request only");
         check(state->video_memory_adapter!=nullptr,"sampler finds the actual rendering adapter with F9 off");
         DXGI_QUERY_VIDEO_MEMORY_INFO expected{};
         ok(state->video_memory_adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&expected),"independent process VRAM query");
         const auto path=std::filesystem::u8path(snapshot().benchmark.csv_path);
-        tick_benchmark(clock+kBenchmarkDurationMs);
+        tick_benchmark(clock+benchmark_duration_ms(true));
         std::ifstream csv(path);std::string line;bool gpu{},ram{};
         while(std::getline(csv,line)) {
             for(const auto& key:{std::string("VRAM end MiB,"),std::string("RAM working set end MiB,")}) {
@@ -2071,6 +2065,12 @@ int main(int argc,char** argv) {
             auto desired=xrfg::autonomous::snapshot().desired;desired.enabled=n==5||n==7;
             check(xrfg::autonomous::request(desired),"Independent actual generation off/on");
             xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(state),"Independent worker stop/start keeps XR session");
+        }
+        if(independent_offon && state->nvidia_options.ofr && (n==8 || n==10)) {
+            check(separate_native_publications(*state),"AER always retains separate native publications");
+            const auto app=find_swapchain(chain);
+            check(app && app->frame_generation && app->frame_generation->separate_native_publications,
+                "active AER generation owns separate native publication resources after off/on");
         }
         if(hfw_offon && (n==6 || n==7)) {
             auto desired=xrfg::autonomous::snapshot().desired;desired.enabled=n==7;
@@ -2926,6 +2926,9 @@ int main(int argc,char** argv) {
                 xrfg::embedded::independent_aer_double_state==2,"4X AER never generated actual coherent stereo midpoints");
             std::printf("AER4 accepted coherent endpoints=%llu final outputs=%u expired=%llu expected=%u\n",stage->ordinal,f.real_ends.load(),expired,expected);
         }
+        if(independent_offon && independent_aer)
+            std::printf("FIXED_AER_PUBLICATIONS native=%u expired=%llu expected=%u\n",
+                f.real_ends.load(),static_cast<unsigned long long>(expired),unsigned(expected));
         check(f.real_ends+expired==expected,"every produced output must be confirmed native or explicitly expired, never lost/faked");
         check(f.real_ends>=2,"independent route never recovered a fresh scene after warmup/stall expiration");
         if(!independent_aer) {
@@ -3112,7 +3115,8 @@ int main(int argc,char** argv) {
         xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,false);
     }
     if(split_eyes) {
-        check(f.chains.size()==(state->independent_pacing?6:4),"separate eyes retain bounded native publications per source and delivery lane");
+        const bool separate_publications=separate_native_publications(*state);
+        check(f.chains.size()==(separate_publications?6:4),"separate eyes retain bounded native publications per source and delivery lane");
         auto inventory=state->private_runtime->native_swapchain_mapping();
         for(unsigned retry=0;!inventory && retry<1000;++retry){std::this_thread::yield();inventory=state->private_runtime->native_swapchain_mapping();}
         check(inventory.has_value(),"native lane inventory available");
@@ -3122,12 +3126,12 @@ int main(int argc,char** argv) {
             auto c=find_swapchain(source);check(c->pooled_publication && c->frame_generation,"both non-Luke source output sets obey shared publication admission");
             const auto real=native(c->frame_generation->current[0].handle),generated=native(c->frame_generation->synthetic[0].handle);
             check(real && generated,"both actual generation outputs retain native publication owners");
-            check(state->independent_pacing?real!=generated:real==generated,"shipping real/generated rings use distinct native lanes only with Independent");
+            check(separate_publications?real!=generated:real==generated,"native stereo separates publications while AER shares each source sink");
             if(std::find(sinks.begin(),sinks.end(),real)==sinks.end())sinks.push_back(real);
             if(std::find(sinks.begin(),sinks.end(),generated)==sinks.end())sinks.push_back(generated);
             check(!state->lower_vram && !state->separate_synthesis,"pool does not activate Lower VRAM");
         }
-        check(sinks.size()==(state->independent_pacing?4:2),"native lanes never merge different eye sources");
+        check(sinks.size()==(separate_publications?4:2),"native publications never merge different eye sources");
     }
     if(steady_memory) {
         auto disabled=xrfg::autonomous::snapshot().desired;disabled.enabled=false;disabled.afw_mode=0;

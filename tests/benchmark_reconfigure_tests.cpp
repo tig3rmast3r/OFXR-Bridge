@@ -9,7 +9,7 @@ void require(bool ok,const char* text){if(!ok)throw std::runtime_error(text);}
 void report(RuntimeStatus& runtime){
     const auto state=snapshot();
     runtime.rife_execution_active=runtime.rife_tensorrt=true;runtime.generation_state=GenerationState::ready;
-    runtime.applied_revision=state.revision;runtime.pacing_mode=state.desired.pacing_mode;
+    runtime.applied_revision=state.revision;runtime.pacing_mode=kIndependentPacingMode;
     runtime.buffer_capacity=state.desired.enabled && state.desired.pacing_mode!=0?
         (state.desired.increase_buffer?4:3):state.desired.increase_buffer?3:2;
     report_runtime(runtime);
@@ -21,13 +21,16 @@ int main(){
         RuntimeStatus runtime{};runtime.process_id=GetCurrentProcessId();runtime.sessions=1;
         runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;
         auto saved=snapshot().desired;saved.benchmark_csv=true;saved.benchmark_auto_pick=false;
-        saved.nr_enabled=true;require(request(saved),"save isolated NR configuration");saved=snapshot().desired;
+        saved.nr_enabled=true;saved.advanced_mode=true;saved.independent_pacing=true;
+        std::filesystem::create_directories(root);
+        require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",global_configuration_path().c_str()),"enable isolated benchmark");
+        require(request(saved),"save isolated NR configuration");saved=snapshot().desired;
         report(runtime);require(start_benchmark(false),"start actual controller");
         unsigned count{};
         while(snapshot().desired.frame_generation!=4){
             require(++count<40,"reach first RIFE route");
             report(runtime);const auto clock=GetTickCount64()-4000;
-            tick_benchmark(clock);tick_benchmark(clock+kBenchmarkDurationMs);
+            tick_benchmark(clock);tick_benchmark(clock+benchmark_duration_ms(true));
             require(benchmark_active(snapshot().benchmark),"preceding routes keep suite active");
         }
         report(runtime);tick_benchmark();

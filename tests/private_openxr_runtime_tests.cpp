@@ -300,7 +300,8 @@ struct Fixture {
         }
         f.delivery_thread=GetCurrentThreadId();
         if(info->layerCount){std::unique_lock lock(f.mutex);f.end_entered=true;f.changed.notify_all();f.changed.wait(lock,[&]{return !f.block_end.load();});}
-        check(info->displayTime>=prediction && (info->displayTime-prediction)%period==0,"End uses its own runtime prediction, advancing whole physical periods only if expired");
+        if(!(f.independent_mode && f.transport && f.transport->clean_bypass_enabled()))
+            check(info->displayTime>=prediction && (info->displayTime-prediction)%period==0,"End uses its own runtime prediction, advancing whole physical periods only if expired");
         if(info->displayTime>prediction)++f.advanced_predictions;
         unsigned color{},overlay_color{};bool has_overlay{};float position{};
         if(info->layerCount) {
@@ -1836,6 +1837,79 @@ void independent_window_test(bool d12,bool early_due=false) {
     f.transport->stop();independent_fixture_mode=false;period=saved_period;
     std::printf("Independent %s: mid-window arrival/early_due=%d/None0/exact heartbeat/owner destruction PASS\n",d12?"D12":"D11",early_due);
 }
+void independent_clean_admission_test(bool d12) {
+    const auto saved_period=period;period=11'111'111;
+    independent_fixture_mode=true;
+    Fixture f(d12,true,{},false,true,false,8,false);
+    f.transport->set_clean_bypass(true);
+    const auto chain=f.make_chain();
+    f.write(chain,40);f.begin_virtual();xr_ok(f.submit(chain,1),"first clean in-flight image");
+    f.wait_entered();
+    XrFrameState next{XR_TYPE_FRAME_STATE};
+    auto ahead=std::async(std::launch::async,[&]{return f.transport->wait_frame(nullptr,&next);});
+    const bool overlaps=ahead.wait_for(40ms)==std::future_status::ready;
+    if(!overlaps)f.unblock();
+    check(ahead.wait_for(2s)==std::future_status::ready,"clean first lookahead eventually resumes");
+    xr_ok(ahead.get(),"clean first lookahead");
+    check(overlaps,"clean bypass must allow the next render while the prior native End is in flight");
+    xr_ok(f.transport->begin_frame(nullptr),"clean lookahead Begin");
+    f.write(chain,80);xr_ok(f.submit(chain,2),"second clean image accepted");
+    auto bounded=std::async(std::launch::async,[&]{return f.transport->wait_frame(nullptr,&next);});
+    const bool blocked=bounded.wait_for(40ms)==std::future_status::timeout;
+    f.unblock();
+    check(bounded.wait_for(2s)==std::future_status::ready,"native completion opens bounded clean admission");
+    xr_ok(bounded.get(),"bounded clean Wait");
+    check(blocked,"clean source lookahead must not fill the generation FIFO");
+    xr_ok(f.transport->begin_frame(nullptr),"third clean Begin");
+    f.write(chain,120);xr_ok(f.submit(chain,3),"third clean image");
+    f.wait_count(3);xr_ok(f.transport->drain(),"bounded clean source drain");
+    check(f.pixels==std::vector<unsigned>({40,80,120}),"bounded clean sources preserve FIFO pixels");
+    xr_ok(f.transport->destroy_swapchain(chain),"bounded clean source destroy");
+    f.transport->stop();independent_fixture_mode=false;period=saved_period;
+}
+void independent_clean_source_test(bool d12) {
+    const auto saved_period=period;
+    period=11'111'111;
+    independent_fixture_mode=true;
+    Fixture f(d12,true,{},false,true,false,8,false);
+    f.unblock();
+    f.transport->set_clean_bypass(true);
+    const auto chain=f.make_chain();
+    std::array<std::atomic<XrTime>,3> source_times{};
+    f.inspect_layers=[&](const XrFrameEndInfo* info) {
+        const auto* projection=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+        const auto identity=static_cast<unsigned>(projection->views[0].pose.position.x);
+        check(identity>0 && identity<=source_times.size(),"clean source pose identity");
+        check(info->displayTime==source_times[identity-1].load(),
+            "clean delivery/replay preserves the time matching the exact source pose");
+    };
+    for(unsigned n=1;n<=3;++n) {
+        XrFrameState predicted{XR_TYPE_FRAME_STATE};
+        xr_ok(f.transport->wait_frame(nullptr,&predicted),"clean Independent source Wait");
+        xr_ok(f.transport->begin_frame(nullptr),"clean Independent source Begin");
+        f.write(chain,n*40);
+        source_times[n-1]=predicted.predictedDisplayTime;
+        XrCompositionLayerProjectionView view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        view.pose.orientation.w=1;view.pose.position.x=static_cast<float>(n);
+        view.subImage.swapchain=chain;view.subImage.imageRect.extent={1,1};
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=1;projection.views=&view;
+        const XrCompositionLayerBaseHeader* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+        XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+        end.displayTime=predicted.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        end.layerCount=1;end.layers=&layer;
+        xr_ok(f.transport->end_frame(&end),"clean Independent exact source submission");
+        f.wait_count(n);
+        std::this_thread::sleep_for(30ms); // producer slower than headset refresh
+    }
+    xr_ok(f.transport->drain(),"clean Independent drain");
+    check(f.pixels==std::vector<unsigned>({40,80,120}) && f.positions==std::vector<float>({1,2,3}),
+        "clean Independent source pixels and poses remain ordered");
+    check(f.replayed_ends>0,"clean sparse producer retains a scene between real frames");
+    xr_ok(f.transport->destroy_swapchain(chain),"clean Independent source destroy");
+    f.transport->stop();
+    independent_fixture_mode=false;period=saved_period;
+}
 void independent_grid_test(bool d12) {
     const auto saved_period=period;period=11'111'111;
     independent_fixture_mode=true;independent_fixture_begin_work=200'000;
@@ -2172,7 +2246,7 @@ int main(int argc,char** argv){
         for(bool d12:{true,false})for(bool paced:{true,false})aer_optical_handoff_test(d12,paced);
         return 0;
     }
-    if(const auto r=rife_aer_handoff_test(argc,argv);r>=0)return r;if(argc>1 && std::string_view(argv[1])=="rife-handoff"){rife_handoff_matrix();return 0;}if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);clean_bypass_admission(true,false,true);clean_bypass_admission(true,true,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
+    if(const auto r=rife_aer_handoff_test(argc,argv);r>=0)return r;if(argc>1 && std::string_view(argv[1])=="rife-handoff"){rife_handoff_matrix();return 0;}if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){independent_clean_admission_test(true);independent_clean_admission_test(false);independent_clean_source_test(true);independent_clean_source_test(false);stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);clean_bypass_admission(true,false,true);clean_bypass_admission(true,true,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
 if(argc>1 && std::string_view(argv[1])=="begin-renewal"){
     for(bool native:{false,true})for(bool director_only:{false,true}) {

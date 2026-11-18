@@ -198,7 +198,8 @@ between tests. Other backends have not been tested.
 Quality and artifacts vary by scene and configuration. The flow-resolution
 setting controls the cost of motion estimation, not the final output resolution.
 3X/4X availability depends on the generator, graphics API, runtime and GPU;
-**AER framegen is 2X-only**. The settings expose the multipliers supported by the
+**AER framegen supports 2X and, on compatible routes, 4X; 3X is unavailable**.
+The settings expose the multipliers supported by the
 selected route.
 
 **DLSS-G preset (next launch)** lets you choose **A** for quality or **C** for a
@@ -233,17 +234,23 @@ through OFXR and the runtime. Cycle minimum is not complete input-to-photon late
 
 #### Benchmarks
 
-Enable **Enable benchmarks** in the tray, then open the benchmark controls under
-**Display**. Choose the optical-flow, complete or Luke Ross suite and stay in the
-same representative scene throughout the run. Turn **AER framegen off** before
-running the ordinary suites.
+Enable **Enable benchmarks** in the tray, then open **Tests**. Benchmarks require
+**Independent pacing**. Keep the same representative scene throughout the run.
 
-- Each test has **2.5 seconds** to settle and **5 seconds** of measurement.
+- **Without vectors** tests OpticalFlow NVIDIA and RIFE. **Complete** also tests
+  supported Hybrid, DLSS-G and FSR configurations. Both retain the stereo/AER mode
+  selected before starting.
+- **Luke Ross** tests OSR normal and faster, alone or with OpticalFlow NVIDIA and
+  RIFE, plus raw AER with the supported generators. Hybrid is included with AER
+  and excluded with OSR. FidelityFX and AFW are excluded from all suites.
+- Every supported **2X, 3X and 4X** configuration is measured, even after reaching
+  headset refresh. AER uses **2X and 4X**. RIFE keeps one user-selected Quality.
+- Each test has **2.5 seconds** to settle and **7.5 seconds** of measurement.
+  Compilation and configuration setup are outside this 10-second interval.
 - Diagnostic logging is not required; benchmark CSV output is automatic.
-- Results include FPS, Cycle minimum and VRAM use. They are saved under
+- FPS, Cycle minimum, their means and memory results are saved under
   **`%LOCALAPPDATA%\ofxr-bridge\Benchmarks`**; use **Open folder** in the tray.
-- Suite length adapts to the available routes and earlier results. Skipped tests
-  remain n.a. in the CSV.
+  Unsupported or unavailable results remain n.a. in the summary CSV.
 - **Auto pick best one** applies the winning settings at completion. Otherwise,
   the previous settings are restored. Stopping also restores them; manually
   changing a tested setting stops automation and keeps your edit.

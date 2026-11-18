@@ -38,3 +38,42 @@ void minimum_spacing_rules() {
     check(compressed.read_minimum_cycle(110'000'000,value) && std::abs(value-31.111111F)<.001F,
         "native Framework burst uses native timing, not earlier virtual acceptance or future prediction");
 }
+
+void aer4_minimum_cycle() {
+    constexpr std::int64_t ms=1'000'000;
+    InterfaceCycle cycle(100*ms);
+    cycle.producer_returned(108*ms);
+    cycle.source_dependency(56*ms);
+    auto first_midpoint=std::make_shared<InterfaceDeliveryReceipt>(true,false,true);
+    auto first_reference=std::make_shared<InterfaceDeliveryReceipt>(true,true);
+    auto second_midpoint=std::make_shared<InterfaceDeliveryReceipt>(true,false,true);
+    auto second_reference=std::make_shared<InterfaceDeliveryReceipt>(false,true);
+    for(const auto& receipt:{first_midpoint,first_reference,second_midpoint,second_reference}) {
+        cycle.attach_native_delivery(receipt);
+        receipt->synthetic_confirmed=true;
+    }
+    first_midpoint->completed(true,195*ms,196*ms,205*ms,191*ms);
+    first_reference->completed(true,204*ms,205*ms,214*ms,192*ms);
+    cycle.synthetic_accepted(196*ms,11*ms);
+    float minimum{};
+    check(cycle.read_minimum_cycle(108*ms,minimum) && minimum==150,
+        "AER 4X counts the leading midpoint and keeps the measured source dependency");
+    second_midpoint->completed(true,217*ms,218*ms,228*ms,210*ms);
+    second_reference->completed(true,228*ms,229*ms,239*ms,213*ms);
+    cycle.synthetic_accepted(218*ms,11*ms);
+    check(cycle.read_minimum_cycle(108*ms,minimum) && minimum==150,
+        "the later AER 4X midpoint does not invalidate or extend the first mixed reference");
+    float game{},generation{},delivery{};
+    check(cycle.stages(104*ms,108*ms,minimum,game,generation,delivery) &&
+        generation==131 && delivery==15,
+        "AER 4X stage boundaries use the leading midpoint readiness");
+
+    InterfaceCycle ordinary(100*ms);
+    ordinary.attach_native_delivery(first_midpoint);
+    auto real=std::make_shared<InterfaceDeliveryReceipt>(false);
+    ordinary.attach_native_delivery(real);
+    ordinary.synthetic_accepted(196*ms,11*ms);
+    real->completed(true,194*ms,195*ms,204*ms);
+    check(!ordinary.read_minimum_cycle(108*ms,minimum),
+        "a generated output after a normal real reference remains out of order");
+}

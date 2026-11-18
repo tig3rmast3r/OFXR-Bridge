@@ -36,7 +36,7 @@ def windows(pid):
     @CALLBACK
     def visit(window, unused):
         owner = W.DWORD();user.GetWindowThreadProcessId(window, C.byref(owner))
-        if owner.value == pid and text(window).startswith("OFXR 0.3.3 - Pre-compile"):
+        if owner.value == pid and text(window).startswith("OFXR ") and "Pre-compile TensorRT" in text(window):
             out.append(window)
         return True
     user.EnumWindows(visit, 0)
@@ -60,7 +60,7 @@ a=p.parse_args()
 def progress(current,done):
  dest=Path(a.progress);tmp=dest.with_suffix('.tmp');tmp.write_text(json.dumps(dict(status='running',current=current,completed=done,total=2,message='fixture compilation')));tmp.replace(dest)
 progress(1,0)
-for i in range(30):
+for i in range(80):
  if Path(a.cancel).exists():break
  time.sleep(.1)
 cancelled=Path(a.cancel).exists()
@@ -86,10 +86,39 @@ raise SystemExit(1 if cancelled else 0)
                         if any("1/2" in label for label in labels):saw_count = True;break
                     time.sleep(.05)
                 self.assertTrue(window and saw_count, "actual form shows the 1/2 combination counter")
-                if cancel:
+                self.assertTrue(any("Current step:" in label and "several minutes" in label for label in labels),
+                    "in-progress compilation has a visible elapsed-time indication")
+                if not cancel:
+                    first = next(label for label in labels if "Current step:" in label)
+                    changed = False
+                    until = time.monotonic() + 2
+                    while time.monotonic() < until and not changed:
+                        current_labels = []
+                        @CALLBACK
+                        def read_label(child, unused):
+                            current_labels.append(text(child));return True
+                        user.EnumChildWindows(window, read_label, 0)
+                        changed = any("Current step:" in label and label != first for label in current_labels)
+                        time.sleep(.05)
+                    self.assertTrue(changed, "elapsed time advances while the engine count is unchanged")
+                if cancel == "button":
+                    buttons = []
+                    @CALLBACK
+                    def find_button(child, unused):
+                        if text(child) == "Cancel":buttons.append(child)
+                        return True
+                    user.EnumChildWindows(window, find_button, 0)
+                    self.assertTrue(buttons)
+                    user.PostMessageW(buttons[0], 0xF5, 0, 0)
+                elif cancel:
                     user.PostMessageW(window, 0x10, 0, 0)
                 while not result.exists() and time.monotonic() < deadline:time.sleep(.05)
                 self.assertTrue(result.is_file(), "owned worker completes or acknowledges cancel")
+                if cancel:
+                    request = json.loads(Path(str(result)+".cancel").read_text(encoding="utf-8"))
+                    self.assertEqual(request["source"], "cancel-button" if cancel == "button" else "window-close")
+                    self.assertTrue(request["requested_utc"])
+
                 time.sleep(.4)
                 if not cancel:
                     positions = []
@@ -111,7 +140,8 @@ raise SystemExit(1 if cancelled else 0)
                     process.wait(timeout=5)
 
     def test_actual_progress_window(self):self.run_fixture(False)
-    def test_actual_cancel_window(self):self.run_fixture(True)
+    def test_actual_cancel_window(self):self.run_fixture("window")
+    def test_actual_cancel_button(self):self.run_fixture("button")
 
 
 if __name__ == "__main__":unittest.main()

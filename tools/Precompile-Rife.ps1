@@ -14,27 +14,28 @@ $cancelPath=$ResultJson+'.cancel'
 $logPath=$ResultJson+'.log'
 $form=New-Object Windows.Forms.Form
 $form.Text=if(Test-Path -LiteralPath (Join-Path $Root 'vulkan/backend.json')){'OFXR - Prepare Vulkan for found games'}else{'OFXR 0.4.0 - Pre-compile TensorRT for found games'}
-$form.ClientSize=New-Object Drawing.Size(560,164)
+$form.ClientSize=New-Object Drawing.Size(560,180)
 $form.StartPosition='CenterScreen';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false;$form.MinimizeBox=$true
 $label=New-Object Windows.Forms.Label
-$label.Location=New-Object Drawing.Point(16,16);$label.Size=New-Object Drawing.Size(528,50)
+$label.Location=New-Object Drawing.Point(16,16);$label.Size=New-Object Drawing.Size(528,66)
 $label.Text='Preparing recorded game resolutions...';$form.Controls.Add($label)
 $bar=New-Object Windows.Forms.ProgressBar
-$bar.Location=New-Object Drawing.Point(16,76);$bar.Size=New-Object Drawing.Size(528,24)
+$bar.Location=New-Object Drawing.Point(16,92);$bar.Size=New-Object Drawing.Size(528,24)
 $form.Controls.Add($bar)
 $button=New-Object Windows.Forms.Button
-$button.Text='Cancel';$button.Location=New-Object Drawing.Point(444,120);$button.Size=New-Object Drawing.Size(100,28)
+$button.Text='Cancel';$button.Location=New-Object Drawing.Point(444,136);$button.Size=New-Object Drawing.Size(100,28)
 $form.Controls.Add($button)
 $state=@{done=$false;cancelled=$false}
-$cancel={
+$cancel={param([string]$Origin,[string]$Reason='')
  if($state.done){$form.Close();return}
  $state.cancelled=$true
- [IO.File]::WriteAllText($cancelPath,'cancel')
+ $request=[ordered]@{schema=1;source=$Origin;reason=$Reason;requested_utc=[DateTime]::UtcNow.ToString('o');process_id=$PID}
+ [IO.File]::WriteAllText($cancelPath,($request|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
  $button.Enabled=$false;$label.Text='Cancelling the current compilation...'
 }
-$button.Add_Click($cancel)
+$button.Add_Click({& $cancel 'cancel-button'})
 $form.Add_FormClosing({param($sender,$event)
- if(-not $state.done){$event.Cancel=$true;& $cancel}
+ if(-not $state.done){$event.Cancel=$true;& $cancel 'window-close' ([string]$event.CloseReason)}
 })
 function Quote-Argument([string]$Value){
  if($Value.Contains('"')){throw 'Invalid quote in pre-compile argument.'}
@@ -51,6 +52,12 @@ function Read-PrecompileJson([string]$Path){
  # Close the handle before parsing or updating any controls.
  return ($text|ConvertFrom-Json)
 }
+function Format-PrecompileProgress($Progress,[double]$ElapsedSeconds){
+ $elapsed=[TimeSpan]::FromSeconds([Math]::Max(0,$ElapsedSeconds))
+ return ('{0}/{1}   {2}' -f $Progress.current,$Progress.total,$Progress.message)+[Environment]::NewLine+
+  ('Current step: {0:00}:{1:00}. First compilation can take several minutes.' -f [Math]::Floor($elapsed.TotalMinutes),$elapsed.Seconds)
+}
+$stepClock=[Diagnostics.Stopwatch]::StartNew();$lastStep=-1
 $process=$null;$exitCode=1
 try {
  $python=Join-Path $Root 'python/python.exe'
@@ -76,12 +83,14 @@ try {
    try {
     $p=Read-PrecompileJson $progressPath
     $bar.Maximum=[Math]::Max(1,[int]$p.total);$bar.Value=[Math]::Min($bar.Maximum,[int]$p.completed)
-    $label.Text=('{0}/{1}   {2}' -f $p.current,$p.total,$p.message)
+    if([int]$p.current -ne $lastStep){$lastStep=[int]$p.current;$stepClock.Restart()}
+    $label.Text=Format-PrecompileProgress $p $stepClock.Elapsed.TotalSeconds
    }catch{} # atomic replacement may race one UI refresh
   }
   Start-Sleep -Milliseconds 100
  }
  $exitCode=$process.ExitCode
+ try {[IO.File]::AppendAllText($logPath,([DateTime]::UtcNow.ToString('o')+' Helper exit code: '+$exitCode+'; UI cancellation requested: '+$state.cancelled+[Environment]::NewLine))}catch{} # advisory diagnostics must not replace the actual result
  $diagnostics=$stderr.Result+$stdout.Result
  if($diagnostics){[IO.File]::AppendAllText($logPath,$diagnostics)}
  if(-not (Test-Path -LiteralPath $ResultJson)){throw 'The pre-compiler exited without a result. See the retained log.'}

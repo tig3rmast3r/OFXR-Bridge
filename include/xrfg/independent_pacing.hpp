@@ -44,23 +44,32 @@ public:
         return qualified_;
     }
 };
+// Split AER can have two accepted packets while only one (or neither) has
+// completed its private copy. That is GPU overlap, not surplus ready content.
+// Keep the validated stereo policy; AER recovery uses the actual ready FIFO.
+inline std::size_t independent_phase_ready_count(bool split_aer,
+    std::size_t pending,std::size_t prepared) noexcept {
+    return split_aer?prepared:pending;
+}
 // Consume surplus output ownership by postponing future source appointments,
 // never by accelerating native End or discarding rendered images. Qualification
-// survives isolated empty-ready/idle samples. Each actual step still needs two
-// ready outputs, fresh native progress and measured residence above the target.
+// survives isolated empty-ready/idle samples. Stereo still needs two ready
+// outputs. Split AER may have one FIFO head while its peer is in native End:
+// a quarter-refresh hysteresis band distinguishes extra age from steady jitter.
 class IndependentSourcePhase {
     std::int64_t period_{},last_{},trimmed_{};
     std::uint64_t delivered_{},expired_{},idle_{};
     IndependentRecoveryWindow recovery_;
+    bool split_aer_{},aer_recovering_{};
 public:
     void reset() noexcept {*this={};}
     std::int64_t trimmed() const noexcept {return trimmed_;}
     std::int64_t observe(std::int64_t now,std::int64_t physical,unsigned divisor,
         std::size_t ready,std::int64_t residence,std::uint64_t delivered,
-        std::uint64_t expired,std::uint64_t idle) noexcept {
-        if((divisor<2 || divisor>4) || physical<2'000'000 || physical>50'000'000 || now<=0){reset();return 0;}
-        if(period_!=physical || delivered<delivered_ || expired<expired_ || idle<idle_) {
-            reset();period_=physical;
+        std::uint64_t expired,std::uint64_t idle,bool split_aer=false) noexcept {
+        if((divisor<1 || divisor>4) || physical<2'000'000 || physical>50'000'000 || now<=0){reset();return 0;}
+        if(period_!=physical || split_aer_!=split_aer || delivered<delivered_ || expired<expired_ || idle<idle_) {
+            reset();period_=physical;split_aer_=split_aer;
         }
         if(last_ && now<=last_)return 0;
         const auto elapsed=last_?now-last_:0;last_=now;
@@ -70,7 +79,17 @@ public:
         delivered_=delivered;expired_=expired;idle_=idle;
         const bool healthy=recovery_.observe(now,physical,fresh-std::min(fresh,lost));
         const auto target=physical/2+2'000'000;
-        if(!healthy || !fresh || missed || !elapsed || elapsed>physical*8 || ready<2 || residence<=target)return 0;
+        if(split_aer) {
+            // A real native output can already own the other prepared image;
+            // requiring two remaining FIFO entries then preserves an extra
+            // physical slot. Arm only above clear excess age, finish at the
+            // old target, and stay idle inside the band after settling.
+            if(missed || elapsed>physical*8 || residence<=target)aer_recovering_=false;
+            if(healthy && fresh && !missed && elapsed && elapsed<=physical*8 &&
+                ready && residence>target+physical/4)aer_recovering_=true;
+        }
+        if(!healthy || !fresh || missed || !elapsed || elapsed>physical*8 ||
+            ready<(split_aer?1U:2U) || residence<=target || (split_aer&&!aer_recovering_))return 0;
         // At most8ms/second and200us per source. Closed-loop ready ownership
         // and residence end recovery; a lifetime one-P cap cannot recover a
         // second menu transient. No accumulated catch-up step after a veto.

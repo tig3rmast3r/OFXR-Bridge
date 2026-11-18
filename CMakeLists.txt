@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1016.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1026.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1624,12 +1624,6 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             xrfg_independent_restore_aer_fsr xrfg_independent_restore_aer_dlssg
             PROPERTIES ENVIRONMENT "" ENVIRONMENT_MODIFICATION "XRFG_TEST_WARP=unset:")
         add_test(NAME xrfg_independent_aer4 COMMAND xrfg_private_runtime_layer_tests independent-aer-4x-fidelity)
-        add_test(NAME xrfg_aer4_phase COMMAND xrfg_private_runtime_layer_tests aer4-phase)
-        add_test(NAME xrfg_aer4_phase_bundled COMMAND xrfg_private_runtime_layer_tests aer4-phase-bundled)
-        add_test(NAME xrfg_aer4_phase_healthy COMMAND xrfg_private_runtime_layer_tests aer4-phase-healthy)
-        add_test(NAME xrfg_aer4_phase_ready COMMAND xrfg_private_runtime_layer_tests aer4-phase-ready)
-        add_test(NAME xrfg_aer4_phase_control2x COMMAND xrfg_private_runtime_layer_tests aer4-phase-control2x)
-        set_tests_properties(xrfg_aer4_phase xrfg_aer4_phase_bundled xrfg_aer4_phase_healthy xrfg_aer4_phase_ready xrfg_aer4_phase_control2x PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         add_test(NAME xrfg_aer4_native_reader COMMAND xrfg_private_runtime_layer_tests aer4-stage-native-reader)
         add_test(NAME xrfg_aer4_native_reader_d11 COMMAND xrfg_private_runtime_layer_tests aer4-stage-d11-native-reader)
         set_tests_properties(xrfg_aer4_native_reader xrfg_aer4_native_reader_d11 PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")

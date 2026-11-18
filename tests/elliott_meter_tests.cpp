@@ -101,13 +101,13 @@ int main(int argc,char** argv){try{
         priority.runtime.afw_running=false;
         priority.runtime.motion_source=1;
         priority.runtime.generation_state=autonomous::GenerationState::missing_motion;
-        check(autonomous::interface_state_text(priority)=="AER Frame Gen" &&
+        check(autonomous::interface_state_text(priority)=="AER Nvidia OFA" &&
             autonomous::interface_generation_active(priority),"confirmed AER supersedes legacy fallback status");
         check(autonomous::interface_reconstruction_text(priority,now)=="OSR/AFW off, using AER Frame Gen" &&
             count_top(rasterize_elliott_meter(priority,now,false,false),red)==0,
             "saved Luke/UEVR OSR is bypassed without making confirmed AER red");
         auto failed=priority;failed.runtime.provider_error=5;
-        check(autonomous::interface_state_text(failed)=="AER Frame Gen: Error" &&
+        check(autonomous::interface_state_text(failed)=="AER Nvidia OFA: Error" &&
             count_top(rasterize_elliott_meter(failed,now,false,false),red)>0,"AER provider errors stay visible");
         auto bypass=priority;bypass.runtime.ofr_evidence.last_bypass_ms=now+1;
         check(count_top(rasterize_elliott_meter(bypass,now+1,false,false),red)>0,"AER bypass remains red with saved OSR");
@@ -117,7 +117,17 @@ int main(int argc,char** argv){try{
             "turning AER off restores the saved OSR readiness requirement");
         priority.runtime.afw_running=true;priority.runtime.pacing_mode=autonomous::kAfwOnlyPacingMode;
         check(!autonomous::interface_afw_only_active(priority,now) &&
-            autonomous::interface_state_text(priority)=="AER Frame Gen","old AFW-only activity cannot override AER");
+            autonomous::interface_state_text(priority)=="AER Nvidia OFA","old AFW-only activity cannot override AER");
+    }
+    for(int mode=0;mode<=4;++mode) {
+        auto labelled=aer;labelled.desired.frame_generation=mode;labelled.runtime.generation_mode=mode;
+        constexpr std::string_view labels[]={"AER Nvidia OFA","AER FSR","AER DLSS-G","AER Hybrid","AER RIFE"};
+        check(autonomous::interface_state_text(labelled)==labels[mode] && autonomous::interface_generation_active(labelled),
+            "AER retains active generator identity and confirmed-output state");
+        labelled.runtime.ofr_evidence={};
+        check(autonomous::interface_state_text(labelled).starts_with(labels[mode]) &&
+            autonomous::interface_state_text(labelled).ends_with(": Waiting") && !autonomous::interface_generation_active(labelled),
+            "AER waiting retains generator identity without claiming activity");
     }
     check(!autonomous::interface_aer_active(aer,now+1000),"AER proof expires independently of ordinary generator FPS");
     proof.last_bypass_ms=now+1;proof.bypasses=1;

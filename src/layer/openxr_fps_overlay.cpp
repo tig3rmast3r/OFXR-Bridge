@@ -1342,7 +1342,7 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
     const bool capture_delivery=two_frame_capture_delivery_active();
     if(nonempty && impl_->private_delivery_end && (impl_->native_confirmation||(measure && stamp.cycle)||capture_delivery||stamp.aer_evidence)) {
         if(measure && stamp.cycle)stamp.cycle->require_native_delivery();
-        try {delivery=std::make_shared<InterfaceDeliveryReceipt>(synthetic,stamp.aer_mixed);
+        try {delivery=std::make_shared<InterfaceDeliveryReceipt>(synthetic, stamp.aer_mixed, stamp.aer_generated_pair);
             if(capture_delivery){
                 delivery->capture_cycle=stamp.cycle?stamp.cycle->started_ns:0;
                 delivery->capture_owner=stamp.scene_owner;delivery->capture_serial=stamp.scene_serial;

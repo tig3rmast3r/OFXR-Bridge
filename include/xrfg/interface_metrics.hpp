@@ -20,14 +20,15 @@ std::int64_t interface_qpc_ns(std::int64_t ticks) noexcept;
 struct InterfaceDeliveryReceipt {
     const bool synthetic;
     const bool mixed_reference;
+    const bool aer_midpoint;
     // F8-only identity, frozen before private submission. No timing policy.
     std::uint64_t capture_cycle{},capture_owner{},capture_serial{};
     std::uint32_t capture_generated_index{};
     std::atomic<bool> synthetic_confirmed{false};
     std::atomic<int> outcome{0}; // 0 pending, 1 native success, -1 failure/empty, -2 expired
     std::int64_t entered_ns{},returned_ns{},display_ns{},prepared_ns{};
-    explicit InterfaceDeliveryReceipt(bool generated,bool mixed=false) noexcept
-        :synthetic(generated),mixed_reference(mixed) {}
+    explicit InterfaceDeliveryReceipt(bool generated, bool mixed=false, bool midpoint=false) noexcept
+        :synthetic(generated),mixed_reference(mixed),aer_midpoint(midpoint) {}
     void discarded() noexcept {outcome.store(-2,std::memory_order_release);}
     void completed(bool success,std::int64_t entered,std::int64_t returned,
                    std::int64_t display,std::int64_t prepared=0) noexcept {
@@ -37,6 +38,7 @@ struct InterfaceDeliveryReceipt {
 };
 struct InterfaceNativeTiming {
     std::int64_t entered_ns{},returned_ns{},display_ns{};
+    bool mixed_reference{};
 };
 
 // One app Wait/Begin/End ticket. It travels with the retained real, rather
@@ -69,7 +71,7 @@ class InterfaceCycle {
             if(!first || receipt->entered_ns<first->entered_ns)first=receipt.get();
         }
         if(!first || !native_valid_)return false;
-        out={first->entered_ns,first->returned_ns,first->display_ns};return true;
+        out={first->entered_ns,first->returned_ns,first->display_ns,first->mixed_reference};return true;
     }
 public:
     const std::int64_t started_ns;
@@ -149,6 +151,10 @@ public:
                 const auto& r=native_[i];
                 if(!r->synthetic || r->mixed_reference || r->outcome.load(std::memory_order_acquire)!=1 ||
                     !r->synthetic_confirmed.load(std::memory_order_acquire))continue;
+                // AER 4X can have a fully generated midpoint between two
+                // mixed references in the same source cycle. Latency ends at
+                // the first mixed reference, so that midpoint is outside it.
+                if(real.mixed_reference && r->aer_midpoint && r->entered_ns>real.entered_ns)continue;
                 if(r->entered_ns<started_ns || r->entered_ns>=real.entered_ns ||
                     outputs==synthetic_entries.size())return false;
                 synthetic_entries[outputs++]=r->entered_ns;
@@ -208,7 +214,9 @@ public:
             bool has_synthetic{};
             for(std::size_t i=0;i<native_count_;++i) {
                 const auto& r=native_[i];if(!r->synthetic && !r->mixed_reference)continue;
-                if(r->outcome.load(std::memory_order_acquire)==-2)continue;
+                const auto outcome=r->outcome.load(std::memory_order_acquire);
+                if(outcome==-2 || (outcome==1 && real.mixed_reference && r->aer_midpoint &&
+                    r->entered_ns>real.entered_ns))continue;
                 has_synthetic=true;
                 if(r->outcome.load(std::memory_order_acquire)!=1 ||
                    !r->synthetic_confirmed.load(std::memory_order_acquire) ||

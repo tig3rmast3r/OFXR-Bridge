@@ -49,7 +49,10 @@ int child(const std::filesystem::path& game,const std::wstring& mode,const std::
     check(read(a::configuration_path()).find("[tray]")==std::string::npos && read(a::configuration_path()).find("[benchmark]")==std::string::npos &&
         read(a::configuration_path()).find("AdvancedMode")==std::string::npos,"global sections and AdvancedMode excluded from game files");
     if(mode!=L"factory") {auto edit=first;edit.backend=3;edit.nr_intensity=.625F;edit.nr_second_pass=mode!=L"reset";check(a::request(edit),"game edit saved");}
-    a::RuntimeStatus report{};report.sessions=report.ready=1;a::report_runtime(report);
+    if(mode==L"benchmark" || mode==L"advanced-flip") {
+        auto bench=a::snapshot().desired;bench.independent_pacing=true;check(a::request(bench),"Independent benchmark fixture");
+    }
+    a::RuntimeStatus report{};report.sessions=report.ready=1;report.pacing_mode=a::kIndependentPacingMode;a::report_runtime(report);
     if(mode==L"benchmark") {
         const auto original=a::snapshot().desired;
         check(a::start_benchmark(false),"suite starts in game profile with global enable flag");
