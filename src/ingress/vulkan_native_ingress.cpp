@@ -45,7 +45,15 @@ struct D24Decoder {
 enum Role{color,motion,depth,output,role_count};
 #if defined(XRFG_NATIVE_INGRESS_TESTS)
 std::uint64_t tested_native_output_copyback_pixels{};
+rdr2_camera_probe::Sample (*test_rdr2_camera)() noexcept{};
 #endif
+struct GuideImageShape {
+    uint32_t width{},height{};
+    VkFormat format{};
+    bool operator==(const GuideImageShape&) const = default;
+};
+using Rdr2GuideShape=std::array<GuideImageShape,3>;
+constexpr unsigned kRdr2ProvisionalSlots=4;
 struct Surface {
     ComPtr<ID3D12Resource> buffer,texture;
     ComPtr<ID3D12Resource> packed_depth;
@@ -71,6 +79,7 @@ struct Slot {
     std::uint64_t last_reservation{};
     std::shared_ptr<RecordingReceipt> current_recording;
     bool current_recording_leased{};
+    bool provisional_rdr2_capture{};
     std::array<bool,role_count> native_before{};
     std::array<ComPtr<ID3D12CommandAllocator>,2> allocators;
     std::array<ComPtr<ID3D12GraphicsCommandList>,2> lists;
@@ -141,6 +150,9 @@ struct PublicFeatureLifetime {
     bool type_known{};
     std::uint64_t sequence{},failure_epoch{};
     unsigned active_calls{};
+    std::mutex rdr2_warmup_mutex;
+    std::weak_ptr<Device> rdr2_camera_owner;
+    std::optional<Rdr2GuideShape> rdr2_ready_shape;
 };
 constexpr std::uint64_t kVulkanPublicStreamNamespace=std::uint64_t{1}<<62;
 class EvaluationDeviceScope {
@@ -220,7 +232,7 @@ struct Hooks {
 Hooks& hooks(){static auto* h=new Hooks;return *h;}
 struct OriginalPublicCapture;
 std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
-    VkDevice,VkCommandBuffer,const NVSDK_NGX_Parameter*);
+    VkDevice,VkCommandBuffer,const NVSDK_NGX_Parameter*,PublicFeatureLifetime&);
 class PublicFeatureInvocationScope {
     inline static thread_local PublicFeatureInvocationScope* current_{};
     PublicFeatureInvocationScope* parent_{};
@@ -284,7 +296,7 @@ public:
         if(!active_)return;preparation_attempted_=true;
         if(rejected_)return;
         try{
-            original_capture_=prepare_original_public_capture(device_,recording_,p);
+            original_capture_=prepare_original_public_capture(device_,recording_,p,*lifetime_);
             sample_camera_at_entry();
         }catch(...){reject();}
     }
@@ -332,6 +344,17 @@ public:
         auto* owner=current_;if(!owner)return false;capture.reset();
         if(owner->rejected_||!owner->preparation_attempted_||owner->claims_!=1||owner->capture_consumed_){owner->reject();return true;}
         owner->capture_consumed_=true;capture=owner->original_capture_;return true;
+    }
+    static void observe_rdr2_readiness(const std::shared_ptr<Device>& device,
+        const Rdr2GuideShape& shape,bool ready) {
+        auto& lifetime=*current_->lifetime_;
+        std::scoped_lock lock(lifetime.rdr2_warmup_mutex);
+        if(ready) {
+            lifetime.rdr2_camera_owner=device;
+            lifetime.rdr2_ready_shape=shape;
+        } else if(lifetime.rdr2_camera_owner.lock()==device&&lifetime.rdr2_ready_shape==shape) {
+            lifetime.rdr2_ready_shape.reset();
+        }
     }
     static void final_capture(std::function<bool()> completion,const NVSDK_NGX_Handle* handle,std::uint32_t identity) {
         if(current_){current_->final_capture_=std::move(completion);current_->native_handle_=handle;current_->native_identity_=identity;}
@@ -920,7 +943,7 @@ struct OriginalPublicCapture {
     std::shared_ptr<OriginalParameters> parameters;
     DlssMotionVectorPublication camera;
     native_ingress::real_vr_dlss_camera::Camera relative_camera;
-    std::optional<rdr2_camera_probe::Sample> native_camera;
+    std::optional<Rdr2GuideShape> rdr2_shape;
     bool deferred_camera{},camera_seen{},camera_ambiguous{};
     VkCommandBuffer recording{};uint32_t family{UINT32_MAX};
     std::shared_ptr<RecordingReceipt> receipt;
@@ -944,6 +967,18 @@ bool rdr2_camera_process() noexcept {
     static const bool selected=[] {wchar_t path[32768]{};if(!GetModuleFileNameW(nullptr,path,32768))return false;
         const auto* base=std::wcsrchr(path,L'\\');return !_wcsicmp(base?base+1:path,L"RDR2.exe");}();
     return selected;
+}
+bool needs_rdr2_native_camera() noexcept {
+#if defined(XRFG_NATIVE_INGRESS_TESTS)
+    if(test_rdr2_camera)return true;
+#endif
+    return rdr2_camera_process()&&!native_ingress::streamline_camera::hooked();
+}
+rdr2_camera_probe::Sample take_rdr2_camera() noexcept {
+#if defined(XRFG_NATIVE_INGRESS_TESTS)
+    if(test_rdr2_camera)return test_rdr2_camera();
+#endif
+    return rdr2_camera_probe::take();
 }
 void PublicFeatureInvocationScope::sample_camera_at_entry() noexcept {
     if(rdr2_camera_process()&&(bridge_flight_logger().enabled()||bridge_flight_logger().ram_enabled()))
@@ -1025,6 +1060,7 @@ void work_submitted(VkQueue,void* opaque) noexcept {
         const auto submission=submit_d12(d,s,work.phase,work.prefix,work.ready);
         if(submission.executed){++s.submitted_phases;neural_rendering::complete_submission(d.queue.Get(),work.nr_receipts);
             if(d.owner_active&&work.phase==1&&work.exact_publication&&SUCCEEDED(submission.result)){
+                s.provisional_rdr2_capture=false;
                 d.production_submitted=true;ingress_reason(0,reinterpret_cast<std::uint64_t>(d.binding.device));}}
         else {neural_rendering::abandon_submission(work.nr_receipts);retire_dlss_motion_vector_stream(work.stream);}
     }catch(...) {}
@@ -1065,7 +1101,7 @@ CommandSplit handoff(const std::shared_ptr<Device>& d,const std::shared_ptr<Slot
     return result;
 }
 std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
-    VkDevice device,VkCommandBuffer recording,const NVSDK_NGX_Parameter* p) {
+    VkDevice device,VkCommandBuffer recording,const NVSDK_NGX_Parameter* p,PublicFeatureLifetime& lifetime) {
     const auto fail=[&](unsigned reason,std::uint64_t detail=0)->std::shared_ptr<OriginalPublicCapture> {
         bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,reason,1360,
             reinterpret_cast<std::uint64_t>(recording),detail);return {};
@@ -1078,13 +1114,9 @@ std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
     if(!d||!d->owner||!d->queue)return fail(4);
     auto capture=std::make_shared<OriginalPublicCapture>();capture->device=d;capture->recording=recording;capture->family=family;
     capture->parameters=std::make_shared<OriginalParameters>(p,device);
-    if(!native_ingress::apply_camera(capture->camera,nullptr)) {
-        if(rdr2_camera_process()&&!native_ingress::streamline_camera::hooked()) {
-            // The public wrapper has not selected the native source yet.
-            // Freeze guides now, resolve its exact camera at the typed SR entry.
-            capture->deferred_camera=true;
-        }
-        else {
+    const bool rdr2=needs_rdr2_native_camera();
+    if(rdr2)capture->deferred_camera=true;
+    else if(!native_ingress::apply_camera(capture->camera,nullptr)) {
         const auto camera=native_ingress::streamline_camera::current(true);
         const auto mask=camera.rejection|(!native_ingress::streamline_camera::hooked()?0x1000U:0U);
         if(ingress_reason(3,(std::uint64_t(camera.frame)<<32)|mask)) {
@@ -1092,8 +1124,7 @@ std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,3,955,
                 (std::uint64_t(bits(camera.near_z))<<32)|bits(camera.far_z),
                 (std::uint64_t(bits(camera.fov))<<32)|camera.viewport);}
-        return fail(5,mask);
-        }
+            return fail(5,mask);
     }
     for(auto r:{motion,depth,output}) {
         const auto& receipt=capture->parameters->images[r];
@@ -1104,6 +1135,25 @@ std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
     SlotShape shape{};for(auto role:{motion,depth,output})shape[role]=&capture->parameters->images[role].resolved.Resource.ImageViewInfo;
     std::scoped_lock lock(d->mutex);
     if(!d->owner_active)return {};
+    const auto receipt=recording_receipt(recording);
+    if(!receipt||receipt->disposition!=RecordingDisposition::recording)return fail(12);
+    capture->receipt=receipt;
+    if(rdr2) {
+        capture->rdr2_shape=Rdr2GuideShape{{
+            {shape[motion]->Width,shape[motion]->Height,shape[motion]->Format},
+            {shape[depth]->Width,shape[depth]->Height,shape[depth]->Format},
+            {shape[output]->Width,shape[output]->Height,shape[output]->Format}}};
+        {
+            // The typed child can observe the current RAGE camera without a
+            // guide copy. A new handle, owner or image size qualifies first.
+            std::scoped_lock warmup_lock(lifetime.rdr2_warmup_mutex);
+            if(lifetime.rdr2_camera_owner.lock()!=d||lifetime.rdr2_ready_shape!=capture->rdr2_shape)return capture;
+        }
+        const auto pending=std::count_if(d->slots.begin(),d->slots.end(),[](const auto& entry) {
+            return entry->provisional_rdr2_capture&&!entry->complete();
+        });
+        if(pending>=kRdr2ProvisionalSlots)return capture;
+    }
     auto s=slot(*d,shape);if(!s)return fail(8,d->slots.size());
     for(auto r:{motion,depth,output}) {
         const auto& image=capture->parameters->images[r].resolved.Resource.ImageViewInfo;auto& target=s->surfaces[r];
@@ -1116,9 +1166,8 @@ std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
     s->diagnostic_native_color_before=s->diagnostic_native_color.native_used;
     // The original recording lease pins every partially recorded input, also
     // when the wrapper later has no child/fails/reuses the opaque handle.
-    const auto receipt=recording_receipt(recording);
-    if(!receipt||receipt->disposition!=RecordingDisposition::recording||!retain_transport_recording(d,s,recording,receipt))return fail(12);
-    capture->receipt=receipt;
+    if(!retain_transport_recording(d,s,recording,receipt))return fail(12);
+    s->provisional_rdr2_capture=rdr2;
     capture->slot=s;
     if(!copy_native(*d,s->surfaces[motion],native(recording),false,motion,family)||
         !copy_native(*d,s->surfaces[depth],native(recording),false,depth,family))return fail(13);
@@ -1322,26 +1371,27 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
                     std::bit_cast<std::uint32_t>(supplied),std::bit_cast<std::uint32_t>(g.frame_time_delta_ms));
         }
     }
-    if(original_capture&&rdr2_camera_process()&&!native_ingress::streamline_camera::hooked()) {
+    if(original_capture&&original_capture->rdr2_shape) {
         // This is the original typed DLSS evaluation inside the same public
         // recording: Luke has finished selecting the GPU-matched source.
         // Do not use the previous selection seen before entering its wrapper,
         // or the shader fallback RDR2 does not produce. take() still requires
         // exact owner/render/ring matrix and immutable camera-history identity.
-        const auto sample=rdr2_camera_probe::take();
-        if(!sample.valid) {
-            ingress_reason(16,rdr2_camera_probe::state().refusal.load());
+        const auto sample=take_rdr2_camera();
+        const auto usable=apply_rdr2_camera(g,sample,g.output_width,g.output_height,g.depth_inverted);
+        PublicFeatureInvocationScope::observe_rdr2_readiness(d,*original_capture->rdr2_shape,usable);
+        if(!usable) {
+            const auto refusal=sample.valid?15U:rdr2_camera_probe::state().refusal.load();
+            ingress_reason(16,refusal);
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
-                rdr2_camera_probe::state().refusal.load(),1362,public_stream,production_sequence);
+                refusal,1362,public_stream,production_sequence);
+            lock.unlock();
             PublicFeatureInvocationScope::refuse_child();return raw();
         }
-        original_capture->native_camera=sample;
+        // Qualification applies only to future preparations. The camera of
+        // each actual copied frame is still read at its own typed boundary.
+        if(!original_capture->slot){lock.unlock();return raw();}
         original_capture->deferred_camera=false;
-    }
-    if(original_capture&&original_capture->native_camera) {
-        if(!f.flags_known||!apply_rdr2_camera(g,*original_capture->native_camera,g.output_width,g.output_height,g.depth_inverted)) {
-            ingress_reason(15);return raw();
-        }
         native_ingress::record_native_camera_accepted();
         static std::atomic_uint64_t last{};const auto now=GetTickCount64();auto previous=last.load(std::memory_order_relaxed);
         if((bridge_flight_logger().enabled()||bridge_flight_logger().ram_enabled())&&now>=previous+1000&&

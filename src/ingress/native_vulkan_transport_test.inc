@@ -871,7 +871,9 @@ struct PublicGuideGpuProbe {
     alignas(16) std::array<unsigned char,16> public_storage{},native_storage{};
     const NVSDK_NGX_Handle* public_handle{reinterpret_cast<const NVSDK_NGX_Handle*>(public_storage.data())};
     const NVSDK_NGX_Handle* native_handle{reinterpret_cast<const NVSDK_NGX_Handle*>(native_storage.data())};
-    bool no_child{},reset_before_child{};unsigned native_calls{},public_calls{};std::uint64_t before_publication{};
+    bool no_child{},reset_before_child{},expect_guide{true};
+    bool camera_available{},inside_typed_call{};
+    unsigned render{},native_calls{},public_calls{};std::uint64_t before_publication{};
     Evaluate saved_native{};bool saved_typed{};
     inline static PublicGuideGpuProbe* current{};
     explicit PublicGuideGpuProbe(TransportProbe& probe,VkFormat format=VK_FORMAT_D32_SFLOAT,bool hdr_output=false)
@@ -936,6 +938,16 @@ struct PublicGuideGpuProbe {
         return create_original(command,type,p,out);
     }
     static NVSDK_NGX_Result release_original(NVSDK_NGX_Handle*){return NVSDK_NGX_Result_Success;}
+    static rdr2_camera_probe::Sample native_camera_for_test() noexcept {
+        const auto& self=*current;
+        if(!self.camera_available||!self.inside_typed_call)return {};
+        rdr2_camera_probe::Sample camera{};
+        const auto set=[&](unsigned at,float value){std::memcpy(camera.camera.data()+at,&value,sizeof(value));};
+        set(0,1);set(24,-1);set(36,1);set(48,float(self.render));
+        set(96,60);set(100,.1F);set(104,100);set(108,1);
+        camera.owner=42;camera.render=self.render;camera.valid=true;
+        return camera;
+    }
     static NVSDK_NGX_Result native_original(VkCommandBuffer command,const NVSDK_NGX_Handle*,const NVSDK_NGX_Parameter* p,void*) {
         auto& self=*current;++self.native_calls;
         require_transport(get<float>(p,NVSDK_NGX_Parameter_MV_Scale_X)==-9&&get<int>(p,NVSDK_NGX_Parameter_Reset)==1,
@@ -949,9 +961,9 @@ struct PublicGuideGpuProbe {
     static NVSDK_NGX_Result wrapper_original(VkCommandBuffer command,const NVSDK_NGX_Handle*,const NVSDK_NGX_Parameter* p,void* callback) {
         auto& self=*current;++self.public_calls;self.prepared.reset();
         for(const auto& slot:self.hardware.device->slots)if(slot->recording_leases&&slot->surfaces[motion].source.Image==self.images[motion].image)self.prepared=slot;
-        require_transport(self.prepared!=nullptr,"public wrapper did not receive its actual pre-recorded guide slot");
+        require_transport(self.prepared||!self.expect_guide,"public wrapper did not receive its actual pre-recorded guide slot");
         self.clear(motion,command,{7,9,0,0});self.clear(depth,command,{.125F,0,0,0});
-        require_transport(sample_late_public_depth(*self.hardware.device,*self.prepared,command,
+        if(self.prepared)require_transport(sample_late_public_depth(*self.hardware.device,*self.prepared,command,
             queue_family_for(command)),"independent late depth witness recording");
         for(auto& value:self.parameters.floats){if(!strcmp(value.name,NVSDK_NGX_Parameter_MV_Scale_X))value.value=-9;
             if(!strcmp(value.name,NVSDK_NGX_Parameter_Jitter_Offset_X))value.value=5;
@@ -968,8 +980,10 @@ struct PublicGuideGpuProbe {
             VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             require_transport(self.hardware.observed<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(self.hardware.command,&begin),
                 "reuse exact command address for fresh native epoch");}
+        self.inside_typed_call=true;
         const auto result=evaluate<1>(command,self.native_handle,p,callback);
-        if(!self.reset_before_child)require_transport(sample_native_public_color(*self.hardware.device,*self.prepared,command,p,
+        self.inside_typed_call=false;
+        if(self.prepared&&!self.reset_before_child)require_transport(sample_native_public_color(*self.hardware.device,*self.prepared,command,p,
             queue_family_for(command)),"actual native output witness before wrapper final copyback");
         require_transport(dlss_motion_vector_publications()==self.before_publication,
             "public guides/output became visible before wrapper final copyback");
@@ -1124,9 +1138,10 @@ struct PublicGuideGpuProbe {
         D3D12_RANGE no_write{};read->Unmap(0,&no_write);destroy_surface(*hardware.device,decoded);
         std::cout<<"D24 production GPU decoder:128 words, every depth bit, zero/one, changing undefined upper bytes PASS\n";
     }
-    void run(unsigned serial,bool abandoned=false,bool reset_child=false) {
+    void run(unsigned serial,bool abandoned=false,bool reset_child=false,bool publish_guide=true) {
         const auto copyback_pixels_before=tested_native_output_copyback_pixels;
-        no_child=abandoned;reset_before_child=reset_child;reset_parameters();VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        no_child=abandoned;reset_before_child=reset_child;expect_guide=publish_guide;render=serial;
+        reset_parameters();VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         std::array<VkImageLayout,5> original_layouts{};for(unsigned i=0;i<images.size();++i)original_layouts[i]=images[i].layout;
         require_transport(hardware.observed<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(hardware.command,&begin),"begin original public GPU recording");
         clear(color,hardware.command,{.2F,.2F,.2F,1});clear(motion,hardware.command,{.25F,-.5F,0,0});clear(depth,hardware.command,{.75F,0,0,0});
@@ -1151,7 +1166,7 @@ struct PublicGuideGpuProbe {
                 "abandoned original public preparation submitted/published or retained recording");
             for(unsigned r=0;r<role_count;++r)require_transport(prepared->surfaces[r].native_used==original[r],"unsubmitted original preparation did not restore exact native ownership");
             for(unsigned i=0;i<images.size();++i)images[i].layout=original_layouts[i];return;}
-        require_transport(!prepared->complete(),"unsubmitted replacement recording reused retired predecessor fences");
+        if(prepared)require_transport(!prepared->complete(),"unsubmitted replacement recording reused retired predecessor fences");
         barrier(images[output],hardware.command,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);VkBufferImageCopy region{};
         region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.imageExtent={ow,oh,1};
         hardware.observed<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(hardware.command,images[output].image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,readback.buffer,1,&region);
@@ -1172,7 +1187,8 @@ struct PublicGuideGpuProbe {
             for(unsigned i=0;i<128;++i)require_transport(static_cast<unsigned char*>(stencil)[i]==0xa7,"depth transport modified native stencil");
             hardware.raw<PFN_vkUnmapMemory>("vkUnmapMemory")(hardware.native_device,hardware.readback.memory);
         }
-        require_transport(tested_native_output_copyback_pixels-copyback_pixels_before==kLukeOriginWidth*kLukeOriginHeight,
+        const auto copied=publish_guide?kLukeOriginWidth*kLukeOriginHeight:0;
+        require_transport(tested_native_output_copyback_pixels-copyback_pixels_before==copied,
             "active AFW native copyback still transfers the full output instead of exact marker pixels");
         void* bytes{};require_transport(hardware.raw<PFN_vkMapMemory>("vkMapMemory")(hardware.native_device,readback.memory,0,ow*oh*output_bytes(),0,&bytes),"map final original public Vulkan color");
         const auto pixel=[&](unsigned x,unsigned y){return static_cast<const std::byte*>(bytes)+(y*ow+x)*output_bytes();};
@@ -1195,12 +1211,24 @@ struct PublicGuideGpuProbe {
         }
         for(unsigned x=0;x<ow;++x)require_transport(output_pixel_matches(pixel(x,oh-1),true),
             "final original public color was captured before wrapper post-SR copyback");
-        hardware.raw<PFN_vkUnmapMemory>("vkUnmapMemory")(hardware.native_device,readback.memory);require_transport(token!=0,"final original public output lost physical CRC marker");
+        hardware.raw<PFN_vkUnmapMemory>("vkUnmapMemory")(hardware.native_device,readback.memory);
+        if(!publish_guide) {
+            require_transport(!token&&dlss_motion_vector_publications()==before_publication,
+                "unqualified native camera published guides or a marker");
+            if(prepared)require_transport(!prepared->complete(),"rejected partial copy released a replayable recording");
+            require_transport(hardware.observed<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(hardware.command,0),
+                "retire raw warmup recording");
+            return;
+        }
+        require_transport(token!=0,"final original public output lost physical CRC marker");
         const auto frame=resolve_luke_guide_token(token,hardware.device->queue.Get(),hardware.device->owner.Get());
         // A first frame, or the first one after an abandoned recording, has
         // no previous guide to resolve into a stereo pair.
-        const bool inspect_pair=serial==2||serial==5||(hdr&&serial>=6);
+        const bool inspect_pair=serial==2||serial==5||(hdr&&serial>=6)||(test_rdr2_camera&&serial==25);
         if(inspect_pair)verify_snapshots(frame,serial);
+        if(test_rdr2_camera&&inspect_pair)
+            require_transport(frame->source_clock_owner==42&&frame->source_clock_sequence==serial,
+                "native warmup borrowed a different camera or used the Streamline fallback");
         if(hdr) {
             const bool diagnostic=diagnostic_ring_enabled.load();
             const auto& mirror=prepared->surfaces[output];
@@ -1250,14 +1278,56 @@ struct PublicGuideGpuProbe {
                 if(resource){const auto desc=resource->GetDesc();bytes+=hardware.device->owner->GetResourceAllocationInfo(0,1,&desc).SizeInBytes;}
         return bytes;
     }
-    void verify(unsigned memory_trial=0){setup();
+    void verify(unsigned memory_trial=0){
+        const bool native_warmup=memory_trial==6;
+        if(native_warmup)oh=ow;
+        setup();
         struct RestoreDiagnostics {
             bool previous=diagnostic_ring_enabled.load();
             ~RestoreDiagnostics(){diagnostic_ring_enabled.store(previous);}
         } restore_diagnostics;
         // The resize tests also cover retiring real color mirrors.
-        if(memory_trial&&!hdr)diagnostic_ring_enabled.store(true);
+        if(memory_trial&&!hdr&&!native_warmup)diagnostic_ring_enabled.store(true);
         if(depth_format==VK_FORMAT_D24_UNORM_S8_UINT)verify_d24_words();
+        if(native_warmup) {
+            test_rdr2_camera=&native_camera_for_test;
+            resize_output(768,768);
+            const auto cold_bytes=transport_bytes();
+            const auto cold_slots=hardware.device->slots.size();
+            for(unsigned serial=1;serial<=20;++serial)run(serial,false,false,false);
+            require_transport(transport_bytes()==cold_bytes&&hardware.device->slots.size()==cold_slots,
+                "unavailable RAGE camera grew the transport bank");
+            camera_available=true;
+            run(21,false,false,false);
+            require_transport(transport_bytes()==cold_bytes,
+                "first exact camera should qualify without recording guide copies");
+            // Occupy four provisional credits before the wrapper runs. The
+            // valid typed call must still run even when no new copy can begin.
+            std::vector<std::shared_ptr<Slot>> pending;
+            for(unsigned index=0;index<kRdr2ProvisionalSlots;++index) {
+                auto entry=slot(*hardware.device);
+                require_transport(bool(entry),"reserve provisional warmup witness");
+                entry->provisional_rdr2_capture=true;
+                ++entry->pending_callbacks;
+                pending.push_back(std::move(entry));
+            }
+            const auto pending_slots=hardware.device->slots.size(),pending_bytes=transport_bytes();
+            run(22,false,false,false);
+            require_transport(hardware.device->slots.size()==pending_slots&&transport_bytes()==pending_bytes,
+                "a fifth unproven camera capture allocated backing");
+            for(auto& entry:pending)--entry->pending_callbacks;
+            run(23);
+            run(24);
+            run(25);
+            require_transport(native_calls==25&&public_calls==25,"warmup skipped or duplicated an original evaluation");
+            // A different shape on the same device must qualify again.
+            resize_output(512,512);camera_available=false;
+            const auto resized_bytes=transport_bytes();
+            run(26,false,false,false);
+            require_transport(transport_bytes()==resized_bytes,"unqualified return resize allocated guide textures");
+            test_rdr2_camera=nullptr;
+            std::cout<<"RDR2 resize warmup: native pass-through, bounded provisional copies, exact camera, motion, depth, and marker PASS\n";
+        } else {
         // The regular transport may already own a completed matching RG16
         // slot (Indiana). Isolate its pool so the cold rollback is genuinely
         // false->true->false on a new production slot, for both game routes.
@@ -1334,6 +1404,7 @@ struct PublicGuideGpuProbe {
             require_transport(settled_bytes<=cold_bytes,"resized transport memory did not return to cold small-resolution allocation");
             std::cout<<"VULKAN_RESIZE_MEMORY cold_slots="<<cold_slots<<" large_slots="<<large_slots
                 <<" cold_bytes="<<cold_bytes<<" large_bytes="<<large_bytes<<" settled_bytes="<<settled_bytes<<" PASS\n";
+        }
         }
         if(hardware.debug)for(UINT64 index=0;index<hardware.debug->GetNumStoredMessages();++index) {
             SIZE_T bytes{};hardware.debug->GetMessage(index,nullptr,&bytes);std::vector<unsigned char> storage(bytes);

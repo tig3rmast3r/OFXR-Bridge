@@ -51,7 +51,7 @@ if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
         "-DGAME_EXE=RDR2.exe" "-DTEST_MODE=native-vulkan-marker-hdr"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_vulkan_bootstrap.cmake")
     set_tests_properties(xrfg_native_vulkan_marker_hdr PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
-    foreach(kind memory retention ownership activation)
+    foreach(kind memory retention ownership activation warmup)
     add_test(NAME xrfg_native_vulkan_resize_${kind} COMMAND "${CMAKE_COMMAND}"
         "-DTEST_EXE=$<TARGET_FILE:xrfg_three_slot_director_tests>"
         "-DLUKE_FIXTURE=$<TARGET_FILE:xrfg_luke_runtime_fixture>"

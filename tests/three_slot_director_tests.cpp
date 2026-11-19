@@ -2865,6 +2865,8 @@ xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
     }
     if (argc>1 && std::string_view(argv[1])=="native-vulkan-marker-hdr")
         return xrfg::native_vulkan::run_buffer_transport_test(true,5);
+    if (argc>1 && std::string_view(argv[1])=="native-vulkan-resize-warmup")
+        return xrfg::native_vulkan::run_buffer_transport_test(true,6);
     if (argc>1 && std::string_view(argv[1])=="native-vulkan-resize-activation")
         return xrfg::native_vulkan::run_buffer_transport_test(true,4);
     if (argc>1 && std::string_view(argv[1])=="native-vulkan-resize-ownership")
