@@ -231,6 +231,7 @@ struct Hooks {
 };
 Hooks& hooks(){static auto* h=new Hooks;return *h;}
 struct OriginalPublicCapture;
+bool needs_rdr2_native_camera() noexcept;
 std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
     VkDevice,VkCommandBuffer,const NVSDK_NGX_Parameter*,PublicFeatureLifetime&);
 class PublicFeatureInvocationScope {
@@ -253,8 +254,15 @@ class PublicFeatureInvocationScope {
             lifetime_->failure_epoch==failure_epoch_&&lifetime_->active_calls==1;
     }
     void reject()noexcept {
+        if(rejected_)return;
         rejected_=true;
-        if(lifetime_)retire_dlss_motion_vector_stream(kVulkanPublicStreamNamespace|lifetime_->identity);
+        if(!lifetime_)return;
+        const auto stream=kVulkanPublicStreamNamespace|lifetime_->identity;
+        // A missing RDR2 guide breaks the exact temporal join. Keep compatible
+        // storage in this live feature so a fresh epoch can reuse completed
+        // slots. Actual feature release and submission failures still retire it.
+        if(needs_rdr2_native_camera())invalidate_dlss_motion_vector_stream_history(stream);
+        else retire_dlss_motion_vector_stream(stream);
     }
 public:
     PublicFeatureInvocationScope(unsigned slot,const NVSDK_NGX_Handle* handle,VkCommandBuffer recording)noexcept {

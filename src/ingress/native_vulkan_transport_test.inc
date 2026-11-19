@@ -874,6 +874,8 @@ struct PublicGuideGpuProbe {
     bool no_child{},reset_before_child{},expect_guide{true};
     bool camera_available{},inside_typed_call{};
     unsigned render{},native_calls{},public_calls{};std::uint64_t before_publication{};
+    std::uint32_t last_color_token{};
+    ComPtr<ID3D12Resource> pre_rejection_motion,pre_rejection_depth;
     Evaluate saved_native{};bool saved_typed{};
     inline static PublicGuideGpuProbe* current{};
     explicit PublicGuideGpuProbe(TransportProbe& probe,VkFormat format=VK_FORMAT_D32_SFLOAT,bool hdr_output=false)
@@ -1221,14 +1223,25 @@ struct PublicGuideGpuProbe {
             return;
         }
         require_transport(token!=0,"final original public output lost physical CRC marker");
+        last_color_token=token;
         const auto frame=resolve_luke_guide_token(token,hardware.device->queue.Get(),hardware.device->owner.Get());
         // A first frame, or the first one after an abandoned recording, has
         // no previous guide to resolve into a stereo pair.
-        const bool inspect_pair=serial==2||serial==5||(hdr&&serial>=6)||(test_rdr2_camera&&serial==25);
+        const bool inspect_pair=serial==2||serial==5||(hdr&&serial>=6)||
+            (test_rdr2_camera&&(serial==25||serial==29));
         if(inspect_pair)verify_snapshots(frame,serial);
         if(test_rdr2_camera&&inspect_pair)
             require_transport(frame->source_clock_owner==42&&frame->source_clock_sequence==serial,
                 "native warmup borrowed a different camera or used the Streamline fallback");
+        if(test_rdr2_camera&&serial==25) {
+            require_transport(frame->previous_opposite_guide!=nullptr,"warmup lost the previous exact guide");
+            pre_rejection_motion=frame->previous_opposite_guide->motion_vectors;
+            pre_rejection_depth=frame->previous_opposite_guide->depth;
+        }
+        if(test_rdr2_camera&&serial==29)
+            require_transport(frame->motion_vectors.Get()==pre_rejection_motion.Get()&&
+                frame->depth.Get()==pre_rejection_depth.Get(),
+                "a recoverable camera miss rebuilt the compatible guide snapshots");
         if(hdr) {
             const bool diagnostic=diagnostic_ring_enabled.load();
             const auto& mirror=prepared->surfaces[output];
@@ -1320,10 +1333,19 @@ struct PublicGuideGpuProbe {
             run(24);
             run(25);
             require_transport(native_calls==25&&public_calls==25,"warmup skipped or duplicated an original evaluation");
+            const auto old_token=last_color_token;
+            camera_available=false;
+            run(26,false,false,false);
+            require_transport(prepared && !resolve_luke_guide_token(old_token,hardware.device->queue.Get(),
+                hardware.device->owner.Get()),"camera refusal exposed guides from the rejected epoch");
+            camera_available=true;
+            run(27,false,false,false);
+            run(28);
+            run(29);
             // A different shape on the same device must qualify again.
             resize_output(512,512);camera_available=false;
             const auto resized_bytes=transport_bytes();
-            run(26,false,false,false);
+            run(30,false,false,false);
             require_transport(transport_bytes()==resized_bytes,"unqualified return resize allocated guide textures");
             test_rdr2_camera=nullptr;
             std::cout<<"RDR2 resize warmup: native pass-through, bounded provisional copies, exact camera, motion, depth, and marker PASS\n";

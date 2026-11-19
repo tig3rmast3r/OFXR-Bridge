@@ -201,6 +201,62 @@ void rdr2_guide_pool(Fixture& fixture) {
     require(!counts->live,"disabled RDR2 guide pool retained textures");
 }
 
+void rdr2_guide_rejection_reuse(Fixture& fixture) {
+    begin_tracking();
+    constexpr std::uint64_t stream=41012;
+    const auto counts=std::make_shared<Counts>();
+    std::pair<ID3D12Resource*,ID3D12Resource*> available;
+    std::shared_ptr<const xrfg::DlssMotionVectorFrame> held;
+    for(unsigned i=0;i<4;++i) {
+        auto recording=fixture.publish(stream,counts,true,nullptr,true,true);
+        fixture.submit(recording);
+        fixture.wait();
+        if(i==0)available={recording.frame->motion_vectors.Get(),recording.frame->depth.Get()};
+        if(i==3)held=xrfg::resolve_luke_guide_token(recording.frame->color_origin_token,
+            fixture.queue.Get(),fixture.device.Get());
+    }
+    require(held && held->previous_opposite_guide,"old guide pair must resolve before rejection");
+    auto unsubmitted=fixture.publish(stream,counts,true,nullptr,true,true);
+    const auto writer_motion=unsubmitted.frame->motion_vectors.Get();
+    const auto writer_depth=unsubmitted.frame->depth.Get();
+    unsubmitted.frame.reset();
+    const auto live=counts->live.load();
+
+    xrfg::invalidate_dlss_motion_vector_stream_history(stream);
+    require(!xrfg::resolve_luke_guide_token(held->color_origin_token,fixture.queue.Get(),fixture.device.Get()),
+        "the rejected epoch still resolves old markers");
+    {
+        auto resumed=fixture.publish(stream,counts,true,nullptr,true,true);
+        const auto& frame=*resumed.frame;
+        require(frame.epoch>held->epoch && frame.serial==1 && frame.previous_serial==0 &&
+            !frame.previous_opposite_guide && !frame.previous_same_guide,
+            "resumed guides joined across a rejected source");
+        require(frame.motion_vectors.Get()==available.first && frame.depth.Get()==available.second &&
+            counts->live==live,"compatible completed snapshots were allocated again after rejection");
+        require(frame.motion_vectors.Get()!=writer_motion && frame.depth.Get()!=writer_depth &&
+            frame.motion_vectors.Get()!=held->motion_vectors.Get() && frame.depth.Get()!=held->depth.Get(),
+            "reused the unsubmitted writer's snapshots or a consumer-pinned pair");
+        fixture.submit(resumed);
+        fixture.wait();
+    }
+    fixture.submit(unsubmitted);
+    fixture.wait();
+    {
+        auto resumed=fixture.publish(stream,counts,true,nullptr,true,true);
+        fixture.submit(resumed);
+        fixture.wait();
+        const auto resolved=xrfg::resolve_luke_guide_token(resumed.frame->color_origin_token,
+            fixture.queue.Get(),fixture.device.Get());
+        require(resolved && resolved->previous_opposite_guide &&
+            resolved->previous_opposite_guide->epoch==resolved->epoch &&
+            resolved->previous_opposite_guide->serial==1,
+            "new marker failed to join its exact post-rejection guide pair");
+    }
+    held.reset();
+    disable();
+    require(!counts->live,"reused snapshot backing outlived capture shutdown");
+}
+
 void unsubmitted_and_blocked_writer(Fixture& fixture) {
     begin_tracking();auto counts=std::make_shared<Counts>();auto recording=fixture.publish(41001,counts);
     require(counts->live==3,"three actual owned snapshots");recording.frame.reset();disable();
@@ -474,8 +530,9 @@ int main(int argc,char** argv) {
 #endif
         std::setvbuf(stdout,nullptr,_IONBF,0);
         const auto mode=argc>1?std::string_view(argv[1]):std::string_view{};
-        Fixture fixture(mode=="warp" || mode=="rdr2-pool");
-        if(argc>1 && std::string_view(argv[1])=="rdr2-pool") {rdr2_guide_pool(fixture);fixture.check_debug();return 0;}
+        Fixture fixture(mode=="warp" || mode=="rdr2-pool" || mode=="rdr2-rejection");
+        if(mode=="rdr2-pool") {rdr2_guide_pool(fixture);fixture.check_debug();return 0;}
+        if(mode=="rdr2-rejection") {rdr2_guide_rejection_reuse(fixture);fixture.check_debug();return 0;}
         if(argc>1 && std::string_view(argv[1])=="history-pressure") {protected_history_pressure(fixture);return 0;}
         unsubmitted_and_blocked_writer(fixture);retired_stream_and_reenable(fixture);protected_consumer(fixture);
         independent_writer_queues(fixture);repeated_toggles(fixture);
