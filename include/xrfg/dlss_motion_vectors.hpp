@@ -520,6 +520,10 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
     std::uint32_t color_origin_token,
     ID3D12CommandQueue* consumer_queue,
     ID3D12Device* canonical_consumer_device) noexcept;
+
+// The consumer has accepted this exact RDR2 color and its guide history.
+// Older lookup records can retire while outstanding readers retain their pins.
+void retire_consumed_luke_guides(const DlssMotionVectorFrame& frame) noexcept;
 // Control-only reset preflight. These metadata queries do NOT return a guide,
 // attach old history or authorize AFW generation. Tokens must still be decoded.
 struct LukeNativeOriginMetadata {

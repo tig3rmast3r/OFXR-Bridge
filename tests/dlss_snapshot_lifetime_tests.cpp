@@ -125,7 +125,7 @@ struct Fixture {
         ok(result,"resource-local destruction observer");
     }
     Recording publish(std::uint64_t stream,const std::shared_ptr<Counts>& counts,bool protected_lifetime=true,
-        ID3D12CommandQueue* producer=nullptr,bool close_list=true) {
+        ID3D12CommandQueue* producer=nullptr,bool close_list=true,bool rdr2_guide=false) {
         auto recording=make_recording();xrfg::DlssMotionVectorPublication publication;
         publication.stream=stream;publication.output=inputs[0].Get();publication.motion_vectors=inputs[1].Get();publication.depth=inputs[2].Get();
         publication.producer_queue=producer?producer:queue.Get();publication.producer_command_list=recording.list.Get();
@@ -133,9 +133,12 @@ struct Fixture {
         publication.depth_width=publication.depth_height=64;publication.scale_x=publication.scale_y=1;
         publication.resource_state=publication.depth_resource_state=D3D12_RESOURCE_STATE_COMMON;
         publication.frame_time_delta_ms=16.6f;publication.camera_near=.1f;publication.camera_far=100;
-        publication.snapshot_output=true;publication.direct_output_receipt=protected_lifetime;
+        publication.snapshot_output=!rdr2_guide;publication.direct_output_receipt=protected_lifetime && !rdr2_guide;
+        publication.protect_snapshot_lifetime=rdr2_guide;
+        publication.raw_motion_variable_interval=rdr2_guide;
         recording.frame=xrfg::publish_dlss_motion_vectors(publication);require(bool(recording.frame),"real snapshot publication");
-        observe(recording.frame->output.Get(),counts);observe(recording.frame->motion_vectors.Get(),counts);observe(recording.frame->depth.Get(),counts);
+        if(publication.snapshot_output && recording.frame->output)observe(recording.frame->output.Get(),counts);
+        observe(recording.frame->motion_vectors.Get(),counts);observe(recording.frame->depth.Get(),counts);
         if(close_list)ok(recording.list->Close(),"published original list close");return recording;
     }
     void submit(Recording& recording,ID3D12CommandQueue* target=nullptr) {
@@ -174,6 +177,29 @@ struct ReleaseGate {
 };
 void begin_tracking(){xrfg::configure_dlss_motion_vector_tracking(false);xrfg::retire_disabled_dlss_motion_vector_resources();xrfg::configure_dlss_motion_vector_tracking(true);}
 void disable(){xrfg::configure_dlss_motion_vector_tracking(false);xrfg::retire_disabled_dlss_motion_vector_resources();}
+
+void rdr2_guide_pool(Fixture& fixture) {
+    begin_tracking();
+    const auto counts=std::make_shared<Counts>();
+    std::vector<std::uint32_t> tokens;
+    std::shared_ptr<const xrfg::DlssMotionVectorFrame> held;
+    for(unsigned i=0;i<180;++i) {
+        auto recording=fixture.publish(41011,counts,true,nullptr,true,true);
+        tokens.push_back(recording.frame->color_origin_token);
+        fixture.submit(recording);fixture.wait();
+        if(i==14)held=xrfg::resolve_luke_guide_token(tokens[9],fixture.queue.Get(),fixture.device.Get());
+        if(i>=16) {
+            // The accepted color can arrive four publications behind ingress.
+            const auto frame=xrfg::resolve_luke_guide_token(tokens[i-4],fixture.queue.Get(),fixture.device.Get());
+            require(frame && frame->previous_opposite_guide,"delayed RDR2 color lost its guides");
+            xrfg::retire_consumed_luke_guides(*frame);
+        }
+    }
+    require(held && held->motion_vectors && held->depth,"retiring lookup records lost a pinned guide");
+    require(counts->live < 28,"completed RDR2 guide backing did not shrink after the burst");
+    held.reset();fixture.wait();disable();
+    require(!counts->live,"disabled RDR2 guide pool retained textures");
+}
 
 void unsubmitted_and_blocked_writer(Fixture& fixture) {
     begin_tracking();auto counts=std::make_shared<Counts>();auto recording=fixture.publish(41001,counts);
@@ -446,7 +472,10 @@ int main(int argc,char** argv) {
         const bool no_registry_allocation=fail_next_snapshot_test_allocation.exchange(false);
         require(no_registry_allocation,"empty begin/abandon lazily allocated registry storage");
 #endif
-        std::setvbuf(stdout,nullptr,_IONBF,0);Fixture fixture(argc>1 && std::string_view(argv[1])=="warp");
+        std::setvbuf(stdout,nullptr,_IONBF,0);
+        const auto mode=argc>1?std::string_view(argv[1]):std::string_view{};
+        Fixture fixture(mode=="warp" || mode=="rdr2-pool");
+        if(argc>1 && std::string_view(argv[1])=="rdr2-pool") {rdr2_guide_pool(fixture);fixture.check_debug();return 0;}
         if(argc>1 && std::string_view(argv[1])=="history-pressure") {protected_history_pressure(fixture);return 0;}
         unsubmitted_and_blocked_writer(fixture);retired_stream_and_reenable(fixture);protected_consumer(fixture);
         independent_writer_queues(fixture);repeated_toggles(fixture);

@@ -293,6 +293,17 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
             chains[eye]->last_released_motion_vectors=same?item.guides:nullptr;
             complete=complete && same && item.guides!=nullptr;
         }
+        if (complete) {
+            const auto& left = *cache.eyes[0].guides->eyes[0];
+            const auto& right = *cache.eyes[1].guides->eyes[0];
+            if (left.stream == right.stream) {
+                if (left.epoch == right.epoch)
+                    xrfg::retire_consumed_luke_guides(left.serial < right.serial ? left : right);
+            } else {
+                xrfg::retire_consumed_luke_guides(left);
+                xrfg::retire_consumed_luke_guides(right);
+            }
+        }
         return complete?S_OK:S_FALSE;
     } catch(...) {clear();return S_FALSE;}
 }
