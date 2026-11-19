@@ -411,12 +411,26 @@ void verify_public_family_dispatch(VkDevice device,VkCommandBuffer command,VkCom
     const auto sr_lifetime=hooks().public_lifetimes.at(probe.public_handle);
     require_transport(sr_lifetime->sequence==1&&sr_lifetime->type_known&&sr_lifetime->type==NVSDK_NGX_Feature_SuperSampling,
         "typed Vulkan SR failed exact public family classification");
+    const auto sr_identity=hooks().features.at(recreated).identity;
+    const auto creates=probe.create_calls,releases=probe.release_calls;
+    const auto initial_tracking=dlss_motion_vector_statistics().status!=DlssMotionVectorStatus::disabled;
+    for(const bool enabled:{false,true,false}) {
+        configure_dlss_motion_vector_tracking(enabled);
+        if(!enabled)retire_disabled_dlss_motion_vector_resources();
+        require_transport(NVSDK_NGX_SUCCEED(probe.cached_evaluate(command,recreated,&creation,callback)) &&
+            hooks().features.at(recreated).identity==sr_identity &&
+            hooks().public_lifetimes.at(recreated)==sr_lifetime &&
+            probe.create_calls==creates && probe.release_calls==releases,
+            "Vulkan guide tracking must leave the application's existing NGX feature in place");
+    }
+    configure_dlss_motion_vector_tracking(initial_tracking);
+    const auto sr_sequence=sr_lifetime->sequence;
     hooks().modules[0].typed_implementation=false;
     const auto observed_before=native_ingress::upscaler_observation().evaluations;
     const auto published_before=dlss_motion_vector_statistics().published;
     const auto calls_before=probe.native_calls,public_before=probe.public_calls;
     require_transport(NVSDK_NGX_SUCCEED(probe.cached_evaluate(command,recreated,&creation,callback))&&
-        sr_lifetime->sequence==1&&probe.native_calls==calls_before+1&&probe.public_calls==public_before+1&&
+        sr_lifetime->sequence==sr_sequence&&probe.native_calls==calls_before+1&&probe.public_calls==public_before+1&&
         probe.callback==callback&&native_ingress::upscaler_observation().evaluations==observed_before&&
         dlss_motion_vector_statistics().published==published_before,
         "typed-unavailable public Vulkan call fell back to generic raw capture or changed its original callback");
