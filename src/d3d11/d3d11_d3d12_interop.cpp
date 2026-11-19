@@ -940,6 +940,55 @@ D3D11D3D12SwapchainInterop::current_destination_images() const noexcept {
         : std::span<ID3D12Resource* const>(impl_->current_d3d12_views);
 }
 
+HRESULT D3D11D3D12SwapchainInterop::append_current_destination(ID3D11Texture2D* image,
+    Microsoft::WRL::ComPtr<ID3D12Resource>* backing) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (!impl_ || !impl_->enabled || !image || !backing) return E_INVALIDARG;
+        auto& s = *impl_;
+        D3D11_TEXTURE2D_DESC desc{};
+        image->GetDesc(&desc);
+        if (desc.Width != s.source_description.Width || desc.Height != s.source_description.Height ||
+            desc.ArraySize != s.source_description.ArraySize || desc.Format != s.source_description.Format ||
+            desc.SampleDesc.Count != s.source_description.SampleDesc.Count ||
+            desc.SampleDesc.Quality != s.source_description.SampleDesc.Quality) return E_INVALIDARG;
+        const auto count = s.current_destination_images.size() + 1;
+        s.current_destination_images.reserve(count);
+        s.shared_current_destinations.reserve(count);
+        s.current_d3d12_views.reserve(count);
+        s.current_d3d11_access.reserve(count);
+        Impl::SharedImage shared;
+        shared.d3d12 = owned_d11_output::backing_for(image, s.d3d12_device.Get());
+        if (shared.d3d12) {
+            shared.d3d11 = image;
+        } else {
+            const auto result = s.create_shared_image(&shared,
+                D3D11InteropInitializationStage::current_create_d3d12,
+                D3D11InteropInitializationStage::current_create_handle,
+                D3D11InteropInitializationStage::current_device1,
+                D3D11InteropInitializationStage::current_open_d3d11, nullptr);
+            if (FAILED(result)) return result;
+        }
+        *backing = shared.d3d12;
+        s.current_destination_images.emplace_back(image);
+        s.current_d3d12_views.push_back(shared.d3d12.Get());
+        s.shared_current_destinations.push_back(std::move(shared));
+        s.current_d3d11_access.emplace_back();
+        return S_OK;
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+      catch (...) { return E_FAIL; }
+}
+
+void D3D11D3D12SwapchainInterop::discard_unsubmitted_current_destination(ID3D11Texture2D* image) noexcept {
+    std::scoped_lock lock(mutex_);
+    if (!impl_ || impl_->current_destination_images.empty() ||
+        impl_->current_destination_images.back().Get() != image) return;
+    impl_->current_destination_images.pop_back();
+    impl_->current_d3d12_views.pop_back();
+    impl_->shared_current_destinations.pop_back();
+    impl_->current_d3d11_access.pop_back();
+}
+
 std::span<ID3D12Resource* const>
 D3D11D3D12SwapchainInterop::synthetic_destination_images() const noexcept {
     std::scoped_lock lock(mutex_);

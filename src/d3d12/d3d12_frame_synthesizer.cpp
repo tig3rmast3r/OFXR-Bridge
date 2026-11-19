@@ -8176,6 +8176,42 @@ HRESULT D3D12FrameSynthesizer::initialize(
     }
 }
 
+HRESULT D3D12FrameSynthesizer::append_synthetic_destination(ID3D12Resource* image) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (!impl_ || !image) return E_INVALIDARG;
+        auto& s = *impl_;
+        const auto desc = image->GetDesc();
+        const auto duplicate = [image](const auto& destination) {
+            return destination.resource.Get() == image;
+        };
+        if (!same_adapter(s.device.Get(), image) || !copy_compatible(s.image_description, desc) ||
+            !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ||
+            !compatible_view_format(desc.Format, s.view_format) ||
+            std::any_of(s.current_destinations.begin(), s.current_destinations.end(), duplicate) ||
+            std::any_of(s.synthetic_destinations.begin(), s.synthetic_destinations.end(), duplicate)) {
+            return E_INVALIDARG;
+        }
+        const auto available = s.submission_available();
+        if (FAILED(available)) return available;
+        Impl::Destination destination{};
+        destination.resource = image;
+        s.synthetic_destinations.push_back(std::move(destination));
+        auto previous_heap = std::move(s.rtv_heap);
+        const auto previous_increment = s.rtv_increment;
+        const auto previous_base = s.current_rtv_base;
+        const auto result = s.create_rtv_heap(previous_heap->GetDesc().NodeMask);
+        if (FAILED(result)) {
+            s.rtv_heap = std::move(previous_heap);
+            s.rtv_increment = previous_increment;
+            s.current_rtv_base = previous_base;
+            s.synthetic_destinations.pop_back();
+        }
+        return result;
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+      catch (...) { return E_FAIL; }
+}
+
 HRESULT D3D12FrameSynthesizer::reconfigure(D3D12OpticalFlowBackend backend,
     D3D12NvidiaOpticalFlowOptions options,
     D3D12FrameGenerationMode generation_mode) noexcept {

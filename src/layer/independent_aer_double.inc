@@ -2,6 +2,7 @@
 // coherent stereo endpoint. Raw staggered eyes never enter this second history.
 struct IndependentAerDouble {
     using Resource=Microsoft::WRL::ComPtr<ID3D12Resource>;
+    static constexpr unsigned kInitialOutputSlots = 3;
     struct Slot {
         std::shared_ptr<xrfg::PrivateOpenXrRuntime> runtime;
         XrSwapchain handle{};Resource image;
@@ -26,6 +27,7 @@ struct IndependentAerDouble {
     };
     struct Channel {
         XrSwapchain source{};
+        XrSwapchainCreateInfo output_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         Resource input,scratch;
         std::array<std::shared_ptr<Slot>,xrfg::kIndependentOutputCredits> slots;
         std::shared_ptr<xrfg::D3D11D3D12SwapchainInterop> interop;
@@ -114,6 +116,33 @@ struct IndependentAerDouble {
         }
         return true;
     }
+
+    HRESULT create_output_slot(const std::shared_ptr<SessionState>& state, Channel& c,
+        std::shared_ptr<Slot>& output) {
+        auto entry = std::make_shared<Slot>();
+        entry->runtime = state->private_runtime;
+        const auto publication_state = native_d11(*state) && !state->d3d12_synthesis_queue
+            ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_COMMON;
+        const auto result = entry->runtime->create_swapchain(&c.output_info,&entry->handle,publication_state,1,c.source,
+            native_d11(*state) ? state->d3d12_device.Get() : nullptr);
+        if (XR_FAILED(result)) return E_FAIL;
+        entry->image = endpoint_image(state,entry->handle,&entry->image11);
+        if (!entry->image && !entry->image11) return E_NOINTERFACE;
+        if (c.generator) {
+            Resource backing = entry->image;
+            if (c.interop) {
+                const auto added = c.interop->append_current_destination(entry->image11.Get(), &backing);
+                if (FAILED(added)) return added;
+            }
+            const auto added = c.generator->append_synthetic_destination(backing.Get());
+            if (FAILED(added)) {
+                if (c.interop) c.interop->discard_unsubmitted_current_destination(entry->image11.Get());
+                return added;
+            }
+        }
+        output = std::move(entry);
+        return S_OK;
+    }
     HRESULT initialize_channel(const std::shared_ptr<SessionState>& state,Channel& c,
         const ProjectionResourceMapping& mapping,const Resource& source,ID3D11Texture2D* source11) {
         stage=11;c.source=mapping.application_swapchain;c.description=description(source,source11);
@@ -124,7 +153,7 @@ struct IndependentAerDouble {
         auto desc=c.description;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         c.input=resource(device,desc);c.scratch=resource(device,desc);
         auto original=find_swapchain(mapping.application_swapchain);if(!original)return E_INVALIDARG;
-        auto info=original->create_info;info.next=nullptr;
+        auto& info=c.output_info;info=original->create_info;info.next=nullptr;
         info.width=unsigned(desc.Width);info.height=desc.Height;info.arraySize=desc.DepthOrArraySize;
         // First-stage endpoints contain mip zero only, even when the game's
         // source swapchain has a mip chain. Do not inherit that source layout.
@@ -134,15 +163,10 @@ struct IndependentAerDouble {
         if(info.createFlags || info.faceCount!=1)return E_NOTIMPL;
         std::vector<ID3D12Resource*> destinations;
         std::vector<ID3D11Texture2D*> destinations11;bool transfer=!source;
-        for(auto& entry:c.slots) {
-            entry=std::make_shared<Slot>();entry->runtime=state->private_runtime;
-            const auto publication_state=native_d11(*state) && !state->d3d12_synthesis_queue
-                ?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;
-            auto result=entry->runtime->create_swapchain(&info,&entry->handle,publication_state,1,c.source,
-                native_d11(*state)?device:nullptr);
-            if(XR_FAILED(result))return E_FAIL;
-            entry->image=endpoint_image(state,entry->handle,&entry->image11);
-            if(!entry->image && !entry->image11)return E_NOINTERFACE;
+        for (unsigned i=0; i<kInitialOutputSlots; ++i) {
+            auto& entry=c.slots[i];
+            const auto result=create_output_slot(state,c,entry);
+            if (FAILED(result)) return result;
             transfer|=!entry->image;
             destinations.push_back(entry->image.Get());destinations11.push_back(entry->image11.Get());
         }
@@ -298,6 +322,14 @@ struct IndependentAerDouble {
         if(previous)for(std::size_t i=0;i<channels.size();++i) {
             auto& w=work[i];auto& c=*channels[i];w.channel=&c;
             for(unsigned j=0;j<c.slots.size();++j) {
+                if (!c.slots[j]) {
+                    const auto grown = create_output_slot(state,c,c.slots[j]);
+                    if (FAILED(grown)) {
+                        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                            111119,ordinal+1,i,std::uint32_t(grown));
+                        return S_FALSE; // retain the anchor and retry once outputs are available
+                    }
+                }
                 bool idle=false;
                 if(c.slots[j]->busy.compare_exchange_strong(idle,true)) {
                     w.slot=c.slots[j];w.output=j;w.lease=std::make_shared<Lease>();w.lease->slot=w.slot;

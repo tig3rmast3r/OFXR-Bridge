@@ -94,6 +94,10 @@ static int independent_aer4_stage_test(bool native12=true,bool bgra=false,bool u
         const auto prime=stage.process(state,endpoint(1),mappings,mid);
         std::printf("AER4_STAGE prime hr=%08x stage=%u channels=%zu ordinal=%llu\n",unsigned(prime),stage.stage,stage.channels.size(),stage.ordinal);std::fflush(stdout);
         check(prime==S_FALSE && !mid,"prime cannot count a repeated frame as generation");
+        check(stage.channels.size()==2,"prime must initialize both eye channels");
+        for(const auto& channel:stage.channels)
+            check(std::count_if(channel->slots.begin(),channel->slots.end(),[](const auto& slot){return bool(slot);})==3,
+                "each eye must start with three allocated outputs");
         if(alias_owner)for(const auto& channel:stage.channels)
             check(!channel->interop,"proven alias must retain direct shared backings instead of D11 copies");
         if(continuity_case) {
@@ -247,6 +251,9 @@ static int independent_aer4_stage_test(bool native12=true,bool bgra=false,bool u
         check(held_left<55 && held_right>170 && held_right<195,"output ring overwrote a still-owned old generated pair");
         if(retain_many) {
             check(retained.size()==8,"eight completed stereo midpoints can coexist within independent output credits");
+            for(const auto& channel:stage.channels)
+                check(std::all_of(channel->slots.begin(),channel->slots.end(),[](const auto& slot){return bool(slot);}),
+                    "retained frames must grow both eye banks to full capacity");
             check(pixel(*retained.front(),0)<55 && pixel(*retained.back(),0)>55,"retained midpoints preserve distinct immutable contents");
             const auto before=GetTickCount64();
             check(stage.process(state,endpoint(10),mappings,mid)==S_FALSE && !mid,
@@ -260,11 +267,12 @@ static int independent_aer4_stage_test(bool native12=true,bool bgra=false,bool u
             std::puts("AER4_CREDITS retained=8 saturated_skip=1 recovered=1");
         }
         for(const auto& c:stage.channels) {
-            unsigned busy{};for(const auto& s:c->slots)busy+=s->busy.load();
+            unsigned busy{};for(const auto& s:c->slots)if(s)busy+=s->busy.load();
             check(busy==1,"only the deliberately retained pair may hold an output credit");
         }
         held.reset();
-        for(const auto& c:stage.channels)for(const auto& s:c->slots)check(!s->busy,"retired generated output leaked its ring credit");
+        for(const auto& c:stage.channels)for(const auto& s:c->slots)
+            check(!s || !s->busy,"retired generated output leaked its ring credit");
         // A real configuration change starts a fresh temporal epoch. A/B alone
         // does not advance this epoch and is covered by the live route test.
         ++state->djules_configuration_epoch;

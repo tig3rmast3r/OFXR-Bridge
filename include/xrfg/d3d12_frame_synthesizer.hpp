@@ -379,6 +379,9 @@ public:
 
 
     [[nodiscard]] HRESULT wait_for_idle() noexcept;
+    // Register an additional output without replacing the temporal history.
+    // The caller serializes registration with synthesis and owns the output.
+    [[nodiscard]] HRESULT append_synthetic_destination(ID3D12Resource* image) noexcept;
     // Caller excludes presenter use and new history captures. Keeps XR destinations.
     [[nodiscard]] HRESULT reconfigure(D3D12OpticalFlowBackend backend,
         D3D12NvidiaOpticalFlowOptions options,

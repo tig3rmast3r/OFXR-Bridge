@@ -104,6 +104,12 @@ public:
     [[nodiscard]] std::span<ID3D12Resource* const> source_images() const noexcept;
     [[nodiscard]] std::span<ID3D12Resource* const>
     current_destination_images() const noexcept;
+
+    // Extend the current publication bank with one idle output. An appended
+    // entry may be removed before it participates in any submission.
+    [[nodiscard]] HRESULT append_current_destination(ID3D11Texture2D* image,
+        Microsoft::WRL::ComPtr<ID3D12Resource>* backing) noexcept;
+    void discard_unsubmitted_current_destination(ID3D11Texture2D* image) noexcept;
     [[nodiscard]] std::span<ID3D12Resource* const>
     synthetic_destination_images() const noexcept;
 
