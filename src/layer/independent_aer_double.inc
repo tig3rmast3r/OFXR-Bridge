@@ -117,6 +117,7 @@ struct IndependentAerDouble {
     HRESULT initialize_channel(const std::shared_ptr<SessionState>& state,Channel& c,
         const ProjectionResourceMapping& mapping,const Resource& source,ID3D11Texture2D* source11) {
         stage=11;c.source=mapping.application_swapchain;c.description=description(source,source11);
+        log_video_memory(*state,VideoMemoryStage::aer_double_begin,handle_value(c.source));
         if(c.description.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D || c.description.SampleDesc.Count!=1)return E_NOTIMPL;
         auto device=state->d3d12_device.Get();
         // Copy/SRV/RTV resources, not UAVs: BGRA XR colors need no typed UAV.
@@ -167,8 +168,10 @@ struct IndependentAerDouble {
         c.generator=std::make_shared<xrfg::D3D12FrameSynthesizer>();
         auto options=state->nvidia_options;options.ofr=false;options.hybrid=false;options.rife_multiplier=2;options.rife_async=options.rife_model>=0;
         ID3D12Resource* scratch[]{c.scratch.Get()};
-        return c.generator->initialize(device,queue.Get(),c.history,scratch,destinations,DXGI_FORMAT(info.format),
+        const auto initialized=c.generator->initialize(device,queue.Get(),c.history,scratch,destinations,DXGI_FORMAT(info.format),
             D3D12_RESOURCE_STATE_COMMON,state->optical_flow_backend,options,false,xrfg::D3D12FrameGenerationMode::ofxr);
+        log_video_memory(*state,VideoMemoryStage::aer_double_ready,handle_value(c.source));
+        return initialized;
     }
     HRESULT capture(Channel& c,ID3D12Resource* source,D3D12_RESOURCE_STATES source_state,
         xrfg::D3D12HistoryCaptureTicket& captured) {
@@ -191,6 +194,19 @@ struct IndependentAerDouble {
         // against its own GPU fence. A CPU wait here serializes the eyes.
         return S_OK;
     }
+    // A discontinuity invalidates the temporal anchor, not compatible output
+    // images/provider state. Source leases retire against their exact last-use
+    // fence; existing midpoint/native-reader leases keep their output credits.
+    HRESULT reset_temporal(unsigned reason) {
+        previous.reset();
+        for(auto& channel:channels)if(channel->generator) {
+            const auto retired=channel->generator->retire_previous();
+            if(FAILED(retired)){stage=43;failure=retired;return retired;}
+        }
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+            111120,reason,channels.size(),ordinal);
+        return S_OK;
+    }
     HRESULT process(const std::shared_ptr<SessionState>& state,const std::shared_ptr<GeneratedFrameEndInfo>& endpoint,
         std::span<const ProjectionResourceMapping> mappings,std::shared_ptr<GeneratedFrameEndInfo>& midpoint) {
         midpoint.reset();
@@ -210,7 +226,9 @@ struct IndependentAerDouble {
     HRESULT process_endpoint(const std::shared_ptr<SessionState>& state,const std::shared_ptr<GeneratedFrameEndInfo>& endpoint,
         std::span<const ProjectionResourceMapping> mappings,std::shared_ptr<GeneratedFrameEndInfo>& midpoint) {
         midpoint.reset();
-        if(!endpoint->interface_stamp.aer_mixed){channels.clear();previous.reset();return S_FALSE;}
+        if(!endpoint->interface_stamp.aer_mixed) {
+            const auto retired=reset_temporal(2);return FAILED(retired)?retired:S_FALSE;
+        }
         if(!state->d3d12_device || !state->private_runtime)return E_NOTIMPL;
         if(!queue) {
             D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -235,17 +253,19 @@ struct IndependentAerDouble {
             }
             images11.push_back(std::move(image11));images.push_back(std::move(image));inputs.push_back(std::move(input));
         }
-        bool reset=channels.size()!=mappings.size() || (previous && !same_layout(*previous,current));
+        const bool layout_changed=previous&&!same_layout(*previous,current);
+        bool reset=channels.size()!=mappings.size();
         for(std::size_t i=0;!reset && i<channels.size();++i)
             reset=channels[i]->source!=mappings[i].application_swapchain || !same_extent(channels[i]->description,description(images[i],images11[i].Get())) ||
                 (!channels[i]->interop && !images[i]);
         if(reset){channels.clear();previous.reset();}
+        else if(layout_changed){const auto retired=reset_temporal(3);if(FAILED(retired))return retired;}
         if(channels.empty())for(std::size_t i=0;i<mappings.size();++i) {
             auto channel=std::make_unique<Channel>();const auto hr=initialize_channel(state,*channel,mappings[i],images[i],images11[i].Get());
             if(FAILED(hr)){channels.clear();previous.reset();return hr;}channels.push_back(std::move(channel));
         }
         const auto camera=previous?synthetic_camera_snapshot(*previous,current,.5f):std::optional<ProjectionSnapshot>{};
-        if(previous && !camera){channels.clear();previous.reset();return S_FALSE;}
+        if(previous && !camera){const auto retired=reset_temporal(4);return FAILED(retired)?retired:S_FALSE;}
         struct Timings {
             bool enabled=xrfg::bridge_flight_logger().enabled();
             std::uint64_t ordinal;std::int64_t entered=enabled?xrfg::interface_clock_ns():0;

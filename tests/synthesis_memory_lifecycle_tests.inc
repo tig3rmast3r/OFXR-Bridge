@@ -228,3 +228,66 @@ void test_synthesis_method_memory(D3D12WarpFixture& fixture) {
         "failed method replacement drained unrelated queued work or retained/advertised a previous provider");
     std::cout<<"SYNTHESIS_MEMORY Fidelity_active_bytes="<<active<<" FSR_unused_optical_bytes=0 switch_cycles=3 suspend_resume_cycles=2 failed_switch=empty PASS\n";
 }
+
+// Real FidelityFX path: retiring an anchor must permit a fresh prime using the
+// same provider allocation/state, including the packed input's SRV/UAV state.
+void test_optical_reprime_memory(D3D12WarpFixture& fixture) {
+    ComPtr<SynthesisMemoryDevice> device;device.Attach(new SynthesisMemoryDevice(fixture.device()));
+    ComPtr<QueueWithReportedDeviceAlias> queue;queue.Attach(new QueueWithReportedDeviceAlias(fixture.queue(),device.Get()));
+    auto source=create_source_texture(fixture,256,192),current=create_source_texture(fixture,256,192),synthetic=create_source_texture(fixture,256,192);
+    ID3D12Resource* sources[]{source.Get()},*real[]{current.Get()},*generated[]{synthetic.Get()};
+    auto history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+    require_hresult(history->initialize(fixture.device(),fixture.queue(),sources,D3D12_RESOURCE_STATE_RENDER_TARGET),"reprime history");
+    xrfg::D3D12FrameSynthesizer flow;
+    require_hresult(flow.initialize(device.Get(),queue.Get(),history,real,generated,kFormat,D3D12_RESOURCE_STATE_RENDER_TARGET,
+        xrfg::D3D12OpticalFlowBackend::fidelity_fx,{},false),"reprime optical engine");
+    auto views=make_reprojection_views();
+    auto capture=[&](unsigned serial){
+        upload_pattern(fixture,source.Get(),fast_control_pattern(256,192,serial,1));
+        xrfg::D3D12HistoryCaptureTicket ticket{};
+        require_hresult(history->capture(0,&ticket),"reprime capture");require_hresult(history->commit(ticket),"reprime commit");return ticket;
+    };
+    UINT64 warmed_created{},warmed_live{};
+    for(unsigned cycle=0;cycle<4;++cycle) {
+        require_hresult(flow.retire_previous(),"retire old anchor without replacing optical provider");
+        auto a=capture(cycle*2+1);xrfg::D3D12FrameSynthesisTicket prime{},pair{};
+        require_hresult(flow.submit_prime(a,views,0,&prime),"same-resource Fidelity prime");
+        require_frame_start_gate(flow,"reprime GPU completion");
+        require(prime.previous_serial==0,"prime retained a stale temporal serial");
+        require_readback_matches(fixture,current.Get(),fast_control_pattern(256,192,cycle*2+1,1),"reprime exact source pixels",D3D12_RESOURCE_STATE_RENDER_TARGET);
+        auto b=capture(cycle*2+2);
+        require_hresult(flow.submit_pair(b,views,views,0,0,&pair),"new post-gap temporal pair");
+        require_frame_start_gate(flow,"reprime pair completion");
+        require(pair.previous_serial==a.serial&&pair.current_serial==b.serial,"post-gap pair used an old source anchor");
+        // Compare visible generated pixels with a freshly initialized provider
+        // fed only this new A/B pair. Old optical history must not leak across
+        // the gap even though its allocations are retained.
+        auto control_real=create_source_texture(fixture,256,192),control_generated=create_source_texture(fixture,256,192);
+        auto control_history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+        require_hresult(control_history->initialize(fixture.device(),fixture.queue(),sources,D3D12_RESOURCE_STATE_RENDER_TARGET),"fresh comparison history");
+        ID3D12Resource* control_reals[]{control_real.Get()},*control_outputs[]{control_generated.Get()};
+        xrfg::D3D12FrameSynthesizer control;
+        require_hresult(control.initialize(fixture.device(),fixture.queue(),control_history,control_reals,control_outputs,kFormat,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,xrfg::D3D12OpticalFlowBackend::fidelity_fx,{},false),"fresh comparison provider");
+        auto control_capture=[&](unsigned serial){
+            upload_pattern(fixture,source.Get(),fast_control_pattern(256,192,serial,1));
+            xrfg::D3D12HistoryCaptureTicket ticket{};
+            require_hresult(control_history->capture(0,&ticket),"fresh comparison capture");
+            require_hresult(control_history->commit(ticket),"fresh comparison commit");return ticket;
+        };
+        xrfg::D3D12FrameSynthesisTicket control_ticket{};
+        require_hresult(control.submit_prime(control_capture(cycle*2+1),views,0,&control_ticket),"fresh comparison prime");
+        require_frame_start_gate(control,"fresh comparison prime completion");
+        require_hresult(control.submit_pair(control_capture(cycle*2+2),views,views,0,0,&control_ticket),"fresh comparison pair");
+        require_frame_start_gate(control,"fresh comparison pair completion");
+        const auto reused_pixels=readback_pattern(fixture,synthetic.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const auto cold_pixels=readback_pattern(fixture,control_generated.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+        for(unsigned eye=0;eye<2;++eye)for(unsigned y=0;y<kHeight;++y)for(unsigned x=0;x<kWidth*4;++x)
+            require(reused_pixels[eye][y*256*4+x]==cold_pixels[eye][y*256*4+x],"retained optical history differs from a fresh post-gap provider");
+        require_hresult(control.wait_for_idle(),"fresh comparison drain");
+        if(cycle==0){warmed_created=device->totals->created;warmed_live=device->totals->live;}
+        require(device->totals->created==warmed_created&&device->totals->live==warmed_live,"re-prime allocated another optical working set");
+    }
+    require_hresult(flow.wait_for_idle(),"reprime final drain");fixture.require_no_debug_errors();
+    std::cout<<"OPTICAL_REPRIME same_provider=1 new_texture_allocations=0 exact_source_pixels=PASS fresh_serials=PASS d3d12_validation=PASS\n";
+}

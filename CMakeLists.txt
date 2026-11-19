@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1027.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1028.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -3150,4 +3150,16 @@ endif()
 if(TARGET xrfg_private_openxr_runtime_tests)
     add_test(NAME xrfg_legacy_optical_clock COMMAND xrfg_private_openxr_runtime_tests legacy-optical-clock)
     set_tests_properties(xrfg_legacy_optical_clock PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
+if(XRFG_BUILD_TESTS AND TARGET xrfg_private_runtime_layer_tests)
+    foreach(kind soft-gap-d12 soft-gap-d11 soft-gap-transfer nonmixed-gap layout-gap failed-gap-owner disabled-gap-owner resized-gap-owner)
+        add_test(NAME xrfg_aer4_resource_${kind} COMMAND xrfg_private_runtime_layer_tests aer4-${kind})
+        set_tests_properties(xrfg_aer4_resource_${kind} PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    endforeach()
+endif()
+
+if(XRFG_BUILD_TESTS AND TARGET xrfg_d3d12_history_tests)
+    add_test(NAME xrfg_aer4_optical_reprime_memory COMMAND xrfg_d3d12_history_tests optical-reprime-memory)
+    set_tests_properties(xrfg_aer4_optical_reprime_memory PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 endif()

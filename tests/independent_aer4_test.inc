@@ -15,7 +15,7 @@ public:
 };
 // Exercise the shipping second stage with deliberately distinct per-eye pixels
 // and cameras. WARP substitutes only the downstream runtime and optical provider.
-static int independent_aer4_stage_test(bool native12=true,bool bgra=false,bool unmarked=false,unsigned app_mips=1,bool retain_many=false,bool hold_gpu=false,bool hold_publication=false,bool alias_owner=false,bool hold_reader=false) {
+static int independent_aer4_stage_test(bool native12=true,bool bgra=false,bool unmarked=false,unsigned app_mips=1,bool retain_many=false,bool hold_gpu=false,bool hold_publication=false,bool alias_owner=false,bool hold_reader=false,unsigned continuity_case=0) {
     xrfg_fixture::ControlProfile profile;
     independent_fixture_mode=true;
     Fixture f(native12,true,{},false,true,!native12);f.throttled=false;f.unblock();
@@ -84,13 +84,79 @@ static int independent_aer4_stage_test(bool native12=true,bool bgra=false,bool u
         return f.read_pixel(read,32,32,0,bgra?2:0);
     };
     {
-        IndependentAerDouble stage;std::shared_ptr<GeneratedFrameEndInfo> mid,held;
+        auto stage_owner=std::make_shared<IndependentAerDouble>();auto& stage=*stage_owner;
+        if(continuity_case) {
+            state->independent_pacing=true;state->menu_enabled=true;state->nvidia_options.ofr=true;
+            state->independent_aer_double=stage_owner;
+        }
+        std::shared_ptr<GeneratedFrameEndInfo> mid,held;
         std::vector<std::shared_ptr<GeneratedFrameEndInfo>> retained;
         const auto prime=stage.process(state,endpoint(1),mappings,mid);
         std::printf("AER4_STAGE prime hr=%08x stage=%u channels=%zu ordinal=%llu\n",unsigned(prime),stage.stage,stage.channels.size(),stage.ordinal);std::fflush(stdout);
         check(prime==S_FALSE && !mid,"prime cannot count a repeated frame as generation");
         if(alias_owner)for(const auto& channel:stage.channels)
             check(!channel->interop,"proven alias must retain direct shared backings instead of D11 copies");
+        if(continuity_case) {
+            ok(stage.process(state,endpoint(2),mappings,mid),"initial 4X pair before gap");
+            check(bool(mid),"initial pair exists");held=mid;mid.reset();
+            std::array<std::shared_ptr<xrfg::D3D12FrameSynthesizer>,2> generators;
+            std::array<IndependentAerDouble::Resource,2> buffers;
+            for(unsigned eye=0;eye<2;++eye){generators[eye]=stage.channels[eye]->generator;buffers[eye]=stage.channels[eye]->input;}
+            const auto old_left=pixel(*held,0),old_right=pixel(*held,1);
+            for(unsigned cycle=0;cycle<3;++cycle) {
+                const auto gap=3+cycle*3;auto missing=endpoint(gap);
+                if(continuity_case==1||continuity_case>=4) {
+                    ProjectionSnapshot snapshot;check(capture_projection_snapshot(&missing->info,&snapshot),"gap snapshot");
+                    state->previous_projection=snapshot;
+                    // This is the actual temporary native-stereo-unavailable
+                    // bypass boundary observed before each live reallocation.
+                    clear_bypassed_generation_continuity(state);
+                    check(state->independent_aer_double==stage_owner,"temporary stereo bypass destroyed the 4X resource owner");
+                } else if(continuity_case==2) {
+                    missing->interface_stamp.aer_mixed=false;
+                    check(stage.process(state,missing,mappings,mid)==S_FALSE&&!mid,"nonmixed input must bypass interpolation");
+                } else {
+                    auto changed=endpoint(gap);changed->projections[0].layer.space=reinterpret_cast<XrSpace>(10);
+                    // Recenter/reference space changes temporal compatibility,
+                    // but leave source handles, dimensions and formats intact.
+                    check(stage.process(state,changed,mappings,mid)==S_FALSE&&!mid,"space change must re-prime instead of interpolate");
+                }
+                for(unsigned eye=0;eye<2;++eye)
+                    check(stage.channels.size()==2&&stage.channels[eye]->generator==generators[eye]&&
+                        stage.channels[eye]->input==buffers[eye],"temporal gap reallocated compatible 4X channels");
+                const auto prime_n=gap+1;
+                check(stage.process(state,endpoint(prime_n),mappings,mid)==S_FALSE&&!mid,"first recovered endpoint must prime, never bridge a gap");
+                ok(stage.process(state,endpoint(prime_n+1),mappings,mid),"recovered adjacent 4X pair");
+                check(bool(mid),"4X pair recovers after gap");
+                check(std::abs(mid->projections[0].views[0].pose.position.x-(.02f*(prime_n+.5f)-.032f))<.00001f,
+                    "4X paired across the stale camera rather than the new prime");
+                check(pixel(*mid,0)<130&&pixel(*mid,1)>180,"recovered eyes crossed histories");
+                check(pixel(*held,0)==old_left&&pixel(*held,1)==old_right,"re-prime overwrote a leased pre-gap midpoint");
+                mid.reset();
+            }
+            held.reset();
+            if(continuity_case==6) {
+                auto resized=ci;resized.width=resized.height=96;
+                for(unsigned eye=0;eye<2;++eye) {
+                    xr_ok(f.transport->create_swapchain(&resized,&sources[2+eye],D3D12_RESOURCE_STATE_RENDER_TARGET,1),"resized AER4 source backing");
+                    auto chain=std::make_shared<SwapchainState>(state,resized);chain->handle=sources[2+eye];
+                    {std::scoped_lock lock(g_state_mutex);g_swapchains[chain->handle]=chain;}
+                    f.write(sources[2+eye],eye?200:60);mappings[eye].application_swapchain=sources[2+eye];
+                }
+                auto changed=endpoint(12);
+                for(unsigned eye=0;eye<2;++eye)changed->projections[0].views[eye].subImage.swapchain=sources[2+eye];
+                check(stage.process(state,changed,mappings,mid)==S_FALSE&&!mid,"resized backing must start a fresh epoch");
+                for(unsigned eye=0;eye<2;++eye)check(stage.channels[eye]->generator!=generators[eye]&&stage.channels[eye]->description.Width==96,
+                    "resource reuse retained the wrong backing dimensions");
+            }
+            if(continuity_case==4)stage.failure=E_FAIL;
+            if(continuity_case==5)state->menu_enabled=false;
+            state->generation_continuity_reset_pending=continuity_case!=4&&continuity_case!=5;
+            state->previous_projection=ProjectionSnapshot{};
+            clear_bypassed_generation_continuity(state);
+            check(!state->independent_aer_double,"structural/disabled/failed boundary must release the retained 4X owner");
+            std::printf("AER4_RESOURCE_REUSE case=%u compatible_channels=2 soft_gaps=3 stale_pairs=0 retained_pixels=PASS structural_release=PASS\n",continuity_case);
+        } else {
         if(hold_reader) {
             f.expected_views=2;
             ok(stage.process(state,endpoint(2),mappings,mid),"reader-gate midpoint");check(bool(mid),"reader-gate output exists");
@@ -211,6 +277,8 @@ static int independent_aer4_stage_test(bool native12=true,bool bgra=false,bool u
         check(stage.process(state,endpoint(13),mappings,mid)==S_FALSE && !mid,"configuration change can retry and prime the failed stage");
         ok(stage.process(state,endpoint(14),mappings,mid),"generation recovers after deliberate retry");check(bool(mid),"recovered stage creates a genuine pair");
         mid.reset();
+        }
+        state->independent_aer_double.reset();
     }
     for(auto source:sources) {
         if(!source)continue;

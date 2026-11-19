@@ -2618,6 +2618,8 @@ enum class VideoMemoryStage : std::int64_t {
     private_first_use = 10,
     // The staging textures of single-swapchain rings.
     staging = 11,
+    aer_double_begin = 12,
+    aer_double_ready = 13,
 };
 
 void log_video_memory(
@@ -3445,7 +3447,7 @@ void schedule_generation_quarantine(
     GenerationQuarantineReason reason,
     std::uint64_t detail = 0) noexcept;
 void clear_generation_continuity(
-    const std::shared_ptr<SessionState>& state) noexcept;
+    const std::shared_ptr<SessionState>& state,bool preserve_aer_resources=false) noexcept;
 void enter_generation_quarantine(
     const std::shared_ptr<SessionState>& state,
     GenerationQuarantineReason reason,
@@ -17288,14 +17290,17 @@ void schedule_generation_quarantine(
 }
 
 void clear_generation_continuity(
-    const std::shared_ptr<SessionState>& state) noexcept {
+    const std::shared_ptr<SessionState>& state,bool preserve_aer_resources) noexcept {
     // Consume only this request. A concurrent quarantine must remain pending.
-    state->generation_continuity_reset_pending.exchange(false, std::memory_order_acq_rel);
+    const bool structural=state->generation_continuity_reset_pending.exchange(false, std::memory_order_acq_rel);
     if (continuous_presenter_active(state))
         static_cast<void>(wait_for_presenter_idle(state));
-    state->independent_aer_double.reset();
+    const bool kept=preserve_aer_resources&&!structural&&state->independent_aer_double&&
+        SUCCEEDED(state->independent_aer_double->failure)&&
+        SUCCEEDED(state->independent_aer_double->reset_temporal(1));
+    if(!kept)state->independent_aer_double.reset();
     state->independent_aer_double_unavailable=false;
-    xrfg::embedded::independent_aer_double_state=0;
+    xrfg::embedded::independent_aer_double_state=kept?1:0;
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::continuity_reset,
         0,
@@ -17337,8 +17342,14 @@ void clear_generation_continuity(
 void clear_bypassed_generation_continuity(const std::shared_ptr<SessionState>& state) noexcept {
     bool has_anchor;
     { std::scoped_lock lock(state->mutex); has_anchor = state->previous_projection.has_value(); }
-    if (has_anchor || state->generation_continuity_reset_pending.load(std::memory_order_acquire))
-        clear_generation_continuity(state);
+    if (has_anchor || state->generation_continuity_reset_pending.load(std::memory_order_acquire)) {
+        // Missing native stereo/guide input is a temporal gap. Keep selected
+        // Independent AER4 resources warm; structural/stop/configuration paths
+        // still destroy them, and the next endpoint must prime a new anchor.
+        const bool keep_aer=state->independent_pacing&&state->menu_enabled&&
+            state->nvidia_options.ofr&&!state->manual_control.stop_requested();
+        clear_generation_continuity(state,keep_aer);
+    }
 }
 
 // The raw XR and post-AFW colors have different temporal anchors. Reset once
