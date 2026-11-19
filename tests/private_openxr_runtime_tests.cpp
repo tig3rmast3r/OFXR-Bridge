@@ -3,6 +3,7 @@
 #include "xrfg/interface_metrics.hpp"
 #include "xrfg/private_delivery_queue.hpp"
 #include "xrfg/d3d11_d3d12_interop.hpp"
+#include "xrfg/d3d12_history.hpp"
 #include "xrfg/owned_d11_output.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
 #include "d3d12_reported_device_alias.hpp"

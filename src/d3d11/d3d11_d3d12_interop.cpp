@@ -262,6 +262,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
     std::vector<ComPtr<ID3D11Texture2D>> current_destination_images;
     std::vector<ComPtr<ID3D11Texture2D>> synthetic_destination_images;
     std::vector<SharedImage> shared_sources;
+    bool shared_source_pending{};
     std::vector<SharedImage> shared_current_destinations;
     std::vector<SharedImage> shared_synthetic_destinations;
     std::vector<std::uint64_t> current_d3d11_access;
@@ -417,7 +418,8 @@ struct D3D11D3D12SwapchainInterop::Impl {
         std::span<ID3D11Texture2D* const> input_sources,
         std::span<ID3D11Texture2D* const> input_current_destinations,
         std::span<ID3D11Texture2D* const> input_synthetic_destinations,
-        D3D11InteropInitializationStage* failure_stage) {
+        D3D11InteropInitializationStage* failure_stage,
+        bool reuse_source_mirror) {
         if (failure_stage != nullptr) {
             *failure_stage = D3D11InteropInitializationStage::complete;
         }
@@ -545,7 +547,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
         }
 
         result = create_shared_images(
-            source_images.size(),
+            reuse_source_mirror ? 1 : source_images.size(),
             &shared_sources,
             &source_d3d12_views,
             D3D11InteropInitializationStage::source_create_d3d12,
@@ -555,6 +557,11 @@ struct D3D11D3D12SwapchainInterop::Impl {
             failure_stage);
         if (FAILED(result)) {
             return result;
+        }
+        if (reuse_source_mirror) {
+            // History keeps the logical application index even when all
+            // indices read from the same cross-API staging allocation.
+            source_d3d12_views.resize(source_images.size(), shared_sources.front().d3d12.Get());
         }
         result = create_shared_images(
             current_destination_images.size(),
@@ -638,10 +645,13 @@ struct D3D11D3D12SwapchainInterop::Impl {
     }
 
     [[nodiscard]] HRESULT prepare_capture(std::uint32_t source_index,ID3D11Texture2D* exact=nullptr) noexcept {
-        if (!enabled || source_index >= source_images.size() ||
-            source_index >= shared_sources.size()) {
+        if (!enabled || source_index >= source_images.size()) {
             return E_INVALIDARG;
         }
+        if (shared_source_pending) {
+            return HRESULT_FROM_WIN32(ERROR_BUSY);
+        }
+        const bool shared_source = shared_sources.size() < source_images.size();
         if(exact) {
             ID3D11Texture2D* images[]{exact};
             const auto valid=validate_images(d3d11_device.Get(),images,source_description,true);
@@ -658,7 +668,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
         }
         copy_mip_zero(
             d3d11_context.Get(),
-            shared_sources[source_index].d3d11.Get(),
+            shared_sources[shared_source ? 0 : source_index].d3d11.Get(),
             exact?exact:source_images[source_index].Get(),
             source_description.ArraySize,
             source_description.MipLevels,
@@ -680,6 +690,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
             enabled = false;
             return result;
         }
+        shared_source_pending = shared_source;
         return S_OK;
     }
 
@@ -699,6 +710,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
         }
         last_d3d12_access_value = value;
         last_d3d12_signal_value = value;
+        shared_source_pending = false;
         return S_OK;
     }
 
@@ -896,7 +908,8 @@ HRESULT D3D11D3D12SwapchainInterop::initialize(
     std::span<ID3D11Texture2D* const> source_images,
     std::span<ID3D11Texture2D* const> current_destination_images,
     std::span<ID3D11Texture2D* const> synthetic_destination_images,
-    D3D11InteropInitializationStage* failure_stage) noexcept {
+    D3D11InteropInitializationStage* failure_stage,
+    bool reuse_source_mirror) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ != nullptr) {
@@ -911,7 +924,8 @@ HRESULT D3D11D3D12SwapchainInterop::initialize(
             source_images,
             current_destination_images,
             synthetic_destination_images,
-            failure_stage);
+            failure_stage,
+            reuse_source_mirror);
         if (FAILED(result)) {
             return result;
         }

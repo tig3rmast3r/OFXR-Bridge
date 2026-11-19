@@ -316,8 +316,66 @@ void owned_d11_output_format_contracts() {
             unsigned(format),slices,static_cast<unsigned long long>(bytes));
     }
 }
+void shared_d11_source_capture() {
+    Fixture f(false,true,{},false,true,true);
+    ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),&f.device12,&f.queue),"shared source owner");
+    ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&f.fence)),"shared source readback fence");
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width=desc.Height=4;
+    desc.MipLevels=desc.SampleDesc.Count=1;
+    desc.ArraySize=2;
+    desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+    std::array<ComPtr<ID3D11Texture2D>,3> sources;
+    std::array<ID3D11Texture2D*,3> views{};
+    for (unsigned i=0; i<sources.size(); ++i) {
+        std::array<std::uint32_t,16> left,right;
+        left.fill(20+i);
+        right.fill(120+i);
+        const D3D11_SUBRESOURCE_DATA pixels[]{{left.data(),16,64},{right.data(),16,64}};
+        ok(f.device11->CreateTexture2D(&desc,pixels,&sources[i]),"create indexed application pixels");
+        views[i]=sources[i].Get();
+    }
+    ComPtr<ID3D11Texture2D> current,synthetic;
+    ok(f.device11->CreateTexture2D(&desc,nullptr,&current),"shared source fixture current");
+    ok(f.device11->CreateTexture2D(&desc,nullptr,&synthetic),"shared source fixture synthetic");
+    ID3D11Texture2D* currents[]{current.Get()}, *synthetics[]{synthetic.Get()};
+    xrfg::D3D11D3D12SwapchainInterop bridge;
+    ok(bridge.initialize(f.device11.Get(),f.context.Get(),f.device12.Get(),f.queue.Get(),
+        views,currents,synthetics,nullptr,true),"initialize one physical source mirror");
+    const auto mirrors=bridge.source_images();
+    check(mirrors.size()==3 && mirrors[0]==mirrors[1] && mirrors[0]==mirrors[2],
+        "logical application indices alias one source mirror");
+    xrfg::D3D12SwapchainHistory history;
+    ok(history.initialize(f.device12.Get(),f.queue.Get(),mirrors,D3D12_RESOURCE_STATE_COMMON),"shared source history");
+    ok(bridge.prepare_capture(1),"prepare a capture which history will skip");
+    check(bridge.prepare_capture(2)==HRESULT_FROM_WIN32(ERROR_BUSY),"cannot overwrite an unfinished mirror");
+    ok(bridge.finish_capture(),"release the skipped capture on the GPU timeline");
+    constexpr std::array<unsigned,3> order{2,0,1};
+    std::array<xrfg::D3D12HistoryCaptureTicket,3> captures{};
+    for (const auto index : order) {
+        ok(bridge.prepare_capture(index),"transfer an exact indexed source");
+        ok(history.capture(index,&captures[index]),"queue the immutable history copy");
+        ok(bridge.finish_capture(),"fence the mirror read before the next transfer");
+        ok(history.commit(captures[index]),"commit the indexed capture");
+        check(captures[index].source_index==index,"capture receipt lost the source image index");
+    }
+    for (const auto index : order) {
+        xrfg::D3D12HistoryConsumerLease lease{};
+        ComPtr<ID3D12Resource> captured;
+        ComPtr<ID3D12Fence> ready;
+        ok(history.acquire_consumer(captures[index],&lease,captured.GetAddressOf(),ready.GetAddressOf()),
+            "read the immutable indexed capture");
+        check(read_owned_d11_backing(f,captured.Get())==std::array<unsigned,2>{20+index,120+index},
+            "mirror reuse changed one of the captured eye images");
+        history.cancel_consumer(lease);
+    }
+    std::puts("D11 shared source: one mirror, three exact indexed stereo captures PASS");
+}
+
 void owned_d11_output_tests() {
     owned_d11_output_case(false);owned_d11_output_case(true);owned_d11_output_format_contracts();
+    shared_d11_source_capture();
 }
 
 class UnprovedOwnedOutputAlias final:public ReportedDeviceAlias {

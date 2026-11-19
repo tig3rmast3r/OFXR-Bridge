@@ -4326,7 +4326,7 @@ create_d3d11_frame_generation_swapchains(
             std::span<ID3D11Texture2D* const>(
                 synthetic.d3d11_resources.data(),
                 synthetic.d3d11_resources.size()),
-            &interop_failure_stage);
+            &interop_failure_stage, session->independent_pacing);
         if (FAILED(gpu_result)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
@@ -9160,6 +9160,7 @@ XrResult release_swapchain_image_locked(
         } else {
             xrfg::D3D12HistoryCaptureTicket ticket{};
             HRESULT capture_result = S_OK;
+            bool interop_prepared = false;
             if (d3d11_interop) {
                 const auto interop_token = xrfg::bridge_flight_logger().begin(
                     xrfg::BridgeFlightOperation::d3d11_capture,
@@ -9168,6 +9169,7 @@ XrResult release_swapchain_image_locked(
                     0);
                 capture_result =
                     d3d11_interop->prepare_capture(*candidate_index);
+                interop_prepared = SUCCEEDED(capture_result);
                 xrfg::bridge_flight_logger().end(
                     interop_token,
                     xrfg::BridgeFlightOperation::d3d11_capture,
@@ -9199,7 +9201,7 @@ XrResult release_swapchain_image_locked(
                         capture_result,handle_value(state->handle),capture_wait.waited_us,
                         (static_cast<std::uint64_t>(capture_wait.limit_us)<<32)|*candidate_index);
             }
-            if (SUCCEEDED(capture_result) && d3d11_interop) {
+            if (interop_prepared) {
                 const HRESULT finish_result = d3d11_interop->finish_capture();
                 xrfg::bridge_flight_logger().event(
                     xrfg::BridgeFlightOperation::d3d11_capture,
@@ -9207,7 +9209,7 @@ XrResult release_swapchain_image_locked(
                     handle_value(state->handle),
                     *candidate_index,
                     1);
-                capture_result = finish_result;
+                if (SUCCEEDED(capture_result)) capture_result = finish_result;
             }
             if (SUCCEEDED(capture_result)) {
                 pending_capture = ticket;

@@ -99,7 +99,8 @@ public:
         std::span<ID3D11Texture2D* const> source_images,
         std::span<ID3D11Texture2D* const> current_destination_images,
         std::span<ID3D11Texture2D* const> synthetic_destination_images,
-        D3D11InteropInitializationStage* failure_stage = nullptr) noexcept;
+        D3D11InteropInitializationStage* failure_stage = nullptr,
+        bool reuse_source_mirror = false) noexcept;
 
     [[nodiscard]] std::span<ID3D12Resource* const> source_images() const noexcept;
     [[nodiscard]] std::span<ID3D12Resource* const>
@@ -115,7 +116,8 @@ public:
 
     // Must be called while the application still owns the released source
     // image. Queues D3D11 mip-zero copies and makes the D3D12 queue wait for
-    // them before any history access.
+    // them before any history access. With a shared source mirror, finish
+    // this capture before preparing another index, even if history rejects it.
     [[nodiscard]] HRESULT prepare_capture(std::uint32_t source_index) noexcept;
 
     // Copy an exact retained endpoint into an existing source slot. This does
