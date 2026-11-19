@@ -153,13 +153,13 @@ constexpr UINT kSrvDescriptorCount = 12;
 constexpr UINT kUavDescriptorCount = 3;
 constexpr UINT kDescriptorBlockSize =
     kSrvDescriptorCount + kUavDescriptorCount;
-// The depth splat's UAV table (u0 the splat, u1/u2 null) after the eye
-// blocks: its pass must not overwrite a block's pack UAVs that the pair's
-// earlier commands still read when they execute.
+// One depth splat UAV table per eye (u0 the eye's slices, u1/u2 null).
+// Keep these after the eye blocks, whose pack UAVs are still used on the GPU.
 constexpr UINT kSplatDescriptorBase =
     kDescriptorBlockSize * kMaxReprojectionViews;
 // The still mask's likewise.
-constexpr UINT kStillMaskDescriptorBase = kSplatDescriptorBase + kUavDescriptorCount;
+constexpr UINT kStillMaskDescriptorBase =
+    kSplatDescriptorBase + kUavDescriptorCount * kMaxReprojectionViews;
 // 0.2 V546: a block for the eye-order measurement, whose t10 is the other
 // stream's vectors and u0 the verdict.
 constexpr UINT kEyeOrderDescriptorBase = kStillMaskDescriptorBase + kUavDescriptorCount;
@@ -171,8 +171,6 @@ constexpr UINT kEyeOrderVerdictBytes = 16;
 constexpr UINT kDepthSplatFlag = 32U;
 constexpr UINT kDepthSplatOutputShift = 27U;
 constexpr UINT kDepthSplatOutputMask = 3U << kDepthSplatOutputShift;
-// A splat slice per eye and synthetic output, to 4X.
-constexpr UINT kDepthSplatOutputs = 3U;
 // Hybrid's depth search, live for every synthesizer's next pair. On by
 // default, as the setting (0.2 V532's switch was off).
 std::atomic<bool> g_hybrid_depth_search{true};
@@ -980,7 +978,7 @@ struct D3D12FrameSynthesizer::Impl {
         float* depth_regions_mapped{};
         // Hybrid's depth search: the midpoint splat (0.2 V555).
         ComPtr<ID3D12Resource> depth_splat;
-        UINT depth_splat_width{}, depth_splat_height{};
+        UINT depth_splat_width{}, depth_splat_height{}, depth_splat_slices{};
         D3D12_RESOURCE_STATES depth_splat_state{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
         D3D12RamTiming<5> ram_gpu;
         UINT64 ram_source_identity{}, ram_source_serial{};
@@ -2525,8 +2523,8 @@ struct D3D12FrameSynthesizer::Impl {
             D3D12_UNORDERED_ACCESS_VIEW_DESC null_splat{};
             null_splat.Format = DXGI_FORMAT_R32_UINT;
             null_splat.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-            null_splat.Texture2DArray.ArraySize = kMaxReprojectionViews * kDepthSplatOutputs;
-            for (UINT index = 0; index < kUavDescriptorCount; ++index)
+            null_splat.Texture2DArray.ArraySize = 1;
+            for (UINT index = 0; index < kMaxReprojectionViews * kUavDescriptorCount; ++index)
                 device->CreateUnorderedAccessView(nullptr, nullptr, &null_splat,
                     offset_cpu_handle(cpu_start, kSplatDescriptorBase + index, descriptor_increment));
             null_splat.Format = DXGI_FORMAT_R8_UINT;
@@ -3547,10 +3545,12 @@ struct D3D12FrameSynthesizer::Impl {
         if (!depth_splat_clear_pipeline || !depth_splat_build_pipeline) return flags;
         struct EyeSplat {
             SynthesisParameters parameters{};
-            UINT columns{}, rows{};
+            UINT columns{}, rows{}, first_slice{};
         };
         std::array<EyeSplat, kMaxReprojectionViews> eyes{};
         std::array<bool, kMaxReprojectionViews> built{};
+        const UINT outputs = synthetic_output_count();
+        UINT slice_count = 0;
         UINT width = 0, height = 0;
         for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
             const UINT slice = resolved_array_slice(target_views[view_index], view_index,
@@ -3575,18 +3575,21 @@ struct D3D12FrameSynthesizer::Impl {
                 grid_width > 16384.0F || grid_height > 16384.0F) continue;
             splat.columns = static_cast<UINT>(std::ceil(grid_width)) + 1U;
             splat.rows = static_cast<UINT>(std::ceil(grid_height)) + 1U;
+            splat.first_slice = slice_count;
+            slice_count += outputs;
             width = std::max(width, splat.columns);
             height = std::max(height, splat.rows);
             built[eye] = true;
         }
-        if (width == 0 || height == 0) return flags;
-        if (!slot.depth_splat || slot.depth_splat_width < width || slot.depth_splat_height < height) {
+        if (slice_count == 0) return flags;
+        if (!slot.depth_splat || slot.depth_splat_width < width ||
+            slot.depth_splat_height < height || slot.depth_splat_slices != slice_count) {
             const D3D12_HEAP_PROPERTIES heap = default_heap_properties(0);
             D3D12_RESOURCE_DESC texture{};
             texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
             texture.Width = std::max(width, slot.depth_splat_width);
             texture.Height = std::max(height, slot.depth_splat_height);
-            texture.DepthOrArraySize = static_cast<UINT16>(kMaxReprojectionViews * kDepthSplatOutputs);
+            texture.DepthOrArraySize = static_cast<UINT16>(slice_count);
             texture.MipLevels = 1;
             texture.Format = DXGI_FORMAT_R32_UINT;
             texture.SampleDesc.Count = 1;
@@ -3600,6 +3603,7 @@ struct D3D12FrameSynthesizer::Impl {
             slot.depth_splat = std::move(splat);
             slot.depth_splat_width = static_cast<UINT>(texture.Width);
             slot.depth_splat_height = texture.Height;
+            slot.depth_splat_slices = texture.DepthOrArraySize;
             slot.depth_splat_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
 
@@ -3610,20 +3614,22 @@ struct D3D12FrameSynthesizer::Impl {
         eye_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
         eye_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         eye_view.Texture2DArray.MipLevels = 1;
-        eye_view.Texture2DArray.ArraySize = kDepthSplatOutputs;
+        eye_view.Texture2DArray.ArraySize = outputs;
+        D3D12_UNORDERED_ACCESS_VIEW_DESC eye_uav{};
+        eye_uav.Format = DXGI_FORMAT_R32_UINT;
+        eye_uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        eye_uav.Texture2DArray.ArraySize = outputs;
         for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
-            D3D12_SHADER_RESOURCE_VIEW_DESC view = eye_view;
-            view.Texture2DArray.FirstArraySlice = eye * kDepthSplatOutputs;
             // The draw's t9: this eye's slices, one per output, or nothing.
-            device->CreateShaderResourceView(built[eye] ? slot.depth_splat.Get() : nullptr, &view,
+            auto* resource = built[eye] ? slot.depth_splat.Get() : nullptr;
+            eye_view.Texture2DArray.FirstArraySlice = eyes[eye].first_slice;
+            device->CreateShaderResourceView(resource, &eye_view,
                 offset_cpu_handle(cpu_start, eye * kDescriptorBlockSize + 9U, descriptor_increment));
+            eye_uav.Texture2DArray.FirstArraySlice = eyes[eye].first_slice;
+            device->CreateUnorderedAccessView(resource, nullptr, &eye_uav,
+                offset_cpu_handle(cpu_start, kSplatDescriptorBase + eye * kUavDescriptorCount,
+                    descriptor_increment));
         }
-        D3D12_UNORDERED_ACCESS_VIEW_DESC array_view{};
-        array_view.Format = DXGI_FORMAT_R32_UINT;
-        array_view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-        array_view.Texture2DArray.ArraySize = kMaxReprojectionViews * kDepthSplatOutputs;
-        device->CreateUnorderedAccessView(slot.depth_splat.Get(), nullptr, &array_view,
-            offset_cpu_handle(cpu_start, kSplatDescriptorBase, descriptor_increment));
 
         dred_marker(list, "OFXR depth splat begin");
         if (slot.depth_splat_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
@@ -3634,7 +3640,6 @@ struct D3D12FrameSynthesizer::Impl {
         ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
         list->SetDescriptorHeaps(1, heaps);
         list->SetComputeRootSignature(root_signature.Get());
-        const UINT outputs = synthetic_output_count();
         // Each output's pass carries that output's fraction and index, as its
         // draws will.
         const auto bind = [&](UINT eye, UINT output) {
@@ -3646,7 +3651,8 @@ struct D3D12FrameSynthesizer::Impl {
             list->SetComputeRootDescriptorTable(0,
                 offset_gpu_handle(gpu_start, eye * kDescriptorBlockSize, descriptor_increment));
             list->SetComputeRootDescriptorTable(1,
-                offset_gpu_handle(gpu_start, kSplatDescriptorBase, descriptor_increment));
+                offset_gpu_handle(gpu_start, kSplatDescriptorBase + eye * kUavDescriptorCount,
+                    descriptor_increment));
             list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &parameters, 0);
         };
         list->SetPipelineState(depth_splat_clear_pipeline.Get());
@@ -3676,16 +3682,17 @@ struct D3D12FrameSynthesizer::Impl {
         slot.depth_splat_state = kShaderReadState;
         dred_marker(list, "OFXR depth splat complete");
         // 867, a synthesizer's first splat for an eye and whenever its grid
-        // or its outputs change: a the eye << 48 | columns << 20 | rows, b
-        // the synthetic outputs splatted.
+        // or its layout changes: a the eye << 48 | columns << 20 | rows,
+        // b the synthetic outputs splatted, c the allocated slice count.
         for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
             if (!built[eye]) continue;
             const std::uint64_t a = (static_cast<std::uint64_t>(eye) << 48U) |
                 (static_cast<std::uint64_t>(eyes[eye].columns & 0xFFFFFU) << 20U) |
                 (eyes[eye].rows & 0xFFFFFU);
-            const std::uint64_t key = (a << 2U) | outputs;
+            const std::uint64_t key = (a << 5U) | (outputs << 3U) | slot.depth_splat_slices;
             if (depth_splat_recorded[eye].exchange(key + 1U, std::memory_order_relaxed) == key + 1U) continue;
-            bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 867, a, outputs);
+            bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 867, a,
+                outputs, slot.depth_splat_slices);
         }
         return flags;
     }

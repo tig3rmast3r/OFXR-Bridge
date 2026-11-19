@@ -218,12 +218,15 @@ template <typename DepthForPixel>
 // 2X-4X, each output checked at its own instant. depth_thirds: depth's size
 // in thirds of the vectors': 2 as Ready or Not's, larger as Skyrim's.
 // forward_depth: larger is farther, as Skyrim's is.
+enum class HybridBarsLayout { stereo, single_eye, right_depth };
 double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
     xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx,
     UINT length = 256, bool vertical = false, UINT outputs = 1, UINT depth_thirds = 3,
-    bool forward_depth = false) {
+    bool forward_depth = false, HybridBarsLayout layout = HybridBarsLayout::stereo) {
     const UINT width = vertical ? 128U : length;
     const UINT height = vertical ? length : 128U;
+    const bool single_eye = layout == HybridBarsLayout::single_eye;
+    const UINT view_count = single_eye ? 1U : kEyeCount;
     // Along the motion (u) and across it (v), in image pixels.
     const auto along = [&](UINT x, UINT y) { return static_cast<int>(vertical ? y : x); };
     const auto across = [&](UINT x, UINT y) { return static_cast<int>(vertical ? x : y); };
@@ -273,13 +276,13 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
             const float nearness = bar_at(along(x, y), across(x, y), bar_motion) ? 0.5F : 0.01F;
             return forward_depth ? 1.0F - nearness : nearness;
         });
-    std::array<ComPtr<ID3D12Resource>, 2> sources{
-        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
-    std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
-        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
-    std::array<ComPtr<ID3D12Resource>, 3> synthetic_destinations{
-        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height),
-        create_source_texture(fixture, width, height)};
+    const auto make_color = [&] {
+        return single_eye ? create_single_slice_texture(fixture, width, height)
+                          : create_source_texture(fixture, width, height);
+    };
+    std::array<ComPtr<ID3D12Resource>, 2> sources{make_color(), make_color()};
+    std::array<ComPtr<ID3D12Resource>, 2> current_destinations{make_color(), make_color()};
+    std::array<ComPtr<ID3D12Resource>, 3> synthetic_destinations{make_color(), make_color(), make_color()};
     upload_pattern(fixture, sources[0].Get(), previous);
     upload_pattern(fixture, sources[1].Get(), current);
     std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
@@ -300,8 +303,8 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
         "bars synthesizer initialization failed");
     const auto guides = [&](std::uint64_t serial) {
         auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
-        set->eye_count = kEyeCount;
-        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        set->eye_count = view_count;
+        for (UINT eye = 0; eye < view_count; ++eye) {
             auto frame = std::make_shared<xrfg::DlssMotionVectorFrame>();
             frame->stream = 511 + eye;
             frame->epoch = 3;
@@ -313,7 +316,7 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
             frame->output_height = frame->motion_height = height;
             frame->motion_slice = frame->output_slice = eye;
             frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-            if (with_depth) {
+            if (with_depth && (layout != HybridBarsLayout::right_depth || eye == 1)) {
                 frame->depth = game_depth;
                 frame->depth_width = depth_field_width;
                 frame->depth_height = depth_field_height;
@@ -325,7 +328,8 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
         }
         return set;
     };
-    const ReprojectionViews views = make_reprojection_views();
+    const ReprojectionViews stereo_views = make_reprojection_views();
+    const auto views = std::span(stereo_views).first(view_count);
     xrfg::D3D12HistoryCaptureTicket capture_a{}, capture_b{};
     require(operation_succeeded(history->capture(0, &capture_a)) &&
             operation_succeeded(history->commit(capture_a)),
@@ -350,11 +354,18 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
         "bars pair failed");
     fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
     double coverage_total = 0;
+    const UINT first_eye = layout == HybridBarsLayout::right_depth ? 1U : 0U;
     for (UINT output = 0; output < outputs; ++output) {
-        const StereoPattern actual = readback_pattern(fixture, synthetic_destinations[output].Get(),
-            D3D12_RESOURCE_STATE_RENDER_TARGET);
+        StereoPattern actual;
+        if (single_eye) {
+            actual[0] = readback_single_slice(fixture, synthetic_destinations[output].Get(),
+                D3D12_RESOURCE_STATE_RENDER_TARGET);
+        } else {
+            actual = readback_pattern(fixture, synthetic_destinations[output].Get(),
+                D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
         const int shift = static_cast<int>(std::lround(bar_motion * fractions[output]));
-        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        for (UINT eye = first_eye; eye < view_count; ++eye) {
             std::size_t bar_pixels = 0, shown = 0;
             for (int v = bar_top + 4; v < bar_bottom - 4; ++v) {
                 for (int u = 0; u < static_cast<int>(length); ++u) {
@@ -380,7 +391,54 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
     }
     require(operation_succeeded(synthesizer.wait_for_idle()), "bars final drain failed");
     require(operation_succeeded(history->invalidate()), "bars history invalidate failed");
-    return coverage_total / static_cast<double>(kEyeCount * outputs);
+    return coverage_total / static_cast<double>((view_count - first_eye) * outputs);
+}
+
+void test_hybrid_depth_slices(D3D12WarpFixture& fixture) {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("ofxr-depth-slices-" + std::to_string(GetCurrentProcessId()));
+    std::filesystem::create_directories(root);
+    SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", root.c_str());
+    std::ofstream(root / "ofxr_bridge.ini") << "[diagnostics]\nlogging_enabled=1\n";
+    auto& log = xrfg::bridge_flight_logger();
+    log.initialize(root);
+    require(log.enabled(), "depth slice allocation trace unavailable");
+    xrfg::set_hybrid_depth_search(true);
+
+    struct Case { HybridBarsLayout layout; UINT outputs, eye_count, first_eye; };
+    const std::array cases{
+        Case{HybridBarsLayout::single_eye, 1, 1, 0},
+        Case{HybridBarsLayout::right_depth, 1, 1, 1},
+        Case{HybridBarsLayout::stereo, 1, 2, 0},
+        Case{HybridBarsLayout::stereo, 2, 2, 0},
+        Case{HybridBarsLayout::stereo, 3, 2, 0},
+    };
+    // The recorded a field carries eye index and the bars' 257 × 129 grid.
+    constexpr std::uint64_t grid = (257ULL << 20U) | 129ULL;
+    std::vector<std::string> expected;
+    for (const auto backend : {xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                               xrfg::D3D12OpticalFlowBackend::nvidia}) {
+        for (const auto& test : cases) {
+            require(test_hybrid_bars(fixture, true, backend, 256, false, test.outputs,
+                3, false, test.layout) >= 0.95, "compact depth splat lost the near bars");
+            for (UINT i = 0; i < test.eye_count; ++i) {
+                const auto eye_and_grid = (std::uint64_t(test.first_eye + i) << 48U) | grid;
+                expected.push_back("a=" + std::to_string(eye_and_grid) +
+                    " b=" + std::to_string(test.outputs) +
+                    " c=" + std::to_string(test.eye_count * test.outputs));
+            }
+        }
+    }
+    log.flush();
+    std::ifstream file(log.log_path());
+    std::vector<std::string> actual;
+    for (std::string line; std::getline(file, line);) {
+        if (line.find("op=embedded_configuration result=867 ") != std::string::npos)
+            actual.push_back(line.substr(line.find(" a=") + 1U));
+    }
+    require(actual == expected, "depth splat did not allocate one slice per usable eye and output");
+    log.shutdown();
+    std::cout << "Hybrid depth splat: exact 1/2/4/6 slices, sparse right eye and distinct output times PASS\n";
 }
 
 // 0.2 V559-V573: Hybrid's HUD fix. A translucent HUD over a flat world, whose

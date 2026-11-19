@@ -1002,10 +1002,12 @@ void get_copy_layouts(
     std::array<UINT, kEyeCount>* row_counts,
     std::array<UINT64, kEyeCount>* row_sizes,
     UINT64* total_size) {
+    require(description.DepthOrArraySize > 0 && description.DepthOrArraySize <= kEyeCount,
+        "test texture array size is unsupported");
     device->GetCopyableFootprints(
         &description,
         0,
-        kEyeCount,
+        description.DepthOrArraySize,
         0,
         layouts->data(),
         row_counts->data(),
@@ -1043,7 +1045,7 @@ void upload_pattern(
     auto* mapped_bytes = static_cast<std::byte*>(mapped_memory);
     const UINT width = static_cast<UINT>(description.Width);
     const UINT height = description.Height;
-    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+    for (UINT eye = 0; eye < description.DepthOrArraySize; ++eye) {
         require(row_counts[eye] == height, "unexpected upload row count");
         require(
             row_sizes[eye] == static_cast<UINT64>(width) * kBytesPerPixel,
@@ -1070,7 +1072,7 @@ void upload_pattern(
             D3D12_RESOURCE_STATE_RENDER_TARGET,
             D3D12_RESOURCE_STATE_COPY_DEST);
         command_list->ResourceBarrier(1, &to_copy_destination);
-        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        for (UINT eye = 0; eye < description.DepthOrArraySize; ++eye) {
             D3D12_TEXTURE_COPY_LOCATION source{};
             source.pResource = upload.Get();
             source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
@@ -6945,6 +6947,12 @@ int main(int argc, char** argv) {
             test_guide_composer(guides_fixture);
             guides_fixture.require_no_debug_errors();
             std::cout << "Stellar R22 resolver/composer GPU checks passed\n";
+            return 0;
+        }
+        if (argc>1 && std::string_view(argv[1])=="hybrid-depth-slices") {
+            D3D12WarpFixture hybrid_fixture(true);
+            test_hybrid_depth_slices(hybrid_fixture);
+            hybrid_fixture.require_no_debug_errors();
             return 0;
         }
         if (argc>1 && std::string_view(argv[1])=="hybrid") {

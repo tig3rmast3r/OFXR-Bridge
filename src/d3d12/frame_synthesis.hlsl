@@ -27,7 +27,7 @@ ByteAddressBuffer GameDepthRegion : register(t11);
 Texture2DArray<uint> StillMask : register(t10);
 RWTexture2D<float4> PackedColor : register(u0);
 #ifdef XRFG_DEPTH_SPLAT
-// The pass that writes the splat, every eye's and output's slice.
+// The pass that writes the splat, with one slice per output of the bound eye.
 RWTexture2DArray<uint> DepthSplatOut : register(u0);
 #endif
 #ifdef XRFG_STILL_MASK
@@ -1871,15 +1871,14 @@ float4 ReprojectGeneratedWithLateHudPS(FullscreenVertex input) : SV_Target {
 // search's solve converges to - on the 2 x 2 texels around that point, so no
 // gap opens between neighbours; the nearest by the game's depth keeps a
 // contested texel. The composition reads one word per pixel. Slice = the
-// eye; a slice per synthetic output, to 4X.
-static const uint kDepthSplatOutputs = 3u;
+// guide eye; the UAV exposes only that eye's slices.
 
 [numthreads(8, 8, 1)]
 void ClearDepthSplat(uint3 id : SV_DispatchThreadID) {
     hybrid_layout = true;
     float2 limit = ceil(depth_splat_extent());
     if (float(id.x) <= limit.x && float(id.y) <= limit.y) {
-        DepthSplatOut[uint3(id.xy, kDepthSplatOutputs * Slice + depth_splat_output())] = 0u;
+        DepthSplatOut[uint3(id.xy, depth_splat_output())] = 0u;
     }
 }
 
@@ -1905,7 +1904,7 @@ void BuildDepthSplat(uint3 id : SV_DispatchThreadID) {
     float2 at = (midpoint - output_rect.xy + 0.5) * per_pixel;
     int2 limit = int2(ceil(extent));
     int2 base = int2(floor(at - 0.5));
-    uint slice = kDepthSplatOutputs * Slice + depth_splat_output();
+    uint slice = depth_splat_output();
     [unroll] for (uint corner = 0; corner < 4; ++corner) {
         int2 texel = base + int2(corner & 1u, corner >> 1);
         if (all(texel >= 0) && all(texel <= limit)) {
