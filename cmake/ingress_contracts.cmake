@@ -42,3 +42,15 @@ if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
     add_dependencies(xrfg_three_slot_director_tests xrfg_kcd_engine_dispatch_fixture)
     add_test(NAME xrfg_kcd_engine_dispatch COMMAND xrfg_three_slot_director_tests kcd-engine-dispatch "$<TARGET_FILE:xrfg_kcd_engine_dispatch_fixture>")
 endif()
+
+if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
+    foreach(kind memory retention ownership activation)
+    add_test(NAME xrfg_native_vulkan_resize_${kind} COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXE=$<TARGET_FILE:xrfg_three_slot_director_tests>"
+        "-DLUKE_FIXTURE=$<TARGET_FILE:xrfg_luke_runtime_fixture>"
+        "-DDESTINATION=${CMAKE_BINARY_DIR}/native-vulkan-resize-${kind}"
+        "-DGAME_EXE=RDR2.exe" "-DTEST_MODE=native-vulkan-resize-${kind}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_vulkan_bootstrap.cmake")
+    set_tests_properties(xrfg_native_vulkan_resize_${kind} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 RUN_SERIAL TRUE)
+    endforeach()
+endif()

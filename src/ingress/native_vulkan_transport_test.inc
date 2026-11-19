@@ -844,7 +844,7 @@ struct TransportProbe {
 // overwritten in place by the wrapper before the typed call; its private SR
 // output is then overwritten/copy-backed after that call has returned.
 struct PublicGuideGpuProbe {
-    static constexpr unsigned ow=512,oh=32;
+    unsigned ow=512,oh=32;
     struct Image {VkImage image{};VkImageView view{};VkDeviceMemory memory{};
         NVSDK_NGX_Resource_VK resource{};VkImageLayout layout{VK_IMAGE_LAYOUT_UNDEFINED};};
     TransportProbe& hardware;std::array<Image,5> images;VkFormat depth_format;
@@ -945,7 +945,7 @@ struct PublicGuideGpuProbe {
         // Integer-byte centers avoid half-way UNORM rounding assumptions.
         self.clear(4,command,{40.F/255.F,51.F/255.F,63.F/255.F,1});self.barrier(self.images[4],command,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         self.barrier(self.images[output],command,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        VkImageCopy region{};region.srcSubresource=region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.extent={ow,oh,1};
+        VkImageCopy region{};region.srcSubresource=region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.extent={self.ow,self.oh,1};
         hardware_copy(self,command,region);
         self.barrier(self.images[4],command,VK_IMAGE_LAYOUT_GENERAL);self.barrier(self.images[output],command,VK_IMAGE_LAYOUT_GENERAL);
         return result;
@@ -1143,7 +1143,7 @@ struct PublicGuideGpuProbe {
         require_transport(tested_native_output_copyback_pixels-copyback_pixels_before==kLukeOriginWidth*kLukeOriginHeight,
             "active AFW native copyback still transfers the full output instead of exact marker pixels");
         void* bytes{};require_transport(hardware.raw<PFN_vkMapMemory>("vkMapMemory")(hardware.native_device,readback.memory,0,ow*oh*4,0,&bytes),"map final original public Vulkan color");
-        std::uint32_t token{};std::array<float,ow> row{};
+        std::uint32_t token{};std::vector<float> row(ow);
         for(unsigned y=0;y<oh;++y){for(unsigned x=0;x<ow;++x)row[x]=luke_origin_luma(static_cast<const std::byte*>(bytes)+(y*ow+x)*4,DXGI_FORMAT_R8G8B8A8_UNORM);
             const auto decoded=decode_luke_origin_row(row);require_transport(!decoded.ambiguous,"final original public color token ambiguous");if(decoded.token){require_transport(!token||token==decoded.token,"final public output contains competing tokens");token=decoded.token;}}
         const std::array<unsigned char,4> composite{40,51,63,255};
@@ -1180,7 +1180,32 @@ struct PublicGuideGpuProbe {
         --prepared->pending_callbacks;
         require_transport(hardware.observed<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(hardware.command,0),"retire exact completed public original recording");
     }
-    void verify(){setup();
+    void resize_output(unsigned width,unsigned height) {
+        // run() proves both native/D12 completion and resets the original
+        // command buffer before old application images are destroyed.
+        for(unsigned role:{unsigned(output),4U}) {
+            auto& image=images[role];
+            hardware.raw<PFN_vkDestroyImageView>("vkDestroyImageView")(hardware.native_device,image.view,nullptr);
+            hardware.cached_image_destroy(hardware.native_device,image.image,nullptr);
+            hardware.raw<PFN_vkFreeMemory>("vkFreeMemory")(hardware.native_device,image.memory,nullptr);image={};
+        }
+        hardware.raw<PFN_vkDestroyBuffer>("vkDestroyBuffer")(hardware.native_device,readback.buffer,nullptr);
+        hardware.raw<PFN_vkFreeMemory>("vkFreeMemory")(hardware.native_device,readback.memory,nullptr);
+        ow=width;oh=height;
+        make(output,VK_FORMAT_R8G8B8A8_UNORM,ow,oh);make(4,VK_FORMAT_R8G8B8A8_UNORM,ow,oh);
+        const auto saved=hardware.byte_count;hardware.byte_count=ow*oh*4;
+        readback=hardware.host_buffer(VK_BUFFER_USAGE_TRANSFER_DST_BIT);hardware.byte_count=saved;
+        auto& feature=hooks().features[native_handle];feature.out_width=ow;feature.out_height=oh;
+        configure_luke_color_origin_extent(ow,oh);
+    }
+    UINT64 transport_bytes() const {
+        UINT64 bytes{};
+        for(const auto& entry:hardware.device->slots)for(const auto& surface:entry->surfaces)
+            for(auto* resource:{surface.buffer.Get(),surface.texture.Get(),surface.packed_depth.Get()})
+                if(resource){const auto desc=resource->GetDesc();bytes+=hardware.device->owner->GetResourceAllocationInfo(0,1,&desc).SizeInBytes;}
+        return bytes;
+    }
+    void verify(unsigned memory_trial=0){setup();
         if(depth_format==VK_FORMAT_D24_UNORM_S8_UINT)verify_d24_words();
         // The regular transport may already own a completed matching RG16
         // slot (Indiana). Isolate its pool so the cold rollback is genuinely
@@ -1189,6 +1214,72 @@ struct PublicGuideGpuProbe {
         hardware.device->slots.insert(hardware.device->slots.end(),previous_slots.begin(),previous_slots.end());
         run(1);run(2);run(3,true);run(3,false,true);run(4);run(5);
         require_transport(native_calls==5&&public_calls==7,"public transaction duplicated original calls or compacted actual production");
+        if(memory_trial) {
+            // The earlier role probe keeps a diagnostic Slot reference for its
+            // own cleanup. Release that test-only owner now: it must not pin a
+            // completed large transport during the return-to-small assertion.
+            hardware.captured=std::make_shared<Slot>();
+            const auto cold_slots=hardware.device->slots.size(),cold_bytes=transport_bytes();
+            if(memory_trial==4) {
+                // Force a completed burst through the production allocator,
+                // then run real publications until its high-water backing is
+                // cold. No synthetic byte counter or separate pool model.
+                SlotShape burst_shape{};
+                for(unsigned role=0;role<role_count;++role)burst_shape[role]=&images[role].resource.Resource.ImageViewInfo;
+                std::vector<std::shared_ptr<Slot>> burst;
+                for(auto& entry:hardware.device->slots){++entry->pending_callbacks;burst.push_back(entry);}
+                for(unsigned n=0;n<6;++n) {
+                    auto entry=slot(*hardware.device,burst_shape);require_transport(bool(entry),"allocate bounded activation burst");
+                    for(unsigned role=0;role<role_count;++role)
+                        require_transport(surface(*hardware.device,entry->surfaces[role],*burst_shape[role],Role(role)),"actual activation burst backing");
+                    ++entry->pending_callbacks;burst.push_back(entry);
+                }
+                const auto burst_bytes=transport_bytes();
+                for(auto& entry:burst)--entry->pending_callbacks;
+                burst.clear();
+                for(unsigned serial=20;serial<150;++serial)run(serial);
+                const auto settled=transport_bytes();
+                std::cout<<"VULKAN_ACTIVATION_MEMORY cold_bytes="<<cold_bytes<<" burst_bytes="<<burst_bytes<<" settled_bytes="<<settled<<std::endl;
+                require_transport(burst_bytes>cold_bytes&&settled<=cold_bytes,
+                    "completed activation burst backing remains at its high-water allocation");
+            }
+            // Exercise the actual selector against each independent ownership
+            // boundary. A different requested shape cannot release these bytes.
+            if(memory_trial==3) {
+            auto protected_slot=prepared;
+            const auto old_image=protected_slot->surfaces[output].texture.Get();
+            auto different=protected_slot->surfaces[output].source;different.Width=768;different.Height=48;
+            SlotShape different_shape{};different_shape[output]=&different;
+            const auto retained=[&] {
+                auto other=slot(*hardware.device,different_shape);
+                require_transport(other&&other!=protected_slot&&protected_slot->surfaces[output].texture.Get()==old_image,
+                    "resize released native transport before its exact recording/readers retired");
+            };
+            ++protected_slot->pending_callbacks;retained();--protected_slot->pending_callbacks;
+            ++protected_slot->final_value;retained();--protected_slot->final_value;
+            ++protected_slot->d12_value;retained();--protected_slot->d12_value;
+            ++protected_slot->recording_leases;retained();--protected_slot->recording_leases;
+            protected_slot.reset();
+            }
+            resize_output(768,48);
+            for(unsigned serial=6;serial<=(memory_trial==1?11U:8U);++serial)run(serial);
+            const auto large_slots=hardware.device->slots.size(),large_bytes=transport_bytes();
+            // A completed incompatible first slot must not create a new full
+            // transport set on EVERY subsequent publication at the same size.
+            std::cout<<"VULKAN_RESIZE_GROWTH cold_slots="<<cold_slots<<" large_slots="<<large_slots
+                <<" cold_bytes="<<cold_bytes<<" large_bytes="<<large_bytes<<std::endl;
+            if(memory_trial==1)require_transport(large_slots<=cold_slots+2,"resize repeatedly allocated incompatible transport slots");
+            resize_output(512,32);
+            for(unsigned serial=12;serial<=14;++serial)run(serial);
+            const auto settled_bytes=transport_bytes();
+            std::cout<<"VULKAN_RESIZE_RETURN settled_bytes="<<settled_bytes<<std::endl;
+            for(const auto& entry:hardware.device->slots)if(entry!=hardware.captured)
+                require_transport(!entry->surfaces[output].texture||entry->surfaces[output].source.Width==512,
+                    "completed large output transport survives return to small resolution");
+            require_transport(settled_bytes<=cold_bytes,"resized transport memory did not return to cold small-resolution allocation");
+            std::cout<<"VULKAN_RESIZE_MEMORY cold_slots="<<cold_slots<<" large_slots="<<large_slots
+                <<" cold_bytes="<<cold_bytes<<" large_bytes="<<large_bytes<<" settled_bytes="<<settled_bytes<<" PASS\n";
+        }
         if(hardware.debug)for(UINT64 index=0;index<hardware.debug->GetNumStoredMessages();++index) {
             SIZE_T bytes{};hardware.debug->GetMessage(index,nullptr,&bytes);std::vector<unsigned char> storage(bytes);
             auto* message=reinterpret_cast<D3D12_MESSAGE*>(storage.data());
@@ -1213,7 +1304,7 @@ struct PublicGuideGpuProbe {
     }
 };
 }
-int run_buffer_transport_test(bool bootstrap) {
+int run_buffer_transport_test(bool bootstrap,unsigned memory_trial) {
     // A failed GPU proof retains resources until process exit instead of
     // destroying possibly submitted external resources or waiting forever.
     try {
@@ -1225,11 +1316,11 @@ int run_buffer_transport_test(bool bootstrap) {
             ~LoaderLifetime(){if(module)FreeLibrary(module);}
         } loader_lifetime;
         if(!loader_lifetime.module)throw TransportSkip("Vulkan loader unavailable");
-        verify_image_entry_contract();for(unsigned variant=0;variant<4;++variant) {
+        verify_image_entry_contract();for(unsigned variant=0;variant<(memory_trial?1U:4U);++variant) {
             const auto role=variant==1?color:variant==2?output:motion;
             auto* probe=new TransportProbe;probe->bootstrap=bootstrap;probe->capture_role=role;probe->rgba_motion=variant==3;
             probe->setup();probe->verify();if(bootstrap&&variant==0)for(auto format:{VK_FORMAT_D32_SFLOAT,VK_FORMAT_D24_UNORM_S8_UINT}) {
-                PublicGuideGpuProbe transaction(*probe,format);transaction.verify();
+                PublicGuideGpuProbe transaction(*probe,format);transaction.verify(memory_trial);
             }
             probe->cleanup();delete probe;
             std::cout<<"Native Vulkan exact GPU role="<<role<<" format="<<(variant==3?"RGBA16":role==motion?"RG16":"R11G11B10")

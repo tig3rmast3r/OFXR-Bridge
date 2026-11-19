@@ -446,6 +446,11 @@ HRESULT snapshot_resource(
             nullptr,
             IID_PPV_ARGS(resource.GetAddressOf()));
         if (FAILED(result)) return result;
+        if(bridge_flight_logger().enabled()||bridge_flight_logger().ram_enabled()) {
+            const auto bytes=allocation_device->GetResourceAllocationInfo(0,1,&description).SizeInBytes;
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,description.Format,1364,
+                (std::uint64_t(description.Width)<<32)|description.Height,bytes);
+        }
         std::shared_ptr<const DlssSnapshotAllocation> allocation;
         try { allocation=std::make_shared<const DlssSnapshotAllocation>(resource.Get(),allocation_device.Get()); }
         catch(...) {return E_OUTOFMEMORY;}

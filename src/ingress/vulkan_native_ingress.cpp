@@ -68,6 +68,7 @@ struct Slot {
     VkBuffer marker_upload{};VkDeviceMemory marker_memory{};void* marker_pixels{};
     std::uint64_t value{},final_value{},d12_value{};
     unsigned pending_callbacks{},submitted_phases{},recording_leases{};
+    std::uint64_t last_reservation{};
     std::shared_ptr<RecordingReceipt> current_recording;
     bool current_recording_leased{};
     std::array<bool,role_count> native_before{};
@@ -100,6 +101,7 @@ struct Device {
     bool native_alive{true};
     bool owner_active{true};
     bool production_submitted{};
+    std::uint64_t reservations{};
 };
 struct RecordingLease {
     std::shared_ptr<Device> device;std::shared_ptr<Slot> slot;
@@ -396,7 +398,17 @@ void destroy_marker_upload(Device& d,Slot& s) {
     if(s.marker_memory)if(auto fn=api<PFN_vkFreeMemory>(d,"vkFreeMemory"))fn(d.binding.device,s.marker_memory,nullptr);
     s.marker_upload={};s.marker_memory={};s.marker_pixels=nullptr;
 }
+std::uint64_t surface_allocation_bytes(Device& d,const Surface& surface) {
+    std::uint64_t bytes{};if(!d.owner)return bytes;
+    for(auto* resource:{surface.buffer.Get(),surface.texture.Get(),surface.packed_depth.Get()})
+        if(resource){const auto desc=resource->GetDesc();const auto size=d.owner->GetResourceAllocationInfo(0,1,&desc).SizeInBytes;
+            if(size!=UINT64_MAX)bytes+=size;}
+    return bytes;
+}
 void destroy_surface(Device& d,Surface& s) {
+    if((s.buffer||s.texture)&&(bridge_flight_logger().enabled()||bridge_flight_logger().ram_enabled()))
+        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,0,1363,
+            reinterpret_cast<std::uint64_t>(s.texture.Get()),surface_allocation_bytes(d,s));
     if(s.imported)if(auto fn=api<PFN_vkDestroyBuffer>(d,"vkDestroyBuffer"))fn(d.binding.device,s.imported,nullptr);
     if(s.memory)if(auto fn=api<PFN_vkFreeMemory>(d,"vkFreeMemory"))fn(d.binding.device,s.memory,nullptr);
     s={};
@@ -607,7 +619,11 @@ HRESULT surface(Device& d,Surface& target,const NVSDK_NGX_ImageViewInfo_VK& sour
     if(allocated!=VK_SUCCESS)return failed(8,DXGI_ERROR_UNSUPPORTED,allocated);
     const auto bound=bind(d.binding.device,s.imported,s.memory,0);
     if(bound!=VK_SUCCESS)return failed(9,DXGI_ERROR_UNSUPPORTED,bound);
-    s.source=source;destroy_surface(d,target);target=std::move(s);cleanup.kept=true;return S_OK;
+    s.source=source;destroy_surface(d,target);target=std::move(s);cleanup.kept=true;
+    if(bridge_flight_logger().enabled()||bridge_flight_logger().ram_enabled())
+        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,role,1362,
+            (std::uint64_t(source.Width)<<32)|source.Height,surface_allocation_bytes(d,target));
+    return S_OK;
 }
 HRESULT initialize_slot(Device& d,Slot& slot) {
     struct Cleanup{Device& device;Slot& slot;bool kept{};~Cleanup(){
@@ -631,15 +647,53 @@ HRESULT initialize_slot(Device& d,Slot& slot) {
         if(SUCCEEDED(result))result=slot.lists[n]->Close();if(FAILED(result))return result;
     }cleanup.kept=true;return S_OK;
 }
-std::shared_ptr<Slot> slot(Device& d) {
-    // Native copyback, not only the D3D12 work, must retire before reuse.
-    // Completed slots with matching resources may be reset; in-flight slots
-    // remain process-pinned even when an abandoned app buffer never submits.
-    for(const auto& s:d.slots)if(s->complete())return s;
-    if(d.slots.size()>=14)return {};
-    auto s=std::make_shared<Slot>();if(FAILED(initialize_slot(d,*s)))return {};
-    d.slots.push_back(s);return s;
+using SlotShape=std::array<const NVSDK_NGX_ImageViewInfo_VK*,role_count>;
+bool matching_surface(const Surface& surface,const NVSDK_NGX_ImageViewInfo_VK& image) {
+    return !surface.texture || (surface.source.Width==image.Width&&surface.source.Height==image.Height&&surface.source.Format==image.Format);
 }
+bool matching_slot(const Slot& slot,const SlotShape& shape) {
+    for(unsigned role=0;role<role_count;++role)
+        if(shape[role]&&!matching_surface(slot.surfaces[role],*shape[role]))return false;
+    return true;
+}
+void release_slot_surfaces(Device& d,Slot& slot) {
+    for(auto& surface:slot.surfaces)destroy_surface(d,surface);
+    destroy_surface(d,slot.diagnostic_late_depth);destroy_surface(d,slot.diagnostic_native_color);
+    slot.native_before={};slot.diagnostic_late_depth_before=false;slot.diagnostic_native_color_before=false;
+}
+std::shared_ptr<Slot> slot(Device& d,const SlotShape& shape={}) {
+    ++d.reservations;
+    // Resizing must search for a compatible completed set, rather than take
+    // the first completed (old-size) set and grow again on every publication.
+    // Submitted buffers may remain executable. Preserve their resources until
+    // the original recording leases have also been released/reset.
+    const bool shaped=std::any_of(shape.begin(),shape.end(),[](auto* image){return image!=nullptr;});
+    for(const auto& candidate:d.slots) {
+        if(!shaped||!candidate->complete()||candidate->recording_leases)continue;
+        const bool obsolete=!matching_slot(*candidate,shape);
+        const bool cold=d.reservations-candidate->last_reservation>=120;
+        if(obsolete||cold)release_slot_surfaces(d,*candidate);
+    }
+    // Prefer the fullest matching backing, then the most recently used set.
+    // A partial slot from another capture must not warm a second full set
+    // while an already complete compatible set is available later in the pool.
+    const std::shared_ptr<Slot>* selected{};unsigned selected_backing{};
+    for(const auto& candidate:d.slots) {
+        if(!candidate->complete()||!matching_slot(*candidate,shape))continue;
+        unsigned backing{};for(unsigned role=0;role<role_count;++role)
+            if((!shaped||shape[role])&&candidate->surfaces[role].texture)++backing;
+        if(!selected||backing>selected_backing||(backing==selected_backing&&candidate->last_reservation>(*selected)->last_reservation)) {
+            selected=&candidate;selected_backing=backing;
+        }
+    }
+    if(selected){(*selected)->last_reservation=d.reservations;return *selected;}
+    if(d.slots.size()>=14)return {};
+    auto created=std::make_shared<Slot>();if(FAILED(initialize_slot(d,*created)))return {};
+    created->last_reservation=d.reservations;d.slots.push_back(created);
+    bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,0,1361,d.slots.size(),d.reservations);
+    return created;
+}
+
 VkImageAspectFlags transport_aspects(VkFormat format,VkImageAspectFlags declared,Role role,bool copy_plane) {
     if(role!=depth)return declared;
     // NGX can describe a genuine depth image with a default COLOR range.
@@ -1046,16 +1100,8 @@ std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
         const auto needed=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|(r==output?VK_IMAGE_USAGE_TRANSFER_DST_BIT:0);
         if((receipt.allocation.usage&needed)!=needed)return fail(7,(std::uint64_t(r)<<32)|receipt.allocation.usage);
     }
-    std::scoped_lock lock(d->mutex);auto s=slot(*d);if(!s)return fail(8,d->slots.size());
-    // A slot cannot change shape after any copy references it. Preserve the
-    // old pool and allocate another exact slot when public images resize.
-    for(auto r:{motion,depth,output}) {
-        const auto& image=capture->parameters->images[r].resolved.Resource.ImageViewInfo;
-        const auto& target=s->surfaces[r];
-        if(target.texture&&(target.source.Width!=image.Width||target.source.Height!=image.Height||target.source.Format!=image.Format)) {
-            if(d->slots.size()>=14)return fail(9,d->slots.size());s=std::make_shared<Slot>();if(FAILED(initialize_slot(*d,*s)))return fail(10);d->slots.push_back(s);break;
-        }
-    }
+    SlotShape shape{};for(auto role:{motion,depth,output})shape[role]=&capture->parameters->images[role].resolved.Resource.ImageViewInfo;
+    std::scoped_lock lock(d->mutex);auto s=slot(*d,shape);if(!s)return fail(8,d->slots.size());
     for(auto r:{motion,depth,output}) {
         const auto& image=capture->parameters->images[r].resolved.Resource.ImageViewInfo;auto& target=s->surfaces[r];
         if(!target.buffer&&FAILED(surface(*d,target,image,r)))return fail(11,r);target.source=image;
@@ -1311,7 +1357,8 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         }
         if(!supported){ingress_reason(5,r);return raw();}
     }
-    auto s=original_capture?original_capture->slot:slot(*d);if(!s){ingress_reason(6);return raw();}
+    SlotShape shape{};for(unsigned role=0;role<role_count;++role)shape[role]=&resources[role]->Resource.ImageViewInfo;
+    auto s=original_capture?original_capture->slot:slot(*d,shape);if(!s){ingress_reason(6);return raw();}
     if(!original_capture){s->submitted_phases=0;
         for(unsigned role=0;role<role_count;++role)s->native_before[role]=s->surfaces[role].native_used;
         s->diagnostic_late_depth_before=s->diagnostic_late_depth.native_used;
@@ -1321,11 +1368,7 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         if(target.texture&&(target.source.Width!=image.Width||target.source.Height!=image.Height||target.source.Format!=image.Format)) {
             if(original_capture){if(r!=color){PublicFeatureInvocationScope::refuse_child();return raw();}
                 destroy_surface(*d,target);continue;}
-            // Reallocation only after both APIs retired. Keep abandoned/in-flight
-            // resources process-pinned; their fences are the recovery boundary.
-            if(d->slots.size()>=14)return raw();
-            auto replacement=std::make_shared<Slot>();if(FAILED(initialize_slot(*d,*replacement)))return raw();
-            d->slots.push_back(replacement);s=replacement;break;
+            return raw(); // slot() must have selected an exact compatible shape
         }
     }
     for(unsigned r=0;r<role_count;++r){auto& target=s->surfaces[r];const auto& image=resources[r]->Resource.ImageViewInfo;
