@@ -117,6 +117,69 @@ void test_history_memory_lifecycle(D3D12WarpFixture& fixture) {
         <<" cycles=4 unused=0 disabled=0 exact_stereo=PASS producer_consumer_fences=PASS\n";
 }
 
+// Exercise actual WARP copies with counted texture allocations and exact
+// CPU/GPU ownership, rather than a separate model of the slot policy.
+void test_adaptive_history_memory(D3D12WarpFixture& fixture) {
+    ComPtr<SynthesisMemoryDevice> device;device.Attach(new SynthesisMemoryDevice(fixture.device()));
+    ComPtr<QueueWithReportedDeviceAlias> queue;
+    queue.Attach(new QueueWithReportedDeviceAlias(fixture.queue(),device.Get()));
+    auto source=create_source_texture(fixture,256,192);
+    const auto pattern=fast_control_pattern(256,192,31,1);
+    upload_pattern(fixture,source.Get(),pattern);
+    ID3D12Resource* sources[]{source.Get()};
+    xrfg::D3D12SwapchainHistory history;
+    require_hresult(history.initialize(device.Get(),queue.Get(),sources,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,12),"adaptive initialize");
+    const auto desc=source->GetDesc();
+    const auto one=fixture.device()->GetResourceAllocationInfo(0,1,&desc).SizeInBytes;
+    auto capture=[&] {
+        xrfg::D3D12HistoryCaptureTicket ticket{};
+        require_hresult(history.capture(0,&ticket),"adaptive capture");
+        require_hresult(history.commit(ticket),"adaptive commit");
+        // CPU completion of the producer alone; wait_for_idle rejects pins.
+        xrfg::D3D12HistoryConsumerLease lease{};ComPtr<ID3D12Resource> color;ComPtr<ID3D12Fence> producer;
+        require_hresult(history.acquire_consumer(ticket,&lease,&color,&producer),"adaptive read");
+        require_hresult(producer->SetEventOnCompletion(ticket.fence_value,nullptr),"adaptive copy completion");
+        history.cancel_consumer(lease);
+        return ticket;
+    };
+    xrfg::D3D12HistoryCaptureTicket latest{};
+    for(unsigned i=0;i<150;++i) latest=capture();
+    const auto previous=latest;
+    latest=capture();
+    require_hresult(history.pin_capture(previous),"retain immediately previous temporal capture");
+    history.unpin_capture(previous);
+    require(device->totals->created==3 && device->totals->live==3*one,"steady history allocated beyond three snapshots");
+    std::vector<xrfg::D3D12HistoryCaptureTicket> pins;
+    for(unsigned i=0;i<12;++i) {
+        if(i) latest=capture();
+        require_hresult(history.pin_capture(latest),"adaptive pin");pins.push_back(latest);
+    }
+    require(device->totals->live==12*one,"burst did not retain full capacity");
+    xrfg::D3D12HistoryCaptureTicket refused{};
+    require(history.capture(0,&refused)==HRESULT_FROM_WIN32(ERROR_BUSY),"all pinned history was overwritten");
+    for(auto ticket:pins) history.unpin_capture(ticket);
+    // Submitted reader on an overflow slot must survive compaction and trim.
+    xrfg::D3D12HistoryConsumerLease lease{};ComPtr<ID3D12Resource> color;ComPtr<ID3D12Fence> producer,consumer;
+    require_hresult(history.acquire_consumer(pins.back(),&lease,&color,&producer),"overflow lease");
+    require_readback_matches(fixture,color.Get(),pattern,"burst history pixels",D3D12_RESOURCE_STATE_COMMON);
+    require_hresult(fixture.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&consumer)),"overflow fence");
+    color.Reset();producer.Reset();
+    for(unsigned i=0;i<150;++i) latest=capture();
+    const auto leased_live=device->totals->live.load();
+    require_hresult(history.retire_consumer(lease,consumer.Get(),1),"overflow retire");
+    color.Reset();producer.Reset();
+    for(unsigned i=0;i<150;++i) latest=capture();
+    const auto fenced_live=device->totals->live.load();
+    require_hresult(consumer->Signal(1),"overflow completion");latest=capture();
+    require(leased_live==4*one,"trim released an active CPU lease or retained idle overflow");
+    require(fenced_live==4*one,"trim released an unfinished GPU reader or retained idle overflow");
+    require(device->totals->live==3*one,"completed overflow was not retired");
+    require(FAILED(history.pin_capture(pins.back())),"retired ticket still resolves");
+    require_hresult(history.release_snapshots(),"adaptive shutdown");
+    require(device->totals->live==0,"adaptive shutdown leaked textures");
+    std::cout<<"ADAPTIVE_HISTORY steady=3 burst=12 retired=3 pinned_busy=PASS exact_reader_fence=PASS\n";
+}
+
 void test_synthesis_method_memory(D3D12WarpFixture& fixture) {
     ComPtr<SynthesisMemoryDevice> device;device.Attach(new SynthesisMemoryDevice(fixture.device()));
     ComPtr<QueueWithReportedDeviceAlias> queue;

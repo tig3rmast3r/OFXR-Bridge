@@ -66,6 +66,8 @@ public:
         // D3D11 interop mirrors use COMMON at both API ownership boundaries.
         D3D12_RESOURCE_STATES release_state,
         D3D12HistoryInitializationStage* failure_stage = nullptr,
+        // Expanded rings reuse completed backing before growing, retaining
+        // the latest two captures. Cold overflow retires after 120 captures.
         unsigned slot_count=kSlotCount) noexcept;
 
     // Queues the source-to-history copy and returns after signaling its fence;

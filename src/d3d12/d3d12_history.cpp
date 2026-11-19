@@ -499,6 +499,45 @@ struct D3D12SwapchainHistory::Impl {
             return E_FAIL;
         }
 
+        // Expanded Independent history keeps the ordinary three-image temporal
+        // window, but grows only when existing backing is still owned. Never
+        // overwrite the latest two captures: consumers may acquire them later.
+        if (slots.size() > kSlotCount) {
+            const auto recent = [&](const HistorySlot& candidate) {
+                return candidate.valid && candidate.ticket.serial < next_serial &&
+                    next_serial - candidate.ticket.serial <= 2;
+            };
+            // A burst slot must stay cold for 120 captures before retirement.
+            // No waits here, and no release unless both exact fences completed.
+            for (unsigned i = kSlotCount; i < slots.size(); ++i) {
+                auto& candidate = slots[i];
+                if (!candidate.resource || recent(candidate) ||
+                    next_serial - candidate.ticket.serial < 120) continue;
+                const auto status = prepare_slot_for_capture(candidate);
+                if (status == S_OK) candidate = {};
+                else if (status != HRESULT_FROM_WIN32(ERROR_BUSY)) return status;
+            }
+            unsigned selected = static_cast<unsigned>(slots.size());
+            // Prefer allocated backing, then grow. Low indices compact the
+            // working set again once a burst's leases and GPU work retire.
+            for (unsigned pass = 0; pass < 2 && selected == slots.size(); ++pass) {
+                for (unsigned i = 0; i < slots.size(); ++i) {
+                    auto& candidate = slots[i];
+                    if (recent(candidate) || bool(candidate.resource) != (pass == 0)) continue;
+                    const auto status = prepare_slot_for_capture(candidate);
+                    if (status == S_OK) { selected = i; break; }
+                    if (status != HRESULT_FROM_WIN32(ERROR_BUSY)) return status;
+                }
+            }
+            if (selected == slots.size()) {
+                // At capacity retain the existing bounded-wait/fail-open path,
+                // targeting the oldest capture rather than a temporal neighbour.
+                selected = 0;
+                for (unsigned i = 1; i < slots.size(); ++i)
+                    if (slots[i].ticket.serial < slots[selected].ticket.serial) selected = i;
+            }
+            next_slot = selected;
+        }
         HistorySlot& slot = slots[next_slot];
         HRESULT result = prepare_slot_for_capture(slot);
         if (result == HRESULT_FROM_WIN32(ERROR_BUSY) && wait && wait->limit_us) {

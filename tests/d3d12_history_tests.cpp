@@ -6875,6 +6875,11 @@ int main(int argc, char** argv) {
         if(argc>1 && std::string_view(argv[1])=="optical-reprime-memory") {
             D3D12WarpFixture fixture;test_optical_reprime_memory(fixture);return 0;
         }
+        if(argc>1 && std::string_view(argv[1])=="adaptive-history") {
+            D3D12WarpFixture fixture;
+            test_adaptive_history_memory(fixture);
+            return 0;
+        }
         if(argc>1 && std::string_view(argv[1])=="memory-lifecycle") {
             D3D12WarpFixture fixture;
             std::cout<<"MEMORY_TEST history begin"<<std::endl;

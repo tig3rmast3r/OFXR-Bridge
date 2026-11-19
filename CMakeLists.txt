@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1029.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1030.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2055,6 +2055,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_dependencies(xrfg_luke_depth_gpu_tests xrfg_implicit_layer xrfg_d3d12_history)
         add_test(NAME xrfg_luke_depth_gpu COMMAND xrfg_luke_depth_gpu_tests)
         add_executable(xrfg_d3d12_history_tests tests/d3d12_history_tests.cpp)
+        add_test(NAME xrfg_adaptive_history_memory COMMAND xrfg_d3d12_history_tests adaptive-history)
+        set_tests_properties(xrfg_adaptive_history_memory PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         add_test(NAME xrfg_synthesis_memory_lifecycle COMMAND xrfg_d3d12_history_tests memory-lifecycle)
         set_tests_properties(xrfg_synthesis_memory_lifecycle PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         add_executable(xrfg_dlss_snapshot_lifetime_tests tests/dlss_snapshot_lifetime_tests.cpp)
