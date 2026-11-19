@@ -100,7 +100,51 @@ static int independent_aer4_stage_test(bool native12=true,bool bgra=false,bool u
                 "each eye must start with three allocated outputs");
         if(alias_owner)for(const auto& channel:stage.channels)
             check(!channel->interop,"proven alias must retain direct shared backings instead of D11 copies");
-        if(continuity_case) {
+        if(continuity_case==7) {
+            dispatch->destroy_swapchain=+[](XrSwapchain handle){
+                return current->transport->destroy_swapchain(handle);
+            };
+            const auto source=find_swapchain(sources[0]);
+            source->frame_generation=std::make_shared<FrameGenerationSwapchainState>();
+            auto& primary=source->frame_generation->current[0].handle;
+            xr_ok(f.transport->create_swapchain(&ci,&primary,D3D12_RESOURCE_STATE_COMMON,1),"primary output allocation");
+            const auto primary_handle=primary;
+            source->projection_history_needed=true;
+
+            ok(stage.process(state,endpoint(2),mappings,mid),"disarm reader midpoint");
+            check(bool(mid),"disarm reader output");
+            const auto generated=mid->projections[0].views[0].subImage.swapchain;
+            stage_owner.reset(); // the session is the only owner of the output bank
+            std::promise<void> reader_entered, release_reader;
+            auto entered=reader_entered.get_future();auto released=release_reader.get_future().share();
+            f.expected_views=2;
+            f.preparation_callback=[&](std::uint64_t){reader_entered.set_value();released.wait();};
+            f.begin_virtual();
+            const auto submitted=f.transport->end_frame(&mid->info);
+            mid.reset();
+            if(XR_FAILED(submitted) || entered.wait_for(std::chrono::seconds(2))!=std::future_status::ready) {
+                release_reader.set_value();
+                throw std::runtime_error("private reader did not enter before Disarm");
+            }
+            auto retiring=std::async(std::launch::async,[&]{return retire_disarmed_generation(state);});
+            const auto reader_protected=retiring.wait_for(std::chrono::milliseconds(100))==std::future_status::timeout;
+            release_reader.set_value();
+            check(retiring.get() && reader_protected,"Disarm must retire generation only after the native read");
+            f.preparation_callback={};
+            unsigned count{};
+            check(f.transport->enumerate_images(primary_handle,0,&count,nullptr)==XR_ERROR_HANDLE_INVALID,
+                "Disarm must release primary outputs");
+            check(f.transport->enumerate_images(generated,0,&count,nullptr)==XR_ERROR_HANDLE_INVALID,
+                "Disarm must release second-stage outputs");
+            check(!source->frame_generation && !source->projection_history_needed && !state->independent_aer_double,
+                "Disarm must clear temporal ownership");
+            for(const auto original:sources)if(original)
+                xr_ok(f.transport->enumerate_images(original,0,&count,nullptr),"original swapchain survives Disarm");
+            auto raw=endpoint(3);
+            f.begin_virtual();
+            xr_ok(f.transport->end_frame(&raw->info),"raw stereo survives Disarm");
+            xr_ok(f.transport->drain(),"retire raw frame after Disarm");
+        } else if(continuity_case) {
             ok(stage.process(state,endpoint(2),mappings,mid),"initial 4X pair before gap");
             check(bool(mid),"initial pair exists");held=mid;mid.reset();
             std::array<std::shared_ptr<xrfg::D3D12FrameSynthesizer>,2> generators;

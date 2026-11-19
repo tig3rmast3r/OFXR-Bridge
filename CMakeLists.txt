@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1032.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1033.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1626,6 +1626,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_independent_aer4 COMMAND xrfg_private_runtime_layer_tests independent-aer-4x-fidelity)
         add_test(NAME xrfg_aer4_native_reader COMMAND xrfg_private_runtime_layer_tests aer4-stage-native-reader)
         add_test(NAME xrfg_aer4_native_reader_d11 COMMAND xrfg_private_runtime_layer_tests aer4-stage-d11-native-reader)
+        add_test(NAME xrfg_aer4_disarm_retirement COMMAND xrfg_private_runtime_layer_tests aer4-disarm-retirement)
+        set_tests_properties(xrfg_aer4_disarm_retirement PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         set_tests_properties(xrfg_aer4_native_reader xrfg_aer4_native_reader_d11 PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         add_test(NAME xrfg_independent_aer4_stage COMMAND xrfg_private_runtime_layer_tests aer4-stage)
         add_test(NAME xrfg_independent_aer4_stage_d11 COMMAND xrfg_private_runtime_layer_tests aer4-stage-d11)

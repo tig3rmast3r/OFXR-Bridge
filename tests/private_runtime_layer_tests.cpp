@@ -645,6 +645,7 @@ int main(int argc,char** argv) {
     if(route=="aer4-soft-gap-transfer")return independent_aer4_stage_test(false,false,true,1,false,false,false,false,false,1);
     if(route=="aer4-nonmixed-gap")return independent_aer4_stage_test(true,false,false,1,false,false,false,false,false,2);
     if(route=="aer4-layout-gap")return independent_aer4_stage_test(true,false,false,1,false,false,false,false,false,3);
+    if(route=="aer4-disarm-retirement")return independent_aer4_stage_test(false,false,false,1,false,false,false,false,false,7);
     if(route=="aer4-stage")return independent_aer4_stage_test();
     if(route=="aer4-stage-d11")return independent_aer4_stage_test(false);
     if(route=="aer4-stage-d11-bgra")return independent_aer4_stage_test(false,true);

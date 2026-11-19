@@ -865,6 +865,7 @@ struct SessionState {
     std::atomic<bool> menu_enabled{true};
     std::atomic<bool> generation_steady_state_established{false};
     bool manual_stop_applied{}; // frame_call_mutex; terminal for this XrSession.
+    bool manual_stop_resources_retired{};
     std::atomic<std::int64_t> interface_begun_ns{};
     std::atomic<std::uint64_t> interface_serial{};
     std::atomic<std::uint64_t> app_image_releases{}; // names Luke scenes while reconstruction is off
@@ -3007,6 +3008,10 @@ bool early_source_capture(const SwapchainState& chain) noexcept {
     return native || luke;
 }
 
+bool session_has_independent_guide_consumer(const SessionState& state) noexcept {
+    return xrfg::neural_rendering::status().enabled || state.uevr_osr_active.load(std::memory_order_acquire);
+}
+
 void configure_session_guide_capture(const SessionState& state) {
     // Plain Luke OFXR consumes the released XR colour. With AFW off it must
     // not depend on a successful SR capture, colour barcode or native camera.
@@ -3017,9 +3022,9 @@ void configure_session_guide_capture(const SessionState& state) {
         !state.hybrid_requested && selected_afw_mode() == 0;
     const bool outputs_needed=(!state.pressure_resources_active.load(std::memory_order_acquire) && temporal_generation_requested()) ||
         (state.luke_afw_enabled && selected_afw_mode()!=0);
-    const bool enabled=xrfg::neural_rendering::status().enabled ||
-        state.uevr_osr_active.load(std::memory_order_acquire) ||
-        (outputs_needed && !raw_luke_ofxr && state.dlss_motion_vectors && (!state.luke_fresh_only ||
+    const bool enabled=session_has_independent_guide_consumer(state) ||
+        (!state.manual_control.stop_requested() && outputs_needed && !raw_luke_ofxr &&
+         state.dlss_motion_vectors && (!state.luke_fresh_only ||
             (!state.afw_only && temporal_generation_requested()) || selected_afw_mode()!=0));
     if(!enabled)
         xrfg::configure_dlss_motion_vector_tracking(false);
@@ -3457,7 +3462,7 @@ void enter_generation_quarantine(
     XrTime time,
     XrDuration duration) noexcept;
 
-void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept {
+HRESULT drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept {
     const auto flight_token = xrfg::bridge_flight_logger().begin(
         xrfg::BridgeFlightOperation::gpu_drain,
         state && state->session ? handle_value(state->session->handle) : 0);
@@ -3474,7 +3479,8 @@ void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept 
         if (generation && generation->afw_source_synthesizer)
             result = generation->afw_source_synthesizer->wait_for_idle();
         if (generation && generation->afw_temporal_synthesizer) {
-            result = generation->afw_temporal_synthesizer->wait_for_idle();
+            const auto temporal_result = generation->afw_temporal_synthesizer->wait_for_idle();
+            if (SUCCEEDED(result)) result = temporal_result;
         }
         if (generation && generation->synthesizer) {
             const HRESULT source_result =
@@ -3520,11 +3526,13 @@ void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept 
             flight_token,
             xrfg::BridgeFlightOperation::gpu_drain,
             result);
+        return result;
     } catch (...) {
         xrfg::bridge_flight_logger().end(
             flight_token,
             xrfg::BridgeFlightOperation::gpu_drain,
             E_FAIL);
+        return E_FAIL;
     }
 }
 
@@ -4522,7 +4530,8 @@ void refresh_native_generation_capacity(SessionState& state) noexcept {
 // The original SR/RR list submission supplies it later. Called under
 // frame_call_mutex only between application frames, before private allocation.
 void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) noexcept {
-    if(!session || !session->luke_afw_enabled || session->graphics_binding!=SessionGraphicsBinding::d3d11 ||
+    if(!session || session->manual_control.stop_requested() || !session->luke_afw_enabled ||
+        session->graphics_binding!=SessionGraphicsBinding::d3d11 ||
         session->application_frame_in_progress)return;
     const bool native_ready=(session->graphics_binding_capabilities&8ULL)!=0;
     const bool afw_needed=selected_afw_mode()!=0;
@@ -4678,6 +4687,50 @@ bool release_pressure_generation_resources(const std::shared_ptr<SessionState>& 
         chain->generation_refusal=SwapchainEligibilityReason::awaiting_projection_use;
     }
     return released;
+}
+
+// Manual disarm is terminal for this session. The existing application and
+// bridge swapchains remain the owners of the raw frames presented afterward.
+bool retire_disarmed_generation(const std::shared_ptr<SessionState>& state) {
+    if (XR_FAILED(wait_for_synthesis_handoff(state))) return false;
+    if (state->private_runtime && XR_FAILED(state->private_runtime->drain())) return false;
+    clear_generation_continuity(state);
+    {
+        std::scoped_lock lock(state->presenter_mutex);
+        state->presenter_last_frame.reset();
+    }
+    state->aer_native_guide_cache.reset();
+    state->panel_generated.clear();
+    {
+        std::scoped_lock lock(state->luke_guide_mutex);
+        state->luke_afw_last_pair.reset();
+        state->luke_frame_motion_vectors.reset();
+    }
+    {
+        std::scoped_lock lock(state->gpu_mutex);
+        state->luke_afw.reset();
+        state->luke_context_failed_queue = nullptr;
+    }
+    bool retired = true;
+    for (const auto& chain : find_swapchains(state)) {
+        std::scoped_lock call_lock(chain->call_mutex);
+        std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
+        {
+            std::scoped_lock lock(chain->mutex);
+            chain->last_released_capture.reset();
+            chain->last_released_motion_vectors.reset();
+            chain->projection_history_needed.store(false,std::memory_order_release);
+            history = chain->d3d12_history;
+        }
+        chain->generation_eligible_pending = false;
+        if (FAILED(drain_swapchain_gpu(chain)) || (history && FAILED(history->release_snapshots()))) {
+            retired = false;
+            continue;
+        }
+        destroy_frame_generation_swapchains(chain);
+    }
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    return retired;
 }
 
 void log_rife_memory_refusal(const std::shared_ptr<SessionState>& session,HRESULT failure) noexcept {
@@ -17912,6 +17965,7 @@ HRESULT recover_rife_memory(const std::shared_ptr<SessionState>& state) {
 HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
                                bool force_startup_rendezvous = false,
                                const XrFrameEndInfo* current = nullptr) {
+    if (state->manual_control.stop_requested()) return S_OK;
     const auto recovery=recover_rife_memory(state);if(FAILED(recovery))return recovery;
     auto control = xrfg::embedded::snapshot();
     control.desired=effective_session_settings(*state,control.desired);
@@ -19104,6 +19158,27 @@ XrResult layer_end_frame_impl(
     const auto pipeline_result=poll_djules_pipeline(state);
     if(XR_FAILED(pipeline_result)) return pipeline_result;
 
+    // A duplicate source can bypass the rest of EndFrame below. Retire the
+    // old generation owners even when the game is holding the same image.
+    const bool manually_disarmed = state->manual_control.stop_requested();
+    if (manually_disarmed && !state->manual_stop_applied) {
+        configure_session_guide_capture(*state);
+        if (!session_has_independent_guide_consumer(*state)) {
+            if (state->luke_vulkan_device)
+                xrfg::native_vulkan::stop_owner(state->luke_vulkan_device);
+            if (state->vulkan_binding.device && state->vulkan_binding.device != state->luke_vulkan_device)
+                xrfg::native_vulkan::stop_owner(state->vulkan_binding.device);
+        }
+        state->manual_stop_applied = true;
+        state->presenter_restore_after_bypass=false;
+        if (state->fps_overlay) state->fps_overlay->suspend();
+    }
+    if (manually_disarmed && !state->manual_stop_resources_retired &&
+        XR_SUCCEEDED(enter_presenter_exclusive())) {
+        state->manual_stop_resources_retired = retire_disarmed_generation(state);
+        if (presenter_content_lock.owns_lock()) presenter_content_lock.unlock();
+    }
+
     // Only the synchronous AFW->XR Off path supplies startup observations.
     // The guard covers validation/bypass/failed-prepare early returns without
     // treating an async director handoff as a physically completed frame.
@@ -19210,24 +19285,10 @@ XrResult layer_end_frame_impl(
         }
     }
     if(!xrfg::diagnostic_ring_enabled)capture_application_metadata(state,end_info);
-    const bool manually_disarmed = state->manual_control.stop_requested();
     const bool presenter_route_mismatch = use_continuous_presenter &&
         (three_slot_generation_session(state) != state->three_slot_director ||
          fsr_two_slot_session(state) != state->fsr_two_slot_presenter ||
          queued_nvidia_session(state) != state->queued_nvidia_presenter);
-    if (manually_disarmed && !state->manual_stop_applied) {
-        // The existing queue has been drained before taking the content lock.
-        // Do not unload hooks/resources, cancel submitted GPU work, or hand
-        // overlapping frame calls to a different owner mid-cycle.
-        clear_generation_continuity(state);
-        {
-            std::scoped_lock presenter_lock(state->presenter_mutex);
-            state->presenter_last_frame.reset();
-        }
-        state->manual_stop_applied = true;
-        state->presenter_restore_after_bypass=false;
-        if (state->fps_overlay) state->fps_overlay->suspend();
-    }
     if (!manually_disarmed) {
         retire_unused_composition_outputs(state,end_info);
         if (state->fps_overlay) {

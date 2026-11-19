@@ -1102,7 +1102,9 @@ std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
         if((receipt.allocation.usage&needed)!=needed)return fail(7,(std::uint64_t(r)<<32)|receipt.allocation.usage);
     }
     SlotShape shape{};for(auto role:{motion,depth,output})shape[role]=&capture->parameters->images[role].resolved.Resource.ImageViewInfo;
-    std::scoped_lock lock(d->mutex);auto s=slot(*d,shape);if(!s)return fail(8,d->slots.size());
+    std::scoped_lock lock(d->mutex);
+    if(!d->owner_active)return {};
+    auto s=slot(*d,shape);if(!s)return fail(8,d->slots.size());
     for(auto r:{motion,depth,output}) {
         const auto& image=capture->parameters->images[r].resolved.Resource.ImageViewInfo;auto& target=s->surfaces[r];
         // RDR2's native marker needs the exact VkImage receipt, not a color mirror.
@@ -1280,6 +1282,7 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         if(NVSDK_NGX_SUCCEED(guides->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,&original_flags))&&original_flags!=f.flags) {
             PublicFeatureInvocationScope::refuse_child();return raw();}}
     if(!d||!d->owner||!d->queue){ingress_reason(2);return raw();}std::unique_lock lock(d->mutex);
+    if(!d->owner_active){lock.unlock();return raw();}
     std::array<const char*,role_count> names{NVSDK_NGX_Parameter_Color,NVSDK_NGX_Parameter_MotionVectors,NVSDK_NGX_Parameter_Depth,NVSDK_NGX_Parameter_Output};
     std::array<ImageReceipt,role_count> receipts{};
     std::array<const NVSDK_NGX_Resource_VK*,role_count> resources{};
