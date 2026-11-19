@@ -40,6 +40,9 @@ constexpr std::size_t kSnapshotSlotCount = 16;
 // arrive 5-6 publications behind production. Retention is not a pacing delay;
 // snapshots remain immutable and CPU/GPU readers still prevent slot reuse.
 constexpr std::size_t kLukeOriginHistoryCount = kSnapshotSlotCount - 2;
+// A delayed color can be six publications behind the latest guide and still
+// needs its two preceding guides. Keep that entire window before growing.
+constexpr std::uint64_t kRdr2RecentGuideCount = 9;
 constexpr std::uint64_t kGuideOverflowIdlePublications = 120;
 constexpr D3D12_RESOURCE_STATES kSnapshotReadState =
     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
@@ -152,7 +155,8 @@ bool writer_complete(const SnapshotSlot& slot) noexcept {
 // that publication forever. On pressure, forget only a registry-owned old key
 // whose two snapshots have completed and have no CPU/GPU reader. Recent stream
 // anchors and externally resolved frames remain pinned by their own ownership.
-bool reclaim_luke_history_snapshot(StreamState& stream) noexcept {
+template <typename Eligible>
+bool reclaim_luke_history_snapshot(StreamState& stream, Eligible eligible) noexcept {
     const auto available=[](const auto& slots,const auto& retention) {
         if(!retention || retention.use_count()!=2 || !retention->reusable())return false;
         return std::any_of(slots.begin(),slots.end(),[&](const auto& slot) {
@@ -162,7 +166,8 @@ bool reclaim_luke_history_snapshot(StreamState& stream) noexcept {
     for(auto it=stream.luke_origin_history.begin();it!=stream.luke_origin_history.end();++it) {
         const auto& frame=*it;
         if(frame.use_count()!=1 || !available(stream.snapshots,frame->motion_retention) ||
-            (frame->depth && !available(stream.depth_snapshots,frame->depth_retention)))continue;
+            (frame->depth && !available(stream.depth_snapshots,frame->depth_retention)) ||
+            !eligible(*frame))continue;
         static std::atomic_uint64_t deadline{};
         const auto now=GetTickCount64();auto before=deadline.load(std::memory_order_relaxed);
         if(now>=before && deadline.compare_exchange_strong(before,now+1000,std::memory_order_relaxed))
@@ -172,6 +177,10 @@ bool reclaim_luke_history_snapshot(StreamState& stream) noexcept {
         return true;
     }
     return false;
+}
+
+bool reclaim_luke_history_snapshot(StreamState& stream) noexcept {
+    return reclaim_luke_history_snapshot(stream, [](const DlssMotionVectorFrame&) { return true; });
 }
 
 void clear_frame_history(StreamState& stream) noexcept {
@@ -373,7 +382,8 @@ HRESULT snapshot_resource(
     std::size_t retained_capacity = SnapshotCount,
     bool dlss_float_motion = false,
     std::shared_ptr<const DlssSnapshotAllocation>* bound_allocation = nullptr,
-    std::uint64_t adaptive_publication = 0) noexcept {
+    std::uint64_t adaptive_publication = 0,
+    StreamState* adaptive_history = nullptr) noexcept {
     if (source == nullptr || producer_command_list == nullptr ||
         producer_queue == nullptr || snapshot == nullptr) return E_POINTER;
     snapshot->Reset();
@@ -429,6 +439,10 @@ HRESULT snapshot_resource(
         return writer_complete(slot) &&
             (!slot.retention || (slot.retention.use_count() == 1 && slot.retention->reusable()));
     };
+    const auto compatible = [&](const SnapshotSlot& slot) {
+        return slot.resource && matching_description(slot.description, description) &&
+            same_identity(slot.allocation_device.Get(), allocation_device.Get());
+    };
     if (adaptive_publication) {
         // Reuse matching backing before warming further slots. Pending copies,
         // resolved colors, and submitted readers still own their exact images.
@@ -440,10 +454,26 @@ HRESULT snapshot_resource(
                 slot = {};
                 continue;
             }
-            if (selected == capacity && slot.resource &&
-                matching_description(slot.description, description) &&
-                same_identity(slot.allocation_device.Get(), allocation_device.Get())) selected = index;
+            if (selected == capacity && compatible(slot)) selected = index;
         }
+    }
+    if (selected == capacity && adaptive_history) {
+        reclaim_luke_history_snapshot(*adaptive_history, [&](const DlssMotionVectorFrame& frame) {
+            if (frame.epoch != adaptive_history->epoch || frame.serial > adaptive_history->serial ||
+                adaptive_history->serial - frame.serial < kRdr2RecentGuideCount) return false;
+            // Reclaim only if it exposes backing of the requested shape and
+            // device. An incompatible texture wouldn't prevent an allocation.
+            for (std::size_t index = 0; index < capacity; ++index) {
+                const auto& slot = snapshots[index];
+                if (slot.retention &&
+                    (slot.retention == frame.motion_retention || slot.retention == frame.depth_retention) &&
+                    compatible(slot)) {
+                    selected = index;
+                    return true;
+                }
+            }
+            return false;
+        });
     }
     for (std::size_t offset = 0; selected == capacity && offset < capacity; ++offset) {
         const auto index = (next_snapshot + offset) % capacity;
@@ -458,8 +488,7 @@ HRESULT snapshot_resource(
         catch (...) { return E_OUTOFMEMORY; }
     }
     SnapshotSlot& slot = snapshots[selected];
-    if (!slot.resource || !matching_description(slot.description, description) ||
-        !same_identity(slot.allocation_device.Get(), allocation_device.Get())) {
+    if (!compatible(slot)) {
         D3D12_HEAP_PROPERTIES properties{};
         properties.Type = D3D12_HEAP_TYPE_DEFAULT;
         properties.CreationNodeMask = 1;
@@ -718,13 +747,15 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         const bool retain_snapshots=publication.protect_snapshot_lifetime || publication.direct_output_receipt;
         const std::size_t retained_capacity=publication.direct_output_receipt ? 6 : kSnapshotSlotCount;
         const auto adaptive_publication = publication.raw_motion_variable_interval ? state.next_publication : 0;
+        auto* adaptive_history = adaptive_publication && publication.protect_snapshot_lifetime ? &stream : nullptr;
         const auto snapshot_motion=[&] { return snapshot_resource(stream.snapshots, stream.next_snapshot,
                 publication.motion_vectors, publication.resource_state,
                 publication.producer_command_list, publication.producer_queue,
                 publication.verified_producer_device,
                 &motion_snapshot, kSnapshotReadState,
                 retain_snapshots ? &motion_retention : nullptr,
-                &motion_snapshot_device,retained_capacity,publication.dlss_float_motion,&motion_allocation,adaptive_publication); };
+                &motion_snapshot_device,retained_capacity,publication.dlss_float_motion,&motion_allocation,
+                adaptive_publication,adaptive_history); };
         HRESULT snapshot_result=snapshot_motion();
         while(snapshot_result==HRESULT_FROM_WIN32(ERROR_BUSY) && publication.protect_snapshot_lifetime &&
             reclaim_luke_history_snapshot(stream))snapshot_result=snapshot_motion();
@@ -745,7 +776,8 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
                     publication.producer_queue,
                     publication.verified_producer_device, &depth_snapshot, kSnapshotReadState,
                     retain_snapshots ? &depth_retention : nullptr,
-                    &depth_snapshot_device,retained_capacity,false,&depth_allocation,adaptive_publication); };
+                    &depth_snapshot_device,retained_capacity,false,&depth_allocation,
+                    adaptive_publication,adaptive_history); };
             snapshot_result=snapshot_depth();
             while(snapshot_result==HRESULT_FROM_WIN32(ERROR_BUSY) && publication.protect_snapshot_lifetime &&
                 reclaim_luke_history_snapshot(stream))snapshot_result=snapshot_depth();

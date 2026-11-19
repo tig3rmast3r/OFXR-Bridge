@@ -181,6 +181,26 @@ void disable(){xrfg::configure_dlss_motion_vector_tracking(false);xrfg::retire_d
 void rdr2_guide_pool(Fixture& fixture) {
     begin_tracking();
     const auto counts=std::make_shared<Counts>();
+    {
+        std::vector<std::uint32_t> tokens;
+        for (unsigned i=0; i<36; ++i) {
+            auto recording=fixture.publish(41010,counts,true,nullptr,true,true);
+            tokens.push_back(recording.frame->color_origin_token);
+            fixture.submit(recording);
+            fixture.wait();
+            if (i>=8) {
+                const auto delayed=xrfg::resolve_luke_guide_token(tokens[i-6],fixture.queue.Get(),fixture.device.Get());
+                require(delayed && delayed->previous_opposite_guide &&
+                    delayed->previous_opposite_guide->color_origin_token==tokens[i-7] &&
+                    delayed->previous_same_guide && delayed->previous_same_guide->color_origin_token==tokens[i-8],
+                    "six-publication delay lost its exact predecessor guides");
+            }
+        }
+        require(counts->live==20,"unconsumed RDR2 lookup grew instead of reusing compatible completed pairs");
+        disable();
+        require(!counts->live,"unconsumed guide backing survived retirement");
+        begin_tracking();
+    }
     std::vector<std::uint32_t> tokens;
     std::shared_ptr<const xrfg::DlssMotionVectorFrame> held;
     for(unsigned i=0;i<180;++i) {
