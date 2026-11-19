@@ -1244,7 +1244,10 @@ struct PublicGuideGpuProbe {
                 "a recoverable camera miss rebuilt the compatible guide snapshots");
         if(hdr) {
             const bool diagnostic=diagnostic_ring_enabled.load();
+            const auto& input_mirror=prepared->surfaces[color];
             const auto& mirror=prepared->surfaces[output];
+            require_transport(!input_mirror.buffer&&!input_mirror.texture&&!input_mirror.imported&&!input_mirror.memory,
+                "guide and output-diagnostic paths allocated an unused input-color mirror");
             if(inspect_pair)require_transport(frame&&bool(frame->output)==diagnostic,
                 "guide token exposed the wrong HDR color ownership");
             if(serial<=5)require_transport(!mirror.buffer&&!mirror.texture&&!mirror.imported&&!mirror.memory,

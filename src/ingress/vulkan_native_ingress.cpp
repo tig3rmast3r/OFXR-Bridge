@@ -1163,6 +1163,13 @@ std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
         if(pending>=kRdr2ProvisionalSlots)return capture;
     }
     auto s=slot(*d,shape);if(!s)return fail(8,d->slots.size());
+    // A preceding neural capture can leave input-color backing in this slot.
+    // Retire it before the new recording takes a lease, after earlier
+    // recordings and both transport fences have released the slot.
+    if (rdr2_camera_process() && s->surfaces[color].buffer && !s->recording_leases &&
+        !neural_rendering::status().enabled) {
+        destroy_surface(*d,s->surfaces[color]);
+    }
     for(auto r:{motion,depth,output}) {
         const auto& image=capture->parameters->images[r].resolved.Resource.ImageViewInfo;auto& target=s->surfaces[r];
         // RDR2's native marker needs the exact VkImage receipt, not a color mirror.
@@ -1443,8 +1450,11 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
     const auto nr=neural_rendering::status();const bool pre_nr=nr.enabled&&nr.before_sr;
     const bool lazy_public_output=original_capture&&rdr2_camera_process();
     for(unsigned r=0;r<role_count;++r){auto& target=s->surfaces[r];const auto& image=resources[r]->Resource.ImageViewInfo;
+        // The original evaluation still owns its Vulkan input color. An
+        // OFXR mirror is only needed when neural rendering can consume it.
+        const bool defer_color=lazy_public_output&&r==color&&!nr.enabled;
         const bool defer_output=lazy_public_output&&r==output&&!pre_nr;
-        if(!defer_output&&!target.buffer&&FAILED(surface(*d,target,image,static_cast<Role>(r))))return raw();
+        if(!defer_color&&!defer_output&&!target.buffer&&FAILED(surface(*d,target,image,static_cast<Role>(r))))return raw();
         target.source=image;}
     g.output=s->surfaces[output].texture.Get();g.motion_vectors=s->surfaces[motion].texture.Get();g.depth=s->surfaces[depth].texture.Get();
     g.resource_state=g.depth_resource_state=g.output_resource_state=D3D12_RESOURCE_STATE_COMMON;
