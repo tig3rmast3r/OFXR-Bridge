@@ -6,6 +6,7 @@
 #include <sstream>
 #include <nvsdk_ngx_helpers_vk.h>
 #include "xrfg/luke_motion_format.hpp"
+#include "xrfg/diagnostic_ring_sink.hpp"
 #include "xrfg/native_ingress/streamline1/sl1.h"
 #include <filesystem>
 
@@ -848,6 +849,7 @@ struct PublicGuideGpuProbe {
     struct Image {VkImage image{};VkImageView view{};VkDeviceMemory memory{};
         NVSDK_NGX_Resource_VK resource{};VkImageLayout layout{VK_IMAGE_LAYOUT_UNDEFINED};};
     TransportProbe& hardware;std::array<Image,5> images;VkFormat depth_format;
+    bool hdr{};
     OriginalParameters parameters{nullptr,{}};
     HostBuffer readback;HMODULE streamline{};
     decltype(&sl1::slSetConstants) set_constants{};decltype(&sl1::slEvaluateFeature) evaluate_sl{};
@@ -858,7 +860,21 @@ struct PublicGuideGpuProbe {
     bool no_child{},reset_before_child{};unsigned native_calls{},public_calls{};std::uint64_t before_publication{};
     Evaluate saved_native{};bool saved_typed{};
     inline static PublicGuideGpuProbe* current{};
-    explicit PublicGuideGpuProbe(TransportProbe& probe,VkFormat format=VK_FORMAT_D32_SFLOAT):hardware(probe),depth_format(format){}
+    explicit PublicGuideGpuProbe(TransportProbe& probe,VkFormat format=VK_FORMAT_D32_SFLOAT,bool hdr_output=false)
+        :hardware(probe),depth_format(format),hdr(hdr_output){}
+    VkFormat output_format() const {return hdr?VK_FORMAT_R16G16B16A16_SFLOAT:VK_FORMAT_R8G8B8A8_UNORM;}
+    unsigned output_bytes() const {return hdr?8:4;}
+    bool output_pixel_matches(const void* pixel,bool composite) const {
+        if(hdr) {
+            const std::array<uint16_t,4> expected=composite?
+                std::array<uint16_t,4>{0x3000,0x3400,0x3800,0x3c00}:
+                std::array<uint16_t,4>{0x3400,0x3800,0x3a00,0x3c00};
+            return std::memcmp(pixel,expected.data(),sizeof(expected))==0;
+        }
+        const std::array<unsigned char,4> expected=composite?
+            std::array<unsigned char,4>{40,51,63,255}:std::array<unsigned char,4>{37,73,113,255};
+        return std::memcmp(pixel,expected.data(),sizeof(expected))==0;
+    }
     void barrier(Image& image,VkCommandBuffer command,VkImageLayout layout) {
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.image=image.image;
         b.subresourceRange=image.resource.Resource.ImageViewInfo.SubresourceRange;
@@ -913,7 +929,8 @@ struct PublicGuideGpuProbe {
         void* output_resource{};require_transport(NVSDK_NGX_SUCCEED(p->Get(NVSDK_NGX_Parameter_Output,&output_resource))&&
             static_cast<const NVSDK_NGX_Resource_VK*>(output_resource)->Resource.ImageViewInfo.Image==self.images[4].image,
             "public trial changed the wrapper's private native output");
-        self.clear(4,command,{37.F/255.F,73.F/255.F,113.F/255.F,1});return NVSDK_NGX_Result_Success;
+        self.clear(4,command,self.hdr?std::array<float,4>{.25F,.5F,.75F,1}:
+            std::array<float,4>{37.F/255.F,73.F/255.F,113.F/255.F,1});return NVSDK_NGX_Result_Success;
     }
     static NVSDK_NGX_Result wrapper_original(VkCommandBuffer command,const NVSDK_NGX_Handle*,const NVSDK_NGX_Parameter* p,void* callback) {
         auto& self=*current;++self.public_calls;self.prepared.reset();
@@ -943,7 +960,9 @@ struct PublicGuideGpuProbe {
         require_transport(dlss_motion_vector_publications()==self.before_publication,
             "public guides/output became visible before wrapper final copyback");
         // Integer-byte centers avoid half-way UNORM rounding assumptions.
-        self.clear(4,command,{40.F/255.F,51.F/255.F,63.F/255.F,1});self.barrier(self.images[4],command,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        self.clear(4,command,self.hdr?std::array<float,4>{.125F,.25F,.5F,1}:
+            std::array<float,4>{40.F/255.F,51.F/255.F,63.F/255.F,1});
+        self.barrier(self.images[4],command,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         self.barrier(self.images[output],command,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkImageCopy region{};region.srcSubresource=region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.extent={self.ow,self.oh,1};
         hardware_copy(self,command,region);
@@ -965,8 +984,8 @@ struct PublicGuideGpuProbe {
             transport_aspects(VK_FORMAT_D32_SFLOAT_S8_UINT,VK_IMAGE_ASPECT_COLOR_BIT,depth,false)==(VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT)&&
             transport_aspects(VK_FORMAT_D32_SFLOAT_S8_UINT,VK_IMAGE_ASPECT_COLOR_BIT,depth,true)==VK_IMAGE_ASPECT_DEPTH_BIT,
             "depth transport must preserve color depth and isolate packed depth/stencil correctly");
-        make(depth,depth_format,16,8);make(output,VK_FORMAT_R8G8B8A8_UNORM,ow,oh);make(4,VK_FORMAT_R8G8B8A8_UNORM,ow,oh);
-        const auto old_bytes=hardware.byte_count;hardware.byte_count=ow*oh*4;readback=hardware.host_buffer(VK_BUFFER_USAGE_TRANSFER_DST_BIT);hardware.byte_count=old_bytes;
+        make(depth,depth_format,16,8);make(output,output_format(),ow,oh);make(4,output_format(),ow,oh);
+        const auto old_bytes=hardware.byte_count;hardware.byte_count=ow*oh*output_bytes();readback=hardware.host_buffer(VK_BUFFER_USAGE_TRANSFER_DST_BIT);hardware.byte_count=old_bytes;
         wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);auto root=std::filesystem::path(executable).parent_path();
         for(unsigned i=0;i<7&&!streamline;++i,root=root.parent_path())for(const auto* configuration:{L"Release",L""}) {
             const auto path=root/L"streamline-fixtures"/L"legacy"/configuration/L"sl.interposer.dll";
@@ -1038,9 +1057,8 @@ struct PublicGuideGpuProbe {
             }D3D12_RANGE no_write{};reads[i]->Unmap(0,&no_write);}
         void* native_bytes{};D3D12_RANGE native_range{0,SIZE_T(sizes[3])};
         require_transport(reads[3]->Map(0,&native_range,&native_bytes),"native color witness GPU map");
-        const std::array<unsigned char,4> native_color{37,73,113,255};
-        for(unsigned y=0;y<oh;++y)for(unsigned x=0;x<ow;++x)require_transport(!std::memcmp(
-            static_cast<char*>(native_bytes)+footprints[3].Offset+y*footprints[3].Footprint.RowPitch+x*4,native_color.data(),4),
+        for(unsigned y=0;y<oh;++y)for(unsigned x=0;x<ow;++x)require_transport(output_pixel_matches(
+            static_cast<char*>(native_bytes)+footprints[3].Offset+y*footprints[3].Footprint.RowPitch+x*output_bytes(),false),
             "native color witness captured wrapper final color instead of actual private native output");
         D3D12_RANGE native_no_write{};reads[3]->Unmap(0,&native_no_write);
     }
@@ -1142,11 +1160,12 @@ struct PublicGuideGpuProbe {
         }
         require_transport(tested_native_output_copyback_pixels-copyback_pixels_before==kLukeOriginWidth*kLukeOriginHeight,
             "active AFW native copyback still transfers the full output instead of exact marker pixels");
-        void* bytes{};require_transport(hardware.raw<PFN_vkMapMemory>("vkMapMemory")(hardware.native_device,readback.memory,0,ow*oh*4,0,&bytes),"map final original public Vulkan color");
+        void* bytes{};require_transport(hardware.raw<PFN_vkMapMemory>("vkMapMemory")(hardware.native_device,readback.memory,0,ow*oh*output_bytes(),0,&bytes),"map final original public Vulkan color");
+        const auto pixel=[&](unsigned x,unsigned y){return static_cast<const std::byte*>(bytes)+(y*ow+x)*output_bytes();};
+        const auto dxgi=native_vulkan::format(output_format(),output);
         std::uint32_t token{};std::vector<float> row(ow);
-        for(unsigned y=0;y<oh;++y){for(unsigned x=0;x<ow;++x)row[x]=luke_origin_luma(static_cast<const std::byte*>(bytes)+(y*ow+x)*4,DXGI_FORMAT_R8G8B8A8_UNORM);
+        for(unsigned y=0;y<oh;++y){for(unsigned x=0;x<ow;++x)row[x]=luke_origin_luma(pixel(x,y),dxgi);
             const auto decoded=decode_luke_origin_row(row);require_transport(!decoded.ambiguous,"final original public color token ambiguous");if(decoded.token){require_transport(!token||token==decoded.token,"final public output contains competing tokens");token=decoded.token;}}
-        const std::array<unsigned char,4> composite{40,51,63,255};
         // Marker-only copyback must preserve every native pixel outside the
         // actual bands, including nonzero row/column offsets and row padding.
         LukeColorOriginLayout marker_layout{};
@@ -1157,16 +1176,28 @@ struct PublicGuideGpuProbe {
                 const auto& rect=marker_layout.bands[band];
                 marker_pixel|=x>=rect.x&&x<rect.x+rect.width&&y>=rect.y&&y<rect.y+rect.height;
             }
-            if(!marker_pixel)require_transport(!std::memcmp(static_cast<unsigned char*>(bytes)+(y*ow+x)*4,
-                composite.data(),4),"marker-only copyback overwrote unchanged wrapper composite pixels");
+            if(!marker_pixel)require_transport(output_pixel_matches(pixel(x,y),true),
+                "marker-only copyback overwrote unchanged wrapper composite pixels");
         }
-        const auto* actual=static_cast<unsigned char*>(bytes)+(oh-1)*ow*4;
-        if(serial==1||std::memcmp(actual,composite.data(),4))std::cout<<"Public final GPU RGBA="<<unsigned(actual[0])<<','<<unsigned(actual[1])<<','
-            <<unsigned(actual[2])<<','<<unsigned(actual[3])<<" expected="<<unsigned(composite[0])<<','<<unsigned(composite[1])<<','
-            <<unsigned(composite[2])<<','<<unsigned(composite[3])<<" native-private RGBA=37,73,113,255\n";
-        for(unsigned x=0;x<ow;++x)require_transport(!std::memcmp(static_cast<unsigned char*>(bytes)+((oh-1)*ow+x)*4,composite.data(),4),"final original public color was captured before wrapper post-SR copyback");
+        for(unsigned x=0;x<ow;++x)require_transport(output_pixel_matches(pixel(x,oh-1),true),
+            "final original public color was captured before wrapper post-SR copyback");
         hardware.raw<PFN_vkUnmapMemory>("vkUnmapMemory")(hardware.native_device,readback.memory);require_transport(token!=0,"final original public output lost physical CRC marker");
-        const auto frame=resolve_luke_guide_token(token,hardware.device->queue.Get(),hardware.device->owner.Get());if(serial==2||serial==5)verify_snapshots(frame,serial);
+        const auto frame=resolve_luke_guide_token(token,hardware.device->queue.Get(),hardware.device->owner.Get());
+        // A first frame, or the first one after an abandoned recording, has
+        // no previous guide to resolve into a stereo pair.
+        const bool inspect_pair=serial==2||serial==5||(hdr&&serial>=6);
+        if(inspect_pair)verify_snapshots(frame,serial);
+        if(hdr) {
+            const bool diagnostic=diagnostic_ring_enabled.load();
+            const auto& mirror=prepared->surfaces[output];
+            if(inspect_pair)require_transport(frame&&bool(frame->output)==diagnostic,
+                "guide token exposed the wrong HDR color ownership");
+            if(serial<=5)require_transport(!mirror.buffer&&!mirror.texture&&!mirror.imported&&!mirror.memory,
+                "native HDR marker allocated a full output mirror");
+            if(diagnostic)require_transport(mirror.buffer&&mirror.texture&&mirror.imported&&mirror.memory&&
+                mirror.texture.Get()==frame->output.Get()&&mirror.texture->GetDesc().Format==dxgi&&
+                surface_allocation_bytes(*hardware.device,mirror)>0,"HDR pixel capture did not allocate its mirror on demand");
+        }
         // Real games keep completed command buffers executable for many frames.
         // Their recording leases must not exhaust the bounded transport pool.
         require_transport(prepared->recording_leases!=0,"completed recording lease unexpectedly reset by test");
@@ -1206,6 +1237,12 @@ struct PublicGuideGpuProbe {
         return bytes;
     }
     void verify(unsigned memory_trial=0){setup();
+        struct RestoreDiagnostics {
+            bool previous=diagnostic_ring_enabled.load();
+            ~RestoreDiagnostics(){diagnostic_ring_enabled.store(previous);}
+        } restore_diagnostics;
+        // The resize tests also cover retiring real color mirrors.
+        if(memory_trial&&!hdr)diagnostic_ring_enabled.store(true);
         if(depth_format==VK_FORMAT_D24_UNORM_S8_UINT)verify_d24_words();
         // The regular transport may already own a completed matching RG16
         // slot (Indiana). Isolate its pool so the cold rollback is genuinely
@@ -1214,7 +1251,11 @@ struct PublicGuideGpuProbe {
         hardware.device->slots.insert(hardware.device->slots.end(),previous_slots.begin(),previous_slots.end());
         run(1);run(2);run(3,true);run(3,false,true);run(4);run(5);
         require_transport(native_calls==5&&public_calls==7,"public transaction duplicated original calls or compacted actual production");
-        if(memory_trial) {
+        if(hdr) {
+            diagnostic_ring_enabled.store(true);run(6);
+            diagnostic_ring_enabled.store(false);run(7);
+            std::cout<<"RDR2 HDR marker: no mirror on native guide path, on-demand mirror for diagnostics, native marker resumes with exact guide tokens PASS\n";
+        } else if(memory_trial) {
             // The earlier role probe keeps a diagnostic Slot reference for its
             // own cleanup. Release that test-only owner now: it must not pin a
             // completed large transport during the return-to-small assertion.
@@ -1320,7 +1361,7 @@ int run_buffer_transport_test(bool bootstrap,unsigned memory_trial) {
             const auto role=variant==1?color:variant==2?output:motion;
             auto* probe=new TransportProbe;probe->bootstrap=bootstrap;probe->capture_role=role;probe->rgba_motion=variant==3;
             probe->setup();probe->verify();if(bootstrap&&variant==0)for(auto format:{VK_FORMAT_D32_SFLOAT,VK_FORMAT_D24_UNORM_S8_UINT}) {
-                PublicGuideGpuProbe transaction(*probe,format);transaction.verify(memory_trial);
+                PublicGuideGpuProbe transaction(*probe,format,memory_trial==5);transaction.verify(memory_trial);
             }
             probe->cleanup();delete probe;
             std::cout<<"Native Vulkan exact GPU role="<<role<<" format="<<(variant==3?"RGBA16":role==motion?"RG16":"R11G11B10")

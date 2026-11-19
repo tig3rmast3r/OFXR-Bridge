@@ -13,6 +13,10 @@
 
 namespace xrfg {
 
+struct DlssVulkanOutputExtent {
+    std::uint32_t width{}, height{};
+};
+
 struct DlssMotionVectorPublication {
     std::uint64_t stream{};
     ID3D12Resource* output{};
@@ -106,6 +110,9 @@ struct DlssMotionVectorPublication {
     // Cyberpunk OSR: exact pre-REAL-VR N1 capture, never inferred from N2.
     bool osr_native_cabin_motion{};
     OsrSourceTime source_camera_time{};
+    // Exact Vulkan output geometry for a token-bound guide publication whose
+    // pixels are marked in-place. A D3D12 color resource is absent on this path.
+    std::optional<DlssVulkanOutputExtent> vulkan_output_extent;
 };
 
 // A camera attached to a published frame at its submission.

@@ -271,7 +271,11 @@ bool interleaved_frames(const DlssMotionVectorFrame& current,
 // depth rectangle leaves its texture; 64 no positive frame time with depth;
 // 128 non-finite camera planes with depth.
 std::uint32_t invalid_bits(const DlssMotionVectorPublication& publication) noexcept {
-    if (publication.stream == 0 || publication.output == nullptr ||
+    const auto& vulkan_output = publication.vulkan_output_extent;
+    const bool native_marker = vulkan_output && vulkan_output->width && vulkan_output->height &&
+        publication.protect_snapshot_lifetime && !publication.snapshot_output &&
+        !publication.direct_output_receipt;
+    if (publication.stream == 0 || (!publication.output && !native_marker) ||
         publication.motion_vectors == nullptr ||
         publication.producer_queue == nullptr ||
         publication.producer_command_list == nullptr || publication.output_width == 0 ||
@@ -281,13 +285,15 @@ std::uint32_t invalid_bits(const DlssMotionVectorPublication& publication) noexc
         !std::isfinite(publication.jitter_y)) {
         return 1;
     }
-    const auto output = publication.output->GetDesc();
+    const auto output = publication.output ? publication.output->GetDesc() : D3D12_RESOURCE_DESC{};
+    const auto output_width = publication.output ? output.Width : vulkan_output->width;
+    const auto output_height = publication.output ? output.Height : vulkan_output->height;
     const auto motion = publication.motion_vectors->GetDesc();
     std::uint32_t bits = 0;
-    if (output.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+    if ((publication.output && output.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) ||
         motion.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) bits |= 2;
-    if (static_cast<std::uint64_t>(publication.output_x) + publication.output_width > output.Width ||
-        static_cast<std::uint64_t>(publication.output_y) + publication.output_height > output.Height)
+    if (static_cast<std::uint64_t>(publication.output_x) + publication.output_width > output_width ||
+        static_cast<std::uint64_t>(publication.output_y) + publication.output_height > output_height)
         bits |= 4;
     if (static_cast<std::uint64_t>(publication.motion_x) + publication.motion_width > motion.Width ||
         static_cast<std::uint64_t>(publication.motion_y) + publication.motion_height > motion.Height)

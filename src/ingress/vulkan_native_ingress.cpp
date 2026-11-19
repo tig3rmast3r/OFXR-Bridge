@@ -336,7 +336,7 @@ public:
     static void final_capture(std::function<bool()> completion,const NVSDK_NGX_Handle* handle,std::uint32_t identity) {
         if(current_){current_->final_capture_=std::move(completion);current_->native_handle_=handle;current_->native_identity_=identity;}
     }
-    static bool mark_original(ID3D12GraphicsCommandList* list,ID3D12Resource* resource,
+    static bool mark_original(ID3D12GraphicsCommandList* list,
         const std::shared_ptr<const DlssMotionVectorFrame>& frame,ID3D12Device* device,LukeColorOriginRect rectangle,
         LukeColorOriginRect* written_rectangle=nullptr)noexcept;
     static VkResult copy_original(VkCommandBuffer,const std::shared_ptr<Device>&,const std::shared_ptr<Slot>&,
@@ -757,10 +757,11 @@ bool copy_native(Device& d,Surface& s,VkCommandBuffer cmd,bool to_native,Role ro
 bool write_native_marker(Device& d,Slot& slot,VkCommandBuffer cmd,const LukeColorOriginPatch& patch) {
     auto barrier=api<PFN_vkCmdPipelineBarrier>(d,"vkCmdPipelineBarrier");
     auto to_image=api<PFN_vkCmdCopyBufferToImage>(d,"vkCmdCopyBufferToImage");if(!barrier||!to_image||!slot.marker_upload)return false;
-    const auto& s=slot.surfaces[output];const auto bytes=pixel_bytes(s.footprint.Footprint.Format);if(!bytes)return false;
-    VkImageMemoryBarrier image{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};image.image=s.source.Image;
-    image.subresourceRange=s.source.SubresourceRange;
-    image.subresourceRange.aspectMask=transport_aspects(s.source.Format,image.subresourceRange.aspectMask,output,false);
+    const auto& source=slot.surfaces[output].source;
+    const auto bytes=luke_origin_pixel_bytes(format(source.Format,output));if(!bytes)return false;
+    VkImageMemoryBarrier image{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};image.image=source.Image;
+    image.subresourceRange=source.SubresourceRange;
+    image.subresourceRange.aspectMask=transport_aspects(source.Format,image.subresourceRange.aspectMask,output,false);
     image.srcQueueFamilyIndex=image.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
     image.oldLayout=VK_IMAGE_LAYOUT_GENERAL;image.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     // Luke may finish its output with a copy and consume it with another
@@ -773,14 +774,14 @@ bool write_native_marker(Device& d,Slot& slot,VkCommandBuffer cmd,const LukeColo
     for(unsigned band=0;band<patch.band_count;++band) {
         auto& region=regions[band];const auto& area=patch.bands[band];
         region.bufferOffset=VkDeviceSize(band)*kLukeOriginWidth*kLukeOriginHeight*bytes;
-        region.imageSubresource={s.source.SubresourceRange.aspectMask,s.source.SubresourceRange.baseMipLevel,s.source.SubresourceRange.baseArrayLayer,1};
-        region.imageSubresource.aspectMask=transport_aspects(s.source.Format,region.imageSubresource.aspectMask,output,true);
+        region.imageSubresource={source.SubresourceRange.aspectMask,source.SubresourceRange.baseMipLevel,source.SubresourceRange.baseArrayLayer,1};
+        region.imageSubresource.aspectMask=transport_aspects(source.Format,region.imageSubresource.aspectMask,output,true);
         region.imageOffset={int32_t(area.x),int32_t(area.y),0};region.imageExtent={area.width,area.height,1};
 #if defined(XRFG_NATIVE_INGRESS_TESTS)
         tested_native_output_copyback_pixels+=std::uint64_t(area.width)*area.height;
 #endif
     }
-    to_image(cmd,slot.marker_upload,s.source.Image,image.newLayout,patch.band_count,regions.data());
+    to_image(cmd,slot.marker_upload,source.Image,image.newLayout,patch.band_count,regions.data());
     std::swap(image.oldLayout,image.newLayout);
     image.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;image.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|
         VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1104,7 +1105,9 @@ std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
     std::scoped_lock lock(d->mutex);auto s=slot(*d,shape);if(!s)return fail(8,d->slots.size());
     for(auto r:{motion,depth,output}) {
         const auto& image=capture->parameters->images[r].resolved.Resource.ImageViewInfo;auto& target=s->surfaces[r];
-        if(!target.buffer&&FAILED(surface(*d,target,image,r)))return fail(11,r);target.source=image;
+        // RDR2's native marker needs the exact VkImage receipt, not a color mirror.
+        if(!(r==output&&rdr2_camera_process())&&!target.buffer&&FAILED(surface(*d,target,image,r)))return fail(11,r);
+        target.source=image;
     }
     s->submitted_phases=0;for(unsigned r=0;r<role_count;++r)s->native_before[r]=s->surfaces[r].native_used;
     s->diagnostic_late_depth_before=s->diagnostic_late_depth.native_used;
@@ -1125,11 +1128,11 @@ std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
     capture->camera.raw_motion_native_span_confirmed=true;
     return capture;
 }
-bool PublicFeatureInvocationScope::mark_original(ID3D12GraphicsCommandList* list,ID3D12Resource* resource,
+bool PublicFeatureInvocationScope::mark_original(ID3D12GraphicsCommandList* list,
     const std::shared_ptr<const DlssMotionVectorFrame>& frame,ID3D12Device* device,LukeColorOriginRect rectangle,
     LukeColorOriginRect* written_rectangle)noexcept {
     try {
-        auto* owner=current_;if(!owner||!owner->original_capture_||!frame||!resource)return false;
+        auto* owner=current_;if(!owner||!owner->original_capture_||!frame)return false;
         if(recording_epoch(owner->original_capture_->recording)!=owner->original_capture_->receipt->epoch)return false;
         std::scoped_lock lock(hooks().mutex);
         const auto& capture=*owner->original_capture_;
@@ -1139,12 +1142,16 @@ bool PublicFeatureInvocationScope::mark_original(ID3D12GraphicsCommandList* list
             native_feature==hooks().features.end()||native_feature->second.identity!=owner->native_identity_||
             frame->native_production_sequence!=owner->production_sequence_||
             frame->stream!=(kVulkanPublicStreamNamespace|owner->lifetime_->identity)||
-            capture.device->owner.Get()!=device||capture.slot->surfaces[output].texture.Get()!=resource)return false;
+            capture.device->owner.Get()!=device)return false;
         const auto& receipt=capture.parameters->images[output];
-        const auto found=hooks().image_usage.find(receipt.resolved.Resource.ImageViewInfo.Image);
+        const auto image=receipt.resolved.Resource.ImageViewInfo.Image;
+        const auto& surface=capture.slot->surfaces[output];
+        if(surface.source.Image!=image)return false;
+        const auto found=hooks().image_usage.find(image);
         if(found==hooks().image_usage.end()||found->second.creation!=receipt.allocation.creation||found->second.device!=owner->device_)return false;
         if(!list)return true; // Validated; write_native_marker writes it in the continuation.
-        return SUCCEEDED(mark_luke_color_origin(list,resource,frame->color_origin_token,
+        if(!surface.texture||frame->output.Get()!=surface.texture.Get())return false;
+        return SUCCEEDED(mark_luke_color_origin(list,surface.texture.Get(),frame->color_origin_token,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,device,rectangle,DXGI_FORMAT_UNKNOWN,written_rectangle));
     }catch(...){return false;}
 }
@@ -1166,6 +1173,7 @@ VkResult PublicFeatureInvocationScope::copy_original(VkCommandBuffer command,con
             frame->native_production_sequence!=owner->production_sequence_||
             frame->stream!=(kVulkanPublicStreamNamespace|owner->lifetime_->identity)||
             capture.device!=d||capture.slot!=s||capture.family!=family||
+            s->surfaces[output].source.Image!=receipt.resolved.Resource.ImageViewInfo.Image||
             allocation==hooks().image_usage.end()||allocation->second.creation!=receipt.allocation.creation||
             allocation->second.device!=owner->device_)return VK_ERROR_INITIALIZATION_FAILED;
         if(patch)return write_native_marker(*d,*s,command,*patch)?VK_SUCCESS:VK_ERROR_INITIALIZATION_FAILED;
@@ -1371,8 +1379,12 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
             return raw(); // slot() must have selected an exact compatible shape
         }
     }
+    const auto nr=neural_rendering::status();const bool pre_nr=nr.enabled&&nr.before_sr;
+    const bool lazy_public_output=original_capture&&rdr2_camera_process();
     for(unsigned r=0;r<role_count;++r){auto& target=s->surfaces[r];const auto& image=resources[r]->Resource.ImageViewInfo;
-        if(!target.buffer&&FAILED(surface(*d,target,image,static_cast<Role>(r))))return raw();target.source=image;}
+        const bool defer_output=lazy_public_output&&r==output&&!pre_nr;
+        if(!defer_output&&!target.buffer&&FAILED(surface(*d,target,image,static_cast<Role>(r))))return raw();
+        target.source=image;}
     g.output=s->surfaces[output].texture.Get();g.motion_vectors=s->surfaces[motion].texture.Get();g.depth=s->surfaces[depth].texture.Get();
     g.resource_state=g.depth_resource_state=g.output_resource_state=D3D12_RESOURCE_STATE_COMMON;
     g.output_x=get<UINT>(guides,NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X);g.output_y=get<UINT>(guides,NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y);
@@ -1385,7 +1397,6 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
     g.motion_height=std::min(g.motion_height,available(motion_info.Height,g.motion_y));
     g.depth_width=std::min(g.depth_width,available(depth_info.Width,g.depth_x));
     g.depth_height=std::min(g.depth_height,available(depth_info.Height,g.depth_y));
-    const auto nr=neural_rendering::status();const bool pre_nr=nr.enabled&&nr.before_sr;
     if(original_capture&&original_capture->deferred_camera&&pre_nr) {
         PublicFeatureInvocationScope::refuse_child();ingress_reason(14,4);return raw();
     }
@@ -1423,7 +1434,7 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
             reinterpret_cast<std::uint64_t>(s->diagnostic_native_color.source.Image),
             reinterpret_cast<std::uint64_t>(s->surfaces[output].source.Image));
     }
-    auto finish=[d,s,g,frame,pre_nr,nr_enabled=nr.enabled,recording,native_family,p,original_capture,native_color_probe,native_color_result,identity=f.identity,handle]()mutable->bool {
+    auto finish=[d,s,g,frame,pre_nr,nr_enabled=nr.enabled,recording,native_family,p,original_capture,lazy_public_output,native_color_probe,native_color_result,identity=f.identity,handle]()mutable->bool {
         std::unique_lock device_lock(d->mutex,std::defer_lock);
         if(original_capture)device_lock.lock();
         if(original_capture) {
@@ -1460,15 +1471,24 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         // so it stays in Vulkan: no output pixels cross and the game's queue
         // does not wait for D3D12. Guides keep their own producer fence.
         LukeColorOriginPatch native_patch{};
-        const auto output_description=s->surfaces[output].texture->GetDesc();
+        auto& output_surface=s->surfaces[output];
+        const auto output_image=output_surface.source;
+        const auto output_format=format(output_image.Format,output);
         const auto generation=embedded::snapshot().desired;
         const auto reconstruction=embedded::afw_snapshot().desired;
         const bool origin_requested=luke_origin_marker_requested(generation.enabled,reconstruction.ofr,
             reconstruction.mode,generation.frame_generation,generation.hybrid,generation.rife_model);
         const bool native_marker=original_capture&&!nr_enabled&&!depth_probe&&!native_color_probe&&
-            origin_requested&&ensure_marker_upload(*d,*s)&&
-            luke_color_origin_patch_layout(static_cast<UINT>(output_description.Width),output_description.Height,
+            g.protect_snapshot_lifetime&&origin_requested&&luke_origin_pixel_bytes(output_format)&&ensure_marker_upload(*d,*s)&&
+            luke_color_origin_patch_layout(output_image.Width,output_image.Height,
                 {g.output_x,g.output_y,g.output_width,g.output_height},&native_patch);
+        if(native_marker&&lazy_public_output) {
+            g.output=nullptr;
+            g.vulkan_output_extent=DlssVulkanOutputExtent{output_image.Width,output_image.Height};
+        } else {
+            if(!output_surface.buffer&&FAILED(surface(*d,output_surface,output_image,output)))return false;
+            g.output=output_surface.texture.Get();
+        }
         if(((pre_nr||original_capture)&&FAILED(begin_d12(*s,1)))||
             (!native_marker&&!copy_native(*d,s->surfaces[output],native(recording),false,output,native_family)))return false;
         auto* list=s->lists[1].Get();if(!native_marker)copy_d12(list,s->surfaces[output],false);
@@ -1501,20 +1521,20 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
             }
         }
         for(auto role:{motion,depth})d12_barrier(list,s->surfaces[role].texture.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        d12_barrier(list,s->surfaces[output].texture.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if(!native_marker)d12_barrier(list,output_surface.texture.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         Parameters final_parameters(original_capture?original_capture->parameters.get():p,s.get());
         if(nr_enabled)neural_rendering::after_sr(identity,list,&final_parameters,d->queue.Get());
         bool marker=true;
         LukeColorOriginRect written_rectangle{};
         if(frame&&g.protect_snapshot_lifetime&&origin_requested) {
-            if(original_capture)marker=PublicFeatureInvocationScope::mark_original(native_marker?nullptr:list,g.output,frame,d->owner.Get(),
+            if(original_capture)marker=PublicFeatureInvocationScope::mark_original(native_marker?nullptr:list,frame,d->owner.Get(),
                 {g.output_x,g.output_y,g.output_width,g.output_height},&written_rectangle);
             else mark_luke_color_origin(list,g.output,frame->color_origin_token,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,d->owner.Get(),
                 {g.output_x,g.output_y,g.output_width,g.output_height});
         }
-        if(native_marker&&frame)luke_color_origin_patch_pixels(native_patch,output_description.Format,
+        if(native_marker&&frame)luke_color_origin_patch_pixels(native_patch,output_format,
             frame->color_origin_token,static_cast<std::byte*>(s->marker_pixels));
-        d12_barrier(list,s->surfaces[output].texture.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
+        if(!native_marker)d12_barrier(list,output_surface.texture.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
         for(auto role:{motion,depth})d12_barrier(list,s->surfaces[role].texture.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
         // AFW consumes final XR color, not this native HDR surface. With NR
         // inactive the only modified pixels are the exact written marker bands.
@@ -1523,8 +1543,8 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         if(frame&&(frame->native_production_sequence<=8||frame->native_production_sequence%300==0))
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
                 (marker_only?1:0)|(native_marker?2:0)|(origin_requested?4:0),1191,
-                marker_only?std::uint64_t(written_rectangle.width)*written_rectangle.height*pixel_bytes(s->surfaces[output].footprint.Footprint.Format):0,
-                std::uint64_t(s->surfaces[output].source.Width)*s->surfaces[output].source.Height*pixel_bytes(s->surfaces[output].footprint.Footprint.Format));
+                marker_only?std::uint64_t(written_rectangle.width)*written_rectangle.height*pixel_bytes(output_format):0,
+                std::uint64_t(output_image.Width)*output_image.Height*pixel_bytes(output_format));
         if(!native_marker)copy_d12(list,s->surfaces[output],true,marker_only?&written_rectangle:nullptr);
         Copyback copy{d.get(),&s->surfaces[output],output,native_family};
         if(original_capture)copy.guarded=[d,s,frame,native_family,marker_only,written_rectangle,native_marker,native_patch](VkCommandBuffer command){
