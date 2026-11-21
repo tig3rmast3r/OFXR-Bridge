@@ -271,7 +271,8 @@ public:
         float native_history_stereo[16]{};
         float native_history_previous_dejitter[2]{};
         bool background_history_only{}; // recent real peer fills occluded holes after a missed native frame
-        bool detect_motion_interval{}; // GPU colour correspondence, exact N1/N2 histories only
+        bool detect_motion_interval{}; // shared GPU decision, exact N1/N2 histories only
+        bool motion_interval_camera{}; // current->adjacent and current->same projections are verified
         bool conservative_cabin_history{}; // GTA unlocked camera; requires confirmed original N1
         ID3D12Resource* adjacent_motion{}; // immutable original N1 field, not composed same-eye motion
         D3D12_RESOURCE_STATES adjacent_motion_state{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
@@ -328,7 +329,7 @@ public:
         // Typeless so the F8 capture, which knows R32_TYPELESS, can read them;
         // the views are R32_UINT.
         result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, stereo_);
-        if (SUCCEEDED(result)) result = create_texture(device, 8, 1, DXGI_FORMAT_R32_TYPELESS, true, scene_state_);
+        if (SUCCEEDED(result)) result = create_texture(device, 9, 1, DXGI_FORMAT_R32_TYPELESS, true, scene_state_);
         if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, history_splat_);
         if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, history_offset_);
         if (SUCCEEDED(result)) result = create_texture(device, color_width, color_height, color_format, true, warped_);
@@ -383,6 +384,7 @@ public:
         if(current_motion && in.adjacent_motion)constants.flags|=512u;
         const bool detect_interval=current_motion && in.adjacent_motion && in.detect_motion_interval;
         if(detect_interval)constants.flags|=4096u;
+        if(detect_interval && in.motion_interval_camera)constants.flags|=131072u;
         if(current_motion && in.adjacent_motion && in.conservative_cabin_history)constants.flags|=1024u;
         if((constants.flags&1024u)!=0 && in.native_history_motion && in.use_history_motion)constants.flags|=2048u;
         const bool classified_history=in.use_history && in.use_history_motion && in.use_classified_history_motion;

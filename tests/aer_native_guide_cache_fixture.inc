@@ -122,6 +122,36 @@ public:
 };
 
 int aer_motion_interval_gpu_test() {
+    using Interval = xrfg::AerMotionInterval;
+    const Interval::Result direct_two{2};
+    const Interval::Result direct_one{1};
+    check(Interval::decide(1, 190, 35, direct_two, direct_two).interval == 1,
+        "strong current evidence must immediately change the interval");
+    check(Interval::decide(0, 202, 114, direct_two, direct_two).interval == 0 &&
+        Interval::decide(0, 114, 202, direct_one, direct_two).interval == 0 &&
+        Interval::decide(0, 114, 202, direct_two, {}).interval == 0,
+        "weak evidence requires both exact endpoints to agree with the current vote");
+    check(Interval::decide(0, 0, 0, direct_two, direct_two).interval == 0 &&
+        Interval::decide(0, 64, 64, direct_two, direct_two).interval == 0 &&
+        Interval::decide(0, 19, 31, direct_two, direct_two).interval == 0,
+        "history cannot fill in insufficient or tied current votes");
+    auto same = direct_two;
+    auto opposite = direct_two;
+    // Four consecutive weak publications in the r4 run, including the
+    // closest vote. Each must be backed by both exact history decisions.
+    const std::array<std::array<unsigned, 2>, 4> votes{{
+        {82, 119}, {133, 141}, {109, 125}, {59, 113}
+    }};
+    for (unsigned i = 0; i < votes.size(); ++i) {
+        const auto result = Interval::decide(0, votes[i][0], votes[i][1], same, opposite);
+        check(result.interval == 2 && result.corroboration_age == i + 1,
+            "weak interval lost a unanimous, recent exact history");
+        same = opposite;
+        opposite = result;
+    }
+    check(Interval::decide(0, 59, 113, same, opposite).interval == 0,
+        "weak interval repeated without fresh direct evidence");
+
     Fixture f(true);f.transport->stop();f.transport.reset();
     constexpr unsigned size=128;
     const auto texture=[&](DXGI_FORMAT format,const std::array<float,4>& color,bool motion=false) {
@@ -145,6 +175,100 @@ int aer_motion_interval_gpu_test() {
     auto red=texture(DXGI_FORMAT_R8G8B8A8_UNORM,{1,0,0,1});
     auto blue=texture(DXGI_FORMAT_R8G8B8A8_UNORM,{0,0,1,1});
     auto grey=texture(DXGI_FORMAT_R8G8B8A8_UNORM,{.5F,.5F,.5F,1});
+    auto depth=texture(DXGI_FORMAT_R32_FLOAT,{.5F,0,0,0},true);
+    const auto depth_owner=std::make_shared<xrfg::DlssSnapshotAllocation>(depth.Get(),f.device12.Get());
+    for (unsigned scenario : {1U,2U,0U,3U}) {
+        Interval classifier;
+        // The grey wall contains no colour evidence. At reversed Z=.5
+        // and near/far=1/100, a .125 camera step gives 4.04 texels.
+        const float motion_pixels=scenario==1?4.04F:scenario?8.08F:0.F;
+        auto wall_motion=texture(DXGI_FORMAT_R32G32_FLOAT,{motion_pixels,0,0,0},true);
+        std::array<std::shared_ptr<xrfg::DlssMotionVectorFrame>,3> frames;
+        for (unsigned n=0;n<frames.size();++n) {
+            auto& frame=frames[n];
+            frame=std::make_shared<xrfg::DlssMotionVectorFrame>();
+            frame->color_origin_token=400+n;
+            frame->stream=10+(n%2);frame->epoch=1;frame->serial=10+n/2;
+            frame->native_production_sequence=frame->serial;frame->publication=100+n;
+            frame->source_clock_owner=88;frame->source_clock_sequence=400+n;
+            frame->camera_frame_token=400+n;frame->camera_frame_token_valid=true;
+            frame->camera_data_valid=frame->camera_matrices_valid=true;
+            frame->camera_right={1,0,0};frame->camera_up={0,1,0};frame->camera_forward={0,0,1};
+            frame->camera_position={.125F*n,0,0};
+            frame->camera_view_to_clip={1,0,0,0, 0,1,0,0, 0,0,1.F/99,-1, 0,0,100.F/99,0};
+            frame->camera_clip_to_view={1,0,0,0, 0,1,0,0, 0,0,0,.99F, 0,0,-1,.01F};
+            frame->raw_motion_variable_interval=frame->luke_interleaved_history=true;
+            frame->motion_interval_native_view_rows=true;
+            frame->raw_camera_motion_included=1;frame->depth_inverted=true;
+            frame->motion_vectors=wall_motion;frame->depth=depth;frame->depth_allocation=depth_owner;
+            frame->motion_width=frame->motion_height=frame->depth_width=frame->depth_height=size;
+            frame->output_width=frame->output_height=size;frame->scale_x=frame->scale_y=1;
+            if (n==2) {
+                frame->previous_same_guide=frames[0];
+                frame->previous_opposite_guide=frames[1];
+                if (scenario==3) ++frame->source_clock_sequence;
+            }
+            Interval::Result result;
+            ok(classifier.observe(f.device12.Get(),f.queue.Get(),n%2,grey.Get(),*frame,*frame,
+                result,nullptr,nullptr),"depth and camera interval observation");
+            if (n==2) {
+                const unsigned expected=scenario==3?0:scenario;
+                check(!result.one && !result.two && result.interval==expected &&
+                    result.camera_interval==expected && result.camera_attempted==(scenario!=3),
+                    "camera vote must recover both endpoints without colour evidence and reject unmatched frames");
+            }
+        }
+    }
+    auto mixed=texture(DXGI_FORMAT_R8G8B8A8_UNORM,{.5F,.5F,.5F,1});
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC desc{};
+        desc.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;desc.NumDescriptors=1;
+        ComPtr<ID3D12DescriptorHeap> heap;
+        ok(f.device12->CreateDescriptorHeap(&desc,IID_PPV_ARGS(&heap)),"mixed interval RTV");
+        const auto handle=heap->GetCPUDescriptorHandleForHeapStart();
+        f.device12->CreateRenderTargetView(mixed.Get(),nullptr,handle);
+        f.commands([&](ID3D12GraphicsCommandList* list) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition={mixed.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_RENDER_TARGET};
+            list->ResourceBarrier(1,&barrier);
+            constexpr float one[]{0,0,1,1}, two[]{1,0,0,1};
+            for (unsigned i=0;i<316;++i) {
+                const auto x=LONG((.05+.9*(i%32+.5)/32)*size-.5);
+                const auto y=LONG((.05+.9*(i/32+.5)/18)*size-.5);
+                const D3D12_RECT rect{x,y,x+2,y+2};
+                list->ClearRenderTargetView(handle,i<114?one:two,1,&rect);
+            }
+            std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);
+            list->ResourceBarrier(1,&barrier);
+        });
+    }
+    for (bool gap : {false,true}) {
+        Interval classifier;
+        std::array<std::shared_ptr<xrfg::DlssMotionVectorFrame>,5> frames;
+        for (unsigned n=0;n<frames.size();++n) {
+            auto& frame=frames[n];
+            frame=std::make_shared<xrfg::DlssMotionVectorFrame>();
+            frame->color_origin_token=301+n;frame->motion_vectors=motion;
+            frame->motion_width=frame->motion_height=size;
+            frame->output_width=frame->output_height=size;
+            frame->scale_x=frame->scale_y=1;
+            if (n>=2) {
+                frame->previous_same_guide=frames[n-2];
+                frame->previous_opposite_guide=frames[(n==4 && gap)?1:n-1];
+            }
+            auto* color=n==4?mixed.Get():n%2?blue.Get():red.Get();
+            Interval::Result result;
+            ok(classifier.observe(f.device12.Get(),f.queue.Get(),n%2,color,*frame,*frame,
+                result,nullptr,nullptr),"mixed GPU interval observation");
+            if (n==4) {
+                check(gap ? !result.interval && !result.one && !result.two :
+                    result.interval==2 && result.one==114 && result.two==202 && result.corroboration_age==1,
+                    "mixed vote may only use exact previous GPU decisions");
+            }
+        }
+    }
     for(unsigned expected:{1U,2U,0U}) {
         xrfg::AerMotionInterval classifier;
         std::array<std::shared_ptr<xrfg::DlssMotionVectorFrame>,3> frames;
@@ -294,7 +418,7 @@ int aer_motion_interval_gpu_test() {
         }
         xrfg::bridge_flight_logger().shutdown();
     }
-    std::puts("AER variable motion: actual GPU N1/N2 and ambiguity, including faint patch motion, exact fences and F8 PASS");return 0;
+    std::puts("AER variable motion: GPU point, patch and camera votes, exact history, fences and F8 PASS");return 0;
 }
 
 int aer_native_guide_join_test() {

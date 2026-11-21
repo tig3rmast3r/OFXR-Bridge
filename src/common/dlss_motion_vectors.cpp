@@ -877,6 +877,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->raw_motion_native_span = publication.raw_motion_native_span;
         frame->raw_motion_native_span_confirmed = publication.raw_motion_native_span_confirmed;
         frame->raw_motion_variable_interval = publication.raw_motion_variable_interval;
+        frame->motion_interval_native_view_rows = publication.motion_interval_native_view_rows;
         frame->compose_native_object_history = publication.compose_native_object_history;
         frame->osr_native_cabin_motion = publication.osr_native_cabin_motion;
         frame->source_camera_time = publication.source_camera_time;

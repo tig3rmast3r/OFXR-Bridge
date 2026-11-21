@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1044.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1045.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -592,6 +592,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_compose_motion.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/motion_interval.hlsli"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/uevr_osr_input.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/uevr_osr_guide.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/ingress/vulkan_d24_decode.hlsl"
@@ -667,7 +668,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E Classify /O3 /WX /Ges
             /Qstrip_debug /Qstrip_reflect /Fh "${XRFG_AER_INTERVAL_HEADER}" /Vn g_xrfg_aer_motion_interval_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/aer_motion_interval.hlsl"
-        DEPENDS src/d3d12/aer_motion_interval.hlsl VERBATIM)
+        DEPENDS src/d3d12/aer_motion_interval.hlsl src/d3d12/motion_interval.hlsli VERBATIM)
     target_sources(xrfg_d3d12_history PRIVATE "${XRFG_AER_INTERVAL_HEADER}")
     foreach(stage decide compose)
         set(header "${XRFG_GENERATED_SHADER_DIR}/guide_composer_${stage}_shader.hpp")
@@ -2891,14 +2892,16 @@ if(WIN32 AND TARGET xrfg_d3d12_history)
  add_custom_command(OUTPUT "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_lower_shader.hpp"
   COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullResolveLower /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
    /Fh "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_lower_shader.hpp" /Vn g_xrfg_osr_full_resolve_lower_shader "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
-  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl")
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/motion_interval.hlsli")
  add_custom_target(xrfg_osr_lower_shader DEPENDS "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_lower_shader.hpp")
  add_dependencies(xrfg_d3d12_history xrfg_osr_lower_shader)
 
  add_custom_command(OUTPUT "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_map_shader.hpp"
   COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFullResolveMap /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
    /Fh "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_map_shader.hpp" /Vn g_xrfg_osr_full_resolve_map_shader "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
-  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl")
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_full_warp.hlsl"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/motion_interval.hlsli")
  add_custom_target(xrfg_osr_map_shader DEPENDS "${XRFG_GENERATED_SHADER_DIR}/osr_full_resolve_map_shader.hpp")
  add_dependencies(xrfg_d3d12_history xrfg_osr_map_shader)
  if(XRFG_BUILD_TESTS)

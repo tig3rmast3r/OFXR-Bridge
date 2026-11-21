@@ -26,6 +26,7 @@
 #include "xrfg/osr_hole_fill.hpp"
 #include "osr_full_warp_pass.hpp"
 #include "rdr2_camera_phase_pass.hpp"
+#include "xrfg/motion_interval_evidence.hpp"
 #include "xrfg/osr_full_warp.hpp"
 
 #include <Windows.h>
@@ -2893,6 +2894,10 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     std::copy_n(current_to_history.values,16,in.current_history_data);
                     std::copy_n(native_to_history.values,16,in.current_history_data+16);
                     std::copy_n(previous_same_transform.values,16,in.current_history_data+32);
+                    in.motion_interval_camera=in.detect_motion_interval &&
+                        impl_->camera_axes==LukeProducerCameraAxes::native_view_rows &&
+                        impl_->previous_source_publication[source_eye]==native_same.publication &&
+                        motion_interval_camera_ready(guide);
                     for (unsigned r=0;r<4;++r) {
                         in.current_history_data[48+r]=provider_camera.source_clip_to_view.values[r*4+3];
                         in.current_history_data[52+r]=native_same.camera.clip_to_view[r*4+3];
@@ -2947,7 +2952,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 if(guide.previous_opposite_guide)stamp(*guide.previous_opposite_guide,1);
                 if(guide.previous_same_guide)stamp(*guide.previous_same_guide,2);
                 std::uint32_t a{},b{};std::memcpy(&a,&in.current_motion_fraction,4);std::memcpy(&b,&in.history_advance_fraction,4);
-                log.event(BridgeFlightOperation::luke_afw_stage,(midpoint?1:0)|(advance?2:0)|(in.use_classified_history_motion?4:0),
+                log.event(BridgeFlightOperation::luke_afw_stage,(midpoint?1:0)|(advance?2:0)|
+                    (in.use_classified_history_motion?4:0)|(in.motion_interval_camera?8:0),
                     1382,guide.publication,(std::uint64_t(a)<<32)|b);
                 two_frame_capture_timeline("osr_source_fraction",(midpoint?1:0)|(advance?2:0),guide.publication,a,b);
             }
@@ -3015,7 +3021,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 scene.stream = guide.stream;
                 scene.capture_serial = guide.publication;
                 scene.eye = static_cast<std::int32_t>(peer_eye);
-                scene.width = 8; scene.height = 1;
+                scene.width = static_cast<std::uint32_t>(impl_->osr_full.scene_state()->GetDesc().Width);
+                scene.height = 1;
                 two_frame_capture_record_ng_x(scene, impl_->device.Get(), command_list,
                     impl_->osr_full.scene_state(), impl_->osr_full.scene_state_state());
                 TwoFrameImageInfo stereo{};

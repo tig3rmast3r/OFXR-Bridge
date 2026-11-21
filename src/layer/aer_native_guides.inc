@@ -273,8 +273,15 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
                             SUCCEEDED(hr)?interval.interval:hr,1450,frame->publication,
                             (std::uint64_t(interval.one)<<32)|interval.two);
                         if(interval.patch_attempted)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
-                            interval.interval,1451,frame->publication,
+                            (interval.corroboration_age||interval.camera_interval)?0:interval.interval,1451,frame->publication,
                             (std::uint64_t(interval.patch_one)<<32)|interval.patch_two);
+                        if (interval.corroboration_age)
+                            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                                interval.interval,1452,frame->publication,interval.corroboration_age);
+                        if (interval.camera_attempted)
+                            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                                interval.camera_interval,1453,frame->publication,
+                                (std::uint64_t(interval.camera_one)<<32)|interval.camera_two);
                         if(FAILED(hr)||!interval.interval||(interval.interval==1&&interval.middle_interval!=1)){refuse();continue;}
                         auto classified=std::make_shared<xrfg::DlssMotionVectorFrame>(*frame);
                         classified->raw_motion_native_span=interval.interval;

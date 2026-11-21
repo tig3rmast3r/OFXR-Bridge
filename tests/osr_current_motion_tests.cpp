@@ -685,6 +685,42 @@ void classified_history(unsigned eye,bool low,unsigned interval) {
     std::printf("Classified original history eye=%u low=%u interval=%u PASS\n",eye,low,interval);
 }
 
+void camera_classified_interval(unsigned eye, unsigned interval, bool camera_enabled) {
+    Fixture f;
+    const std::vector<UINT> wall(width*height,grey(128));
+    const std::vector<float> depth(width*height,.2F);
+    warm(f,wall);
+    auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    auto composed=f.texture(DXGI_FORMAT_R16G16_FLOAT);
+    const std::vector<UINT> zero(width*height);
+    begin(f);f.upload(composed.Get(),zero.data());submit(f);
+    save(f,eye,wall,.2F,composed.Get(),{101,11,3});
+    save(f,1-eye,wall,.2F,composed.Get(),{102,22,4});
+    // A flat wall defeats both point and patch matching. Its known
+    // clip-space camera motion is +4 or +8 texels in the two witnesses.
+    const std::vector<UINT> vectors(width*height,interval==1?0x4400u:0x4800u);
+    begin(f);
+    f.upload(field.Get(),vectors.data());f.upload(f.color.Get(),wall.data());f.upload(f.depth.Get(),depth.data());
+    auto in=inputs(f,eye);
+    in.source_motion=composed.Get();in.adjacent_motion=field.Get();
+    in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;
+    in.use_current_history_motion=true;in.detect_motion_interval=true;
+    in.motion_interval_camera=camera_enabled;
+    for(unsigned base:{0u,32u})
+        for(unsigned row=0;row<4;++row)in.current_history_data[base+row*5]=1;
+    in.current_history_data[12]=8.F/width;in.current_history_data[44]=16.F/width;
+    in.current_history_data[56]=in.current_history_data[57]=1;
+    in.current_history_data[62]=1;
+    f.warp.record(f.device.Get(),f.list.Get(),in);
+    auto state=f.readback(f.warp.scene_state());
+    submit(f);
+    void* ptr{};ok(state.buffer->Map(0,nullptr,&ptr),"shared interval state");
+    const auto* values=static_cast<const UINT*>(ptr);
+    check(values[5]==(camera_enabled?interval:0) && values[8]==(camera_enabled?3u:0u),
+        "OSR must use the shared camera decision with verified projections only");
+    state.buffer->Unmap(0,nullptr);
+}
+
 void unclassified_history(unsigned eye,bool low) {
     Fixture f;
     std::vector<UINT> old(width*height),current(width*height),motion(width*height,eye?0xd000u:0x5000u);
@@ -734,6 +770,8 @@ int main(int argc,char** argv) {
     }
     if(argc==2&&std::string_view(argv[1])=="classified-history") {
         for(unsigned eye:{0u,1u})for(bool low:{false,true})for(unsigned interval:{0u,1u,2u})classified_history(eye,low,interval);
+        for(unsigned eye:{0u,1u})for(unsigned interval:{1u,2u})for(bool camera:{false,true})
+            camera_classified_interval(eye,interval,camera);
         for(unsigned eye:{0u,1u})for(bool low:{false,true})timed_midpoint(eye,low);return 0;
     }
     if(argc==2&&std::string_view(argv[1])=="unclassified-history") {

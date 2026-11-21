@@ -103,7 +103,8 @@ struct DlssMotionVectorPublication {
     // evaluation that publishes this guide. Calibration waits for it.
     bool camera_pending{};
     bool raw_motion_native_span_confirmed{};
-    bool raw_motion_variable_interval{}; // RDR2: verify original field against both exact eye histories
+    bool raw_motion_variable_interval{}; // The field can reference either exact earlier eye.
+    bool motion_interval_native_view_rows{}; // Producer cameras give native view axes for this field.
     // Exact native camera source clock shared by independently observed eye
     // features. Does not replace each feature's NGX production sequence.
     std::uint64_t source_clock_owner{},source_clock_sequence{};
@@ -255,7 +256,8 @@ struct DlssMotionVectorFrame {
     // the part of the vectors that lands on it. MSFS 2024's foveated
     // periphery spreads a few hundred render columns over a whole eye.
     bool raw_motion_native_span_confirmed{};
-    bool raw_motion_variable_interval{}; // RDR2: verify original field against both exact eye histories
+    bool raw_motion_variable_interval{};
+    bool motion_interval_native_view_rows{};
     bool placed{};
     // Release-time packed-eye join: the upscaler rounded the eye extent to
     // four texels. Keep the cropped vector rectangle, not a stretched guide.

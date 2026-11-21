@@ -1,4 +1,6 @@
 #include "xrfg/aer_motion_interval.hpp"
+#include "xrfg/luke_native_motion.hpp"
+#include "xrfg/motion_interval_evidence.hpp"
 #include "xrfg/two_frame_capture.hpp"
 #include "aer_motion_interval_shader.hpp"
 #include <algorithm>
@@ -11,10 +13,12 @@ using Microsoft::WRL::ComPtr;
 struct Parameters {
     std::array<float,4> current{},middle{},previous{};
     std::array<float,2> size{},scale{},jitter{};
-    UINT enabled{},slice{},capture{};
+    UINT enabled{},slice{},capture{},camera_enabled{};
+    UINT padding[2]{};
+    std::array<float,16> to_adjacent{},to_same_eye{};
 };
-static_assert(sizeof(Parameters)==84);
-constexpr unsigned kDecisionBytes=6*sizeof(UINT);
+static_assert(sizeof(Parameters)==56*sizeof(UINT));
+constexpr unsigned kDecisionBytes=9*sizeof(UINT);
 constexpr unsigned kProbeBytes=kAerMotionProbeCount*sizeof(TwoFrameAerMotionProbe);
 constexpr unsigned kReadbackBytes=kDecisionBytes+kProbeBytes;
 std::array<unsigned,7> capture_result(const AerMotionInterval::Result& r) {
@@ -31,6 +35,21 @@ DXGI_FORMAT readable(DXGI_FORMAT f) {
     if(f==DXGI_FORMAT_R32G32_TYPELESS)return DXGI_FORMAT_R32G32_FLOAT;
     return f;
 }
+bool prepare_camera_vote(const DlssMotionVectorFrame& frame, Parameters& params) noexcept {
+    if (!params.enabled || !motion_interval_camera_ready(frame) ||
+        frame.depth_x || frame.depth_y || frame.motion_x || frame.motion_y)
+        return false;
+    const auto depth=frame.depth->GetDesc();
+    if (depth.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D || depth.Format!=DXGI_FORMAT_R32_FLOAT ||
+        depth.SampleDesc.Count!=1 || depth.DepthOrArraySize!=1 ||
+        depth.Width!=frame.depth_width || depth.Height!=frame.depth_height)
+        return false;
+    const auto current=dlss_native_camera_history(frame);
+    const auto adjacent=dlss_native_camera_history(*frame.previous_opposite_guide);
+    const auto same=dlss_native_camera_history(*frame.previous_same_guide);
+    return native_motion_detail::transform(current,adjacent,params.to_adjacent,1.F,true) &&
+           native_motion_detail::transform(current,same,params.to_same_eye,1.F,true);
+}
 }
 struct AerMotionInterval::Impl {
     struct History {ComPtr<ID3D12Resource> color;std::uint32_t token{};
@@ -41,7 +60,8 @@ struct AerMotionInterval::Impl {
     ComPtr<ID3D12DescriptorHeap> heap;ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> list;ComPtr<ID3D12Resource> decision,readback;
     ComPtr<ID3D12Fence> fence;std::uint64_t value{};bool copy_state{},pending{};
-    HANDLE event{};unsigned pending_eye{};std::vector<ComPtr<ID3D12Resource>> active;
+    HANDLE event{};unsigned pending_eye{};bool pending_exact_history{};
+    std::vector<ComPtr<ID3D12Resource>> active;
     std::shared_ptr<const DlssMotionVectorFrame> active_guide;
     std::shared_ptr<TwoFrameAerMotionCapture> pending_capture;
     unsigned probe_bytes{};
@@ -55,9 +75,14 @@ struct AerMotionInterval::Impl {
         }
         void* data{};D3D12_RANGE range{0,kDecisionBytes+probe_bytes};
         auto hr=readback->Map(0,&range,&data);if(FAILED(hr))return hr;
-        const auto* words=static_cast<const UINT*>(data);auto& r=history[pending_eye].result;
-        r.interval=words[0];r.one=words[1];r.two=words[2];
+        const auto* words=static_cast<const UINT*>(data);
+        auto& r=history[pending_eye].result;
+        const auto same=pending_exact_history?r:Result{};
+        const auto opposite=pending_exact_history?history[pending_eye^1].result:Result{};
+        r=AerMotionInterval::decide(words[0],words[1],words[2],same,opposite);
         r.patch_attempted=words[3];r.patch_one=words[4];r.patch_two=words[5];
+        r.camera_attempted=(words[6]&4)!=0;
+        r.camera_interval=words[6]&3;r.camera_one=words[7];r.camera_two=words[8];
         two_frame_capture_finish_aer_motion(pending_capture,S_OK,capture_result(r),
             {static_cast<const std::byte*>(data)+kDecisionBytes,probe_bytes});
         pending_capture.reset();probe_bytes=0;
@@ -66,7 +91,7 @@ struct AerMotionInterval::Impl {
     }
     HRESULT initialize(ID3D12Device* d,ID3D12CommandQueue* q) {
         device=d;queue=q;
-        D3D12_DESCRIPTOR_RANGE ranges[2]{{D3D12_DESCRIPTOR_RANGE_TYPE_SRV,4,0,0,0},
+        D3D12_DESCRIPTOR_RANGE ranges[2]{{D3D12_DESCRIPTOR_RANGE_TYPE_SRV,5,0,0,0},
             {D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,0,0,0}};
         D3D12_ROOT_PARAMETER args[3]{};
         for(unsigned i=0;i<2;++i){args[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;args[i].DescriptorTable={1,&ranges[i]};}
@@ -81,7 +106,7 @@ struct AerMotionInterval::Impl {
         D3D12_COMPUTE_PIPELINE_STATE_DESC ps{};ps.pRootSignature=root.Get();
         ps.CS={g_xrfg_aer_motion_interval_shader,sizeof(g_xrfg_aer_motion_interval_shader)};
         hr=d->CreateComputePipelineState(&ps,IID_PPV_ARGS(&pipeline));if(FAILED(hr))return hr;
-        D3D12_DESCRIPTOR_HEAP_DESC hd{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,5,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
+        D3D12_DESCRIPTOR_HEAP_DESC hd{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,6,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
         hr=d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&heap));if(FAILED(hr))return hr;
         hr=d->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator));if(FAILED(hr))return hr;
         hr=d->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),pipeline.Get(),IID_PPV_ARGS(&list));if(FAILED(hr))return hr;
@@ -97,6 +122,24 @@ struct AerMotionInterval::Impl {
         event=CreateEventW(nullptr,FALSE,FALSE,nullptr);return event?S_OK:HRESULT_FROM_WIN32(GetLastError());
     }
 };
+AerMotionInterval::Result AerMotionInterval::decide(unsigned interval, unsigned one, unsigned two,
+    const Result& previous_same, const Result& previous_opposite) noexcept {
+    Result result{interval, previous_opposite.interval, one, two};
+    if (interval || one == two || std::max(one, two) < 32) return result;
+
+    const unsigned majority = one > two ? 1 : 2;
+    const auto age = std::max(previous_same.corroboration_age, previous_opposite.corroboration_age);
+    // Use the current image vote and both linked endpoints. A strong current
+    // vote can change the interval immediately. Weak votes can only extend an
+    // agreed interval for a short stretch before both branches need fresh evidence.
+    constexpr unsigned max_corroboration_age = 4;
+    if (previous_same.interval == majority && previous_opposite.interval == majority &&
+        age < max_corroboration_age) {
+        result.interval = majority;
+        result.corroboration_age = age + 1;
+    }
+    return result;
+}
 AerMotionInterval::AerMotionInterval()=default;
 AerMotionInterval::~AerMotionInterval() {
     // A timed-out submission still owns its allocator, descriptors and inputs.
@@ -149,6 +192,7 @@ HRESULT AerMotionInterval::observe(ID3D12Device* d,ID3D12CommandQueue* q,unsigne
         if(own.color){const auto old=own.color->GetDesc();if(old.Width!=cd.Width||old.Height!=cd.Height||old.Format!=cd.Format){own={};params.enabled=0;}}
         if(!own.color){auto copy=cd;copy.Flags=D3D12_RESOURCE_FLAG_NONE;copy.MipLevels=1;D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
             hr=d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&copy,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&own.color));if(FAILED(hr))return hr;}
+        params.camera_enabled=prepare_camera_vote(original,params);
         hr=p.allocator->Reset();if(FAILED(hr))return hr;hr=p.list->Reset(p.allocator.Get(),p.pipeline.Get());if(FAILED(hr))return hr;
         p.active={color,original.motion_vectors.Get(),own.color?own.color.Get():color,peer.color?peer.color.Get():color};
         p.active_guide=std::make_shared<DlssMotionVectorFrame>(original);
@@ -160,6 +204,13 @@ HRESULT AerMotionInterval::observe(ID3D12Device* d,ID3D12CommandQueue* q,unsigne
             srv.ViewDimension=i==3?D3D12_SRV_DIMENSION_TEXTURE2DARRAY:D3D12_SRV_DIMENSION_TEXTURE2D;
             if(i==3){srv.Texture2DArray.MipLevels=1;srv.Texture2DArray.ArraySize=inputs[i]->GetDesc().DepthOrArraySize;}
             else srv.Texture2D.MipLevels=1;d->CreateShaderResourceView(inputs[i],&srv,cpu);cpu.ptr+=increment;}
+        D3D12_SHADER_RESOURCE_VIEW_DESC depth_view{};
+        depth_view.Format=DXGI_FORMAT_R32_FLOAT;
+        depth_view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        depth_view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+        depth_view.Texture2D.MipLevels=1;
+        d->CreateShaderResourceView(params.camera_enabled?original.depth.Get():nullptr,&depth_view,cpu);
+        cpu.ptr+=increment;
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};uav.Format=DXGI_FORMAT_R32_TYPELESS;uav.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;
         uav.Buffer.NumElements=kReadbackBytes/sizeof(UINT);
         uav.Buffer.Flags=D3D12_BUFFER_UAV_FLAG_RAW;d->CreateUnorderedAccessView(p.decision.Get(),nullptr,&uav,cpu);
@@ -176,7 +227,7 @@ HRESULT AerMotionInterval::observe(ID3D12Device* d,ID3D12CommandQueue* q,unsigne
         auto b=barrier(color,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);p.list->ResourceBarrier(1,&b);
         if(p.copy_state){auto v=barrier(p.decision.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);p.list->ResourceBarrier(1,&v);}
         ID3D12DescriptorHeap* heaps[]{p.heap.Get()};p.list->SetDescriptorHeaps(1,heaps);p.list->SetComputeRootSignature(p.root.Get());
-        auto gpu=p.heap->GetGPUDescriptorHandleForHeapStart();p.list->SetComputeRootDescriptorTable(0,gpu);gpu.ptr+=4*increment;p.list->SetComputeRootDescriptorTable(1,gpu);
+        auto gpu=p.heap->GetGPUDescriptorHandleForHeapStart();p.list->SetComputeRootDescriptorTable(0,gpu);gpu.ptr+=5*increment;p.list->SetComputeRootDescriptorTable(1,gpu);
         p.list->SetComputeRoot32BitConstants(2,sizeof(params)/4,&params,0);p.list->Dispatch(1,1,1);
         auto v=barrier(p.decision.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);p.list->ResourceBarrier(1,&v);
         const unsigned probe_bytes=params.capture?kProbeBytes:0;
@@ -192,13 +243,13 @@ HRESULT AerMotionInterval::observe(ID3D12Device* d,ID3D12CommandQueue* q,unsigne
         p.list->ResourceBarrier(2,copies.data());hr=p.list->Close();
         if(FAILED(hr)){two_frame_capture_finish_aer_motion(receipt,hr,{});return hr;}
         ID3D12CommandList* lists[]{p.list.Get()};q->ExecuteCommandLists(1,lists);++p.value;p.pending=true;p.pending_eye=eye;p.copy_state=true;
+        p.pending_exact_history=params.enabled!=0;
         if(submitted)p.fence.CopyTo(submitted);if(submitted_value)*submitted_value=p.value;
         hr=q->Signal(p.fence.Get(),p.value);if(FAILED(hr)) {
             two_frame_capture_finish_aer_motion(receipt,hr,{});return hr;
         }
         p.pending_capture=std::move(receipt);p.probe_bytes=probe_bytes;
-        const auto middle_interval=params.enabled?peer.result.interval:0;
-        own.token=original.color_origin_token;own.rect=params.current;own.result={0,middle_interval,0,0};p.pending=true;p.pending_eye=eye;
+        own.token=original.color_origin_token;own.rect=params.current;
         hr=p.finish();if(FAILED(hr))return hr;output=own.result;return S_OK;
     }catch(...){return E_FAIL;}
 }

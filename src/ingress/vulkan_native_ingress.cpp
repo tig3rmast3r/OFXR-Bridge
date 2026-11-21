@@ -1061,6 +1061,7 @@ bool apply_rdr2_camera(DlssMotionVectorPublication& g,const rdr2_camera_probe::S
     g.source_clock_owner=sample.owner;g.source_clock_sequence=sample.render;
     g.source_camera_time={sample.owner,sample.render,sample.camera_qpc,sample.camera_frequency};
     g.raw_motion_variable_interval=true;
+    g.motion_interval_native_view_rows=true;
     g.camera_data_valid=g.camera_matrices_valid=true;g.protect_snapshot_lifetime=true;return true;
 }
 bool rdr2_camera_process() noexcept {

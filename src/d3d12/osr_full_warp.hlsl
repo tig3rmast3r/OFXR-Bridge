@@ -123,45 +123,54 @@ groupshared uint SceneValid[64];
 groupshared uint SceneChanged[64];
 groupshared uint SceneSource[64];
 
-groupshared uint IntervalOne[64];
-groupshared uint IntervalTwo[64];
-// RDR2's original field can reference either retained eye. Classify once per
-// frame, using a fixed 576-sample colour vote, never a per-pixel interval mix.
-// Exact CPU history identities are a prerequisite; ambiguity disables motion.
+#define INTERVAL_CURRENT SourceColor
+#define INTERVAL_ADJACENT HistoryColor
+#define INTERVAL_SAME_EYE NativePreviousColor
+#include "motion_interval.hlsli"
+
+void LoadIntervalMotion(float2 uv, float2 motion_size,
+    out int2 texel, out float2 raw_motion, out bool valid) {
+    // The OSR classifier works in the cropped depth grid. The original
+    // motion resource still contains the full native image.
+    texel=int2(floor(uv*motion_size-SourceDejitter));
+    const int2 address=texel+int2(CurrentHistoryData[15].xy);
+    raw_motion=0;
+    uint width,height;
+    AdjacentMotion.GetDimensions(width,height);
+    valid=all(texel>=0) && all(texel<int2(DepthSize)) &&
+        all(address>=0) && all(address<int2(width,height));
+    if (valid) raw_motion=AdjacentMotion.Load(int3(address,0));
+}
+float LoadIntervalDepth(int2 texel) {
+    return SourceDepth.Load(int3(texel,0));
+}
+void StoreIntervalProbe(uint index, MotionIntervalProbe probe) {
+    // OSR keeps the GPU decision in SceneState for reconstruction and F8.
+}
+
 void classify_interval(uint lane) {
-    uint one=0,two=0;
-    if((Flags&4096u)!=0) {
-        uint aw,ah;AdjacentMotion.GetDimensions(aw,ah);
-        [loop] for(uint i=lane;i<576u;i+=64u) {
-            const float2 uv=.05+.9*(float2(i%32u,i/32u)+.5)/float2(32,18);
-            const int2 t=int2(floor(uv*DepthSize-SourceDejitter));
-            const int2 address=t+int2(CurrentHistoryData[15].xy);
-            if(any(address<0)||any(address>=int2(aw,ah)))continue;
-            const float2 raw=AdjacentMotion.Load(int3(address,0))*CurrentHistoryData[14].xy;
-            if(!all(isfinite(raw))||any(abs(raw)>4096))continue;
-            const float2 at=uv+raw/float2(DepthSize);
-            if(any(at<0)||any(at>=1))continue;
-            const float3 a=SourceColor.SampleLevel(LinearClamp,uv,0).rgb;
-            const float3 b=HistoryColor.SampleLevel(LinearClamp,at,0).rgb;
-            const float3 c=NativePreviousColor.SampleLevel(LinearClamp,at,0).rgb;
-            if(!all(isfinite(a))||!all(isfinite(b))||!all(isfinite(c)))continue;
-            const float e1=dot(abs(a-b),float3(1,1,1))/3;
-            const float e2=dot(abs(a-c),float3(1,1,1))/3;
-            one+=(e1<.15 && e1+.015<e2)?1u:0u;
-            two+=(e2<.15 && e2+.015<e1)?1u:0u;
-        }
+    const bool enabled=(Flags&4096u)!=0;
+    const bool camera_enabled=enabled && (Flags&131072u)!=0;
+    float2 scale=0;
+    float4x4 to_adjacent=0, to_same_eye=0;
+    if (enabled) scale=CurrentHistoryData[14].xy/float2(DepthSize);
+    if (camera_enabled) {
+        // The existing cropped OSR transforms multiply row vectors. Convert
+        // their rows for the classifier's column-vector convention.
+        to_adjacent=transpose(float4x4(CurrentHistoryData[0],CurrentHistoryData[1],
+            CurrentHistoryData[2],CurrentHistoryData[3]));
+        to_same_eye=transpose(float4x4(CurrentHistoryData[8],CurrentHistoryData[9],
+            CurrentHistoryData[10],CurrentHistoryData[11]));
     }
-    IntervalOne[lane]=one;IntervalTwo[lane]=two;
-    GroupMemoryBarrierWithGroupSync();
-    [unroll] for(uint stride=32;stride>0;stride>>=1) {
-        if(lane<stride){IntervalOne[lane]+=IntervalOne[lane+stride];IntervalTwo[lane]+=IntervalTwo[lane+stride];}
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if(lane==0) {
-        SceneState[uint2(5,0)]=IntervalOne[0]>=32 && IntervalOne[0]>2*IntervalTwo[0]?1u:
-            (IntervalTwo[0]>=32 && IntervalTwo[0]>2*IntervalOne[0]?2u:0u);
+    const float4 whole=float4(0,0,1,1);
+    const MotionIntervalGeometry geometry={whole,whole,whole,float2(DepthSize),scale,float2(0,0)};
+    const MotionIntervalDecision result=ClassifyMotionInterval(lane,geometry,enabled,camera_enabled,
+        to_adjacent,to_same_eye,false);
+    if (lane==0) {
+        SceneState[uint2(5,0)]=result.interval;
         SceneState[uint2(6,0)]=(Flags&65536u)!=0?HistoryInterval.Load(int3(0,0,0)):0u;
         SceneState[uint2(7,0)]=asuint((Flags&32768u)!=0?CurrentHistoryData[20].x:.5);
+        SceneState[uint2(8,0)]=result.evidence;
     }
 }
 bool original_is_adjacent() {
