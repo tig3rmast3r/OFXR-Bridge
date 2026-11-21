@@ -2988,9 +2988,11 @@ const OfxrEyeSourceV1* captured_eye_source(const SwapchainState& state,
     return nullptr;
 }
 
+enum class EyeMetadataLookup { any, release_token_only };
+
 std::shared_ptr<const xrfg::DlssMotionVectorFrame> resolve_eye_metadata(
     SwapchainState& state, const xrfg::D3D12HistoryCaptureTicket& capture, unsigned eye,
-    ID3D12CommandQueue* queue, ID3D12Device* device) {
+    ID3D12CommandQueue* queue, ID3D12Device* device, EyeMetadataLookup lookup = EyeMetadataLookup::any) {
     xrfg::EyeGuideKey key;
     xrfg::RepeatedEyeGuide repeated;
     std::uint32_t token{};
@@ -2999,9 +3001,10 @@ std::shared_ptr<const xrfg::DlssMotionVectorFrame> resolve_eye_metadata(
         std::scoped_lock lock(state.mutex);
         const auto* source = captured_eye_source(state, capture, eye);
         if (!source) return {};
+        token = source->guide_token;
+        if (!token && lookup == EyeMetadataLookup::release_token_only) return {};
         const auto producer = state.released_eye_frame.frame.producer;
         const auto render = source->render_id;
-        token = source->guide_token;
         const auto& binding = state.eye_guide_bindings[eye];
         if (binding.accepts(producer, source->stream_id)) {
             key = binding.key;
@@ -17036,12 +17039,11 @@ struct LukeOriginHistoryProbe {
         std::array<xrfg::EyeIdentitySource, 2> identity_sources{};
         bool markers_attempted = true;
         const bool rdr2 = rdr2_aer_osr_process();
-        const bool audit_markers = xrfg::bridge_flight_logger().enabled();
-        const auto resolve_metadata = [&] {
+        const auto resolve_metadata = [&](EyeMetadataLookup lookup) {
             for (unsigned i = 0; i < 2; ++i) {
-                if (!entries[i].source_capture) continue;
+                if (metadata[i] || !entries[i].source_capture) continue;
                 auto candidate = resolve_eye_metadata(*entries[i].swapchain, entries[i].source_capture->capture,
-                    entries[i].logical_eye, session->d3d12_queue.Get(), session->d3d12_device.Get());
+                    entries[i].logical_eye, session->d3d12_queue.Get(), session->d3d12_device.Get(), lookup);
                 if (candidate && candidate->camera_data_valid && candidate->depth && candidate->motion_vectors &&
                     candidate->previous_opposite_guide && candidate->previous_opposite_guide->camera_data_valid)
                     metadata[i] = std::move(candidate);
@@ -17058,8 +17060,8 @@ struct LukeOriginHistoryProbe {
                 inputs[i].capture=entries[i].source_capture->capture;
             }
             if(session->luke_warmup_probe_poisoned) {output.reason=GenerationPrepareReason::missing_capture;return output;}
-            if (!audit_markers) resolve_metadata();
-            markers_attempted = audit_markers || !metadata[0] || !metadata[1];
+            resolve_metadata(EyeMetadataLookup::release_token_only);
+            markers_attempted = !metadata[0] || !metadata[1];
             if (markers_attempted) {
                 const auto result=read_luke_capture_origins(session->d3d12_queue.Get(),inputs,origin_tokens,origin_results,
                     session->luke_warmup_probe_poisoned,&origin_nonblack,true);
@@ -17067,7 +17069,6 @@ struct LukeOriginHistoryProbe {
                     inputs[0].capture.serial,inputs[1].capture.serial);
                 if(FAILED(result)) {output.reason=GenerationPrepareReason::missing_capture;return output;}
             }
-            if (audit_markers) resolve_metadata();
         }
         // Each color is frozen by its own history ticket. Copy into disjoint
         // AFW scratch, then resolve only the token actually present in it.
@@ -17091,8 +17092,8 @@ struct LukeOriginHistoryProbe {
             origin_colors[index]=images[entry.prepared.current_destination_index];
         }
         if (!rdr2) {
-            if (!audit_markers) resolve_metadata();
-            markers_attempted = audit_markers || !metadata[0] || !metadata[1];
+            resolve_metadata(EyeMetadataLookup::release_token_only);
+            markers_attempted = !metadata[0] || !metadata[1];
         }
         if (!rdr2 && markers_attempted) {
             const auto read_origins = [&] {
@@ -17113,8 +17114,10 @@ struct LukeOriginHistoryProbe {
                 std::scoped_lock lock(session->gpu_mutex);
                 read_origins();
             }
-            if (audit_markers) resolve_metadata();
         }
+        // A render ID inferred from an earlier marker can lag the actual
+        // image. Check the exact image before falling back to that mapping.
+        if (markers_attempted) resolve_metadata(EyeMetadataLookup::any);
         for(std::size_t index=0;index<entries.size();++index) {
             auto& entry=entries[index];const HRESULT result=origin_results[index];
             const auto marker = SUCCEEDED(result) ? origin_tokens[index] : 0;

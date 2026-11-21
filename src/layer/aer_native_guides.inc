@@ -181,12 +181,9 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
         }
         unsigned read_mask{};
         std::array<std::shared_ptr<const xrfg::DlssMotionVectorFrame>, 2> metadata;
-        const bool audit_markers = xrfg::bridge_flight_logger().enabled();
-        const auto resolve_metadata = [&](unsigned eye) {
-            const auto& item = cache.eyes[eye];
-            if (item.guides || item.epoch_rejected) return;
+        const auto resolve_metadata = [&](unsigned eye, EyeMetadataLookup lookup) {
             auto candidate = resolve_eye_metadata(*chains[eye], inputs[eye].capture, eye,
-                cache.read_queue.Get(), session->d3d12_device.Get());
+                cache.read_queue.Get(), session->d3d12_device.Get(), lookup);
             if (candidate && candidate->publication && candidate->motion_vectors && candidate->depth &&
                 aer_native_same_eye_history(*candidate)) metadata[eye] = std::move(candidate);
         };
@@ -195,8 +192,9 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
             if(item.observe(chains[eye],inputs[eye].history,inputs[eye].capture)) {
                 std::scoped_lock lock(chains[eye]->mutex);chains[eye]->last_released_motion_vectors.reset();
             }
-            if (!audit_markers) resolve_metadata(eye);
-            if (!item.attempted && !metadata[eye]) read_mask |= 1U << eye;
+            if (item.guides || item.epoch_rejected || item.attempted) continue;
+            resolve_metadata(eye, EyeMetadataLookup::release_token_only);
+            if (!metadata[eye]) read_mask |= 1U << eye;
         }
         if(read_mask) {
             std::array<std::uint32_t,2> tokens{};
@@ -220,15 +218,16 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
         bool complete=true;
         for(unsigned eye=0;eye<2;++eye) {
             auto& item=cache.eyes[eye];
-            // Keep guide-fence waits behind the marker copies during F9
-            // audit, just as on the original CRC path.
-            if (audit_markers) resolve_metadata(eye);
             if (item.attempted)
                 compare_eye_metadata_to_marker(*chains[eye], inputs[eye].capture, eye, item.token);
             if(item.guides && item.guides->eyes[0] && xrfg::luke_native_stream_reset(
                 item.guides->eyes[0]->stream,item.guides->eyes[0]->epoch,session->d3d12_device.Get())) {
                 item.guides.reset();item.epoch_rejected=true;
             }
+            // Inferred render IDs can lag the pixels. Keep their guide
+            // waits behind the marker copy and use them for recovery.
+            if (!item.guides && !item.epoch_rejected && !metadata[eye])
+                resolve_metadata(eye, EyeMetadataLookup::any);
             if (!item.guides && (item.token || metadata[eye] ||
                     item.marker_result == HRESULT_FROM_WIN32(ERROR_INVALID_DATA)) && !item.epoch_rejected) {
                 xrfg::EyeIdentitySource identity_source{};

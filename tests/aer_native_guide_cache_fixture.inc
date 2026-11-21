@@ -484,6 +484,7 @@ int aer_native_guide_join_test() {
         std::array<std::uint32_t,2> expected{};
         for(unsigned n=1;n<=(tagged_guides ? 12U : 8U);++n) {
             const unsigned eye=n%2;
+            const auto previous_token = expected[eye];
             ComPtr<ID3D12GraphicsCommandList> recorded;
             f.commands([&](ID3D12GraphicsCommandList* list) {
                 recorded=list;xrfg::DlssMotionVectorPublication p;
@@ -551,6 +552,18 @@ int aer_native_guide_join_test() {
                     recovered = select_luke_eye_guide(chain, capture, eye, exact, true, 0,
                         HRESULT_FROM_WIN32(ERROR_NOT_FOUND), consumer, device);
                     check(recovered == exact, "a missing marker prevented exact guide selection");
+                    if (n == 12) {
+                        check(!xrfg::bridge_flight_logger().enabled(), "marker-first regression requires logging off");
+                        // REAL VR supplies a render ID without a guide token.
+                        // A stale ID can still match a live same-eye guide.
+                        const OfxrEyeFrameMetadataV1 stale{sizeof(OfxrEyeFrameMetadataV1),
+                            OFXR_EYE_SOURCE_MUTAR, capture.source_index, 1, {{83, n - 1, 0, eye}}};
+                        record_eye_frame_release(chain, capture.source_index, &stale);
+                        chain.released_eye_frame.capture_serial = capture.serial;
+                        const auto wrong = resolve_eye_metadata(chain, capture, eye, consumer, device);
+                        check(wrong && wrong->color_origin_token == previous_token &&
+                            aer_native_same_eye_history(*wrong), "stale metadata must be otherwise usable");
+                    }
                 }
             }
             check(refresh_aer_native_guides(state,snapshot,mappings)==S_OK,"actual native AER colour-token join did not attach both eyes");
