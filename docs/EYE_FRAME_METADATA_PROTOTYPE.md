@@ -284,8 +284,8 @@ loaded module and active runtime methods match the eye and camera-ring ABI.
 GTA V Enhanced, Kingdom Come II, TLOU1, Ghost of Tsushima, and Spider-Man
 Remastered installations were checked against those witnesses. Each game's
 existing DLSS capture boundary is retained. RDR2's Vulkan path is unchanged.
-Older REAL VR modules such as the installed Cyberpunk 2077 build stay on the
-existing path. Live confirmation of the new bindings is pending.
+At r11, older modules such as Cyberpunk 2077's REAL VR 26.3 build stayed on
+the marker path.
 
 With F9 enabled, result 51 confirms a binding, 42 confirms that metadata and
 the readable marker agree, and 50 confirms recovery from an ambiguous marker.
@@ -312,3 +312,17 @@ stage 1453 records camera votes. In OSR, bit 3 of stage 1382 records
 verified camera inputs. An F8 capture puts the GPU decision in word 5 of
 `osr_scene_state` and its evidence in word 8. Evidence codes are 0 for
 inconclusive, 1 for points, 2 for patches, and 3 for camera reprojection.
+
+## REAL VR 26.3 support
+
+The shared adapter recognizes the 26.3.0.25587 DLL used by Cyberpunk 2077.
+The D3D12 DLSS evaluation wrapper supplies the active runtime owner. The
+adapter verifies the selected render in that owner's camera ring and checks
+that the depth method uses the same render to select the eye. On release,
+the eye draw supplies the render ID beside the original or retained source
+texture. The retained-source probe checks the texture choice before the draw.
+Other draw paths can still use pixel markers.
+
+Both handoffs were verified against the installed DLL offline. A headset
+trace is still needed to confirm guide binding (result 51), metadata and
+marker agreement (42), and metadata recovery on marker misses (45).
