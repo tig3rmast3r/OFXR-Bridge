@@ -33,7 +33,7 @@ struct TwoFrameAerMotionCapture {
     TwoFrameAerMotionInfo info;
     unsigned frame{};
     HRESULT status{E_PENDING};
-    std::array<unsigned,4> result{}; // interval, middle interval, N1 votes, N2 votes
+    std::array<unsigned,7> result{}; // intervals and pixel votes, then patch attempt and support
     std::vector<TwoFrameAerMotionProbe> probes;
 };
 namespace {
@@ -369,7 +369,7 @@ void write_aer_motion(const std::shared_ptr<Session>& session) {
     if(session->aer_motion.empty())return;
     std::ofstream decisions(session->directory/L"aer-motion-decisions.tsv",std::ios::binary);
     std::ofstream samples(session->directory/L"aer-motion-probes.tsv",std::ios::binary);
-    decisions<<"frame\teye\tpublication\ttoken\tstream\tnative_sequence\tswapchain\trelease_serial\tadjacent_token\tsame_eye_token\tretained_adjacent_token\tretained_same_eye_token\tstatus\theld\thistory_enabled\tinterval\tmiddle_interval\tvotes_n1\tvotes_n2\tmotion_format\tslice\tmotion_size\tmotion_scale\tjitter\tcurrent_rect\tadjacent_rect\tsame_eye_rect\tprobe_count\n";
+    decisions<<"frame\teye\tpublication\ttoken\tstream\tnative_sequence\tswapchain\trelease_serial\tadjacent_token\tsame_eye_token\tretained_adjacent_token\tretained_same_eye_token\tstatus\theld\thistory_enabled\tinterval\tmiddle_interval\tvotes_n1\tvotes_n2\tmotion_format\tslice\tmotion_size\tmotion_scale\tjitter\tcurrent_rect\tadjacent_rect\tsame_eye_rect\tprobe_count\tpatch_attempted\tpatch_support_n1\tpatch_support_n2\n";
     samples<<"frame\teye\tpublication\tprobe\ttexel_x\ttexel_y\tcurrent_u\tcurrent_v\tnative_u\tnative_v\traw_x\traw_y\ttarget_native_u\ttarget_native_v\tadjacent_u\tadjacent_v\tsame_eye_u\tsame_eye_v\terror_n1\terror_n2\tflags\n";
     decisions<<std::setprecision(9);
     samples<<std::setprecision(9);
@@ -380,7 +380,7 @@ void write_aer_motion(const std::shared_ptr<Session>& session) {
             <<'\t'<<i.swapchain<<'\t'<<i.release_serial<<'\t'<<i.adjacent_token<<'\t'<<i.same_eye_token
             <<'\t'<<i.retained_adjacent_token<<'\t'<<i.retained_same_eye_token<<'\t'
             <<std::hex<<static_cast<std::uint32_t>(entry->status)<<std::dec<<'\t'<<i.held<<'\t'<<i.history_enabled;
-        for(auto result:entry->result)decisions<<'\t'<<result;
+        for(auto result:std::span(entry->result).first<4>())decisions<<'\t'<<result;
         decisions<<'\t'<<i.motion_format<<'\t'<<i.slice;
         const auto array=[&](const auto& values) {
             decisions<<'\t';
@@ -388,7 +388,9 @@ void write_aer_motion(const std::shared_ptr<Session>& session) {
         };
         array(i.motion_size);array(i.scale);array(i.jitter);
         array(i.current_rect);array(i.adjacent_rect);array(i.same_eye_rect);
-        decisions<<'\t'<<entry->probes.size()<<'\n';
+        decisions<<'\t'<<entry->probes.size();
+        for(auto result:std::span(entry->result).subspan<4>())decisions<<'\t'<<result;
+        decisions<<'\n';
         for(unsigned n=0;n<entry->probes.size();++n) {
             const auto& p=entry->probes[n];
             samples<<entry->frame<<'\t'<<i.eye<<'\t'<<i.publication<<'\t'<<n<<'\t'<<p.texel[0]<<'\t'<<p.texel[1];
@@ -842,7 +844,7 @@ std::shared_ptr<TwoFrameAerMotionCapture> two_frame_capture_begin_aer_motion(con
 }
 
 void two_frame_capture_finish_aer_motion(const std::shared_ptr<TwoFrameAerMotionCapture>& entry,HRESULT status,
-    const std::array<unsigned,4>& result,std::span<const std::byte> probes) noexcept {
+    const std::array<unsigned,7>& result,std::span<const std::byte> probes) noexcept {
     if(!entry)return;
     try {
         std::scoped_lock lock(entry->mutex);

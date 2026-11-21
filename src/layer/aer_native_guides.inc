@@ -272,6 +272,9 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
                         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
                             SUCCEEDED(hr)?interval.interval:hr,1450,frame->publication,
                             (std::uint64_t(interval.one)<<32)|interval.two);
+                        if(interval.patch_attempted)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                            interval.interval,1451,frame->publication,
+                            (std::uint64_t(interval.patch_one)<<32)|interval.patch_two);
                         if(FAILED(hr)||!interval.interval||(interval.interval==1&&interval.middle_interval!=1)){refuse();continue;}
                         auto classified=std::make_shared<xrfg::DlssMotionVectorFrame>(*frame);
                         classified->raw_motion_native_span=interval.interval;

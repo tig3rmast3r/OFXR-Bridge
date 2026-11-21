@@ -14,11 +14,11 @@ struct Parameters {
     UINT enabled{},slice{},capture{};
 };
 static_assert(sizeof(Parameters)==84);
-constexpr unsigned kDecisionBytes=3*sizeof(UINT);
+constexpr unsigned kDecisionBytes=6*sizeof(UINT);
 constexpr unsigned kProbeBytes=kAerMotionProbeCount*sizeof(TwoFrameAerMotionProbe);
 constexpr unsigned kReadbackBytes=kDecisionBytes+kProbeBytes;
-std::array<unsigned,4> capture_result(const AerMotionInterval::Result& r) {
-    return {r.interval,r.middle_interval,r.one,r.two};
+std::array<unsigned,7> capture_result(const AerMotionInterval::Result& r) {
+    return {r.interval,r.middle_interval,r.one,r.two,r.patch_attempted,r.patch_one,r.patch_two};
 }
 D3D12_RESOURCE_BARRIER barrier(ID3D12Resource* r,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b) {
     D3D12_RESOURCE_BARRIER v{};v.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -57,6 +57,7 @@ struct AerMotionInterval::Impl {
         auto hr=readback->Map(0,&range,&data);if(FAILED(hr))return hr;
         const auto* words=static_cast<const UINT*>(data);auto& r=history[pending_eye].result;
         r.interval=words[0];r.one=words[1];r.two=words[2];
+        r.patch_attempted=words[3];r.patch_one=words[4];r.patch_two=words[5];
         two_frame_capture_finish_aer_motion(pending_capture,S_OK,capture_result(r),
             {static_cast<const std::byte*>(data)+kDecisionBytes,probe_bytes});
         pending_capture.reset();probe_bytes=0;

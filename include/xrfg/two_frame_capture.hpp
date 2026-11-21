@@ -241,7 +241,7 @@ struct TwoFrameAerMotionInfo {
 struct TwoFrameAerMotionCapture;
 std::shared_ptr<TwoFrameAerMotionCapture> two_frame_capture_begin_aer_motion(const TwoFrameAerMotionInfo&) noexcept;
 void two_frame_capture_finish_aer_motion(const std::shared_ptr<TwoFrameAerMotionCapture>&,HRESULT,
-    const std::array<unsigned,4>& result,std::span<const std::byte> probes={}) noexcept;
+    const std::array<unsigned,7>& result,std::span<const std::byte> probes={}) noexcept;
 
 // Associates a release-time final-eye image with its xrEndFrame projection.
 void two_frame_capture_annotate_projection(

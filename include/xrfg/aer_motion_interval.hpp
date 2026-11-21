@@ -7,7 +7,10 @@ namespace xrfg {
 // from an SR feature's independent serial counter.
 class AerMotionInterval {
 public:
-    struct Result {unsigned interval{},middle_interval{},one{},two{};};
+    struct Result {
+        unsigned interval{},middle_interval{},one{},two{};
+        unsigned patch_attempted{},patch_one{},patch_two{};
+    };
     AerMotionInterval();
     ~AerMotionInterval();
     HRESULT observe(ID3D12Device*,ID3D12CommandQueue*,unsigned eye,ID3D12Resource* color,

@@ -166,7 +166,7 @@ int aer_motion_interval_gpu_test() {
                 check(result.interval==previous&&!fence&&!value,"held exact token must not record another classifier pass");}
         }
     }
-    const auto pattern=[&](int shift) {
+    const auto pattern=[&](int shift,bool faint) {
         auto image=texture(DXGI_FORMAT_R8G8B8A8_UNORM,{0,0,0,1});
         D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=1;
         ComPtr<ID3D12DescriptorHeap> heap;ok(f.device12->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&heap)),"pattern RTV");
@@ -179,23 +179,34 @@ int aer_motion_interval_gpu_test() {
                 D3D12_RECT rect{std::max(0,x+shift),0,std::min(int(size),x+shift+4),int(size)};
                 if(rect.left>=rect.right)continue;
                 const float value=float(((x+32)/4*7)%13)/12.F;
-                const float c[]{value,1-value,value*.5F,1};list->ClearRenderTargetView(handle,c,1,&rect);
+                const auto column=static_cast<std::uint32_t>((x+32)/4)*0x9e3779b9U;
+                const float luma=(102+((column^(column>>16))>>30))/255.F;
+                const float c[]{faint?luma:value,faint?luma:1-value,faint?luma:value*.5F,1};
+                list->ClearRenderTargetView(handle,c,1,&rect);
             }
             b.Transition.StateBefore=D3D12_RESOURCE_STATE_RENDER_TARGET;b.Transition.StateAfter=D3D12_RESOURCE_STATE_COMMON;list->ResourceBarrier(1,&b);
         });return image;
     };
-    std::array<ComPtr<ID3D12Resource>,3> patterns{pattern(0),pattern(8),pattern(16)};
-    for(unsigned span:{1U,2U}) {
-        auto moved=texture(DXGI_FORMAT_R32G32_FLOAT,{-8.F*span,0,0,0},true);
-        xrfg::AerMotionInterval classifier;std::array<std::shared_ptr<xrfg::DlssMotionVectorFrame>,3> frames;
-        for(unsigned n=0;n<3;++n) {
-            auto& g=frames[n];g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->color_origin_token=201+n;
-            g->motion_vectors=moved;g->motion_width=g->motion_height=g->output_width=g->output_height=size;g->scale_x=g->scale_y=1;
-            if(n==2){g->previous_same_guide=frames[0];g->previous_opposite_guide=frames[1];}
-            xrfg::AerMotionInterval::Result result;ComPtr<ID3D12Fence> fence;std::uint64_t value{};
-            ok(classifier.observe(f.device12.Get(),f.queue.Get(),n%2,patterns[n].Get(),*g,*g,result,
-                fence.GetAddressOf(),&value),"translated interval colour vote");
-            if(n==2)check(result.interval==span,"moving textured scene chose the wrong native interval");
+    for(bool faint:{false,true}) {
+        std::array<ComPtr<ID3D12Resource>,3> patterns{pattern(0,faint),pattern(8,faint),pattern(16,faint)};
+        for(unsigned span:{1U,2U,0U}) {
+            auto moved=texture(DXGI_FORMAT_R32G32_FLOAT,{span==1?-8.F:-16.F,0,0,0},true);
+            xrfg::AerMotionInterval classifier;std::array<std::shared_ptr<xrfg::DlssMotionVectorFrame>,3> frames;
+            for(unsigned n=0;n<3;++n) {
+                auto& g=frames[n];g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->color_origin_token=201+n;
+                g->motion_vectors=moved;g->motion_width=g->motion_height=g->output_width=g->output_height=size;g->scale_x=g->scale_y=1;
+                if(n==2){g->previous_same_guide=frames[0];g->previous_opposite_guide=frames[1];}
+                xrfg::AerMotionInterval::Result result;ComPtr<ID3D12Fence> fence;std::uint64_t value{};
+                // In the ambiguous case both references have the same pattern.
+                ok(classifier.observe(f.device12.Get(),f.queue.Get(),n%2,patterns[span==0&&n==1?0:n].Get(),*g,*g,result,
+                    fence.GetAddressOf(),&value),"translated interval colour vote");
+                if(n==2) {
+                    check(result.interval==span,"moving textured scene chose the wrong native interval");
+                    check(bool(result.patch_attempted)==(faint||span==0),"only inconclusive pixel votes enter patch comparison");
+                    if(faint)check(result.one==0&&result.two==0,"faint fixture must fall below the original voting gap");
+                    if(faint&&span)check((span==1?result.patch_one:result.patch_two)>=32,"patch vote lacks measurable support");
+                }
+            }
         }
     }
     {
@@ -250,9 +261,9 @@ int aer_motion_interval_gpu_test() {
             std::string line;
             check(bool(std::getline(file,line))&&bool(std::getline(file,line)),"F8 classifier decision row");
             const auto row=fields(line);
-            check(row.size()==28&&row[2]=="303"&&row[4]=="501"&&row[6]=="901"&&row[7]=="42"&&
+            check(row.size()==31&&row[2]=="303"&&row[4]=="501"&&row[6]=="901"&&row[7]=="42"&&
                 row[8]=="302"&&row[9]=="301"&&row[10]=="302"&&row[11]=="301"&&row[12]=="0"&&row[14]=="1"&&
-                row[15]=="0"&&row[17]=="0"&&row[18]=="0"&&row[27]=="576",
+                row[15]=="0"&&row[17]=="0"&&row[18]=="0"&&row[27]=="576"&&row[28]=="1"&&row[29]=="0"&&row[30]=="0",
                 "F8 classifier receipt must identify the real release, both references and rejection");
             check(!std::getline(file,line),"only the dispatch inside F8 may be captured");
         }
@@ -283,7 +294,7 @@ int aer_motion_interval_gpu_test() {
         }
         xrfg::bridge_flight_logger().shutdown();
     }
-    std::puts("AER variable motion: actual GPU N1/N2/ambiguous and translated-texture votes, exact fences and held-token reuse PASS");return 0;
+    std::puts("AER variable motion: actual GPU N1/N2 and ambiguity, including faint patch motion, exact fences and F8 PASS");return 0;
 }
 
 int aer_native_guide_join_test() {
