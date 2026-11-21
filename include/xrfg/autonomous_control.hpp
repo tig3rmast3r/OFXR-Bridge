@@ -279,6 +279,7 @@ std::string interface_status_text(const Snapshot& value,bool include_reconstruct
 bool interface_aer_active(const Snapshot&,std::uint64_t now_ms) noexcept;
 std::string interface_aer_text(const Snapshot&,std::uint64_t now_ms);
 std::string_view interface_aer_source_text(const Snapshot&) noexcept;
+std::string_view interface_eye_identity_text(const Snapshot&, std::uint64_t now_ms) noexcept;
 std::string_view interface_state_text(const Snapshot& value) noexcept;
 std::string_view interface_vectors_text(const Snapshot& value, std::uint64_t now_ms) noexcept;
 // Global settings are never redirected by the active game.

@@ -121,6 +121,16 @@ std::array<unsigned, 7> glyph(char c) noexcept {
     case '7': return {31,1,2,4,8,8,8};
     case '8': return {14,17,17,14,17,17,14};
     case '9': return {14,17,17,15,1,1,14};
+    case 'A': return {14,17,17,31,17,17,17};
+    case 'B': return {30,17,17,30,17,17,30};
+    case 'E': return {31,16,16,30,16,16,31};
+    case 'H': return {17,17,17,31,17,17,17};
+    case 'I': return {14,4,4,4,4,4,14};
+    case 'M': return {17,27,21,21,17,17,17};
+    case 'O': return {14,17,17,17,17,17,14};
+    case 'P': return {30,17,17,30,16,16,16};
+    case 'T': return {31,4,4,4,4,4,4};
+    case 'X': return {17,17,10,4,10,17,17};
     case '-': return {0,0,0,31,0,0,0};
     default: return {};
     }
@@ -146,19 +156,28 @@ std::vector<std::uint32_t> rasterize_fps_overlay(
     const auto length = static_cast<unsigned>(snapshot.delivered_valid && std::isfinite(measured)
         ? std::snprintf(text, sizeof(text), "%d", static_cast<int>(std::clamp(rate, 0.0f, 999.0f) + 0.5f))
         : std::snprintf(text, sizeof(text), "--"));
-    unsigned x = (width - (length * 6 - 1) * scale) / 2;
-    const unsigned top = (height - 7 * scale) / 2;
-    for (const char* p = text; *p; ++p, x += 6 * scale) {
-        const auto rows = glyph(*p);
-        for (unsigned y = 0; y < 7; ++y) for (unsigned column = 0; column < 5; ++column) {
-            if ((rows[y] & (1u << (4 - column))) == 0) continue;
-            for (unsigned sy = 0; sy < scale; ++sy) for (unsigned sx = 0; sx < scale; ++sx) {
-                const unsigned px = x + column * scale + sx;
-                const unsigned py = top + y * scale + sy;
-                pixels[static_cast<std::size_t>(py) * width + px] = status;
+    const std::string_view source = snapshot.eye_identity_source == EyeIdentitySource::metadata ? "META"
+        : snapshot.eye_identity_source == EyeIdentitySource::pixel_markers ? "PIX"
+        : snapshot.eye_identity_source == EyeIdentitySource::both ? "BOTH" : "";
+    const auto label_scale = source.empty() ? 0u : scale / 2;
+    const auto top = (height - 7 * scale - 8 * label_scale) / 2;
+    const auto draw = [&](std::string_view line, unsigned line_top, unsigned size, std::uint32_t ink) {
+        unsigned x = (width - (static_cast<unsigned>(line.size()) * 6 - 1) * size) / 2;
+        for (const auto letter : line) {
+            const auto rows = glyph(letter);
+            for (unsigned y = 0; y < 7; ++y) for (unsigned column = 0; column < 5; ++column) {
+                if ((rows[y] & (1u << (4 - column))) == 0) continue;
+                for (unsigned sy = 0; sy < size; ++sy) for (unsigned sx = 0; sx < size; ++sx) {
+                    const unsigned px = x + column * size + sx;
+                    const unsigned py = line_top + y * size + sy;
+                    pixels[static_cast<std::size_t>(py) * width + px] = ink;
+                }
             }
+            x += 6 * size;
         }
-    }
+    };
+    draw({text, length}, top, scale, status);
+    if (label_scale) draw(source, top + 7 * scale + label_scale, label_scale, color(255, 255, 255));
     return pixels;
 }
 

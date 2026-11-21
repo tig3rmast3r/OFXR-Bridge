@@ -8,6 +8,7 @@ struct AerNativeGuideCache {
         std::uint32_t token{};
         HRESULT marker_result{E_PENDING};
         bool attempted{}, epoch_rejected{};
+        xrfg::EyeIdentitySource identity_source{};
         std::shared_ptr<const xrfg::DlssMotionVectorSet> guides;
 
         bool observe(const std::shared_ptr<SwapchainState>& chain,
@@ -17,7 +18,7 @@ struct AerNativeGuideCache {
                 capture.fence_value==value.fence_value && capture.slot==value.slot &&
                 capture.source_index==value.source_index)return false;
             source=chain;history=owner;capture=value;token=0;attempted=false;
-            marker_result=E_PENDING;
+            marker_result=E_PENDING;identity_source={};
             epoch_rejected=false;guides.reset();return true;
         }
     };
@@ -230,9 +231,10 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
             }
             if (!item.guides && (item.token || metadata[eye] ||
                     item.marker_result == HRESULT_FROM_WIN32(ERROR_INVALID_DATA)) && !item.epoch_rejected) {
+                xrfg::EyeIdentitySource identity_source{};
                 auto frame = select_luke_eye_guide(*chains[eye], inputs[eye].capture, eye,
                     std::move(metadata[eye]), item.attempted, item.token, item.marker_result,
-                    cache.read_queue.Get(), session->d3d12_device.Get());
+                    cache.read_queue.Get(), session->d3d12_device.Get(), &identity_source);
                 if(GetTickCount64()>=cache.next_guide_report &&
                     (!frame || !aer_native_same_eye_history(*frame))) {
                     cache.next_guide_report=GetTickCount64()+1000;
@@ -318,6 +320,7 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
                     auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();
                     guides->eye_count=1;guides->resolved_eye=int(eye);guides->eyes[0]=frame;
                     item.guides=std::move(guides);
+                    item.identity_source=identity_source;
                 }
             }
             std::scoped_lock lock(chains[eye]->mutex);
@@ -328,6 +331,8 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
             complete=complete && same && item.guides!=nullptr;
         }
         if (complete) {
+            if (session->fps_overlay)
+                session->fps_overlay->record_eye_identity(cache.eyes[0].identity_source | cache.eyes[1].identity_source);
             const auto& left = *cache.eyes[0].guides->eyes[0];
             const auto& right = *cache.eyes[1].guides->eyes[0];
             if (left.stream == right.stream) {

@@ -5,6 +5,12 @@
 
 namespace xrfg {
 
+enum class EyeIdentitySource : std::uint8_t { none, metadata, pixel_markers, both };
+
+constexpr EyeIdentitySource operator|(EyeIdentitySource left, EyeIdentitySource right) noexcept {
+    return static_cast<EyeIdentitySource>(static_cast<unsigned>(left) | static_cast<unsigned>(right));
+}
+
 // Producer identity shared by the source image and its captured guides.
 // Independent of the guide publication sequence and any camera timing.
 struct EyeGuideRenderIdentity {

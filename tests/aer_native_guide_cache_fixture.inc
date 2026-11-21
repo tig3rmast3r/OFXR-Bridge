@@ -543,9 +543,11 @@ int aer_native_guide_join_test() {
                         "a fresh render ID did not resolve across calibrated owners and clock offset");
                     check(!xrfg::resolve_luke_guide_render(exact->stream, exact->epoch, 82, n, consumer,
                         device, OFXR_EYE_SOURCE_REAL_VR), "guide render lookup matched the wrong producer");
+                    xrfg::EyeIdentitySource selected_from{};
                     auto recovered = select_luke_eye_guide(chain, capture, eye, exact, true, 0,
-                        HRESULT_FROM_WIN32(ERROR_INVALID_DATA), consumer, device);
-                    check(recovered == exact, "an ambiguous marker vetoed an independently identified guide");
+                        HRESULT_FROM_WIN32(ERROR_INVALID_DATA), consumer, device, &selected_from);
+                    check(recovered == exact && selected_from == xrfg::EyeIdentitySource::metadata,
+                        "an ambiguous marker vetoed or was credited for an independently identified guide");
                     recovered = select_luke_eye_guide(chain, capture, eye, exact, true, 0,
                         HRESULT_FROM_WIN32(ERROR_NOT_FOUND), consumer, device);
                     check(recovered == exact, "a missing marker prevented exact guide selection");
@@ -585,9 +587,11 @@ int aer_native_guide_join_test() {
                 frame.eyes[0].guide_token = expected[1 - eye];
                 release(capture);
                 metadata = resolve_eye_metadata(chain, capture, eye, consumer, device);
+                xrfg::EyeIdentitySource selected_from{};
                 auto chosen = select_luke_eye_guide(chain, capture, eye, std::move(metadata), true,
-                    expected[eye], S_OK, consumer, device);
-                check(chosen && chosen->color_origin_token == expected[eye],
+                    expected[eye], S_OK, consumer, device, &selected_from);
+                check(chosen && chosen->color_origin_token == expected[eye] &&
+                    selected_from == xrfg::EyeIdentitySource::pixel_markers,
                     "a verified marker must recover from a metadata disagreement");
                 frame.eyes[0].guide_token = 0;
                 release(capture);

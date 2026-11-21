@@ -109,6 +109,16 @@ int main(int argc, char** argv) {
         }
         require(std::count(green.begin(), green.end(), 0u) > green.size() / 2,
                 "background must be fully transparent");
+        auto identity = snapshot;
+        identity.eye_identity_source = EyeIdentitySource::metadata;
+        const auto metadata = rasterize_fps_overlay(96,48,identity,false);
+        identity.eye_identity_source = EyeIdentitySource::pixel_markers;
+        const auto markers = rasterize_fps_overlay(96,48,identity,false);
+        identity.eye_identity_source = EyeIdentitySource::both;
+        const auto both = rasterize_fps_overlay(96,48,identity,false);
+        require(metadata != markers && markers != both && metadata != both &&
+            std::count(both.begin(), both.end(), 0xffffffffu) > 0,
+            "the corner overlay identifies metadata, markers, or both separately");
         const auto bgra = rasterize_fps_overlay(240, 120, inactive, true);
         require(std::count(bgra.begin(), bgra.end(), 0xffff5050u) > 100, "BGRA color order");
         // Exact oracle: the whole minimal image must contain only the digits 90.

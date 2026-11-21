@@ -3,11 +3,13 @@
 #include <atomic>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include "xrfg/delivery_cadence.hpp"
 #include "xrfg/aer_framegen_evidence.hpp"
+#include "xrfg/eye_guide_binding.hpp"
 
 namespace xrfg {
 // QPC nanoseconds on Windows. Display-time conversion uses this same domain.
@@ -289,6 +291,8 @@ struct InterfaceTelemetry {
     bool aer_eye_equivalents{};
     bool gpu_valid{}, delay_valid{}, presentation_valid{}, cpu_valid{};
     bool ofxr_time_valid{}, cycle_valid{};
+    // Use the alignment padding before InterfaceSource in the shared control layout.
+    EyeIdentitySource eye_identity_source{};
     InterfaceSource gpu_source{}, delay_source{}, presentation_source{}, cpu_source{}, display_source{}, output_source{};
     InterfaceSource ofxr_time_source{}, cycle_source{};
     float cycle_estimated_ms{};
@@ -297,6 +301,7 @@ struct InterfaceTelemetry {
     float game_time_ms{},generation_time_ms{},delivery_time_ms{};
     bool stages_valid{},game_time_valid{};
 };
+static_assert(offsetof(InterfaceTelemetry, gpu_source) == offsetof(InterfaceTelemetry, cycle_valid) + 4);
 
 // Caller serializes access. Fixed storage; only the first successful real
 // submission contributes. Failed attempts do not consume identity, and delayed

@@ -1394,6 +1394,8 @@ void status_pane(Panel& p) {
         lines.push_back({vectors=="DLSS" ? Tone::ok : Tone::idle,"Vectors: "+std::string(vectors)});
         const auto reconstruction=interface_reconstruction_text(state,now);
         lines.push_back({reconstruction.ends_with(": Off") ? Tone::idle : Tone::ok,std::string(reconstruction)});
+        if (const auto identity = interface_eye_identity_text(state,now); !identity.empty())
+            lines.push_back({Tone::ok,std::string(identity)});
         const auto explanation=interface_status_text(state,false);
         std::string_view rest=explanation;
         while(!rest.empty()) {

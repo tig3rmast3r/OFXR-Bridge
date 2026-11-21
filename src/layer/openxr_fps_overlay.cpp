@@ -76,6 +76,13 @@ struct OpenXrFpsOverlay::Impl {
     FpsCounter counter;
     AcceptedSceneRate accepted_scenes;
     InterfaceTimingWindow timings;
+    std::atomic<std::uint64_t> last_eye_metadata{}, last_eye_marker{};
+    EyeIdentitySource recent_eye_identity() const noexcept {
+        const auto now = GetTickCount64();
+        const auto recent = [now](std::uint64_t at) { return at && now >= at && now - at < 1000; };
+        return (recent(last_eye_metadata.load(std::memory_order_relaxed)) ? EyeIdentitySource::metadata : EyeIdentitySource::none) |
+            (recent(last_eye_marker.load(std::memory_order_relaxed)) ? EyeIdentitySource::pixel_markers : EyeIdentitySource::none);
+    }
     DisplayTimeConverter converter{};
     void* converter_user{};
     std::int64_t next_telemetry{};
@@ -969,6 +976,7 @@ struct OpenXrFpsOverlay::Impl {
         out.game_fps = fps.real_fps;
         out.generated_fps = fps.generated_fps;
         out.aer_eye_equivalents = fps.aer_eye_equivalents;
+        out.eye_identity_source = recent_eye_identity();
         out.rates_valid = fps.sample_valid;
         if(luke_scene_measurement) {
             // Preserve the established real/generated OFXR counters. Only the
@@ -1109,6 +1117,7 @@ struct OpenXrFpsOverlay::Impl {
         poll_native_counts(now);
         auto snapshot = counter.snapshot(now);
         snapshot.afw_active = afw_active;
+        snapshot.eye_identity_source = recent_eye_identity();
         if (delivery && !luke_scene_measurement) {
             if (const auto measured = delivery->delivered_fps(now)) {
                 // A compositor also counts copied B slots. Its delivery rate
@@ -1183,6 +1192,13 @@ void OpenXrFpsOverlay::set_afw_active(bool active) noexcept {
     std::scoped_lock lock(impl_->mutex);
     impl_->afw_active = active;
 }
+void OpenXrFpsOverlay::record_eye_identity(EyeIdentitySource source) noexcept {
+    const auto now = GetTickCount64();
+    if (source == EyeIdentitySource::metadata || source == EyeIdentitySource::both)
+        impl_->last_eye_metadata.store(now, std::memory_order_relaxed);
+    if (source == EyeIdentitySource::pixel_markers || source == EyeIdentitySource::both)
+        impl_->last_eye_marker.store(now, std::memory_order_relaxed);
+}
 void OpenXrFpsOverlay::set_delivery_source(SteamVrDelivery* delivery) noexcept {
     std::scoped_lock lock(impl_->mutex);
     impl_->delivery = delivery;
@@ -1216,6 +1232,8 @@ void OpenXrFpsOverlay::reset_metrics() noexcept {
     std::scoped_lock lock(impl_->mutex);
     impl_->counter.reset();
     impl_->accepted_scenes={};
+    impl_->last_eye_metadata.store(0, std::memory_order_relaxed);
+    impl_->last_eye_marker.store(0, std::memory_order_relaxed);
     impl_->timings = {};
     impl_->next_telemetry = 0;
     impl_->native_content_counter=impl_->unique_content_only;

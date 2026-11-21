@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 #include "xrfg/delivery_cadence.hpp"
+#include "xrfg/eye_guide_binding.hpp"
 
 namespace xrfg {
 
@@ -21,6 +22,7 @@ struct FpsSnapshot {
     float real_fps{}, generated_fps{};
     bool sample_valid{};
     bool aer_eye_equivalents{};
+    EyeIdentitySource eye_identity_source{};
 };
 
 // Caller serializes access. Fixed storage, monotonic wall-clock measurements;

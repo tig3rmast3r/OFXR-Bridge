@@ -83,7 +83,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 104801;
+constexpr std::uint32_t kAbi = 104901;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -1554,9 +1554,19 @@ std::string interface_aer_text(const Snapshot& s,std::uint64_t now) {
 }
 std::string_view interface_aer_source_text(const Snapshot& s) noexcept {
     if(!s.desired.ofr_enabled || !s.desired.enabled)return {};
-    return s.runtime.ofr_delivery==1?"Input: alternating releases (pixels unverified)":
+    return s.runtime.ofr_delivery==1?"Input: alternating releases":
         s.runtime.ofr_delivery==2?"Input: paired releases; AER phase assumed":
         "Input: waiting for release cadence";
+}
+std::string_view interface_eye_identity_text(const Snapshot& s, std::uint64_t now) noexcept {
+    const auto& m = s.runtime.telemetry;
+    if (!s.connected || !m.updated_ms || now < m.updated_ms || now - m.updated_ms >= 2000) return {};
+    switch (m.eye_identity_source) {
+    case EyeIdentitySource::metadata: return "Frame identity: Metadata";
+    case EyeIdentitySource::pixel_markers: return "Frame identity: Pixel markers";
+    case EyeIdentitySource::both: return "Frame identity: Metadata + pixel markers";
+    default: return {};
+    }
 }
 std::string_view interface_state_text(const Snapshot& s) noexcept {
     if (!s.connected) return "Waiting";

@@ -94,6 +94,16 @@ int main(int argc,char** argv){try{
     check(autonomous::interface_aer_active(aer,now),"fresh confirmed AER output activates the status");
     check(autonomous::interface_aer_source_text(aer).find("phase assumed")!=std::string::npos,"paired releases cannot certify AER input");
     check(count_top(rasterize_elliott_meter(aer,now,false,false),red)==0,"confirmed AER restores healthy metrics");
+    auto with_identity = aer;
+    with_identity.runtime.ofr_delivery = 1;
+    with_identity.runtime.telemetry.eye_identity_source = EyeIdentitySource::metadata;
+    const auto metadata = rasterize_elliott_meter(with_identity, now, false, false);
+    with_identity.runtime.telemetry.eye_identity_source = EyeIdentitySource::pixel_markers;
+    const auto markers = rasterize_elliott_meter(with_identity, now, false, false);
+    check(metadata != markers && autonomous::interface_aer_source_text(with_identity) == "Input: alternating releases" &&
+        autonomous::interface_eye_identity_text(with_identity, now) == "Frame identity: Pixel markers" &&
+        autonomous::interface_eye_identity_text(with_identity, now + 2000).empty(),
+        "the meter reports fresh identity separately from release cadence");
     for(bool uevr:{false,true}) {
         auto priority=aer;
         priority.desired.luke_osr=2;

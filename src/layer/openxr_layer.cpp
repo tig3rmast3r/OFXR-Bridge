@@ -3026,7 +3026,9 @@ std::shared_ptr<const xrfg::DlssMotionVectorFrame> resolve_eye_metadata(
 std::shared_ptr<const xrfg::DlssMotionVectorFrame> select_luke_eye_guide(
     SwapchainState& state, const xrfg::D3D12HistoryCaptureTicket& capture, unsigned eye,
     std::shared_ptr<const xrfg::DlssMotionVectorFrame> metadata, bool marker_attempted,
-    std::uint32_t marker, HRESULT marker_result, ID3D12CommandQueue* queue, ID3D12Device* device) {
+    std::uint32_t marker, HRESULT marker_result, ID3D12CommandQueue* queue, ID3D12Device* device,
+    xrfg::EyeIdentitySource* selected_from = nullptr) {
+    if (selected_from) *selected_from = xrfg::EyeIdentitySource::none;
     const auto trace = [&](std::int64_t decision, std::uint64_t token) {
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::eye_frame_metadata,
             decision, handle_value(state.handle), capture.serial, token);
@@ -3049,6 +3051,7 @@ std::shared_ptr<const xrfg::DlssMotionVectorFrame> select_luke_eye_guide(
             exact_source_render)) {
         trace(marker ? 42 : marker_attempted ? 45 : 46, metadata->color_origin_token);
         if (ambiguous_marker) trace(50, metadata->color_origin_token);
+        if (selected_from) *selected_from = xrfg::EyeIdentitySource::metadata;
         return metadata;
     }
     if (metadata && marker) {
@@ -3062,6 +3065,7 @@ std::shared_ptr<const xrfg::DlssMotionVectorFrame> select_luke_eye_guide(
     if (!marker) return {};
     auto legacy = xrfg::resolve_luke_guide_token(marker, queue, device);
     if (legacy) {
+        if (selected_from) *selected_from = xrfg::EyeIdentitySource::pixel_markers;
         std::scoped_lock lock(state.mutex);
         if (const auto* source = captured_eye_source(state, capture, eye)) {
             const auto producer = state.released_eye_frame.frame.producer;
@@ -17028,6 +17032,7 @@ struct LukeOriginHistoryProbe {
         std::array<HRESULT,2> origin_results{};
         std::array<bool,2> origin_nonblack{};
         std::array<std::shared_ptr<const xrfg::DlssMotionVectorFrame>, 2> metadata;
+        std::array<xrfg::EyeIdentitySource, 2> identity_sources{};
         bool markers_attempted = true;
         const bool rdr2 = rdr2_aer_osr_process();
         const bool audit_markers = xrfg::bridge_flight_logger().enabled();
@@ -17120,7 +17125,7 @@ struct LukeOriginHistoryProbe {
             }
             entry.guide = select_luke_eye_guide(*entry.swapchain, entry.source_capture->capture,
                 entry.logical_eye, std::move(metadata[index]), markers_attempted, marker, result,
-                session->d3d12_queue.Get(),session->d3d12_device.Get());
+                session->d3d12_queue.Get(),session->d3d12_device.Get(), &identity_sources[index]);
             if (entry.guide) {
                 origin_tokens[index] = entry.guide->color_origin_token;
                 origin_results[index] = S_OK;
@@ -17559,6 +17564,10 @@ struct LukeOriginHistoryProbe {
             return output;
         }
         auto pair = std::make_shared<HeldAfwPair>();
+        if (session->fps_overlay && !sequence_continued) {
+            const auto peer_source = rdr2 || native_peer_camera ? identity_sources[destination_index] : xrfg::EyeIdentitySource::none;
+            session->fps_overlay->record_eye_identity(identity_sources[source_index] | peer_source);
+        }
         pair->projection = snapshot;
         if(reconstructed_position) {
             // Reuse this exact metadata for fresh, retained and post-OSR

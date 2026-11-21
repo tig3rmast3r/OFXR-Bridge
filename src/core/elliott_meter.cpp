@@ -373,9 +373,11 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const auto vector_rows=wrap(vectors,51), status_rows=wrap(explanation,51);
     const auto aer_rows=wrap(autonomous::interface_aer_text(state,now_ms),60);
     const auto aer_source=autonomous::interface_aer_source_text(state);
+    const auto identity_source=autonomous::interface_eye_identity_text(state,now_ms);
     const auto benchmark=elliott_benchmark_text(state,now_ms);
     const int rows_top=214+(benchmark.empty()?0:28), line_height=22;
-    const int count=std::min<int>(int(vector_rows.size()+status_rows.size()+1+aer_rows.size()+(!aer_source.empty()?1:0)+(nr_model_missing?1:0)),
+    const int count=std::min<int>(int(vector_rows.size()+status_rows.size()+1+aer_rows.size()+
+        !aer_source.empty()+!identity_source.empty()+(nr_model_missing?1:0)),
         (h-rows_top-8)/line_height);
     const int used=rows_top+count*line_height+8;
     if(used_height)*used_height=unsigned(used);
@@ -427,6 +429,9 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     }
     if(!aer_source.empty() && drawn<count) {
         c.text(margin,y,aer_source,body,PanelTone::dim);++drawn;y+=line_height;
+    }
+    if(!identity_source.empty() && drawn<count) {
+        c.text(margin,y,identity_source,body,PanelTone::normal);++drawn;y+=line_height;
     }
     rows("Vectors:",vector_rows);rows("Status:",status_rows);
     return c.take();

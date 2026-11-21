@@ -34,6 +34,7 @@ public:
     // GPU fence wait, and every runtime image-wait timeout remains zero.
     void application_frame(const XrFrameEndInfo* info) noexcept;
     void set_afw_active(bool active) noexcept;
+    void record_eye_identity(EyeIdentitySource source) noexcept;
     void set_delivery_source(SteamVrDelivery* delivery) noexcept;
     // Installed only for the known SteamVR native-handle budget. Other runtimes
     // retain direct, separate UI surfaces. A busy inventory defers admission.
