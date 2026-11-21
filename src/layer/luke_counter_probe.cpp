@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <mutex>
 
 namespace xrfg {
 namespace {
@@ -67,8 +68,8 @@ const GtaBinding& gta_binding() { static const GtaBinding value; return value; }
 namespace eye_layout = native_ingress::real_vr_eye_layout;
 
 struct SelectedRenderBinding {
-    std::uintptr_t base{}, owner_pointer{};
-    const eye_layout::Layout* layout{};
+    std::uintptr_t base{};
+    eye_layout::Layout layout;
 };
 
 SelectedRenderBinding find_selected_render_binding() noexcept {
@@ -77,34 +78,7 @@ SelectedRenderBinding find_selected_render_binding() noexcept {
     for (const auto module : modules) {
         if (!module || !GetProcAddress(module, "RealVRVersion") || !GetProcAddress(module, "g_rvrShared")) continue;
         const auto base = reinterpret_cast<std::uintptr_t>(module);
-        IMAGE_DOS_HEADER dos{};
-        IMAGE_NT_HEADERS64 nt{};
-        if (!read_self(base, &dos, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
-            dos.e_lfanew < static_cast<LONG>(sizeof(dos)) || dos.e_lfanew > 4096 - static_cast<LONG>(sizeof(nt)) ||
-            !read_self(base + dos.e_lfanew, &nt, sizeof(nt)) || nt.Signature != IMAGE_NT_SIGNATURE ||
-            nt.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
-            nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) continue;
-        const auto* layout = eye_layout::find(nt.FileHeader.TimeDateStamp, nt.OptionalHeader.SizeOfImage);
-        if (!layout) continue;
-        // Both wrappers load the active runtime pointer through RIP-relative
-        // addressing. In 26.3 this is the D3D12 NGX evaluate wrapper itself.
-        std::array<unsigned char, 14> load{};
-        if (!read_self(base + layout->owner_reference, load.data(), load.size())) continue;
-        constexpr std::array current_load{0x48, 0x8b, 0x3d};
-        constexpr std::array current_use{0x4c, 0x8b, 0xf2};
-        constexpr std::array v26_3_load{0x4c, 0x8b, 0x25};
-        constexpr std::array v26_3_use{0x4c, 0x89, 0x65, 0x28, 0x4d, 0x85, 0xe4};
-        const bool matched = layout->abi == eye_layout::Abi::v26_3
-            ? std::equal(v26_3_load.begin(), v26_3_load.end(), load.begin()) &&
-                std::equal(v26_3_use.begin(), v26_3_use.end(), load.begin() + 7)
-            : std::equal(current_load.begin(), current_load.end(), load.begin()) &&
-                std::equal(current_use.begin(), current_use.end(), load.begin() + 7);
-        if (!matched) continue;
-        std::int32_t displacement{};
-        std::memcpy(&displacement, load.data() + 3, sizeof(displacement));
-        const auto owner_rva = std::int64_t(layout->owner_reference) + 7 + displacement;
-        if (owner_rva < 0 || owner_rva > layout->image_size - sizeof(std::uintptr_t)) continue;
-        return {base, base + static_cast<std::uintptr_t>(owner_rva), layout};
+        if (const auto layout = eye_layout::bind_module(base)) return {base,*layout};
     }
     return {};
 }
@@ -123,36 +97,14 @@ bool method_contains(std::uintptr_t module, std::uintptr_t method,
     return std::search(body.begin(), end, instructions.begin(), instructions.end()) != end;
 }
 
-struct SelectedRenderFields {
-    std::uint32_t selected, camera_ring;
-};
-
-constexpr SelectedRenderFields selected_render_fields(eye_layout::Abi abi) noexcept {
-    return abi == eye_layout::Abi::v26_3
-        ? SelectedRenderFields{0x841808, 0x841340}
-        : SelectedRenderFields{0x841780, 0x8412b8};
-}
-
 bool selected_render_methods(const SelectedRenderBinding& binding, std::uint64_t vtable,
-    const SelectedRenderFields& fields) noexcept {
-    std::array<unsigned char, 27> camera_selection{
-        0x83,0xe0,0x03,0x48,0x69,0xd0,0x30,0x01,0,0,
-        0x48,0x8b,0x84,0x3a,0,0,0,0,  // Load the camera-ring render ID.
-        0x48,0x3b,0x87,0,0,0,0,0x75,0x08}; // Compare it with the selected render.
-    std::memcpy(camera_selection.data() + 14, &fields.camera_ring, sizeof(fields.camera_ring));
-    std::memcpy(camera_selection.data() + 21, &fields.selected, sizeof(fields.selected));
-    auto alternate_register = camera_selection;
-    alternate_register[13] = 0x1a;
-    alternate_register[20] = 0x83;
-    std::array<unsigned char, 9> depth_eye{0x8b,0x83,0,0,0,0,0x83,0xe0,1};
-    std::memcpy(depth_eye.data() + 2, &fields.selected, sizeof(fields.selected));
-    std::uintptr_t camera{}, depth{};
-    return vtable >= binding.base && vtable - binding.base < binding.layout->image_size &&
-        read_self(vtable + binding.layout->camera_method_slot * sizeof(camera), &camera, sizeof(camera)) &&
-        read_self(vtable + binding.layout->depth_method_slot * sizeof(depth), &depth, sizeof(depth)) &&
-        (method_contains(binding.base, camera, camera_selection) ||
-            method_contains(binding.base, camera, alternate_register)) &&
-        method_contains(binding.base, depth, depth_eye);
+    const eye_layout::SelectedRenderFields& fields) noexcept {
+    std::array<std::uintptr_t,128> methods;
+    if (vtable < binding.base || !read_self(vtable,methods.data(),sizeof(methods))) return false;
+    return eye_layout::has_selected_render_methods(binding.layout,binding.base,methods,fields,
+        [&](auto method,const auto& instructions) {
+            return method_contains(binding.base,method,instructions);
+        });
 }
 #endif
 }
@@ -178,30 +130,53 @@ std::optional<LukeGtaHeadlock> query_luke_gta_headlock(bool capture_tracking) no
 std::optional<LukeRenderIdentity> query_real_vr_selected_render() noexcept {
 #if defined(_WIN64)
     static const auto binding = find_selected_render_binding();
-    if (!binding.layout || !module_still_current(binding.base)) return {};
+    if (!module_still_current(binding.base)) return {};
     const auto read = [](std::uintptr_t address, std::uint64_t& value) {
         return read_self(address, &value, sizeof(value));
     };
     constexpr std::uintptr_t camera_stride = 0x130;
-    const auto fields = selected_render_fields(binding.layout->abi);
+    const auto fields = eye_layout::selected_render_fields(binding.layout.abi);
+    const auto owner_pointer = binding.base + binding.layout.owner;
     std::uint64_t owner{}, vtable{}, render{}, ring_render{}, after{}, after_owner{};
-    if (!read(binding.owner_pointer, owner) || !owner || !read(owner, vtable)) return {};
+    if (!read(owner_pointer, owner) || !owner || !read(owner, vtable)) return {};
     static std::atomic_uint64_t verified_vtable{}, refused_vtable{};
     if (vtable != verified_vtable.load(std::memory_order_relaxed)) {
         if (!vtable || vtable == refused_vtable.load(std::memory_order_relaxed)) return {};
         const bool verified = selected_render_methods(binding, vtable, fields);
         (verified ? verified_vtable : refused_vtable).store(vtable, std::memory_order_relaxed);
         bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
-            verified ? 1 : 0, 1372, binding.owner_pointer - binding.base, vtable - binding.base);
+            verified ? 1 : 0, 1372, binding.layout.owner, vtable - binding.base);
         if (!verified) return {};
     }
     if (!read(owner + fields.selected, render) || render >= (1ULL << 63) ||
         !read(owner + fields.camera_ring + (render & 3) * camera_stride, ring_render) || ring_render != render ||
         !read(owner + fields.selected, after) || after != render ||
-        !read(binding.owner_pointer, after_owner) || after_owner != owner) return {};
+        !read(owner_pointer, after_owner) || after_owner != owner) return {};
     return LukeRenderIdentity{owner, render};
 #else
     return {};
 #endif
 }
 } // namespace xrfg
+
+#if defined(_WIN64)
+namespace xrfg::native_ingress::real_vr_eye_layout {
+std::optional<Layout> bind_module(std::uintptr_t base) noexcept {
+    struct Inspection {
+        std::uintptr_t base{};
+        std::optional<Layout> layout;
+    };
+    static std::mutex mutex;
+    static std::array<Inspection,4> inspections{};
+    std::scoped_lock lock(mutex);
+    for (auto& item : inspections) {
+        if (item.base == base) return item.layout;
+        if (!item.base) {
+            item = {base,discover(base,read_self)};
+            return item.layout;
+        }
+    }
+    return {};
+}
+} // namespace xrfg::native_ingress::real_vr_eye_layout
+#endif

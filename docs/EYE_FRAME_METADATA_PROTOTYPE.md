@@ -326,3 +326,16 @@ Other draw paths can still use pixel markers.
 Both handoffs were verified against the installed DLL offline. A headset
 trace is still needed to confirm guide binding (result 51), metadata and
 marker agreement (42), and metadata recovery on marker misses (45).
+
+## Discovering compatible REAL VR updates
+
+The eye metadata adapter discovers the eye draw and the DLSS-side runtime
+owner from the loaded module's instructions. It checks the OpenXR
+swapchain type, ties the source texture and render-ID instructions to
+the same draw through unwind metadata, and verifies the camera and depth
+methods on the active runtime object. The PE timestamp is logged for
+diagnostics. It does not select a layout.
+
+The same checks cover the installed Uncharted 4 and Lost Legacy DLL and
+both runtime types in REAL VR 2611.18.2. Pixel markers remain the fallback
+if a new build changes the handoffs or the adapter cannot verify them.

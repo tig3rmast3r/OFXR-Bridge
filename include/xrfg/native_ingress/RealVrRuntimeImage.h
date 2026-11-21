@@ -27,6 +27,7 @@ inline bool match(std::span<const unsigned char> bytes, std::size_t at,
 struct Section { std::uint32_t rva{}, size{}, flags{}; std::vector<unsigned char> bytes; };
 struct Image {
     std::uintptr_t base{};
+    std::uint32_t timestamp{};
     std::uint32_t unwind_rva{},unwind_size{};
     std::vector<Section> sections;
     std::span<const unsigned char> at(std::uint32_t rva, std::size_t size) const {
@@ -62,7 +63,7 @@ std::optional<Image> load(std::uintptr_t base,Read&& read) {
     const std::size_t table=nt+24+optional;
     if(!count || count>32 || optional<144 || table>header.size() || count*40>header.size()-table ||
         size<4096 || size>512*1024*1024)return {};
-    Image image;image.base=base;
+    Image image;image.base=base;image.timestamp=value<std::uint32_t>(header,nt+8);
     std::size_t total{};
     for(unsigned i=0;i<count;++i) {
         const auto at=table+i*40;

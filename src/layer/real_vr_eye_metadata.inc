@@ -4,16 +4,6 @@ namespace real_vr_eye_metadata {
 #if defined(_WIN64)
 namespace eye_layout = xrfg::native_ingress::real_vr_eye_layout;
 
-struct DrawLayout {
-    std::uint32_t original, endpoint, endpoint_probe, color_release, owner, swapchains;
-};
-
-constexpr DrawLayout draw_layout(eye_layout::Abi abi) noexcept {
-    return abi == eye_layout::Abi::v26_3
-        ? DrawLayout{0xaaf, 0x97a, 0x96c, 0xb90, 0x14e8, 0x5f0}
-        : DrawLayout{0xd7a, 0xb42, 0xb42, 0xdb9, 0x15b0, 0x5f8};
-}
-
 bool read(std::uintptr_t address, void* out, std::size_t size) noexcept {
     SIZE_T copied{};
     return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), out, size, &copied) &&
@@ -23,57 +13,6 @@ bool read(std::uintptr_t address, void* out, std::size_t size) noexcept {
 template<class T>
 bool read(std::uintptr_t address, T& value) noexcept {
     return read(address, &value, sizeof(value));
-}
-
-template<class... Byte>
-bool instructions(std::uintptr_t address, Byte... bytes) noexcept {
-    const std::array<unsigned char, sizeof...(bytes)> expected{static_cast<unsigned char>(bytes)...};
-    std::array<unsigned char, sizeof...(bytes)> actual{};
-    return read(address, actual) && actual == expected;
-}
-
-bool match_draw(std::uintptr_t draw, const DrawLayout& offsets, eye_layout::Abi abi) noexcept {
-    if (abi == eye_layout::Abi::v26_3) {
-        return instructions(draw, 0x89,0x54,0x24,0x10,0x55,0x53,0x56,0x57,0x41,0x57,0x48,0x8d,0xac,0x24,0xc0,0xad,0xff,0xff) &&
-            instructions(draw + 0x1f, 0x48,0x8b,0xb1,0xe8,0x14,0,0,0x48,0x8b,0xf9,0x4c,0x63,0xfa) &&
-            instructions(draw + offsets.original - 15, 0x49,0x8b,0x44,0x1e,0x58,0x48,0x89,0x44,0x24,0x20) &&
-            instructions(draw + offsets.original, 0x49,0x8b,0x44,0x1e,0x10,0x4a,0x89,0x84,0xfe,0x98,0x14,0,0) &&
-            instructions(draw + offsets.endpoint_probe, 0x4a,0x8b,0x04,0x20,0x48,0x89,0x44,0x24,0x20) &&
-            instructions(draw + offsets.endpoint, 0x49,0x3b,0xdd,0xb8,0x30,0,0,0,0xb9,0x38,0,0,0,0x0f,0x4d,0xc1,0x4a,0x8b,0x04,0x20) &&
-            instructions(draw + offsets.color_release, 0x4a,0x8b,0x8c,0xff,0xf0,0x05,0,0,0x48,0x8b,0x01,0xff,0x50,0x28);
-    }
-    return instructions(draw, 0x89,0x54,0x24,0x10,0x55,0x53,0x56,0x57,0x41,0x54,0x48,0x8d,0xac,0x24,0xf0,0xa9,0xff,0xff) &&
-        instructions(draw + 0x1f, 0x48,0x8b,0xb1,0xb0,0x15,0,0,0x48,0x8b,0xf9,0x4c,0x63,0xe2) &&
-        instructions(draw + offsets.original, 0x49,0x8b,0x44,0x1e,0x10,0x4a,0x89,0x84,0xe6,0x98,0x14,0,0) &&
-        instructions(draw + offsets.endpoint, 0x49,0x3b,0xdd,0xb8,0x30,0,0,0,0xb9,0x38,0,0,0,0x0f,0x4c,0xc1,0x4a,0x8b,0x04,0x30) &&
-        instructions(draw + offsets.color_release, 0x4a,0x8b,0x8c,0xe7,0xf8,0x05,0,0,0x48,0x8b,0x01,0xff,0x50,0x28);
-}
-
-const eye_layout::Layout* match_module(std::uintptr_t base) noexcept {
-    IMAGE_DOS_HEADER dos{};
-    IMAGE_NT_HEADERS64 nt{};
-    if (!read(base, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
-        dos.e_lfanew < static_cast<LONG>(sizeof(dos)) || dos.e_lfanew > 4096 - static_cast<LONG>(sizeof(nt)) ||
-        !read(base + dos.e_lfanew, nt) || nt.Signature != IMAGE_NT_SIGNATURE ||
-        nt.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
-        nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return nullptr;
-    const auto* layout = eye_layout::find(nt.FileHeader.TimeDateStamp, nt.OptionalHeader.SizeOfImage);
-    if (!layout) return nullptr;
-    const auto draw = base + layout->draw_eye;
-    const auto offsets = draw_layout(layout->abi);
-    std::uintptr_t release{};
-    std::int32_t original_call{}, endpoint_call{};
-    if (!read(base + layout->swapchain_vtable + 5 * sizeof(release), release) ||
-        release != base + layout->release ||
-        !match_draw(draw, offsets, layout->abi) ||
-        !instructions(draw + offsets.original - 5, 0xe8) ||
-        !instructions(draw + offsets.endpoint - 5, 0xe8) ||
-        !read(draw + offsets.original - 4, original_call) ||
-        !read(draw + offsets.endpoint - 4, endpoint_call) ||
-        std::int64_t(offsets.original) + original_call != std::int64_t(offsets.endpoint) + endpoint_call ||
-        !instructions(base + layout->acquire_index, 0x4c,0x8d,0x41,0x20,0x48,0x8b,0x49,0x10,0x33,0xd2))
-        return nullptr;
-    return layout;
 }
 
 struct Hooks {
@@ -121,15 +60,17 @@ void observe(const SafetyHookContext& ctx, std::uintptr_t render_address, std::u
         eye != static_cast<std::uintptr_t>(scope->eye)) return;
 
     scope->frame.reset();
-    const auto offsets = draw_layout(state.abi);
+    const bool legacy = state.abi == eye_layout::Abi::v26_3;
+    const auto owner_offset = legacy ? 0x14e8 : 0x15b0;
+    const auto swapchains_offset = legacy ? 0x5f0 : 0x5f8;
     std::uintptr_t owner{}, texture{}, chain_object{}, table{};
     std::uint64_t render{};
     std::uint32_t index{};
     XrSwapchain chain{};
-    if (!read(ctx.rdi + offsets.owner, owner) || !owner || owner != ctx.rsi ||
+    if (!read(ctx.rdi + owner_offset, owner) || !owner || owner != ctx.rsi ||
         !read(texture_address, texture) || !texture ||
         !read(render_address, render) || render >= (1ULL << 63) ||
-        !read(ctx.rdi + offsets.swapchains + eye * sizeof(chain_object), chain_object) || !chain_object ||
+        !read(ctx.rdi + swapchains_offset + eye * sizeof(chain_object), chain_object) || !chain_object ||
         !read(chain_object, table) || table != state.table ||
         !read(chain_object + 0x10, chain) || chain == XR_NULL_HANDLE ||
         !read(chain_object + 0x20, index)) return;
@@ -177,15 +118,14 @@ void install() noexcept {
                 !GetProcAddress(module, "g_rvrShared")) continue;
             state.attempted[i] = module;
             const auto base = reinterpret_cast<std::uintptr_t>(module);
-            const auto layout = match_module(base);
+            const auto layout = eye_layout::bind_module(base);
             if (!layout) continue;
             const auto draw_address = base + layout->draw_eye;
-            const auto offsets = draw_layout(layout->abi);
             auto entry = safetyhook::create_inline(reinterpret_cast<void*>(draw_address),
                 reinterpret_cast<void*>(&draw), SafetyHookInline::StartDisabled);
-            auto direct = safetyhook::create_mid(reinterpret_cast<void*>(draw_address + offsets.original),
+            auto direct = safetyhook::create_mid(reinterpret_cast<void*>(base + layout->original),
                 observe_original, SafetyHookMid::StartDisabled);
-            auto endpoint = safetyhook::create_mid(reinterpret_cast<void*>(draw_address + offsets.endpoint_probe),
+            auto endpoint = safetyhook::create_mid(reinterpret_cast<void*>(base + layout->endpoint_probe),
                 observe_endpoint, SafetyHookMid::StartDisabled);
             HMODULE retained{};
             if (!entry || !direct || !endpoint ||

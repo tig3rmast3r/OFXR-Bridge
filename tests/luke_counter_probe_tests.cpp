@@ -1,4 +1,5 @@
 #include "xrfg/luke_counter_probe.hpp"
+#include "xrfg/native_ingress/RealVrEyeLayout.h"
 #include <iostream>
 #include <fstream>
 #include <iterator>
@@ -66,7 +67,7 @@ Memory november(bool hfw) {
     return m;
 }
 void check(bool value, const char* why) {if(!value)throw std::runtime_error(why);}
-int actual_image(const char* path) {
+int actual_image(const char* path, std::span<char*> runtime_types = {}, bool eye_metadata = false) {
     std::ifstream file(path,std::ios::binary);std::vector<unsigned char> bytes{std::istreambuf_iterator<char>(file),{}};
     check(bytes.size()>4096,"actual DLL file missing");
     const auto get=[&]<class T>(std::size_t at){check(at+sizeof(T)<=bytes.size(),"raw PE field bounds");T v{};std::memcpy(&v,bytes.data()+at,sizeof(v));return v;};
@@ -89,6 +90,46 @@ int actual_image(const char* path) {
             }
         }return true;
     };
+    if (eye_metadata) {
+        namespace binding = xrfg::native_ingress::real_vr_eye_layout;
+        namespace image_reader = xrfg::native_ingress::real_vr_runtime_image;
+        const auto layout = binding::discover(image_base,read);
+        check(layout.has_value(),"actual DLL eye metadata layout rejected");
+        const auto image = image_reader::load(image_base,read);
+        check(image.has_value(),"actual DLL sections rejected");
+        for (const auto* type : runtime_types) {
+            const auto table = image_reader::vtable(*image,type);
+            check(table.has_value(),"actual runtime type missing");
+            std::array<std::uintptr_t,128> methods;
+            check(read(image_base+*table,methods.data(),sizeof(methods)),"unreadable runtime methods");
+            const auto matches = [&](std::uintptr_t method, const auto& code) {
+                const auto rva = static_cast<std::uint32_t>(method-image_base);
+                const auto fn = image_reader::function(*image,rva);
+                if (!fn || (*fn)[0]!=rva || (*fn)[1]-rva>8192) return false;
+                const auto body = image->at(rva,(*fn)[1]-rva);
+                return std::search(body.begin(),body.end(),code.begin(),code.end())!=body.end();
+            };
+            check(binding::has_selected_render_methods(*layout,image_base,methods,
+                binding::selected_render_fields(layout->abi),matches),"actual camera/depth pair rejected");
+        }
+        const auto changed_timestamp = layout->timestamp ^ 0x5a5a5a5aU;
+        std::memcpy(bytes.data()+nt+8,&changed_timestamp,sizeof(changed_timestamp));
+        const auto changed = binding::discover(image_base,read);
+        check(changed && changed->timestamp == changed_timestamp && changed->draw_eye == layout->draw_eye &&
+            changed->owner == layout->owner && changed->original == layout->original &&
+            changed->endpoint_probe == layout->endpoint_probe &&
+            changed->swapchain_vtable == layout->swapchain_vtable,"the timestamp affected discovery");
+        const auto draw_section = std::find_if(sections.begin(),sections.end(),[&](const auto& section) {
+            return layout->original>=section.va && layout->original-section.va<section.count;
+        });
+        check(draw_section != sections.end(),"draw witness outside initialized sections");
+        auto& witness = bytes.at(draw_section->raw + layout->original - draw_section->va);
+        witness ^= 0xff;
+        check(!binding::discover(image_base,read),"changed eye draw witness was accepted");
+        std::cout << "EYE_METADATA_LAYOUT_PASS draw=" << std::hex << layout->draw_eye
+            << " owner=" << layout->owner << " vtable=" << layout->swapchain_vtable << '\n';
+        return 0;
+    }
     const auto layout=xrfg::luke_runtime_binding(image_base,read);check(layout.has_value(),"actual file layout rejected");
     check(xrfg::luke_hfw_layout_matches(image_base,read,*layout),"actual HFW selection/method witnesses rejected");
     std::cout<<"ACTUAL_HFW_LAYOUT_PASS owner="<<std::hex<<layout->runtime_pointer<<" vtable="<<layout->hfw_vtable
@@ -99,6 +140,8 @@ int actual_image(const char* path) {
 int main(int argc,char** argv) {
     try {
         if(argc==3&&std::string_view(argv[1])=="--actual")return actual_image(argv[2]);
+        if(argc>=3&&std::string_view(argv[1])=="--eye-metadata")
+            return actual_image(argv[2],{argv+3,static_cast<std::size_t>(argc-3)},true);
         Memory m;
         check(xrfg::luke_layout_matches(module,m),"supported signatures");
         const auto c=xrfg::read_luke_identity(module,m);
