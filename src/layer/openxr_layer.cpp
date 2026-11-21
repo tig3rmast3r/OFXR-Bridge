@@ -13728,6 +13728,17 @@ struct PreparedProjectionFrame {
     xrfg::SceneIdentity original_scene;
 };
 
+[[nodiscard]] bool stale_worker_transaction(const PreparedProjectionFrame& prepared) noexcept {
+    return prepared.kind == PreparedGenerationKind::none &&
+        prepared.reason == GenerationPrepareReason::synthesis_stale_guides &&
+        std::all_of(prepared.resources.begin(), prepared.resources.end(), [](const auto& resource) {
+            const auto& generation = resource.generation;
+            return generation.reason == GenerationPrepareReason::ready ||
+                (generation.reason == GenerationPrepareReason::synthesis_stale_guides &&
+                 generation.preserve_previous);
+        });
+}
+
 void attach_djules_outputs(PreparedProjectionFrame& prepared,
     GeneratedFrameEndInfo& real, GeneratedFrameEndInfo* synthetic=nullptr,
     GeneratedFrameEndInfo* extra=nullptr, GeneratedFrameEndInfo* third=nullptr) {
@@ -14803,16 +14814,19 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
 [[nodiscard]] bool finish_worker_outputs(
     const std::shared_ptr<SessionState>& state, PreparedProjectionFrame& prepared,
     std::uint64_t source_sequence,bool* delayed_completion=nullptr,std::uint64_t preparation_us=0,
-    bool defer_gpu_completion=false) noexcept {
-    bool success = prepared.kind != PreparedGenerationKind::none;
+    bool defer_gpu_completion=false, bool discard_stale=false) noexcept {
+    const bool publish = prepared.kind != PreparedGenerationKind::none;
+    bool success = publish || discard_stale;
+    if (discard_stale && state->d3d12_device && FAILED(state->d3d12_device->GetDeviceRemovedReason()))
+        return false;
     std::uint64_t total_completion_us{preparation_us};
     bool observed_work{};
     for (auto& resource : prepared.resources) {
         auto& g = resource.generation;
         if (!g.worker_generation) continue;
         if (defer_gpu_completion) continue;
-        if (g.late_luke_publication) continue; // acquire below while dispatched GPU work proceeds
-        if(g.staging_generation && (djules_deep_active(*state)||djules_triple_active(*state))) continue;
+        if (!discard_stale && g.late_luke_publication) continue; // acquire below while dispatched GPU work proceeds
+        if(!discard_stale && g.staging_generation && (djules_deep_active(*state)||djules_triple_active(*state))) continue;
         const auto completion_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::timing_synthesis_complete,
             source_sequence, handle_value(resource.application_swapchain));
@@ -14852,11 +14866,11 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             return false;
         }
     }
-    if(success && observed_work)observe_private_completion(*state,total_completion_us,prepared.kind==PreparedGenerationKind::pair);
+    if(publish && success && observed_work)observe_private_completion(*state,total_completion_us,prepared.kind==PreparedGenerationKind::pair);
     for (auto& resource : prepared.resources) {
         auto& g = resource.generation;
         if (!g.worker_generation) continue;
-        if (success && g.worker_generation->d3d11_interop) {
+        if (publish && success && g.worker_generation->d3d11_interop) {
             std::optional<xrfg::D3D11PublicationTargets> targets;
             if (g.late_luke_publication) {
                 auto& current = g.worker_generation->current[g.current_slot];
@@ -14902,7 +14916,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     }
     for (auto& resource : prepared.resources) {
         auto& g = resource.generation;
-        if (!g.worker_generation) continue;
+        if (!g.worker_generation || (discard_stale && g.late_luke_publication)) continue;
         // Wait only for this publication, outside the interop mutex. A global
         // idle wait blocks AFW capture/publish on that same bridge and can
         // also inherit the next producer's completion cursor.
@@ -15248,6 +15262,20 @@ HRESULT publish_independent_aer_first(const std::shared_ptr<SessionState>& state
     state->presenter_condition.notify_all();return S_OK;
 }
 
+void prime_worker_source(SynthesisJob& job) noexcept {
+    job.pair = job.triple = job.quad = false;
+    job.current->previous_sequence = 0;
+}
+
+void log_skipped_worker_pair(const SynthesisJob& job, const PreparedProjectionFrame& prepared) noexcept {
+    auto& logger = xrfg::bridge_flight_logger();
+    logger.event(xrfg::BridgeFlightOperation::generation_prepare,
+        static_cast<std::int64_t>(prepared.reason), handle_value(prepared.failed_swapchain), 0,
+        job.current->source_sequence);
+    logger.event(xrfg::BridgeFlightOperation::presenter_transition, 99413,
+        job.current->source_sequence, job.current->previous_sequence, handle_value(prepared.failed_swapchain));
+}
+
 void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool completion) noexcept {
     SynthesisFailureAudit audit;
     struct FinishSubmission {
@@ -15260,6 +15288,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
         }
     } finished{state,completion};
     try {
+        bool prime_after_stale{};
         for (;;) {
             std::shared_ptr<SynthesisJob> job;
             std::shared_ptr<IndependentSynthesisWork> pending;
@@ -15290,21 +15319,46 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             const auto admission_work_started=job->admission_outputs?std::chrono::duration_cast<std::chrono::nanoseconds>(work_started.time_since_epoch()).count():0;
             xrfg::BridgeFlightToken worker_token{};
             PreparedProjectionFrame prepared;
+            bool preparation_cleanup_failed{};
             if(completion)prepared=std::move(pending->prepared);
             else {
+            if (std::exchange(prime_after_stale, false)) prime_worker_source(*job);
             worker_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_worker_run,
                 job->current->source_sequence, job->current->previous_sequence);
             const auto prepare_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_worker_prepare,
                 job->current->source_sequence, job->current->previous_sequence);
-            prepared = prepare_projection_frame(
-                job->snapshot, job->mappings, job->pair, job->fraction, true,
-                &job->presentation_transform, job->post_afw_frame
-                    ? std::span<const PostAfwFrameInput>{job->post_afw_frame->inputs}
-                    : std::span<const PostAfwFrameInput>{},job->extra_fraction,
-                job->synthetic_camera ? &*job->synthetic_camera : nullptr,
-                job->extra_camera ? &*job->extra_camera : nullptr,job->third_fraction,job->third_camera?&*job->third_camera:nullptr,job->sources);
+            const auto prepare_source = [&] {
+                return prepare_projection_frame(
+                    job->snapshot, job->mappings, job->pair, job->fraction, true,
+                    &job->presentation_transform, job->post_afw_frame
+                        ? std::span<const PostAfwFrameInput>{job->post_afw_frame->inputs}
+                        : std::span<const PostAfwFrameInput>{},job->extra_fraction,
+                    job->synthetic_camera ? &*job->synthetic_camera : nullptr,
+                    job->extra_camera ? &*job->extra_camera : nullptr,job->third_fraction,job->third_camera?&*job->third_camera:nullptr,job->sources);
+            };
+            prepared = prepare_source();
+            if (stale_worker_transaction(prepared)) {
+                if (state->independent_pacing) {
+                    // A partial pair can advance one eye's history. The next
+                    // source must prime both eyes, even if already queued.
+                    prime_after_stale = true;
+                    std::scoped_lock lock(state->presenter_mutex);
+                    if (state->director_anchor_sequence == job->current->source_sequence)
+                        state->director_anchor_sequence = 0;
+                } else if (finish_worker_outputs(state, prepared, job->current->source_sequence,
+                               nullptr, 0, false, true)) {
+                    // The serial director already reserved this real slot.
+                    // Complete it as real-only using the same frozen source.
+                    log_skipped_worker_pair(*job, prepared);
+                    prime_worker_source(*job);
+                    prepared = {};
+                    prepared = prepare_source();
+                } else {
+                    preparation_cleanup_failed = true;
+                }
+            }
             state->generation_status = prepared.kind == PreparedGenerationKind::pair
                 ? xrfg::autonomous::GenerationState::ready : prepared.kind == PreparedGenerationKind::prime
                 ? xrfg::autonomous::GenerationState::recovering : xrfg::autonomous::GenerationState::waiting;
@@ -15351,7 +15405,8 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                 state->presenter_condition.notify_all();continue;
             }
             }
-            const auto first_result=completion?publish_independent_aer_first(state,prepared,job):S_FALSE;
+            const bool discard_stale = completion && stale_worker_transaction(prepared);
+            const auto first_result=completion && !discard_stale ? publish_independent_aer_first(state,prepared,job):S_FALSE;
             const bool deferred_completion=!completion && job->pair && job->triple && fenced_optical_batch(*state,prepared);
             if(job->admission_outputs) {
                 std::scoped_lock lock(state->presenter_mutex);
@@ -15363,7 +15418,20 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             bool delayed_completion{};
             const auto preparation_us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now()-work_started).count());
-            bool success = SUCCEEDED(first_result) && finish_worker_outputs(state, prepared, job->current->source_sequence,&delayed_completion,preparation_us,deferred_completion);
+            bool success = !preparation_cleanup_failed && SUCCEEDED(first_result) &&
+                finish_worker_outputs(state, prepared, job->current->source_sequence,
+                    &delayed_completion, preparation_us, deferred_completion, discard_stale);
+            if (discard_stale && success) {
+                log_skipped_worker_pair(*job, prepared);
+                // Drop retired outputs and any remaining source pins before
+                // waking admission.
+                prepared = {};
+                pending.reset();
+                job.reset();
+                {std::scoped_lock lock(state->presenter_mutex);state->independent_completion_busy=false;}
+                state->presenter_condition.notify_all();
+                continue;
+            }
             if(success && delayed_completion) {
                 // Both eyes have completed and their private Releases succeeded.
                 // Publish this batch's own real image/pose, discard late S1/S2/S3.

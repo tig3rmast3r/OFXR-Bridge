@@ -442,6 +442,102 @@ static int independent_source_admission_test() {
     return 0;
 }
 
+static int independent_stale_guide_worker_test() {
+    Fixture fixture(true);
+    auto dispatch = std::make_shared<Dispatch>();
+    static std::atomic_uint released{};
+    released = 0;
+    dispatch->wait_swapchain_image = +[](XrSwapchain, const XrSwapchainImageWaitInfo*) -> XrResult {
+        return XR_SUCCESS;
+    };
+    dispatch->release_swapchain_image = +[](XrSwapchain, const XrSwapchainImageReleaseInfo*) -> XrResult {
+        ++released;
+        return XR_SUCCESS;
+    };
+    auto state = std::make_shared<SessionState>(dispatch);
+    state->independent_pacing = true;
+    state->d3d12_device = fixture.device12;
+    auto partial = std::make_shared<FrameGenerationSwapchainState>();
+    const auto source = reinterpret_cast<XrSwapchain>(101);
+    const auto output = reinterpret_cast<XrSwapchain>(102);
+    partial->current[0].handle = output;
+    partial->synthetic[0].handle = reinterpret_cast<XrSwapchain>(103);
+    partial->current[0].phase = partial->synthetic[0].phase = PrivateOwnershipPhase::waited;
+    partial->current_runtime_images_per_ring = partial->synthetic_runtime_images_per_ring = 1;
+    partial->current_runtime_images.resize(1);
+    partial->synthetic_runtime_images.resize(1);
+    ComPtr<ID3D12Fence> fence;
+    ok(fixture.device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "partial pair fence");
+
+    const auto make_work = [](std::uint64_t sequence) {
+        auto work = std::make_shared<IndependentSynthesisWork>();
+        work->job = std::make_shared<SynthesisJob>();
+        work->job->current = std::make_shared<ThreeSlotFrame>();
+        work->job->current->source_sequence = sequence;
+        return work;
+    };
+    auto dropped = make_work(2);
+    dropped->job->pair = true;
+    auto& prepared = dropped->prepared;
+    prepared.reason = GenerationPrepareReason::synthesis_stale_guides;
+    prepared.failed_swapchain = reinterpret_cast<XrSwapchain>(104);
+    prepared.resources.push_back({source, {}});
+    auto& ready_eye = prepared.resources.front().generation;
+    ready_eye.kind = PreparedGenerationKind::pair;
+    ready_eye.reason = GenerationPrepareReason::ready;
+    ready_eye.worker_generation = partial;
+    ready_eye.worker_fence = fence;
+    ready_eye.worker_fence_value = 1;
+    prepared.resources.push_back({prepared.failed_swapchain, {}});
+    auto& stale_eye = prepared.resources.back().generation;
+    stale_eye.reason = prepared.reason;
+    check(!stale_worker_transaction(prepared), "stale guides cannot hide a failed output release");
+    stale_eye.preserve_previous = true;
+
+    auto next = make_work(3);
+    next->job->metadata = std::make_shared<GeneratedFrameEndInfo>();
+    XrCompositionLayerProjectionView view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+    view.subImage.swapchain = source;
+    view.subImage.imageRect.extent = {8, 8};
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.viewCount = 1;
+    projection.views = &view;
+    const auto* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    auto& info = next->job->metadata->info;
+    info.type = XR_TYPE_FRAME_END_INFO;
+    info.layerCount = 1;
+    info.layers = &layer;
+    next->job->snapshot.layers.emplace_back().views.push_back(view);
+    next->prepared.kind = PreparedGenerationKind::prime;
+    next->prepared.reason = GenerationPrepareReason::ready;
+    next->prepared.resources.push_back({source, {}});
+    next->prepared.resources.front().generation.current_handle = output;
+
+    state->independent_completions.push_back(std::move(dropped));
+    state->independent_completions.push_back(std::move(next));
+    auto worker = std::thread([&] { synthesis_worker_main(state, true); });
+    bool early_release{}, resumed{};
+    {
+        std::unique_lock lock(state->presenter_mutex);
+        state->presenter_condition.wait_for(lock, 15ms, [&] { return XR_FAILED(state->presenter_failure); });
+        early_release = released.load() != 0;
+        const auto signal = fence->Signal(1);
+        resumed = SUCCEEDED(signal) && state->presenter_condition.wait_for(lock, 1s, [&] {
+            return !state->independent_outputs.empty() || XR_FAILED(state->presenter_failure);
+        });
+        state->presenter_stop_requested = true;
+        state->independent_submission_finished = true;
+    }
+    state->presenter_condition.notify_all();
+    worker.join();
+    check(!early_release && released == 2, "both partial outputs must retire after their fence");
+    check(resumed && XR_SUCCEEDED(state->presenter_failure) && state->independent_outputs.size() == 1 &&
+        state->independent_outputs.front()->source_sequence == 3 && !state->independent_completion_busy,
+        "stale stereo pair stopped the worker or published a partial pair");
+    std::puts("STALE_GUIDE_WORKER partial stereo batch drained, next source published PASS");
+    return 0;
+}
+
 static int legacy_latency_scope_test() {
     xrfg_fixture::ControlProfile profile;
     {Fixture f(true);auto dispatch=std::make_shared<Dispatch>();
@@ -660,6 +756,7 @@ int main(int argc,char** argv) {
     if(route=="aer4-stage-d11-alias")return independent_aer4_stage_test(false,false,false,1,false,false,false,true);
     if(route=="aer4-stage-d11-bgra-alias")return independent_aer4_stage_test(false,true,false,1,false,false,false,true);
     if(route=="independent-source-budget")return independent_source_admission_test();
+    if(route=="independent-stale-guide-worker")return independent_stale_guide_worker_test();
     if(route=="independent-ready-admission")return independent_ready_admission_test();
     if(route=="independent-ready-admission-learned")return independent_ready_admission_test(true);
     if(route=="independent-stage-overlap")return independent_stage_overlap_test();

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1046.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1047.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1541,6 +1541,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(xrfg_independent_frozen_panels xrfg_independent_frozen_panels_aer xrfg_independent_legacy_panel_control PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         set_tests_properties(xrfg_independent_aux_d12 xrfg_independent_aux_d11 PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         add_test(NAME xrfg_independent_source_budget COMMAND xrfg_private_runtime_layer_tests independent-source-budget)
+        add_test(NAME xrfg_independent_stale_guide_worker COMMAND xrfg_private_runtime_layer_tests independent-stale-guide-worker)
+        set_tests_properties(xrfg_independent_stale_guide_worker PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         add_test(NAME xrfg_independent_ready_admission COMMAND xrfg_private_runtime_layer_tests independent-ready-admission)
         add_test(NAME xrfg_independent_stage_overlap COMMAND xrfg_private_runtime_layer_tests independent-stage-overlap)
         add_test(NAME xrfg_independent_native_wait COMMAND xrfg_private_openxr_runtime_tests independent-native-wait)

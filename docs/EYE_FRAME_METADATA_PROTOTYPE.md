@@ -289,3 +289,26 @@ existing path. Live confirmation of the new bindings is pending.
 
 With F9 enabled, result 51 confirms a binding, 42 confirms that metadata and
 the readable marker agree, and 50 confirms recovery from an ambiguous marker.
+
+## r12 stale-guide worker recovery
+
+If either eye refuses a stale guide, the worker retires the partial stereo
+transaction after its GPU fences complete. Independent pacing skips that
+transaction and primes both eyes on the next source. The serial worker can
+prime the current source as real-only, keeping its existing presentation slot.
+GPU or swapchain release failures still propagate. The metadata lookup and
+pixel marker fallback are unchanged.
+
+With F9 on, `presenter_transition` result 99413 identifies an abandoned pair
+that finished cleanup. Later successful `generation_prepare` entries in
+the same session show the worker resumed.
+
+The worker regression test forces a stale pair with one eye's GPU work
+already submitted. The GTA r12 run did not hit 99413, so live verification
+of this recovery remains open.
+
+Test RDR2 in Hybrid AER and Full OSR separately. With F9 enabled, AER
+stage 1453 records camera votes. In OSR, bit 3 of stage 1382 records
+verified camera inputs. An F8 capture puts the GPU decision in word 5 of
+`osr_scene_state` and its evidence in word 8. Evidence codes are 0 for
+inconclusive, 1 for points, 2 for patches, and 3 for camera reprojection.
