@@ -102,15 +102,19 @@ int actual_image(const char* path, std::span<char*> runtime_types = {}, bool eye
             check(table.has_value(),"actual runtime type missing");
             std::array<std::uintptr_t,128> methods;
             check(read(image_base+*table,methods.data(),sizeof(methods)),"unreadable runtime methods");
-            const auto matches = [&](std::uintptr_t method, const auto& code) {
+            const auto matches = [&](std::uintptr_t method, const auto& code, bool exact_entry = false) {
                 const auto rva = static_cast<std::uint32_t>(method-image_base);
+                if (exact_entry) {
+                    auto actual = code;
+                    return read(method,actual.data(),actual.size()) && actual == code;
+                }
                 const auto fn = image_reader::function(*image,rva);
                 if (!fn || (*fn)[0]!=rva || (*fn)[1]-rva>8192) return false;
                 const auto body = image->at(rva,(*fn)[1]-rva);
                 return std::search(body.begin(),body.end(),code.begin(),code.end())!=body.end();
             };
             check(binding::has_selected_render_methods(*layout,image_base,methods,
-                binding::selected_render_fields(layout->abi),matches),"actual camera/depth pair rejected");
+                binding::selected_render_fields(layout->abi),matches),"actual selected-render methods rejected");
         }
         const auto changed_timestamp = layout->timestamp ^ 0x5a5a5a5aU;
         std::memcpy(bytes.data()+nt+8,&changed_timestamp,sizeof(changed_timestamp));

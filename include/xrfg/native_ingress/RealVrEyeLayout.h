@@ -166,16 +166,31 @@ bool has_selected_render_methods(const Layout& layout, std::uintptr_t base,
     alternate_register[20] = 0x83;
     std::array<unsigned char, 9> depth_eye{0x8b,0x83,0,0,0,0,0x83,0xe0,1};
     std::memcpy(depth_eye.data() + 2, &fields.selected, sizeof(fields.selected));
+    // Vulkan runtimes use this leaf method in place of the D3D depth-eye
+    // method. Match its full entry since a leaf may have no unwind record.
+    std::array<unsigned char, 34> selected_valid{
+        0x80,0xb9,0,0,0,0,0,0x74,0x16,            // Selection enabled.
+        0x48,0x83,0xb9,0,0,0,0,0,0x7c,0x0c,      // Selected render is nonnegative.
+        0x80,0xb9,0,0,0,0,0,0x75,0x03,
+        0xb0,0x01,0xc3,0x32,0xc0,0xc3};
+    const auto enabled = fields.selected + 0x2d, blocked = fields.selected + 0x32;
+    std::memcpy(selected_valid.data() + 2, &enabled, sizeof(enabled));
+    std::memcpy(selected_valid.data() + 12, &fields.selected, sizeof(fields.selected));
+    std::memcpy(selected_valid.data() + 21, &blocked, sizeof(blocked));
     const auto code = base + layout.code_begin;
     const auto end = std::find_if(methods.begin(),methods.end(),[&](auto method) {
         return method < code || method-code >= layout.code_size;
     });
     constexpr int depth_after_camera = 11;
+    constexpr int validity_after_camera = 4;
     unsigned pairs{};
-    for (auto method = methods.begin(); end-method > depth_after_camera; ++method) {
-        if ((match_method(*method,camera_selection) ||
-                match_method(*method,alternate_register)) &&
-            match_method(method[depth_after_camera],depth_eye)) {
+    for (auto method = methods.begin(); end-method > validity_after_camera; ++method) {
+        if (!match_method(*method,camera_selection) && !match_method(*method,alternate_register))
+            continue;
+        const auto validity_method = method[validity_after_camera];
+        if ((end-method > depth_after_camera && match_method(method[depth_after_camera],depth_eye)) ||
+            (layout.abi == Abi::current && layout.code_size - (validity_method - code) >= selected_valid.size() &&
+                match_method(validity_method,selected_valid,true))) {
             if (++pairs > 1) return false;
         }
     }

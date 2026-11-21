@@ -6,7 +6,9 @@
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/luke_color_origin.hpp"
 #include "xrfg/luke_origin_demand.hpp"
+#include "xrfg/luke_render_identity.hpp"
 #include "xrfg/luke_vulkan_scope.hpp"
+#include "xrfg/eye_frame_metadata.h"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/ngx_feature_metadata.hpp"
 #include "xrfg/ngx_evaluation_boundary.hpp"
@@ -46,6 +48,7 @@ enum Role{color,motion,depth,output,role_count};
 #if defined(XRFG_NATIVE_INGRESS_TESTS)
 std::uint64_t tested_native_output_copyback_pixels{};
 rdr2_camera_probe::Sample (*test_rdr2_camera)() noexcept{};
+std::optional<LukeRenderIdentity> (*test_vulkan_selected_render)() noexcept{};
 #endif
 struct GuideImageShape {
     uint32_t width{},height{};
@@ -1546,6 +1549,17 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         }
         return raw();
     }
+    if (original_capture && !g.source_clock_owner) {
+        // Read at the typed evaluation of the same public recording, after
+        // REAL VR selected its source and before the wrapper can advance it.
+        const auto selected =
+#if defined(XRFG_NATIVE_INGRESS_TESTS)
+            test_vulkan_selected_render ? test_vulkan_selected_render() :
+#endif
+            query_real_vr_selected_render();
+        if (selected)
+            g.eye_render = {selected->object, selected->render, OFXR_EYE_SOURCE_REAL_VR};
+    }
     for(unsigned r=0;r<role_count;++r) {
         const auto required=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|((r==color||r==output)?VK_IMAGE_USAGE_TRANSFER_DST_BIT:0);
         bool supported{};{std::scoped_lock registry_lock(hooks().mutex);const auto usage=hooks().image_usage.find(resources[r]->Resource.ImageViewInfo.Image);
@@ -1752,6 +1766,9 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         if(device_lock.owns_lock())device_lock.unlock();
         const auto transferred=handoff(d,s,1,g.stream,recording,copy,frame!=nullptr&&marker,!native_marker,capture_marker);
         if(transferred.result!=VK_SUCCESS)ingress_reason(8,static_cast<std::uint64_t>(transferred.result));
+        else if(frame && frame->eye_render.producer)
+            bridge_flight_logger().event(BridgeFlightOperation::eye_frame_metadata,49,
+                frame->eye_render.owner,frame->eye_render.render,frame->color_origin_token);
         return marker&&transferred.result==VK_SUCCESS&&(!original_capture||frame!=nullptr);
     };
     if(original_capture)PublicFeatureInvocationScope::final_capture(std::move(finish),handle,f.identity);

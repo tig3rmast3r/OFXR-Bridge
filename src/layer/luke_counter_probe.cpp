@@ -102,7 +102,11 @@ bool selected_render_methods(const SelectedRenderBinding& binding, std::uint64_t
     std::array<std::uintptr_t,128> methods;
     if (vtable < binding.base || !read_self(vtable,methods.data(),sizeof(methods))) return false;
     return eye_layout::has_selected_render_methods(binding.layout,binding.base,methods,fields,
-        [&](auto method,const auto& instructions) {
+        [&](auto method,const auto& instructions,bool exact_entry = false) {
+            if (exact_entry) {
+                auto actual = instructions;
+                return read_self(method, actual.data(), actual.size()) && actual == instructions;
+            }
             return method_contains(binding.base,method,instructions);
         });
 }

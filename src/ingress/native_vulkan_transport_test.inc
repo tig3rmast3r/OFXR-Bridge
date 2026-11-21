@@ -951,6 +951,12 @@ struct PublicGuideGpuProbe {
         camera.owner=42;camera.render=self.render;camera.valid=true;
         return camera;
     }
+    static constexpr std::uint64_t test_render_id = (1ULL << 32) | 78;
+    static std::optional<LukeRenderIdentity> selected_render_for_test() noexcept {
+        if (current->inside_typed_call && current->render == 2)
+            return LukeRenderIdentity{43, test_render_id};
+        return {};
+    }
     static NVSDK_NGX_Result native_original(VkCommandBuffer command,const NVSDK_NGX_Handle*,const NVSDK_NGX_Parameter* p,void*) {
         auto& self=*current;++self.native_calls;
         require_transport(get<float>(p,NVSDK_NGX_Parameter_MV_Scale_X)==-9&&get<int>(p,NVSDK_NGX_Parameter_Reset)==1,
@@ -1249,6 +1255,15 @@ struct PublicGuideGpuProbe {
         const bool inspect_pair=serial==2||serial==5||(hdr&&serial>=6)||
             (test_rdr2_camera&&(serial==25||serial==28||serial==29));
         if(inspect_pair)verify_snapshots(frame,serial);
+        if (serial == 2 && test_vulkan_selected_render) {
+            const auto matched = resolve_luke_guide_render(frame->stream, frame->epoch, 43, test_render_id,
+                hardware.device->queue.Get(), hardware.device->owner.Get(), OFXR_EYE_SOURCE_REAL_VR);
+            require_transport(matched && matched->color_origin_token == token,
+                "Vulkan guide lost its exact original REAL VR render identity");
+        }
+        if (serial == 5 && test_vulkan_selected_render)
+            require_transport(!frame->eye_render.producer,
+                "an unavailable selected render must leave the new guide on its marker path");
         if(test_rdr2_camera&&inspect_pair)
             require_transport(frame->source_clock_owner==42&&frame->source_clock_sequence==serial,
                 "native warmup borrowed a different camera or used the Streamline fallback");
@@ -1385,6 +1400,11 @@ struct PublicGuideGpuProbe {
         const bool native_warmup=memory_trial==6;
         if(native_warmup)oh=ow;
         setup();
+        struct RestoreSelectedRender {
+            decltype(test_vulkan_selected_render) previous;
+            ~RestoreSelectedRender() { test_vulkan_selected_render = previous; }
+        } restore_render{std::exchange(test_vulkan_selected_render,
+            native_warmup ? nullptr : &selected_render_for_test)};
         struct RestoreDiagnostics {
             bool previous=diagnostic_ring_enabled.load();
             ~RestoreDiagnostics(){diagnostic_ring_enabled.store(previous);}
