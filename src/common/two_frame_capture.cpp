@@ -36,8 +36,14 @@ constexpr std::size_t kMaximumNrImages = 48;
 constexpr std::uint64_t kMaximumNrBytes = 768ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kMaximumDeliveryBytes=1024ULL*1024ULL*1024ULL;
 constexpr std::size_t kMaximumDeliveryImages=32,kMaximumDeliveries=8;
+constexpr std::size_t kMaximumMarkerImages=16;
+constexpr std::uint64_t kMaximumMarkerBytes=2ULL*1024*1024;
+constexpr std::array kCaptureImageLimits{kMaximumImages,kMaximumNrImages,kMaximumDeliveryImages,kMaximumMarkerImages};
+constexpr std::array kCaptureByteLimits{kMaximumBytes,kMaximumNrBytes,kMaximumDeliveryBytes,kMaximumMarkerBytes};
 int capture_pool(std::string_view stage) {
-    return stage.starts_with("nr_")?1:stage.starts_with("fg_delivery_")?2:0;
+    if(stage.starts_with("nr_"))return 1;
+    if(stage.starts_with("fg_delivery_"))return 2;
+    return stage==kVulkanMarkerCaptureStage?3:0;
 }
 
 struct Shot {
@@ -77,7 +83,6 @@ struct Session {
     std::vector<TwoFrameDelivery> deliveries;
     std::vector<TwoFrameDeliveryView> delivery_views;
     bool want_deliveries{},accept_deliveries{true};
-    std::uint64_t delivery_allocated{};
     ComPtr<ID3D12Device> footprint_device; // CPU staging layout only; never a native binding
     std::vector<std::shared_ptr<Shot>> shots;
     std::vector<ContractShot> contracts;
@@ -89,7 +94,7 @@ struct Session {
     std::vector<std::uint64_t> application_swapchains;
     std::filesystem::path directory;
     std::string settings;
-    std::uint64_t allocated{}, nr_allocated{};
+    std::array<std::uint64_t,4> allocated{};
     std::uint32_t dropped_images{};
     std::uint32_t suppressed_upstream_images{};
     TwoFrameCaptureStageBudget stage_budget;
@@ -271,8 +276,8 @@ std::shared_ptr<Shot> prepare_shot(
         } else {
             std::scoped_lock lock(session->mutex);
             const auto pool=capture_pool(info.stage);
-            auto& allocated=pool==1?session->nr_allocated:pool==2?session->delivery_allocated:session->allocated;
-            const auto limit=pool==1?kMaximumNrBytes:pool==2?kMaximumDeliveryBytes:kMaximumBytes;
+            auto& allocated=session->allocated[pool];
+            const auto limit=kCaptureByteLimits[pool];
             if (allocated + shot->bytes > limit) {
                 shot->status = E_OUTOFMEMORY;
             } else {
@@ -299,9 +304,10 @@ std::shared_ptr<Shot> prepare_shot(
     }
     {
         std::scoped_lock lock(session->mutex);
+        const auto pool=capture_pool(info.stage);
         if (!session->sealed && std::count_if(session->shots.begin(),session->shots.end(),[&](const auto& existing){
-                return capture_pool(existing->info.stage)==capture_pool(info.stage);
-            }) < (capture_pool(info.stage)==1?kMaximumNrImages:capture_pool(info.stage)==2?kMaximumDeliveryImages:kMaximumImages))
+                return capture_pool(existing->info.stage)==pool;
+            }) < kCaptureImageLimits[pool])
             session->shots.push_back(shot);
         else {
             ++session->dropped_images;
@@ -628,7 +634,8 @@ void write_session(const std::shared_ptr<Session>& session) {
     summary << "V576 DLSS-G stages: aligned_previous / packed_current / packed_motion / packed_depth -> ngx_generated -> composed_output.\n"
         << "One pair per stream, at most two streams. Native stage swapchain is resource identity, not XR handle.\n"
         << "native_dlssg_pair: original A/B pose/projection. native_dlssg_output_camera: B -> output-to-B quaternion, mode = output index.\n";
-    summary<<"V885 manual F8: separate max8 private-endpoint packets,32images/1GiB, up to1second after the AFW capture closes. fg_delivery_original is the already reconstructed real FG input; fg_delivery_interpolated is temporal frame generation, unknown remains explicit.\n"
+    summary<<"RDR2 Vulkan vk_color_marker_after_stamp holds only the native HDR marker bands, stacked in 8-row blocks in the same order as vk_marker_band entries in xr-timeline.tsv. For each publication, vk_marker_token contains the expected token in code, native production sequence in display_time and guide stream in detail. vk_marker_band stores the band index in code and native x/y in the high/low 32 bits of detail. In both entries serial is the publication. Match it to manifest serial and guide-contracts publication. The GPU reads the original Vulkan output after stamping, before application work resumes.\n"
+        <<"V885 manual F8: separate max8 private-endpoint packets,32images/1GiB, up to1second after the AFW capture closes. fg_delivery_original is the already reconstructed real FG input; fg_delivery_interpolated is temporal frame generation, unknown remains explicit.\n"
         <<"Join manifest stream to fg-deliveries.tsv token, then fg-delivery-views.tsv token/view/slice. Images are the actual waited native target after its copy, before release. Pose/FOV/rect are the owned submitted projection. content_time and native submitted_time differ deliberately.\n"
         <<"Native End result/completed/layer_count prove acceptance only, not physical headset visibility. Pending/refused/empty remain explicit. Reused already-released targets are never read again; reference_token names an earlier captured identical generation,0 means unavailable. No new copy or CPU wait at native End.\n"
         <<"generated_index is the actual submitted output ordinal (1-based,0 for real or unavailable), not a guessed fraction. Source cycle/owner/serial permit temporal joins; missing identity stays0. V886 image_api/image_result report actual readback method and result per view. Native D3D11 uses the existing private-copy owner thread to copy waited targets to staging and Map CPU bytes before release; this adds synchronous GPU readback only during F8. D12 remains fenced readback. A layout-only D12 device never changes the native binding or supplies image contents. Capture readbacks add GPU work during F8; do not benchmark pacing inside the capture.\n";
@@ -1000,9 +1007,10 @@ void two_frame_capture_note(
         shot->frame = frame;
         shot->status = status;
         std::scoped_lock lock(session->mutex);
+        const auto pool=capture_pool(info.stage);
         if (!session->sealed && std::count_if(session->shots.begin(),session->shots.end(),[&](const auto& existing){
-                return std::string_view(existing->info.stage).starts_with("nr_")==std::string_view(info.stage).starts_with("nr_");
-            }) < (std::string_view(info.stage).starts_with("nr_") ? kMaximumNrImages : kMaximumImages))
+                return capture_pool(existing->info.stage)==pool;
+            }) < kCaptureImageLimits[pool])
             session->shots.push_back(std::move(shot));
         else
             ++session->dropped_images;
@@ -1027,6 +1035,7 @@ void two_frame_capture_record_ng_x(
         auto shot = prepare_shot(session, frame, info, device, source);
         if (!shot) return;
         record_copy(*shot, list, source, source_state);
+        std::scoped_lock lock(session->mutex);
         if (SUCCEEDED(shot->status)) shot->producer_list = list;
     } catch (...) {
     }
@@ -1174,6 +1183,20 @@ void two_frame_capture_submission(
         }
     } catch (...) {
     }
+}
+
+void two_frame_capture_abandon_list(ID3D12CommandList* list,HRESULT status) noexcept {
+    if(!list||SUCCEEDED(status))return;
+    try {
+        auto& state=manager();
+        std::scoped_lock lock(state.mutex);
+        if(!state.session)return;
+        std::scoped_lock capture(state.session->mutex);
+        for(const auto& shot:state.session->shots)if(shot->producer_list.Get()==list&&!shot->fence) {
+            shot->status=status;
+            shot->producer_list.Reset();
+        }
+    } catch (...) {}
 }
 
 void two_frame_capture_annotate_projection(

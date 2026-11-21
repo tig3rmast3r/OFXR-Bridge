@@ -9,6 +9,7 @@
 #include "xrfg/diagnostic_ring_sink.hpp"
 #include "xrfg/native_ingress/streamline1/sl1.h"
 #include <filesystem>
+#include <fstream>
 
 namespace xrfg::native_vulkan {
 namespace {
@@ -985,7 +986,7 @@ struct PublicGuideGpuProbe {
         self.inside_typed_call=true;
         const auto result=evaluate<1>(command,self.native_handle,p,callback);
         self.inside_typed_call=false;
-        if(self.prepared&&!self.reset_before_child)require_transport(sample_native_public_color(*self.hardware.device,*self.prepared,command,p,
+        if(self.prepared&&!self.reset_before_child&&!two_frame_capture_images_active())require_transport(sample_native_public_color(*self.hardware.device,*self.prepared,command,p,
             queue_family_for(command)),"actual native output witness before wrapper final copyback");
         require_transport(dlss_motion_vector_publications()==self.before_publication,
             "public guides/output became visible before wrapper final copyback");
@@ -1058,10 +1059,11 @@ struct PublicGuideGpuProbe {
         require_transport(hardware.device->owner->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator)),"original guide GPU readback allocator");
         require_transport(hardware.device->owner->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list)),"original guide GPU readback list");
         copy_d12(list.Get(),prepared->diagnostic_late_depth,false);
-        copy_d12(list.Get(),prepared->diagnostic_native_color,false);
+        const bool full_color=!two_frame_capture_images_active();
+        if(full_color)copy_d12(list.Get(),prepared->diagnostic_native_color,false);
         std::array<ComPtr<ID3D12Resource>,4> reads;std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT,4> footprints{};std::array<UINT64,4> sizes{};
         ID3D12Resource* sources[]{frame->motion_vectors.Get(),frame->depth.Get(),prepared->diagnostic_late_depth.texture.Get(),prepared->diagnostic_native_color.texture.Get()};
-        for(unsigned i=0;i<4;++i){const auto desc=sources[i]->GetDesc();hardware.device->owner->GetCopyableFootprints(&desc,0,1,0,&footprints[i],nullptr,nullptr,&sizes[i]);
+        for(unsigned i=0;i<(full_color?4U:3U);++i){const auto desc=sources[i]->GetDesc();hardware.device->owner->GetCopyableFootprints(&desc,0,1,0,&footprints[i],nullptr,nullptr,&sizes[i]);
             D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
             buffer.Width=sizes[i];buffer.Height=buffer.DepthOrArraySize=buffer.MipLevels=buffer.SampleDesc.Count=1;buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
             require_transport(hardware.device->owner->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&reads[i])),"original guide GPU readback");
@@ -1085,6 +1087,7 @@ struct PublicGuideGpuProbe {
                     i?static_cast<const void*>(&expected_depth):expected_motion.data(),4),
                     "protected early guides or independent late depth witness changed");
             }D3D12_RANGE no_write{};reads[i]->Unmap(0,&no_write);}
+        if(!full_color)return;
         void* native_bytes{};D3D12_RANGE native_range{0,SIZE_T(sizes[3])};
         require_transport(reads[3]->Map(0,&native_range,&native_bytes),"native color witness GPU map");
         for(unsigned y=0;y<oh;++y)for(unsigned x=0;x<ow;++x)require_transport(output_pixel_matches(
@@ -1184,14 +1187,25 @@ struct PublicGuideGpuProbe {
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&hardware.command;
         require_transport(hardware.observed<PFN_vkQueueSubmit>("vkQueueSubmit")(hardware.native_queue,1,&submit,hardware.finished),"submit original public guide/color transaction");
         require_transport(hardware.raw<PFN_vkWaitForFences>("vkWaitForFences")(hardware.native_device,1,&hardware.finished,VK_TRUE,5000000000ULL),"wait original public GPU transaction");
+        if(hdr&&two_frame_capture_images_active()) {
+            HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+            require_transport(event!=nullptr,"create marker capture fence event");
+            const auto armed=prepared->d12_done->SetEventOnCompletion(prepared->d12_value,event);
+            const auto waited=SUCCEEDED(armed)?WaitForSingleObject(event,5000):WAIT_FAILED;
+            CloseHandle(event);
+            require_transport(waited==WAIT_OBJECT_0,"compact marker capture did not retire on the private queue");
+        }
         if(depth_format==VK_FORMAT_D24_UNORM_S8_UINT) {
             void* stencil{};require_transport(hardware.raw<PFN_vkMapMemory>("vkMapMemory")(hardware.native_device,hardware.readback.memory,0,128,0,&stencil),"D24 stencil witness");
             for(unsigned i=0;i<128;++i)require_transport(static_cast<unsigned char*>(stencil)[i]==0xa7,"depth transport modified native stencil");
             hardware.raw<PFN_vkUnmapMemory>("vkUnmapMemory")(hardware.native_device,hardware.readback.memory);
         }
+        LukeColorOriginPatch marker_layout{};
+        require_transport(luke_color_origin_patch_layout(ow,oh,{},&marker_layout),"public marker layout");
+        require_transport(marker_layout.band_count==1,"fixture expects a single marker band");
         const auto copied=publish_guide?kLukeOriginWidth*kLukeOriginHeight:0;
         require_transport(tested_native_output_copyback_pixels-copyback_pixels_before==copied,
-            "active AFW native copyback still transfers the full output instead of exact marker pixels");
+            "active AFW copyback exceeded the marker footprint");
         void* bytes{};require_transport(hardware.raw<PFN_vkMapMemory>("vkMapMemory")(hardware.native_device,readback.memory,0,ow*oh*output_bytes(),0,&bytes),"map final original public Vulkan color");
         const auto pixel=[&](unsigned x,unsigned y){return static_cast<const std::byte*>(bytes)+(y*ow+x)*output_bytes();};
         const auto dxgi=native_vulkan::format(output_format(),output);
@@ -1200,8 +1214,6 @@ struct PublicGuideGpuProbe {
             const auto decoded=decode_luke_origin_row(row);require_transport(!decoded.ambiguous,"final original public color token ambiguous");if(decoded.token){require_transport(!token||token==decoded.token,"final public output contains competing tokens");token=decoded.token;}}
         // Marker-only copyback must preserve every native pixel outside the
         // actual bands, including nonzero row/column offsets and row padding.
-        LukeColorOriginLayout marker_layout{};
-        require_transport(compact_luke_origin_layout(ow,oh,ow,oh,marker_layout),"public marker layout");
         for(unsigned y=0;y<oh;++y)for(unsigned x=0;x<ow;++x) {
             bool marker_pixel=false;
             for(unsigned band=0;band<marker_layout.band_count;++band) {
@@ -1210,6 +1222,13 @@ struct PublicGuideGpuProbe {
             }
             if(!marker_pixel)require_transport(output_pixel_matches(pixel(x,y),true),
                 "marker-only copyback overwrote unchanged wrapper composite pixels");
+        }
+        if(publish_guide)for(unsigned band=0;band<marker_layout.band_count;++band) {
+            const auto& rect=marker_layout.bands[band];
+            std::array<float,kLukeOriginWidth> marker_row{};
+            for(unsigned x=0;x<rect.width;++x)marker_row[x]=luke_origin_luma(pixel(rect.x+x,rect.y),dxgi);
+            const auto decoded=decode_luke_origin_row(marker_row);
+            require_transport(token&&decoded.token==token&&!decoded.ambiguous,"native marker copy lost exact guide identity");
         }
         for(unsigned x=0;x<ow;++x)require_transport(output_pixel_matches(pixel(x,oh-1),true),
             "final original public color was captured before wrapper post-SR copyback");
@@ -1250,8 +1269,15 @@ struct PublicGuideGpuProbe {
                 "guide and output-diagnostic paths allocated an unused input-color mirror");
             if(inspect_pair)require_transport(frame&&bool(frame->output)==diagnostic,
                 "guide token exposed the wrong HDR color ownership");
-            if(serial<=5)require_transport(!mirror.buffer&&!mirror.texture&&!mirror.imported&&!mirror.memory,
+            if(serial<=5||two_frame_capture_images_active())require_transport(!mirror.buffer&&!mirror.texture&&!mirror.imported&&!mirror.memory,
                 "native HDR marker allocated a full output mirror");
+            if(two_frame_capture_images_active()) {
+                const auto& witness=prepared->diagnostic_marker;
+                require_transport(!prepared->diagnostic_native_color.buffer&&witness.texture&&
+                    witness.texture->GetDesc().Width==kLukeOriginWidth&&
+                    witness.texture->GetDesc().Height==marker_layout.band_count*kLukeOriginHeight,
+                    "F8 did not use compact native HDR backing");
+            }
             if(diagnostic)require_transport(mirror.buffer&&mirror.texture&&mirror.imported&&mirror.memory&&
                 mirror.texture.Get()==frame->output.Get()&&mirror.texture->GetDesc().Format==dxgi&&
                 surface_allocation_bytes(*hardware.device,mirror)>0,"HDR pixel capture did not allocate its mirror on demand");
@@ -1293,6 +1319,67 @@ struct PublicGuideGpuProbe {
             for(auto* resource:{surface.buffer.Get(),surface.texture.Get(),surface.packed_depth.Get()})
                 if(resource){const auto desc=resource->GetDesc();bytes+=hardware.device->owner->GetResourceAllocationInfo(0,1,&desc).SizeInBytes;}
         return bytes;
+    }
+    void verify_marker_capture() {
+        // The preceding fixture productions explicitly allocate a native
+        // witness. Begin the actual capture with fresh diagnostic backing.
+        for(const auto& entry:hardware.device->slots)if(entry->diagnostic_native_color.buffer) {
+            require_transport(entry->complete(),"native diagnostic backing is still in flight");
+            destroy_surface(*hardware.device,entry->diagnostic_native_color);
+        }
+        wchar_t executable[MAX_PATH]{};
+        GetModuleFileNameW(nullptr,executable,MAX_PATH);
+        const auto folder=std::filesystem::path(executable).parent_path();
+        const auto pid=std::to_string(GetCurrentProcessId());
+        const auto config=folder/("marker-test-"+pid);
+        std::filesystem::create_directories(config);
+        std::ofstream(config/"ofxr_bridge.ini")<<"[diagnostics]\nlogging_enabled=1\n";
+        bridge_flight_logger().initialize(config);
+        // This arms the same image recorder as F8 without synthesizing a key.
+        require_transport(two_frame_capture_request_origin_loss(),"arm native marker image recorder");
+        std::array<std::uint32_t,2> expected{};
+        for(unsigned frame=1;frame<=expected.size();++frame) {
+            run(5+frame);
+            expected[frame-1]=last_color_token;
+            two_frame_capture_mark_afw_evaluation();
+            two_frame_capture_finish_end_frame(frame);
+        }
+        require_transport(!two_frame_capture_images_active(),"native marker capture failed to seal");
+        std::filesystem::path capture;
+        for(const auto& entry:std::filesystem::directory_iterator(folder)) {
+            if(entry.is_directory()&&entry.path().filename().string().starts_with("ofxr-capture-v23286-"+pid+"-")) {
+                capture=entry.path();
+                break;
+            }
+        }
+        require_transport(!capture.empty(),"native marker capture folder not created");
+        const auto finish=GetTickCount64()+5000;
+        while(!std::filesystem::exists(capture/"settings.txt")&&GetTickCount64()<finish)Sleep(10);
+        std::ifstream manifest(capture/"manifest.tsv");
+        constexpr unsigned bytes_per_texel=8;
+        constexpr unsigned row_bytes=kLukeOriginWidth*bytes_per_texel;
+        constexpr unsigned marker_bytes=row_bytes*kLukeOriginHeight;
+        unsigned captures{};
+        for(std::string line;std::getline(manifest,line);) {
+            std::istringstream row(line);
+            std::vector<std::string> fields;
+            for(std::string value;std::getline(row,value,'\t');)fields.push_back(std::move(value));
+            if(fields.size()<26||fields[2]!=kVulkanMarkerCaptureStage)continue;
+            require_transport(captures<expected.size()&&fields[3]=="0"&&fields[12]==std::to_string(kLukeOriginWidth)&&
+                fields[13]==std::to_string(kLukeOriginHeight)&&fields[16]=="10"&&
+                fields[18]==std::to_string(row_bytes)&&fields[20]==std::to_string(marker_bytes),"wrong native HDR witness footprint");
+            std::vector<std::uint16_t> pixels(marker_bytes/sizeof(std::uint16_t));
+            std::ifstream raw(capture/fields[25],std::ios::binary);
+            require_transport(bool(raw.read(reinterpret_cast<char*>(pixels.data()),marker_bytes)),"cannot read captured native FP16 pixels");
+            for(unsigned y=0;y<kLukeOriginHeight;++y)for(unsigned x=0;x<kLukeOriginWidth;++x) {
+                const auto color=luke_origin_white(expected[captures],x)?0x5c00:0;
+                require_transport(pixels[(y*kLukeOriginWidth+x)*4]==color,"F8 HDR pixels differ from stamped native token");
+            }
+            ++captures;
+        }
+        require_transport(captures==expected.size(),"missing native HDR marker capture");
+        bridge_flight_logger().shutdown();
+        std::cout<<"RDR2 F8 native HDR: exact token, "<<marker_bytes<<" bytes per production, no color mirror PASS\n";
     }
     void verify(unsigned memory_trial=0){
         const bool native_warmup=memory_trial==6;
@@ -1362,8 +1449,10 @@ struct PublicGuideGpuProbe {
         run(1);run(2);run(3,true);run(3,false,true);run(4);run(5);
         require_transport(native_calls==5&&public_calls==7,"public transaction duplicated original calls or compacted actual production");
         if(hdr) {
-            diagnostic_ring_enabled.store(true);run(6);
-            diagnostic_ring_enabled.store(false);run(7);
+            const bool capture_witness=depth_format==VK_FORMAT_D32_SFLOAT;
+            if(capture_witness)verify_marker_capture();
+            diagnostic_ring_enabled.store(true);run(capture_witness?8:6);
+            diagnostic_ring_enabled.store(false);run(capture_witness?9:7);
             std::cout<<"RDR2 HDR marker: no mirror on native guide path, on-demand mirror for diagnostics, native marker resumes with exact guide tokens PASS\n";
         } else if(memory_trial) {
             // The earlier role probe keeps a diagnostic Slot reference for its
@@ -1447,6 +1536,7 @@ struct PublicGuideGpuProbe {
         configure(&family_create_original,&family_create1_original,&family_public_original,&family_release_original);
         for(const auto& slot:hardware.device->slots)if(slot!=hardware.captured){for(auto& surface:slot->surfaces)destroy_surface(*hardware.device,surface);
             destroy_surface(*hardware.device,slot->diagnostic_late_depth);destroy_surface(*hardware.device,slot->diagnostic_native_color);
+            destroy_surface(*hardware.device,slot->diagnostic_marker);destroy_marker_upload(*hardware.device,*slot);
             hardware.raw<PFN_vkDestroySemaphore>("vkDestroySemaphore")(hardware.native_device,slot->timeline,nullptr);slot->timeline={};}
         std::erase_if(hardware.device->slots,[&](const auto& slot){return slot!=hardware.captured;});prepared.reset();
         for(auto& image:images){hardware.raw<PFN_vkDestroyImageView>("vkDestroyImageView")(hardware.native_device,image.view,nullptr);

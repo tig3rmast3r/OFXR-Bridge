@@ -216,6 +216,10 @@ void two_frame_capture_submission(
     std::uint32_t count,
     ID3D12CommandList* const* lists) noexcept;
 
+inline constexpr char kVulkanMarkerCaptureStage[] = "vk_color_marker_after_stamp";
+// A diagnostic list that will never be submitted must not leave a pending shot.
+void two_frame_capture_abandon_list(ID3D12CommandList* list,HRESULT status) noexcept;
+
 // Associates a release-time final-eye image with its xrEndFrame projection.
 void two_frame_capture_annotate_projection(
     std::uint32_t frame,

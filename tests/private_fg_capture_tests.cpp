@@ -103,12 +103,12 @@ void repeat_and_limits(const std::filesystem::path& folder,bool native12){
     state.session.reset();state.has_session=false;state.delivery_active=false;
     xr_ok(f.transport->destroy_swapchain(left),"repeat left cleanup");xr_ok(f.transport->destroy_swapchain(right),"repeat right cleanup");
 
-    auto limited=arm(folder/"limits");limited->delivery_allocated=xrfg::kMaximumDeliveryBytes;
+    auto limited=arm(folder/"limits");limited->allocated[2]=xrfg::kMaximumDeliveryBytes;
     auto l=f.make_chain(),r=f.make_chain();f.write(l,25);f.write(r,125);
     xr_ok(submit(f,l,r,1,std::make_shared<xrfg::InterfaceDeliveryReceipt>(false)),"budget failure cannot fail real submission");
     f.wait_count(9);xr_ok(f.transport->drain(),"limited capture drain");
     check(limited->deliveries.size()==1 && limited->deliveries[0].completed && limited->deliveries[0].result==XR_SUCCESS,"native success independent of readback budget");
-    check(limited->shots.size()==2 && limited->allocated==0 && limited->nr_allocated==0,"separate FG budget preserves original/NR budgets");
+    check(limited->shots.size()==2 && limited->allocated[0]==0 && limited->allocated[1]==0,"separate FG budget preserves original/NR budgets");
     for(const auto& shot:limited->shots)check(shot->status==E_OUTOFMEMORY && !shot->readback,"bounded allocation failure is explicit");
     xrfg::TwoFrameDelivery pending;pending.kind=1;auto pending_token=xrfg::two_frame_capture_claim_delivery(pending);
     xrfg::two_frame_capture_finish_delivery_copy(pending_token,E_ABORT);
