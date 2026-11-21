@@ -1,6 +1,7 @@
 #include "xrfg/presented_output_rate.hpp"
 #include "xrfg/elliott_meter.hpp"
 #include "xrfg/benchmark_suite.hpp"
+#include "xrfg/fps_overlay_model.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -359,10 +360,11 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
         return std::string(b);
     };
     struct Number { std::string value; const char* label; PanelTone tone; };
+    const auto rates = displayed_fps_rates({m.output_fps, m.game_fps, m.generated_fps}, m.display_hz, m.aer_all_mixed);
     const Number numbers[]{
-        {value(m.output_fps,current&&output_rate_valid(m),true),state.runtime.luke_detected?"New submitted FPS":"Output FPS",tone},
-        {value(m.game_fps,current&&m.rates_valid,true),m.aer_eye_equivalents?"Real eye equiv.":"Real submitted",metric_tone(m.rates_valid)},
-        {value(m.generated_fps,current&&m.rates_valid,true),m.aer_eye_equivalents?"Gen eye equiv.":"Gen submitted",metric_tone(m.rates_valid)},
+        {value(rates.output,current&&output_rate_valid(m),true),state.runtime.luke_detected?"New submitted FPS":"Output FPS",tone},
+        {value(rates.real,current&&m.rates_valid,true),m.aer_eye_equivalents?"Real eye equiv.":"Real submitted",metric_tone(m.rates_valid)},
+        {value(rates.generated,current&&m.rates_valid,true),m.aer_eye_equivalents?"Gen eye equiv.":"Gen submitted",metric_tone(m.rates_valid)},
         {value(m.display_hz,current&&m.display_hz>0,true),"Display Hz",PanelTone::dim},
         {value(m.ofxr_time_ms,current&&m.ofxr_time_valid,false),"OFXR time",metric_tone(m.ofxr_time_valid)},
         {value(m.cycle_length_ms,current&&m.cycle_valid,false),"Cycle length",metric_tone(m.cycle_valid)},

@@ -53,11 +53,22 @@ int main(int argc, char** argv) {
             aer.submitted(t,true,false,true); // repeated presentation is not new content
         }
         const auto mixed=aer.snapshot(999'999'999);
-        require(mixed.active && mixed.aer_eye_equivalents,"mixed AER output is generating");
+        require(mixed.active && mixed.aer_eye_equivalents && mixed.aer_all_mixed,"mixed AER output is generating");
         require(std::abs(mixed.submitted_fps-90)<.1F &&
             std::abs(mixed.real_fps-45)<.1F && std::abs(mixed.generated_fps-45)<.1F,
             "90 one-real/one-generated-eye outputs are 45+45 stereo equivalents, never 0+90 or 90+90");
         require(!aer.snapshot(3'000'000'000).aer_eye_equivalents,"mixed labels expire with their samples");
+        for (const float rate : {88.6f, 91.3f}) {
+            const auto shown = displayed_fps_rates({rate, rate / 2, rate / 2}, 90.0f, mixed.aer_all_mixed);
+            require(shown.output == 90.0f && shown.real == 45.0f && shown.generated == 45.0f,
+                "steady mixed AER should show the nominal full and half rates");
+        }
+        require(displayed_fps_rates({87.7f,43.85f,43.85f},90.0f,true).output == 87.7f,
+            "AER display must show a rate outside the rounding band");
+        aer.submitted(1'000'000'000, false);
+        require(!aer.snapshot(1'010'000'000).aer_all_mixed &&
+            displayed_fps_rates({89.0f,45.5f,43.5f},90.0f,false).generated == 43.5f,
+            "a real-only frame must keep AER's measured generated rate visible");
         require(rasterize_fps_overlay(24, 12, {144, true, false, 78, true}, false) ==
             rasterize_fps_overlay(24, 12, {0,true,false,78,true}, false), "fresh delivered count must override submissions");
         for (auto position : {FpsOverlayPosition::off, FpsOverlayPosition::upper_left,

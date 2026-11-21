@@ -22,12 +22,16 @@ struct FpsSnapshot {
     float real_fps{}, generated_fps{};
     bool sample_valid{};
     bool aer_eye_equivalents{};
+    bool aer_all_mixed{};
     EyeIdentitySource eye_identity_source{};
 };
 
 // Caller serializes access. Fixed storage, monotonic wall-clock measurements;
 // successful downstream submissions are NOT evidence of physical scanout.
 [[nodiscard]] float displayed_rate(float rate, float refresh_hz) noexcept;
+struct FpsDisplayRates { float output, real, generated; };
+[[nodiscard]] FpsDisplayRates displayed_fps_rates(
+    FpsDisplayRates measured, float refresh_hz, bool aer_all_mixed) noexcept;
 
 class FpsCounter {
 public:

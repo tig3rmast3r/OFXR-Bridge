@@ -5,6 +5,7 @@
 #include "xrfg/rife_resolution.hpp"
 #include "xrfg/dlssg_profile.hpp"
 #include "xrfg/benchmark_suite.hpp"
+#include "xrfg/fps_overlay_model.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "xrfg/rife_model_catalog.hpp"
@@ -1320,6 +1321,7 @@ void status_pane(Panel& p) {
     const auto& m=state.runtime.telemetry;
     const auto now=GetTickCount64();
     const bool current=state.connected && m.updated_ms && now>=m.updated_ms && now-m.updated_ms<2000;
+    const auto rates = displayed_fps_rates({m.output_fps, m.game_fps, m.generated_fps}, m.display_hz, m.aer_all_mixed);
     const float left=kPad,width=kStatusWidth-kPad*2,cell=width*.5F,label=p.m.label*1.3F;
     const auto base=ImGui::GetWindowPos();
     float y=12;
@@ -1332,7 +1334,7 @@ void status_pane(Panel& p) {
     {
         FaceScope scope(face_mono,p.m.metric);
         char text[32]="N/A";
-        if(current && output_rate_valid(m) && std::isfinite(m.output_fps))std::snprintf(text,sizeof(text),"%.0f",m.output_fps);
+        if(current && output_rate_valid(m) && std::isfinite(rates.output))std::snprintf(text,sizeof(text),"%.0f",rates.output);
         ImGui::TextUnformatted(text);
     }
     const float hero=label+p.m.metric*1.2F+8;
@@ -1342,8 +1344,8 @@ void status_pane(Panel& p) {
     const auto cell_help=[&](float x,float top,Help help) {
         label_help(p,help,{base.x+x,base.y+top},{base.x+x+cell,base.y+top+row_height});
     };
-    value_cell(p,"Real",m.game_fps,current && m.rates_valid,true,left,y);cell_help(left,y,kHelpReal);
-    value_cell(p,"Generated",m.generated_fps,current && m.rates_valid,true,left+cell,y);cell_help(left+cell,y,kHelpGeneratedRate);
+    value_cell(p,"Real",rates.real,current && m.rates_valid,true,left,y);cell_help(left,y,kHelpReal);
+    value_cell(p,"Generated",rates.generated,current && m.rates_valid,true,left+cell,y);cell_help(left+cell,y,kHelpGeneratedRate);
     y+=row_height;
     value_cell(p,"Display Hz",m.display_hz,current && m.display_hz>0,true,left,y);
     cell_help(left,y,m.display_source==InterfaceSource::steamvr_display ? kHelpHzSteam : kHelpHzOpenXr);

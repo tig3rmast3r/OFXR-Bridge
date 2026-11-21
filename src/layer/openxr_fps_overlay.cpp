@@ -976,6 +976,7 @@ struct OpenXrFpsOverlay::Impl {
         out.game_fps = fps.real_fps;
         out.generated_fps = fps.generated_fps;
         out.aer_eye_equivalents = fps.aer_eye_equivalents;
+        out.aer_all_mixed = fps.aer_all_mixed;
         out.eye_identity_source = recent_eye_identity();
         out.rates_valid = fps.sample_valid;
         if(luke_scene_measurement) {
@@ -1133,9 +1134,11 @@ struct OpenXrFpsOverlay::Impl {
                 snapshot.delivered_fps=scene->output;snapshot.delivered_valid=true;
             }
         }
-        if (const auto period = display_period_ns.load(std::memory_order_relaxed); period > 0) {
+        if (const auto period = estimate_period(); period > 0) {
             const auto hz = 1.0e9f / static_cast<float>(period);
-            snapshot.submitted_fps = displayed_rate(snapshot.submitted_fps, hz);
+            snapshot.delivered_fps = displayed_fps_rates(
+                {snapshot.delivered_fps, snapshot.real_fps, snapshot.generated_fps},
+                hz, snapshot.aer_all_mixed).output;
         }
         if(initialize_fps(eye_width))upload(snapshot);
     }

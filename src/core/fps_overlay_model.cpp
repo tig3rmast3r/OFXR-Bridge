@@ -55,17 +55,21 @@ FpsSnapshot FpsCounter::snapshot(std::int64_t now) const noexcept {
     const auto epoch = now / 100'000'000;
     const auto window_start = std::max(start_ns_, (epoch - 9) * 100'000'000);
     const float seconds = std::max(0.1f, static_cast<float>(now - window_start) * 1e-9f);
+    unsigned outputs{}, mixed{};
     for (const auto& entry : buckets_) {
         if (entry.epoch < 0 || entry.epoch > epoch || entry.epoch < epoch - 9) continue;
         result.submitted_fps += static_cast<float>(entry.output) / seconds;
         result.real_fps += (static_cast<float>(entry.real) + .5F*entry.mixed) / seconds;
         result.generated_fps += (static_cast<float>(entry.generated) + .5F*entry.mixed) / seconds;
-        result.aer_eye_equivalents |= entry.mixed!=0;
+        outputs += entry.output;
+        mixed += entry.mixed;
     }
     // Hysteresis across alternating S/B slots; no green merely because armed,
     // initialized, primed, repeated, or because an attempted S failed.
     result.active = last_synthetic_ns_ >= 0 && now >= last_synthetic_ns_ &&
         now - last_synthetic_ns_ < 500'000'000;
+    result.aer_eye_equivalents = mixed != 0;
+    result.aer_all_mixed = result.active && mixed && mixed == outputs && seconds >= 0.5f;
     return result;
 }
 
@@ -73,6 +77,19 @@ float displayed_rate(float rate, float refresh_hz) noexcept {
     if (!(refresh_hz > 0.0f) || !std::isfinite(rate)) return rate;
     const float band = refresh_hz * 0.02f;
     return rate >= refresh_hz - band && rate <= refresh_hz + band ? refresh_hz : rate;
+}
+
+FpsDisplayRates displayed_fps_rates(FpsDisplayRates measured, float refresh_hz, bool aer_all_mixed) noexcept {
+    // The measurement window can straddle a submission. At steady AER cadence
+    // an admitted output contributes one eye to each rate. Require all three
+    // measurements to be close before presenting the nominal cadence.
+    if (!aer_all_mixed || !std::isfinite(refresh_hz) || refresh_hz <= 0.0f) return measured;
+    const float half = refresh_hz * 0.5f;
+    if (displayed_rate(measured.output, refresh_hz) == refresh_hz &&
+        displayed_rate(measured.real, half) == half &&
+        displayed_rate(measured.generated, half) == half)
+        return {refresh_hz, half, half};
+    return measured;
 }
 
 OverlayPlacement overlay_placement(

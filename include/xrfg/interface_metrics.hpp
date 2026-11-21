@@ -292,6 +292,7 @@ struct InterfaceTelemetry {
     bool gpu_valid{}, delay_valid{}, presentation_valid{}, cpu_valid{};
     bool ofxr_time_valid{}, cycle_valid{};
     // Use the alignment padding before InterfaceSource in the shared control layout.
+    bool aer_all_mixed{};
     EyeIdentitySource eye_identity_source{};
     InterfaceSource gpu_source{}, delay_source{}, presentation_source{}, cpu_source{}, display_source{}, output_source{};
     InterfaceSource ofxr_time_source{}, cycle_source{};
