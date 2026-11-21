@@ -1470,7 +1470,8 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_dlss_guide_publication(
 // m[3][2] * z); w's sign is the handedness. A view direction with tangent t
 // and depth d > 0 has z = sign(w) d, so NDC = (t m00 + sign(w) offset) /
 // |w|, and t = (NDC |w| - sign(w) offset) / m00.
-DlssViewGeometry dlss_view_geometry(const DlssMotionVectorFrame& frame) noexcept {
+DlssViewGeometry dlss_view_geometry(
+    const DlssMotionVectorFrame& frame, DlssViewAxes axes) noexcept {
     if (!frame.camera_matrices_valid) return {};
     const auto m = [&](std::size_t row, std::size_t column) {
         return frame.camera_view_to_clip[row * 4U + column];
@@ -1495,12 +1496,17 @@ DlssViewGeometry dlss_view_geometry(const DlssMotionVectorFrame& frame) noexcept
     if (std::fabs(w) < kZero) return {};
     const float sign = w > 0.0F ? 1.0F : -1.0F;
     const float magnitude = std::fabs(w);
+    // REAL VR can supply a camera with a reflected axis (e.g. down-Y).
+    // Convert to XR right/up tangents as in luke_projection_ray_ndc,
+    // preserving the off-axis center and the original producer matrix.
+    const float focal_x = axes == DlssViewAxes::physical ? std::fabs(m(0, 0)) : m(0, 0);
+    const float focal_y = axes == DlssViewAxes::physical ? std::fabs(m(1, 1)) : m(1, 1);
     DlssViewGeometry view;
     view.known = true;
-    view.tan_left = (-magnitude - sign * offset_x) / m(0, 0);
-    view.tan_right = (magnitude - sign * offset_x) / m(0, 0);
-    view.tan_up = (magnitude - sign * offset_y) / m(1, 1);
-    view.tan_down = (-magnitude - sign * offset_y) / m(1, 1);
+    view.tan_left = (-magnitude - sign * offset_x) / focal_x;
+    view.tan_right = (magnitude - sign * offset_x) / focal_x;
+    view.tan_up = (magnitude - sign * offset_y) / focal_y;
+    view.tan_down = (-magnitude - sign * offset_y) / focal_y;
     for (std::size_t axis = 0; axis < 3; ++axis) {
         view.position[axis] = std::isfinite(frame.camera_position[axis]) ? frame.camera_position[axis] : 0.0F;
         view.right[axis] = std::isfinite(frame.camera_right[axis]) ? frame.camera_right[axis] : 0.0F;
@@ -1537,9 +1543,10 @@ constexpr std::uint64_t kMaximumViewPublicationGap = 8;
 
 std::shared_ptr<const DlssMotionVectorFrame> place_guide_in_view(
     const DlssMotionVectorFrame& frame,
-    const DlssEyeView& view) noexcept {
+    const DlssEyeView& view,
+    DlssViewAxes axes) noexcept {
     try {
-        const DlssViewGeometry g = dlss_view_geometry(frame);
+        const DlssViewGeometry g = dlss_view_geometry(frame, axes);
         const double eye_width = static_cast<double>(view.tan_right) - view.tan_left;
         const double eye_height = static_cast<double>(view.tan_up) - view.tan_down;
         if (!g.known || view.x < 0 || view.y < 0 || view.width == 0 || view.height == 0 ||

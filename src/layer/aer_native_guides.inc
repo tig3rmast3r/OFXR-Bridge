@@ -277,7 +277,8 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
                         const auto rect=v.image_rect;
                         const xrfg::DlssEyeView view{std::tan(f.angle_left),std::tan(f.angle_right),std::tan(f.angle_up),
                             std::tan(f.angle_down),int(rect.offset_x),int(rect.offset_y),rect.width,rect.height};
-                        auto placed=xrfg::place_guide_in_view(*frame,view);if(!placed){refuse();continue;}
+                        auto placed=xrfg::place_guide_in_view(*frame,view,xrfg::DlssViewAxes::physical);
+                        if(!placed){refuse();continue;}
                         xrfg::D3D12HistoryConsumerLease lease;Microsoft::WRL::ComPtr<ID3D12Resource> color;
                         Microsoft::WRL::ComPtr<ID3D12Fence> producer,retired;std::uint64_t value{};
                         auto hr=inputs[eye].history->acquire_consumer(inputs[eye].capture,&lease,

@@ -306,7 +306,10 @@ struct DlssViewGeometry {
     std::array<float, 3> position{};
     std::array<float, 3> right{};
 };
-[[nodiscard]] DlssViewGeometry dlss_view_geometry(const DlssMotionVectorFrame& frame) noexcept;
+enum class DlssViewAxes { projection, physical };
+[[nodiscard]] DlssViewGeometry dlss_view_geometry(
+    const DlssMotionVectorFrame& frame,
+    DlssViewAxes axes = DlssViewAxes::projection) noexcept;
 
 // An eye's view in its XR image: the tangents of its field (XrFovf) and its
 // image rectangle.
@@ -475,7 +478,8 @@ std::uint64_t dlss_motion_vector_publications() noexcept;
 // camera covers the view, to within a hundredth of its field.
 std::shared_ptr<const DlssMotionVectorFrame> place_guide_in_view(
     const DlssMotionVectorFrame& frame,
-    const DlssEyeView& view) noexcept;
+    const DlssEyeView& view,
+    DlssViewAxes axes = DlssViewAxes::projection) noexcept;
 // Both eyes' guides from evaluations whose cameras are known, for a game
 // whose DLSS outputs are views of their own rather than its eye images -
 // MSFS 2024's foveated rendering, four a frame: per eye a periphery over the

@@ -52,6 +52,29 @@ int main() {
         auto unknown=std::make_shared<DlssMotionVectorFrame>(*frame);unknown->camera_matrices_valid=false;
         auto invalid=std::make_shared<DlssMotionVectorSet>(*input);invalid->eyes[0]=unknown;
         require(!place_luke_aer_guides(invalid,{&view,1}),"unknown crop geometry cannot be guessed from sizes");
-        std::cout<<"Luke AER selected-provider routing and captured GTA guide crop PASS\n";return 0;
+
+        // Spider-Man Remastered's captured square DLSS projection uses down-Y.
+        auto spider=std::make_shared<DlssMotionVectorFrame>(*frame);
+        spider->output_width=spider->output_height=4480;
+        spider->motion_width=spider->motion_height=spider->depth_width=spider->depth_height=2240;
+        spider->camera_view_to_clip={
+            .869286716F,0,0,0, 0,-.869286716F,0,0, 0,0,-.0000100001F,1, 0,0,.100000992F,0};
+        auto spider_input=std::make_shared<DlssMotionVectorSet>(*input);
+        spider_input->eyes[0]=spider;
+        const DlssEyeView spider_view{-1.150368F,1.150368F,.965689F,-.965689F,0,0,4480,3761};
+        require(!place_guide_in_view(*spider,spider_view),"generic projection placement must stay strict");
+        const auto spider_placed=place_luke_aer_guides(spider_input,{&spider_view,1});
+        require(spider_placed && spider_placed->resolved_eye==1,"down-Y must place the exact eye guide");
+        const auto& spider_guide=*spider_placed->eyes[0];
+        const auto spider_rect=guide_motion_rect(spider_guide);
+        require(spider_guide.camera_view_to_clip==spider->camera_view_to_clip &&
+            spider_guide.publication==spider->publication,"placement must preserve camera and identity");
+        require(std::abs(spider_rect[0])<.001F && std::abs(spider_rect[2]-2240)<.001F &&
+            std::abs(spider_rect[1]-179.804F)<.01F && std::abs(spider_rect[3]-1880.392F)<.02F &&
+            guide_depth_rect(spider_guide)==spider_rect,"down-Y eye must use the centered vertical crop");
+        require(fsr_luke_aer_guide_regions(spider_guide).has_value(),"down-Y crop must be usable by FSR");
+        auto wider=spider_view;wider.tan_right=1.3F;
+        require(!place_luke_aer_guides(spider_input,{&wider,1}),"a guide short of coverage must still refuse");
+        std::cout<<"Luke AER selected-provider routing and captured GTA and Spider-Man guide crops PASS\n";return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

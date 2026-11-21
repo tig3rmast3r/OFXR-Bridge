@@ -34,7 +34,7 @@ inline std::shared_ptr<const DlssMotionVectorSet> place_luke_aer_guides(
             if(!frame || view.x<0 || view.y<0 || !view.width || !view.height)return {};
             if(frame->output_x==unsigned(view.x) && frame->output_y==unsigned(view.y) &&
                 frame->output_width==view.width && frame->output_height==view.height)continue;
-            auto placed=place_guide_in_view(*frame,view);
+            auto placed=place_guide_in_view(*frame,view,DlssViewAxes::physical);
             if(!placed)return {};
             if(!output)output=std::make_shared<DlssMotionVectorSet>(*input);
             output->eyes[i]=std::move(placed);
