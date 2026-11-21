@@ -12,6 +12,8 @@
 #include "xrfg/luke_native_motion_interval.hpp"
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/luke_origin_capture_policy.hpp"
+#include "xrfg/eye_frame_metadata.h"
+#include "xrfg/luke_render_identity.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/two_frame_capture.hpp"
 #include "xrfg/neural_rendering.hpp"
@@ -1379,7 +1381,14 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
         return {};
     }
     if(snapshot_attempted)*snapshot_attempted=true;
+    if (luke) {
+        if (const auto selected = query_real_vr_selected_render())
+            g.eye_render = {selected->object, selected->render, OFXR_EYE_SOURCE_REAL_VR};
+    }
     auto frame=publish_dlss_motion_vectors(g);
+    if (frame && frame->eye_render.producer)
+        bridge_flight_logger().event(BridgeFlightOperation::eye_frame_metadata, 49,
+            frame->eye_render.owner, frame->eye_render.render, frame->color_origin_token);
     if(g.osr_native_cabin_motion && (call<=8 || call%300==0))
         log("cyberpunk_original_n1",call,frame?frame->publication:0,g.camera_frame_token,g.compose_native_object_history);
     if(frame && camera_at_submission) {

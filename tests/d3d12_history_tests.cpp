@@ -10,6 +10,7 @@
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/luke_color_origin.hpp"
 #include "xrfg/luke_origin_continuity.hpp"
+#include "xrfg/eye_guide_binding.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 // Private test session; no keyboard input or shipping test control.
@@ -2399,6 +2400,48 @@ void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_sp
             joined->previous_same_native_camera && joined->previous_same_native_camera->token==n+98 &&
             joined->previous_serial==joined->previous_same_guide->serial,
             "interleaved exact A/B/A camera history was rejected or relabelled");
+        if (shared_source_clock) {
+            const auto metadata = xrfg::resolve_luke_guide_render(frame->stream, frame->epoch,
+                frame->source_clock_owner, frame->source_clock_sequence, fixture.queue(), fixture.device());
+            require(metadata && metadata->publication == joined->publication &&
+                metadata->color_origin_token == joined->color_origin_token &&
+                metadata->previous_opposite_guide == joined->previous_opposite_guide,
+                "native render lookup did not return the CRC-bound GPU publication");
+            require(!xrfg::resolve_luke_guide_render(frame->stream, frame->epoch + 1,
+                    frame->source_clock_owner, frame->source_clock_sequence, fixture.queue(), fixture.device()) &&
+                !xrfg::resolve_luke_guide_render(frame->stream, frame->epoch,
+                    frame->source_clock_owner + 1, frame->source_clock_sequence, fixture.queue(), fixture.device()) &&
+                !xrfg::resolve_luke_guide_render(frame->stream, frame->epoch,
+                    frame->source_clock_owner, frame->source_clock_sequence + 1, fixture.queue(), fixture.device()),
+                "metadata guessed across epoch, owner or eye stream");
+            if (n == 6) {
+                const auto& older = produced[n - 3];
+                const auto retained = xrfg::resolve_luke_guide_render(older->stream, older->epoch,
+                    older->source_clock_owner, older->source_clock_sequence, fixture.queue(), fixture.device());
+                require(retained && retained->publication == older->publication &&
+                    retained->publication != frame->publication, "older eye was relabelled as the latest production");
+                const xrfg::EyeGuideKey key{9, frame->source_clock_owner, frame->stream, frame->epoch, 1};
+                xrfg::EyeGuideBinding binding;
+                binding.observe(key, older->source_clock_sequence, older->source_clock_sequence);
+                binding.observe(key, older->source_clock_sequence, older->source_clock_sequence);
+                require(!binding.accepts(1, 9), "a repeated eye taught a new binding");
+                binding.observe(key, frame->source_clock_sequence, frame->source_clock_sequence);
+                require(binding.accepts(1, 9) && !binding.accepts(1, 10) && !binding.accepts(2, 9),
+                    "two exact anchors did not bind one compositor stream and producer");
+                binding.observe(key, frame->source_clock_sequence, frame->source_clock_sequence + 1);
+                require(!binding.accepts(1, 9), "a marker disagreement retained the binding");
+                const xrfg::RepeatedEyeGuide repeated{9, older->source_clock_sequence, older->stream, older->epoch,
+                    2, older->color_origin_token};
+                require(repeated.find(2, 9, older->source_clock_sequence) == older->color_origin_token &&
+                    !repeated.find(1, 9, older->source_clock_sequence) &&
+                    !repeated.find(2, 10, older->source_clock_sequence) &&
+                    !repeated.find(2, 9, frame->source_clock_sequence),
+                    "the repeat cache accepted a different producer, stream or render");
+                require(xrfg::use_eye_metadata(7, 0, false) && xrfg::use_eye_metadata(7, 7, false) &&
+                    !xrfg::use_eye_metadata(0, 7, false) && !xrfg::use_eye_metadata(7, 8, false) &&
+                    !xrfg::use_eye_metadata(7, 0, true), "metadata and marker fallback priority");
+            }
+        }
         require_readback_matches(fixture,joined->motion_vectors.Get(),make_pattern(static_cast<std::uint8_t>(n*3)),
             "interleaved current MV",joined->resource_state);
         require_readback_matches(fixture,joined->previous_opposite_guide->depth.Get(),make_pattern(static_cast<std::uint8_t>((n-1)*5)),

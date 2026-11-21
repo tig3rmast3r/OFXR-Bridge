@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1045.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1046.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1927,6 +1927,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             target_compile_options(xrfg_layer_manual_disarm_tests PRIVATE /W4 /permissive- /EHsc)
         endif()
         add_dependencies(xrfg_layer_manual_disarm_tests XR_APILAYER_XRFrameBridge_diagnostic)
+        add_test(NAME xrfg_eye_frame_metadata COMMAND xrfg_layer_manual_disarm_tests
+            ${XRFG_TEST_LAYER_DLL} eye-metadata)
+        add_test(NAME xrfg_eye_frame_metadata_native COMMAND xrfg_layer_manual_disarm_tests
+            ${XRFG_TEST_LAYER_DLL} eye-metadata-native)
+        set_tests_properties(xrfg_eye_frame_metadata xrfg_eye_frame_metadata_native PROPERTIES TIMEOUT 30)
         foreach(mode inline d3d11 steamvr flight)
             add_test(NAME xrfg_manual_disarm_${mode} COMMAND xrfg_layer_manual_disarm_tests
                 ${XRFG_TEST_LAYER_DLL} ${mode})

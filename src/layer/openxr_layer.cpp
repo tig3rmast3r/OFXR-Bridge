@@ -39,6 +39,9 @@
 #include "xrfg/dlssg_profile.hpp"
 #include "xrfg/fsr_cadence_probe.hpp"
 #include "xrfg/luke_render_identity.hpp"
+#include "xrfg/eye_frame_metadata.h"
+#include "xrfg/eye_guide_binding.hpp"
+#include "xrfg/native_ingress/RealVrEyeLayout.h"
 #include "xrfg/generation_backpressure.hpp"
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/luke_afw.hpp"
@@ -84,6 +87,9 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_loader_negotiation.h>
 #include <openxr/openxr_platform.h>
+#if defined(_WIN64)
+#include <safetyhook.hpp>
+#endif
 
 #include <algorithm>
 #include "xrfg/ofr_reconstruction.hpp"
@@ -2772,6 +2778,45 @@ void log_swapchain_eligibility(
     std::uint64_t detail = 0,
     std::uint64_t auxiliary = 0) noexcept;
 
+bool valid_eye_frame_metadata(const OfxrEyeFrameMetadataV1& frame) noexcept {
+    if (frame.size != sizeof(frame) || frame.producer < OFXR_EYE_SOURCE_REAL_VR ||
+        frame.producer > OFXR_EYE_SOURCE_MUTAR || frame.eye_count == 0 || frame.eye_count > 2)
+        return false;
+    unsigned seen = 0;
+    for (std::uint32_t i = 0; i < frame.eye_count; ++i) {
+        const auto& eye = frame.eyes[i];
+        if (eye.eye > 1 || !eye.stream_id || (seen & (1U << eye.eye))) return false;
+        seen |= 1U << eye.eye;
+    }
+    return true;
+}
+
+// Scope the metadata to a single normal XR release call. The producer can use
+// the loader's release function, so the rest of the API layer chain still runs.
+class EyeFrameReleaseScope {
+public:
+    EyeFrameReleaseScope(XrSwapchain chain, const OfxrEyeFrameMetadataV1* frame) noexcept
+        : previous_(current_), chain_(chain) {
+        if (frame && valid_eye_frame_metadata(*frame))
+            frame_ = *frame;
+        current_ = this;
+    }
+    ~EyeFrameReleaseScope() { current_ = previous_; }
+
+    static std::optional<OfxrEyeFrameMetadataV1> take(XrSwapchain chain) noexcept {
+        if (!current_ || current_->chain_ != chain) return {};
+        return std::exchange(current_->frame_, std::nullopt);
+    }
+
+private:
+    inline static thread_local EyeFrameReleaseScope* current_{};
+    EyeFrameReleaseScope* previous_;
+    XrSwapchain chain_;
+    std::optional<OfxrEyeFrameMetadataV1> frame_;
+};
+
+#include "real_vr_eye_metadata.inc"
+
 struct SwapchainState {
     std::shared_ptr<xrfg::VulkanBridgeSwapchain> vulkan_bridge;
     // On a bridged D3D11 session (SessionState::d3d11_bridge): the shared
@@ -2805,6 +2850,12 @@ struct SwapchainState {
     std::size_t waited_count{};
     bool ownership_tracking_valid{true};
     std::optional<std::uint32_t> last_released_index;
+    // Guarded by mutex and advanced on release.
+    std::uint64_t eye_frame_release_serial{};
+    OfxrReleasedEyeFrameMetadataV1 released_eye_frame{};
+    unsigned compared_eye_frame_mask{};
+    std::array<xrfg::EyeGuideBinding, 2> eye_guide_bindings;
+    std::array<xrfg::RepeatedEyeGuide, 2> repeated_eye_guides;
     std::shared_ptr<xrfg::D3D12SwapchainHistory> d3d12_history;
     std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> enumerated_d3d11_images;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> enumerated_d3d12_images;
@@ -2848,6 +2899,7 @@ struct SwapchainState {
     bool generation_eligible_pending{};
     // Ordinary D11 bridge only; call_mutex. No borrowed extension pointers.
     std::optional<std::uint32_t> pending_bridge_release;
+    std::optional<OfxrEyeFrameMetadataV1> pending_bridge_eye_frame;
     std::chrono::steady_clock::time_point pending_bridge_release_at{};
     std::uint32_t enumerated_image_count{};
     // An attempt that failed for its own reasons -- synthesis, interop -- is
@@ -2858,6 +2910,186 @@ struct SwapchainState {
     SwapchainEligibilityReason generation_refusal{SwapchainEligibilityReason::ready};
     std::uint64_t generation_refusal_detail{};
 };
+
+// Caller holds the swapchain mutex and has identified the released image.
+void record_eye_frame_release(SwapchainState& state, std::uint32_t image_index,
+    const OfxrEyeFrameMetadataV1* frame) noexcept {
+    const auto serial = ++state.eye_frame_release_serial;
+    state.released_eye_frame = {};
+    state.compared_eye_frame_mask = 0;
+    if (!frame) return;
+    auto& log = xrfg::bridge_flight_logger();
+    const auto operation = xrfg::BridgeFlightOperation::eye_frame_metadata;
+    const auto chain = handle_value(state.handle);
+    if (frame->image_index != image_index) {
+        log.event(operation, -1, chain, serial,
+            (std::uint64_t(frame->image_index) << 32) | image_index);
+        return;
+    }
+    state.released_eye_frame = {serial, 0, *frame};
+    log.event(operation, 0, chain, serial, image_index);
+    for (std::uint32_t i = 0; i < frame->eye_count; ++i) {
+        const auto& eye = frame->eyes[i];
+        const auto code = 2 * frame->producer + eye.eye;
+        log.event(operation, code, chain, serial, eye.render_id);
+        log.event(operation, 16 + code, chain, serial, eye.stream_id);
+    }
+}
+
+void compare_eye_metadata_to_marker(SwapchainState& state, const xrfg::D3D12HistoryCaptureTicket& capture,
+    unsigned eye, std::uint32_t marker_token) {
+    if (!capture.serial || eye > 1 || !xrfg::bridge_flight_logger().enabled()) return;
+    std::scoped_lock lock(state.mutex);
+    const auto& released = state.released_eye_frame;
+    const auto& last = state.last_released_capture;
+    const auto mask = 1U << (eye + (marker_token ? 0 : 2));
+    if (!released.release_serial || released.capture_serial != capture.serial ||
+        !last || last->fence_value != capture.fence_value || last->slot != capture.slot ||
+        released.frame.image_index != capture.source_index || (state.compared_eye_frame_mask & mask))
+        return;
+    for (std::uint32_t i = 0; i < released.frame.eye_count; ++i) {
+        const auto& source = released.frame.eyes[i];
+        if (source.eye != eye) continue;
+        state.compared_eye_frame_mask |= mask;
+        // The REAL VR renderer supplies its own render ID. Log the decoded
+        // token independently so temporal equality can be compared later.
+        const auto comparison = !source.guide_token ? (marker_token ? 36 : 38) + eye :
+            marker_token ? (marker_token == source.guide_token ? 32 : 33) : 34;
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::eye_frame_metadata,
+            comparison, handle_value(state.handle), released.release_serial,
+            (std::uint64_t(source.guide_token) << 32) | marker_token);
+    }
+}
+
+bool rdr2_aer_osr_process() noexcept {
+    static const bool rdr2 = [] {
+        wchar_t path[MAX_PATH]{};
+        const auto size = GetModuleFileNameW(nullptr, path, MAX_PATH);
+        if (!size || size >= MAX_PATH) return false;
+        const auto* name = std::wcsrchr(path, L'\\');
+        return _wcsicmp(name ? name + 1 : path, L"RDR2.exe") == 0;
+    }();
+    return rdr2;
+}
+
+// Caller holds the swapchain mutex. Authenticate the metadata against the
+// exact immutable capture before using it to pick a guide publication.
+const OfxrEyeSourceV1* captured_eye_source(const SwapchainState& state,
+    const xrfg::D3D12HistoryCaptureTicket& capture, unsigned eye) noexcept {
+    const auto& observed = state.released_eye_frame;
+    const auto& last = state.last_released_capture;
+    if (eye > 1 || !last || !observed.release_serial || !capture.serial ||
+        observed.capture_serial != capture.serial || last->serial != capture.serial ||
+        last->fence_value != capture.fence_value || last->slot != capture.slot ||
+        observed.frame.image_index != capture.source_index) return nullptr;
+    for (std::uint32_t i = 0; i < observed.frame.eye_count; ++i) {
+        if (observed.frame.eyes[i].eye == eye) return &observed.frame.eyes[i];
+    }
+    return nullptr;
+}
+
+std::shared_ptr<const xrfg::DlssMotionVectorFrame> resolve_eye_metadata(
+    SwapchainState& state, const xrfg::D3D12HistoryCaptureTicket& capture, unsigned eye,
+    ID3D12CommandQueue* queue, ID3D12Device* device) {
+    xrfg::EyeGuideKey key;
+    xrfg::RepeatedEyeGuide repeated;
+    std::uint32_t token{};
+    std::optional<std::uint64_t> guide_render;
+    {
+        std::scoped_lock lock(state.mutex);
+        const auto* source = captured_eye_source(state, capture, eye);
+        if (!source) return {};
+        const auto producer = state.released_eye_frame.frame.producer;
+        const auto render = source->render_id;
+        token = source->guide_token;
+        const auto& binding = state.eye_guide_bindings[eye];
+        if (binding.accepts(producer, source->stream_id)) {
+            key = binding.key;
+            guide_render = binding.guide_render(render);
+        }
+        repeated = state.repeated_eye_guides[eye];
+        if (!token && repeated.find(producer, source->stream_id, render)) token = repeated.token;
+        else repeated = {};
+    }
+    if (token) {
+        auto guide = xrfg::resolve_luke_guide_token(token, queue, device);
+        if (!guide || xrfg::luke_native_stream_reset(guide->stream, guide->epoch, device)) return {};
+        if (repeated.token && (guide->stream != repeated.guide_stream || guide->epoch != repeated.guide_epoch))
+            return {};
+        return guide;
+    }
+    if (!guide_render) return {};
+    return xrfg::resolve_luke_guide_render(key.guide_stream, key.guide_epoch,
+        key.producer_owner, *guide_render, queue, device, key.shared_render_identity ? key.producer : 0);
+}
+
+std::shared_ptr<const xrfg::DlssMotionVectorFrame> select_luke_eye_guide(
+    SwapchainState& state, const xrfg::D3D12HistoryCaptureTicket& capture, unsigned eye,
+    std::shared_ptr<const xrfg::DlssMotionVectorFrame> metadata, bool marker_attempted,
+    std::uint32_t marker, HRESULT marker_result, ID3D12CommandQueue* queue, ID3D12Device* device) {
+    const auto trace = [&](std::int64_t decision, std::uint64_t token) {
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::eye_frame_metadata,
+            decision, handle_value(state.handle), capture.serial, token);
+    };
+    const bool ambiguous_marker = marker_result == HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    bool exact_source_render = false;
+    if (metadata && ambiguous_marker) {
+        std::scoped_lock lock(state.mutex);
+        if (const auto* source = captured_eye_source(state, capture, eye)) {
+            const auto producer = state.released_eye_frame.frame.producer;
+            const auto& binding = state.eye_guide_bindings[eye];
+            const auto guide_render = binding.guide_render(source->render_id);
+            exact_source_render = binding.accepts(producer, source->stream_id) &&
+                binding.key.shared_render_identity && binding.key.guide_stream == metadata->stream &&
+                binding.key.guide_epoch == metadata->epoch && guide_render &&
+                metadata->eye_render.matches(producer, binding.key.producer_owner, *guide_render);
+        }
+    }
+    if (metadata && xrfg::use_eye_metadata(metadata->color_origin_token, marker, ambiguous_marker,
+            exact_source_render)) {
+        trace(marker ? 42 : marker_attempted ? 45 : 46, metadata->color_origin_token);
+        if (ambiguous_marker) trace(50, metadata->color_origin_token);
+        return metadata;
+    }
+    if (metadata && marker) {
+        std::scoped_lock lock(state.mutex);
+        if (captured_eye_source(state, capture, eye)) {
+            state.eye_guide_bindings[eye] = {};
+            state.repeated_eye_guides[eye] = {};
+        }
+        trace(44, (std::uint64_t(metadata->color_origin_token) << 32) | marker);
+    }
+    if (!marker) return {};
+    auto legacy = xrfg::resolve_luke_guide_token(marker, queue, device);
+    if (legacy) {
+        std::scoped_lock lock(state.mutex);
+        if (const auto* source = captured_eye_source(state, capture, eye)) {
+            const auto producer = state.released_eye_frame.frame.producer;
+            if (!source->guide_token || source->guide_token == marker) {
+                state.repeated_eye_guides[eye] =
+                    {source->stream_id, source->render_id, legacy->stream, legacy->epoch, producer, marker};
+            }
+            if (legacy->eye_render.producer) {
+                const auto& identity = legacy->eye_render;
+                auto& binding = state.eye_guide_bindings[eye];
+                const bool was_confirmed = binding.confirmed;
+                binding.observe(
+                    {source->stream_id, identity.producer == producer ? identity.owner : 0,
+                     legacy->stream, legacy->epoch, producer, true},
+                    source->render_id, identity.render);
+                if (!was_confirmed && binding.confirmed) trace(51, identity.render);
+            } else if (legacy->camera_frame_token_valid && legacy->source_clock_owner) {
+                state.eye_guide_bindings[eye].observe(
+                    {source->stream_id, legacy->source_clock_owner, legacy->stream, legacy->epoch, producer},
+                    source->render_id, legacy->source_clock_sequence);
+                if (source->render_id != legacy->source_clock_sequence)
+                    trace(47, legacy->source_clock_sequence);
+            }
+            trace(43, marker);
+        }
+    }
+    return legacy;
+}
 
 using QueryLukeRossD3D12Context = int (*)(
     ID3D12Device**, ID3D12CommandQueue**) noexcept;
@@ -6458,6 +6690,7 @@ XrResult layer_create_session_impl(
     state->steamvr_separate_queue = GetPrivateProfileIntW(L"tray", L"steamvr_separate_queue", 1,
         xrfg::autonomous::global_configuration_path().c_str()) != 0;
     state->luke_afw_enabled=xrfg::native_ingress::luke_detected();
+    if (state->luke_afw_enabled) real_vr_eye_metadata::install();
     // The transport preference is global; physical runtime identity stays intact.
     wchar_t transport[32]{};
     GetPrivateProfileStringW(L"tray",L"pacing",L"auto",transport,32,
@@ -8696,6 +8929,7 @@ XrResult layer_acquire_swapchain_image_impl(
                 state->waited_count = 0;
                 state->last_released_index.reset();
                 state->last_released_capture.reset();
+                state->released_eye_frame = {};
                 state->ownership_tracking_valid = false;
             }
         }
@@ -8859,7 +9093,8 @@ XrResult layer_wait_swapchain_image_impl(
 XrResult release_swapchain_image_locked(
     const std::shared_ptr<SwapchainState>& state,
     const XrSwapchainImageReleaseInfo* release_info,
-    std::optional<xrfg::LukeRenderIdentity> luke_identity) {
+    std::optional<xrfg::LukeRenderIdentity> luke_identity,
+    const OfxrEyeFrameMetadataV1* eye_frame) {
     const auto swapchain=state->handle;
     std::optional<std::uint32_t> candidate_index;
     std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
@@ -9280,6 +9515,7 @@ XrResult release_swapchain_image_locked(
                 state->acquired_indices.pop_front();
                 --state->waited_count;
                 state->last_released_index = released_index;
+                record_eye_frame_release(*state, released_index, eye_frame);
                 state->last_released_capture.reset();
                 state->last_released_motion_vectors.reset();
                 state->luke_released_identity = state->session->luke_fresh_only ? luke_identity : std::nullopt;
@@ -9291,6 +9527,7 @@ XrResult release_swapchain_image_locked(
                 state->acquired_indices.clear();
                 state->waited_count = 0;
                 state->last_released_index.reset();
+                state->released_eye_frame = {};
                 state->last_released_capture.reset();
                 state->last_released_motion_vectors.reset();
                 state->ownership_tracking_valid = false;
@@ -9305,6 +9542,11 @@ XrResult release_swapchain_image_locked(
             if (committed) {
                 std::scoped_lock lock(state->mutex);
                 state->last_released_capture = pending_capture;
+                if (state->released_eye_frame.release_serial) {
+                    state->released_eye_frame.capture_serial = pending_capture->serial;
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::eye_frame_metadata,
+                        35, handle_value(state->handle), state->released_eye_frame.release_serial, pending_capture->serial);
+                }
                 state->luke_released_identity = luke_identity;
                 state->last_diagnostic_capture = diagnostic_capture;
                 state->last_released_motion_vectors = pending_motion_vectors;
@@ -9376,7 +9618,8 @@ XrResult release_swapchain_image_locked(
 XrResult release_swapchain_with_identity(
     const std::shared_ptr<SwapchainState>& state,
     const XrSwapchainImageReleaseInfo* release_info,
-    std::optional<xrfg::LukeRenderIdentity> luke_identity) {
+    std::optional<xrfg::LukeRenderIdentity> luke_identity,
+    const OfxrEyeFrameMetadataV1* eye_frame = nullptr) {
     if (!state || state->session->dispatch->release_swapchain_image == nullptr) {
         return XR_ERROR_HANDLE_INVALID;
     }
@@ -9419,11 +9662,13 @@ XrResult release_swapchain_with_identity(
                 state->last_released_index = state->acquired_indices.front();
                 state->acquired_indices.pop_front();
                 --state->waited_count;
+                record_eye_frame_release(*state, *state->last_released_index, eye_frame);
                 state->luke_released_identity = luke_identity;
                 state->luke_released_duplicate = true;
             } else {
                 state->ownership_tracking_valid = false;
                 state->acquired_indices.clear(); state->waited_count = 0;
+                state->released_eye_frame = {};
                 state->luke_released_identity.reset();
                 state->luke_released_duplicate = true; // never hand retained A off as new B
             }
@@ -9466,11 +9711,12 @@ XrResult release_swapchain_with_identity(
         if ((vulkan || d3d11) && state->ownership_tracking_valid &&
             state->waited_count>0 && !state->acquired_indices.empty()) {
             state->pending_bridge_release=state->acquired_indices.front();
+            if (eye_frame) state->pending_bridge_eye_frame = *eye_frame;
             state->pending_bridge_release_at=std::chrono::steady_clock::now();
             return XR_SUCCESS;
         }
     }
-    return release_swapchain_image_locked(state,release_info,luke_identity);
+    return release_swapchain_image_locked(state, release_info, luke_identity, eye_frame);
 }
 
 void release_pending_bridge_image_locked(const std::shared_ptr<SwapchainState>& state) noexcept {
@@ -9478,10 +9724,12 @@ void release_pending_bridge_image_locked(const std::shared_ptr<SwapchainState>& 
         if (!state->pending_bridge_release) return;
         const auto index=*state->pending_bridge_release;
         state->pending_bridge_release.reset();
+        const auto eye_frame = std::exchange(state->pending_bridge_eye_frame, std::nullopt);
         const auto elapsed=std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now()-state->pending_bridge_release_at).count();
         const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        const auto result=release_swapchain_image_locked(state,&release,std::nullopt);
+        const auto result=release_swapchain_image_locked(state, &release, std::nullopt,
+            eye_frame ? &*eye_frame : nullptr);
         // d3d11_bridge 4 or vulkan_bridge 10: a deferred release ran; a the
         // swapchain, b the image, c us since the application's release. A
         // failure is the runtime's code, b the stage, c the image.
@@ -9517,7 +9765,11 @@ XrResult layer_release_swapchain_image_impl(XrSwapchain swapchain,
         state->session->native_batch_admission.source_ready(xrfg::NativeBatchAdmission::now());
     }
     // Snapshot before any worker wait. The reader never touches application pixels.
-    return release_swapchain_with_identity(state, release_info, xrfg::query_luke_render_identity());
+    auto eye_frame = EyeFrameReleaseScope::take(swapchain);
+    const auto observed_eye = real_vr_eye_metadata::take(swapchain);
+    if (!eye_frame) eye_frame = observed_eye;
+    return release_swapchain_with_identity(state, release_info, xrfg::query_luke_render_identity(),
+        eye_frame ? &*eye_frame : nullptr);
 }
 
 struct ProjectionLayerCopy {
@@ -16707,12 +16959,23 @@ struct LukeOriginHistoryProbe {
         std::array<std::uint32_t,2> origin_tokens{};
         std::array<HRESULT,2> origin_results{};
         std::array<bool,2> origin_nonblack{};
-        static const bool rdr2=[] {wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
-            const auto* name=wcsrchr(path,L'\\');return !_wcsicmp(name?name+1:path,L"RDR2.exe");}();
+        std::array<std::shared_ptr<const xrfg::DlssMotionVectorFrame>, 2> metadata;
+        bool markers_attempted = true;
+        const bool rdr2 = rdr2_aer_osr_process();
+        const bool audit_markers = xrfg::bridge_flight_logger().enabled();
+        const auto resolve_metadata = [&] {
+            for (unsigned i = 0; i < 2; ++i) {
+                if (!entries[i].source_capture) continue;
+                auto candidate = resolve_eye_metadata(*entries[i].swapchain, entries[i].source_capture->capture,
+                    entries[i].logical_eye, session->d3d12_queue.Get(), session->d3d12_device.Get());
+                if (candidate && candidate->camera_data_valid && candidate->depth && candidate->motion_vectors &&
+                    candidate->previous_opposite_guide && candidate->previous_opposite_guide->camera_data_valid)
+                    metadata[i] = std::move(candidate);
+            }
+        };
         if(rdr2) {
-            // Read the exact immutable history tickets before private output
-            // acquisition/copying. The consumer leases and producer fences
-            // protect these same pixels through readback; no prior-token cache.
+            // RDR2 reads the marker on the history texture before preparing
+            // the scratch images. Other games read it on the prepared images.
             std::array<LukeOriginHistoryProbe,2> inputs;
             for(unsigned i=0;i<2;++i) {
                 if(!entries[i].source_capture) {output.reason=GenerationPrepareReason::missing_capture;return output;}
@@ -16721,11 +16984,16 @@ struct LukeOriginHistoryProbe {
                 inputs[i].capture=entries[i].source_capture->capture;
             }
             if(session->luke_warmup_probe_poisoned) {output.reason=GenerationPrepareReason::missing_capture;return output;}
-            const auto result=read_luke_capture_origins(session->d3d12_queue.Get(),inputs,origin_tokens,origin_results,
-                session->luke_warmup_probe_poisoned,&origin_nonblack,true);
-            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,result,1350,
-                inputs[0].capture.serial,inputs[1].capture.serial);
-            if(FAILED(result)) {output.reason=GenerationPrepareReason::missing_capture;return output;}
+            if (!audit_markers) resolve_metadata();
+            markers_attempted = audit_markers || !metadata[0] || !metadata[1];
+            if (markers_attempted) {
+                const auto result=read_luke_capture_origins(session->d3d12_queue.Get(),inputs,origin_tokens,origin_results,
+                    session->luke_warmup_probe_poisoned,&origin_nonblack,true);
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,result,1350,
+                    inputs[0].capture.serial,inputs[1].capture.serial);
+                if(FAILED(result)) {output.reason=GenerationPrepareReason::missing_capture;return output;}
+            }
+            if (audit_markers) resolve_metadata();
         }
         // Each color is frozen by its own history ticket. Copy into disjoint
         // AFW scratch, then resolve only the token actually present in it.
@@ -16748,7 +17016,11 @@ struct LukeOriginHistoryProbe {
             }
             origin_colors[index]=images[entry.prepared.current_destination_index];
         }
-        if(!rdr2) {
+        if (!rdr2) {
+            if (!audit_markers) resolve_metadata();
+            markers_attempted = audit_markers || !metadata[0] || !metadata[1];
+        }
+        if (!rdr2 && markers_attempted) {
             const auto read_origins = [&] {
                 // Both colors are already frozen in disjoint scratch on this queue.
                 // Submit their small marker copies together: one GPU/CPU rendezvous,
@@ -16767,22 +17039,32 @@ struct LukeOriginHistoryProbe {
                 std::scoped_lock lock(session->gpu_mutex);
                 read_origins();
             }
-        } // Other games retain scratch-image marker reads.
-        output.original_scene=xrfg::luke_original_scene_identity(
-            {SUCCEEDED(origin_results[0])?origin_tokens[0]:0,
-             SUCCEEDED(origin_results[1])?origin_tokens[1]:0},
-            {entries[0].logical_eye,entries[1].logical_eye});
+            if (audit_markers) resolve_metadata();
+        }
         for(std::size_t index=0;index<entries.size();++index) {
             auto& entry=entries[index];const HRESULT result=origin_results[index];
-            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
-                result,989+entry.logical_eye,frame_serial,origin_tokens[index]);
-            if(FAILED(result)||!origin_tokens[index])continue;
-            entry.guide=xrfg::resolve_luke_guide_token(origin_tokens[index],
+            const auto marker = SUCCEEDED(result) ? origin_tokens[index] : 0;
+            if (markers_attempted) {
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                    result,989+entry.logical_eye,frame_serial,origin_tokens[index]);
+                compare_eye_metadata_to_marker(*entry.swapchain, entry.source_capture->capture,
+                    entry.logical_eye, marker);
+            }
+            entry.guide = select_luke_eye_guide(*entry.swapchain, entry.source_capture->capture,
+                entry.logical_eye, std::move(metadata[index]), markers_attempted, marker, result,
                 session->d3d12_queue.Get(),session->d3d12_device.Get());
+            if (entry.guide) {
+                origin_tokens[index] = entry.guide->color_origin_token;
+                origin_results[index] = S_OK;
+            }
             if(entry.guide&&entry.guide->camera_data_valid&&entry.guide->previous_opposite_guide&&
                 entry.guide->previous_opposite_guide->camera_data_valid)
                 publications[index]=entry.guide->publication;
         }
+        output.original_scene=xrfg::luke_original_scene_identity(
+            {SUCCEEDED(origin_results[0])?origin_tokens[0]:0,
+             SUCCEEDED(origin_results[1])?origin_tokens[1]:0},
+            {entries[0].logical_eye,entries[1].logical_eye});
         bool sequence_continued=false;
         bool force_afw_reset=false;
         std::optional<xrfg::LukeOriginSequencePrediction> sequence_prediction;
@@ -21243,6 +21525,28 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_end_frame(
 }
 
 }  // namespace
+
+extern "C" __declspec(dllexport) XrResult OFXR_EYE_METADATA_CALL ofxrReleaseSwapchainImageWithEyeMetadataV1(
+    PFN_xrReleaseSwapchainImage release_image, XrSwapchain swapchain,
+    const XrSwapchainImageReleaseInfo* release_info, const OfxrEyeFrameMetadataV1* frame) {
+    return guard_c_api_boundary([&] {
+        if (!release_image) return XR_ERROR_VALIDATION_FAILURE;
+        EyeFrameReleaseScope scope(swapchain, frame);
+        return release_image(swapchain, release_info);
+    });
+}
+
+extern "C" __declspec(dllexport) XrResult OFXR_EYE_METADATA_CALL ofxrGetReleasedEyeFrameMetadataV1(
+    XrSwapchain swapchain, OfxrReleasedEyeFrameMetadataV1* released) {
+    return guard_c_api_boundary([&] {
+        if (!released) return XR_ERROR_VALIDATION_FAILURE;
+        const auto state = find_swapchain(swapchain);
+        if (!state) return XR_ERROR_HANDLE_INVALID;
+        std::scoped_lock lock(state->mutex);
+        *released = state->released_eye_frame;
+        return XR_SUCCESS;
+    });
+}
 
 // 0.2 V576: a 32-bit __stdcall export is decorated, _name@<argument bytes>;
 // the loader asks for the plain name.

@@ -168,6 +168,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::luke_frame_contract: return "luke_frame_contract";
     case BridgeFlightOperation::luke_pose_contract: return "luke_pose_contract";
     case BridgeFlightOperation::luke_afw_stage: return "luke_afw_stage";
+    case BridgeFlightOperation::eye_frame_metadata: return "eye_frame_metadata";
     case BridgeFlightOperation::gpu_fence_snapshot: return "gpu_fence_snapshot";
     case BridgeFlightOperation::luke_inline_view: return "luke_inline_view";
     case BridgeFlightOperation::luke_inline_pose_bits: return "luke_inline_pose_bits";

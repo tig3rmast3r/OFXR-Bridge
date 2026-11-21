@@ -1,6 +1,7 @@
 #pragma once
 #include "xrfg/osr_source_timing.hpp"
 #include "xrfg/luke_gta_headlock.hpp"
+#include "xrfg/eye_guide_binding.hpp"
 
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -114,6 +115,7 @@ struct DlssMotionVectorPublication {
     // Exact Vulkan output geometry for a token-bound guide publication whose
     // pixels are marked in-place. A D3D12 color resource is absent on this path.
     std::optional<DlssVulkanOutputExtent> vulkan_output_extent;
+    EyeGuideRenderIdentity eye_render;
 };
 
 // A camera attached to a published frame at its submission.
@@ -267,6 +269,7 @@ struct DlssMotionVectorFrame {
     bool osr_native_cabin_motion{};
     OsrSourceTime source_camera_time{};
     std::shared_ptr<const DlssSnapshotAllocation> motion_allocation,depth_allocation;
+    EyeGuideRenderIdentity eye_render;
 };
 
 // The vector and depth rectangles a consumer maps the guide's output onto:
@@ -522,6 +525,10 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
     std::uint32_t color_origin_token,
     ID3D12CommandQueue* consumer_queue,
     ID3D12Device* canonical_consumer_device) noexcept;
+std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_render(
+    std::uint64_t stream_id, std::uint64_t epoch, std::uint64_t producer_owner,
+    std::uint64_t original_render, ID3D12CommandQueue* consumer_queue,
+    ID3D12Device* canonical_consumer_device, std::uint32_t producer = 0) noexcept;
 
 // The consumer has accepted this exact RDR2 color and its guide history.
 // Older lookup records can retire while outstanding readers retain their pins.

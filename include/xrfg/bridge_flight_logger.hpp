@@ -229,6 +229,7 @@ enum class BridgeFlightOperation : std::uint32_t {
     gpu_afw, // a=provider context,b=guide publication,c=calibrated GPU QPC; result0..3 GPU stages,4 CPU submit
     benchmark_command, // V558: a=requested revision,b=automatic suite active,c=run ID. Closes preceding interval before apply.
     benchmark_stages, // V608: a=game/preparation microseconds,b=delivery microseconds,c=revision; result=valid
+    eye_frame_metadata, // a=swapchain, b=release serial, c=image/identity/token evidence
 };
 
 struct BridgeFlightToken {

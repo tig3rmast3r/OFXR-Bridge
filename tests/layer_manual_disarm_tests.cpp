@@ -1,6 +1,7 @@
 #define main existing_call_chain_main
 #include "layer_call_chain.cpp"
 #undef main
+#include "xrfg/eye_frame_metadata.h"
 #include "xrfg/implicit_layer.hpp"
 #include <filesystem>
 #include <d3d12sdklayers.h>
@@ -38,9 +39,85 @@ std::array<std::size_t, 2> marker_pixels(
     return counts;
 }
 
+void verify_eye_frame_metadata(HMODULE module, XrSwapchain swapchain,
+    PFN_xrAcquireSwapchainImage acquire, PFN_xrWaitSwapchainImage wait_image,
+    PFN_xrReleaseSwapchainImage release_image, bool native_runtime) {
+    const auto publish = reinterpret_cast<PFN_ofxrReleaseSwapchainImageWithEyeMetadataV1>(
+        GetProcAddress(module, OFXR_RELEASE_WITH_EYE_METADATA_V1));
+    const auto get = reinterpret_cast<PFN_ofxrGetReleasedEyeFrameMetadataV1>(
+        GetProcAddress(module, OFXR_GET_RELEASED_EYE_METADATA_V1));
+    const auto require = [](bool value, const char* message) {
+        if (!value) throw std::runtime_error(message);
+    };
+    require(publish && get, "find eye metadata exports");
+    XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    wait_info.timeout = XR_INFINITE_DURATION;
+    const XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    const auto acquire_waited = [&] {
+        std::uint32_t index{};
+        require(XR_SUCCEEDED(acquire(swapchain, nullptr, &index)) &&
+            XR_SUCCEEDED(wait_image(swapchain, &wait_info)), "waited eye metadata image");
+        return index;
+    };
+    const auto read = [&] {
+        OfxrReleasedEyeFrameMetadataV1 receipt{};
+        require(XR_SUCCEEDED(get(swapchain, &receipt)), "read eye metadata receipt");
+        return receipt;
+    };
+    g_acquire_ahead_active = true;
+    std::uint64_t serial = 0;
+    for (const auto producer : {OFXR_EYE_SOURCE_REAL_VR, OFXR_EYE_SOURCE_UEVR, OFXR_EYE_SOURCE_MUTAR}) {
+        OfxrEyeFrameMetadataV1 frame{sizeof(frame), static_cast<std::uint32_t>(producer),
+            acquire_waited(), 2, {{7, 101, 41, 0}, {7, 102, 42, 1}}};
+        const auto first_slot = frame.image_index;
+        require(XR_SUCCEEDED(publish(release_image, swapchain, &release_info, &frame)), "publish stereo receipt");
+        const auto first = read();
+        require(first.release_serial > serial && first.frame.producer == frame.producer &&
+            first.frame.image_index == first_slot && first.frame.eyes[0].render_id == 101,
+            "first release stores the supplied render");
+
+        // Simulate a mod copying its retained left eye into a different XR
+        // image alongside a newly rendered right eye.
+        frame.image_index = acquire_waited();
+        frame.eyes[1] = {7, 103, 43, 1};
+        require(frame.image_index != first_slot, "copied-forward eye uses a different XR slot");
+        require(XR_SUCCEEDED(publish(release_image, swapchain, &release_info, &frame)), "publish carried eye");
+        const auto second = read();
+        require(second.release_serial == first.release_serial + 1 &&
+            second.frame.image_index == frame.image_index &&
+            second.frame.eyes[0].stream_id == 7 && second.frame.eyes[0].render_id == 101 &&
+            second.frame.eyes[0].guide_token == 41 && second.frame.eyes[1].render_id == 103,
+            "copied-forward eye keeps its original render and guide across releases");
+        serial = second.release_serial;
+    }
+
+    OfxrEyeFrameMetadataV1 frame{sizeof(frame), OFXR_EYE_SOURCE_REAL_VR,
+        acquire_waited(), 1, {{7, 104, 44, 0}}};
+    if (native_runtime) {
+        g_fail_next_release = true;
+        require(publish(release_image, swapchain, &release_info, &frame) == XR_ERROR_RUNTIME_FAILURE &&
+            read().release_serial == serial, "failed release does not publish a receipt");
+    }
+    require(XR_SUCCEEDED(release_image(swapchain, &release_info)) &&
+        read().release_serial == 0, "ordinary release cannot inherit metadata");
+
+    frame.image_index = (acquire_waited() + 1) % 3;
+    require(XR_SUCCEEDED(publish(release_image, swapchain, &release_info, &frame)) &&
+        read().release_serial == 0, "wrong slot cannot attach metadata or fail the XR release");
+    frame.image_index = acquire_waited();
+    frame.eye_count = 2;
+    frame.eyes[1] = frame.eyes[0];
+    require(XR_SUCCEEDED(publish(release_image, swapchain, &release_info, &frame)) &&
+        read().release_serial == 0, "ambiguous eye records cannot attach metadata");
+    g_acquire_ahead_active = false;
+    std::cout << "Eye frame metadata: all three producers preserve copied-forward render IDs across slots\n";
+}
+
 int main(int argc, char** argv) {
     if (argc != 3 && argc != 4) return 1;
     const std::string mode = argv[2];
+    const bool eye_metadata_native = mode == "eye-metadata-native";
+    const bool eye_metadata = eye_metadata_native || mode == "eye-metadata";
     const bool luke_no_guides=mode=="luke-no-guides" || mode=="luke-fsr-no-guides" || mode=="luke-dlssg-no-guides";
     const bool luke_color=mode=="luke-color-only" || mode=="luke-color-afw-off" || mode=="luke-color-private";
     const bool luke_fixture_mode=luke_no_guides || luke_color;
@@ -95,6 +172,12 @@ int main(int argc, char** argv) {
                 << "\n[overlay]\nposition=" << (!marker_mode.empty() && marker_mode != "hidden" ? "upper_right" : "off") << '\n';
         }
         control_profile = std::make_unique<xrfg_fixture::ExternalControlProfile>(root / L"ofxr_bridge.ini");
+        if (eye_metadata_native) {
+            auto desired = xrfg::autonomous::snapshot().desired;
+            desired.advanced_mode = true;
+            desired.independent_pacing = false;
+            require(xrfg::autonomous::request(desired), "select isolated native-runtime fixture");
+        }
         if(luke_fixture_mode) {
             require(argc==4,"Luke runtime fixture path");
             luke_fixture=LoadLibraryA(argv[3]);require(luke_fixture!=nullptr,"load Luke marker");
@@ -228,11 +311,11 @@ int main(int argc, char** argv) {
             require(XR_SUCCEEDED(end_result), "end frame");
         };
         XrFrameState current{XR_TYPE_FRAME_STATE};
-        require(XR_SUCCEEDED(wait(session, nullptr, &current)), "first wait");
+        if (!eye_metadata) require(XR_SUCCEEDED(wait(session, nullptr, &current)), "first wait");
         // One more warm-up frame than the promotion needs on its own: the frame
         // that arms generation passes through, so the first pair - and the
         // throttled inline cycle the promotion counts - is one frame later.
-        for (int i = 0; i < 9; ++i) {
+        for (int i = 0; !eye_metadata && i < 9; ++i) {
             require(XR_SUCCEEDED(begin(session, nullptr)), "warmup begin");
             capture();
             XrFrameState next_frame{XR_TYPE_FRAME_STATE};
@@ -242,23 +325,27 @@ int main(int argc, char** argv) {
             if (g_flight_simulator_mode) current = next_frame;
             else require(XR_SUCCEEDED(wait(session, nullptr, &current)), "warmup wait");
         }
-        if(luke_no_guides) {
-            require(g_synthetic_release_calls.load()==0, "missing native producer generated synthetic frames");
-            require(g_create_swapchain_calls.load()==1, "missing native producer allocated private swapchains");
-            require(g_application_release_calls.load()==9 && g_end_frame_calls.load()>=9,
-                "missing native producer interrupted original XR frames");
-            require(XR_SUCCEEDED(end_session(session)), "end missing-producer session");
-            require(XR_SUCCEEDED(destroy_swapchain(swapchain)), "destroy missing-producer swapchain");
+        if (luke_no_guides || eye_metadata) {
+            if (eye_metadata) {
+                verify_eye_frame_metadata(module, swapchain, acquire, wait_image, release_image, eye_metadata_native);
+            } else {
+                require(g_synthetic_release_calls.load()==0, "missing native producer generated synthetic frames");
+                require(g_create_swapchain_calls.load()==1, "missing native producer allocated private swapchains");
+                require(g_application_release_calls.load()==9 && g_end_frame_calls.load()>=9,
+                    "missing native producer interrupted original XR frames");
+                std::cout << "Missing native producer: real frames progress, no generation or private swapchains PASS\n";
+            }
+            require(XR_SUCCEEDED(end_session(session)), "end fixture session");
+            require(XR_SUCCEEDED(destroy_swapchain(swapchain)), "destroy fixture swapchain");
             swapchain=XR_NULL_HANDLE;
-            require(XR_SUCCEEDED(destroy_session(session)), "destroy missing-producer session");
+            require(XR_SUCCEEDED(destroy_session(session)), "destroy fixture session");
             session=XR_NULL_HANDLE;
-            require(XR_SUCCEEDED(destroy_instance(instance)), "destroy missing-producer instance");
+            require(XR_SUCCEEDED(destroy_instance(instance)), "destroy fixture instance");
             instance=XR_NULL_HANDLE;
             FreeLibrary(module);module=nullptr;
             control_profile.reset();
             if(signal)CloseHandle(signal);
             std::error_code ignored;std::filesystem::remove_all(root,ignored);
-            std::cout<<"Missing native producer: real frames progress, no generation or private swapchains PASS\n";
             return 0;
         }
         if(luke_color) {

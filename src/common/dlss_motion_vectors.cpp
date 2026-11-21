@@ -874,6 +874,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->camera_frame_token_valid = publication.camera_frame_token_valid;
         frame->native_production_sequence = publication.native_production_sequence;
         frame->source_clock_owner=publication.source_clock_owner;frame->source_clock_sequence=publication.source_clock_sequence;
+        frame->eye_render=publication.eye_render;
         frame->raw_motion_native_span = publication.raw_motion_native_span;
         frame->raw_motion_native_span_confirmed = publication.raw_motion_native_span_confirmed;
         frame->raw_motion_variable_interval = publication.raw_motion_variable_interval;
@@ -2955,6 +2956,42 @@ void retire_consumed_luke_guides(const DlssMotionVectorFrame& frame) noexcept {
     // Preserve N-1 and N-2 plus two earlier publications for a delayed eye.
     while (!history.empty() && history.front()->epoch == frame.epoch &&
            history.front()->serial < frame.serial - 4) history.pop_front();
+}
+
+std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_render(
+    std::uint64_t stream_id, std::uint64_t epoch, std::uint64_t producer_owner,
+    std::uint64_t original_render, ID3D12CommandQueue* consumer_queue,
+    ID3D12Device* canonical_consumer_device, std::uint32_t producer) noexcept {
+    try {
+        if (!consumer_queue || !canonical_consumer_device || !stream_id || !epoch || !producer_owner ||
+            !g_tracking_enabled.load(std::memory_order_acquire)) return {};
+        const auto exact_render = [&](const DlssMotionVectorFrame& frame) {
+            if (frame.stream != stream_id || frame.epoch != epoch) return false;
+            return producer ? frame.eye_render.matches(producer, producer_owner, original_render) :
+                frame.camera_frame_token_valid && frame.source_clock_owner == producer_owner &&
+                    frame.source_clock_sequence == original_render;
+        };
+        std::uint32_t token{};
+        {
+            auto& state = registry();
+            std::scoped_lock lock(state.mutex);
+            const auto stream = state.streams.find(stream_id);
+            if (stream == state.streams.end() || stream->second.epoch != epoch) return {};
+            for (const auto& frame : stream->second.luke_origin_history) {
+                if (!exact_render(*frame)) continue;
+                if (token || !frame->color_origin_token) return {};
+                token = frame->color_origin_token;
+            }
+        }
+        // Use the same queue, device, epoch and neighbouring guide checks as
+        // the pixel path. A publication that retired between lookups is a miss.
+        if (token) {
+            auto frame = resolve_luke_guide_token(token, consumer_queue, canonical_consumer_device);
+            if (frame && exact_render(*frame) &&
+                !luke_native_stream_reset(stream_id, epoch, canonical_consumer_device)) return frame;
+        }
+    } catch (...) {}
+    return {};
 }
 
 bool luke_native_stream_reset(std::uint64_t stream,std::uint64_t accepted_epoch,

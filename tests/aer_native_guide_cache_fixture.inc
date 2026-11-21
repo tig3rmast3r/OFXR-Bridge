@@ -478,10 +478,11 @@ int aer_native_guide_join_test() {
       for(auto& mapping:mappings)mapping.views[0].projection_index=placement==1?1:0;
       for(unsigned test_case:{0U,1U,2U}) {
         const bool interleaved=test_case==2;const unsigned span=test_case==0?2:1;
+        const bool tagged_guides = placement == 0 && test_case == 1;
         xrfg::configure_dlss_motion_vector_tracking(false);xrfg::retire_disabled_dlss_motion_vector_resources();
         xrfg::configure_dlss_motion_vector_tracking(true);state->aer_native_guide_cache.reset();
         std::array<std::uint32_t,2> expected{};
-        for(unsigned n=1;n<=8;++n) {
+        for(unsigned n=1;n<=(tagged_guides ? 12U : 8U);++n) {
             const unsigned eye=n%2;
             ComPtr<ID3D12GraphicsCommandList> recorded;
             f.commands([&](ID3D12GraphicsCommandList* list) {
@@ -491,6 +492,7 @@ int aer_native_guide_join_test() {
                 p.output_width=p.motion_width=p.depth_width=width;p.output_height=p.motion_height=p.depth_height=height;
                 p.resource_state=p.depth_resource_state=D3D12_RESOURCE_STATE_COMMON;
                 p.protect_snapshot_lifetime=true;p.raw_motion_native_span=span;p.raw_motion_native_span_confirmed=true;
+                if (tagged_guides) p.eye_render = {82, n, OFXR_EYE_SOURCE_MUTAR};
                 if(interleaved) {
                     p.native_production_sequence=(n+1)/2;p.source_clock_owner=77;p.source_clock_sequence=n;
                     p.camera_frame_token=n;p.camera_frame_token_valid=p.camera_data_valid=p.camera_matrices_valid=true;
@@ -505,6 +507,12 @@ int aer_native_guide_join_test() {
             ok(chains[eye]->d3d12_history->capture(0,&capture),"join release-bound capture");
             ok(chains[eye]->d3d12_history->commit(capture),"join commit capture");
             chains[eye]->last_released_capture=capture;
+            if (tagged_guides) {
+                const OfxrEyeFrameMetadataV1 metadata{sizeof(OfxrEyeFrameMetadataV1),
+                    OFXR_EYE_SOURCE_MUTAR, capture.source_index, 1, {{83, n + 1, 0, eye}}};
+                record_eye_frame_release(*chains[eye], capture.source_index, &metadata);
+                chains[eye]->released_eye_frame.capture_serial = capture.serial;
+            }
             if(n<(interleaved?6U:4U))continue;
             record_projection_capture_order(snapshot,mappings);f.gpu_wait();
             // Exact captured inputs and guide receipts are already complete.
@@ -523,6 +531,26 @@ int aer_native_guide_join_test() {
                 state->d3d12_device=f.device12;
                 state->aer_native_guide_cache->queue_retry_after=0;
             }
+            if (tagged_guides && n >= 9) {
+                auto& chain = *chains[eye];
+                auto* consumer = state->aer_native_guide_cache->read_queue.Get();
+                auto* device = f.device12.Get();
+                auto exact = resolve_eye_metadata(chain, capture, eye, consumer, device);
+                if (n < 11) {
+                    check(!exact, "an owner and clock relationship was accepted with fewer than four anchors");
+                } else {
+                    check(exact && exact->color_origin_token == expected[eye],
+                        "a fresh render ID did not resolve across calibrated owners and clock offset");
+                    check(!xrfg::resolve_luke_guide_render(exact->stream, exact->epoch, 82, n, consumer,
+                        device, OFXR_EYE_SOURCE_REAL_VR), "guide render lookup matched the wrong producer");
+                    auto recovered = select_luke_eye_guide(chain, capture, eye, exact, true, 0,
+                        HRESULT_FROM_WIN32(ERROR_INVALID_DATA), consumer, device);
+                    check(recovered == exact, "an ambiguous marker vetoed an independently identified guide");
+                    recovered = select_luke_eye_guide(chain, capture, eye, exact, true, 0,
+                        HRESULT_FROM_WIN32(ERROR_NOT_FOUND), consumer, device);
+                    check(recovered == exact, "a missing marker prevented exact guide selection");
+                }
+            }
             check(refresh_aer_native_guides(state,snapshot,mappings)==S_OK,"actual native AER colour-token join did not attach both eyes");
             check(state->aer_native_guide_cache->read_queue.Get()!=f.queue.Get(),"join reused the stalled ingress queue");
             for(unsigned e=0;e<2;++e) {
@@ -533,6 +561,53 @@ int aer_native_guide_join_test() {
             }
             check(refresh_aer_native_guides(state,snapshot,mappings)==S_OK,"held exact guides were not reused");
             check(classify_fsr_stereo_guides(snapshot,mappings)==FsrStereoGuideReason::ready,"static projection must not request native scene guides");
+            if (placement == 0 && test_case == 0 && n == 8) {
+                auto& chain = *chains[eye];
+                auto* consumer = state->aer_native_guide_cache->read_queue.Get();
+                auto* device = f.device12.Get();
+                OfxrEyeFrameMetadataV1 frame{sizeof(OfxrEyeFrameMetadataV1),
+                    OFXR_EYE_SOURCE_MUTAR, capture.source_index, 1, {{77, 42, expected[eye], eye}}};
+                const auto release = [&](const auto& ticket) {
+                    std::scoped_lock lock(chain.mutex);
+                    chain.last_released_capture = ticket;
+                    record_eye_frame_release(chain, ticket.source_index, &frame);
+                    chain.released_eye_frame.capture_serial = ticket.serial;
+                };
+                release(capture);
+                auto metadata = resolve_eye_metadata(chain, capture, eye, consumer, device);
+                check(metadata && metadata->color_origin_token == expected[eye] &&
+                    !resolve_eye_metadata(chain, capture, 1 - eye, consumer, device),
+                    "a guide token must resolve only for the eye carried by the release");
+                auto wrong_slot = capture;
+                ++wrong_slot.source_index;
+                check(!resolve_eye_metadata(chain, wrong_slot, eye, consumer, device),
+                    "metadata from another release slot was used");
+                frame.eyes[0].guide_token = expected[1 - eye];
+                release(capture);
+                metadata = resolve_eye_metadata(chain, capture, eye, consumer, device);
+                auto chosen = select_luke_eye_guide(chain, capture, eye, std::move(metadata), true,
+                    expected[eye], S_OK, consumer, device);
+                check(chosen && chosen->color_origin_token == expected[eye],
+                    "a verified marker must recover from a metadata disagreement");
+                frame.eyes[0].guide_token = 0;
+                release(capture);
+                check(!resolve_eye_metadata(chain, capture, eye, consumer, device),
+                    "an unknown render must wait for a marker or a native clock");
+                chosen = select_luke_eye_guide(chain, capture, eye, {}, true,
+                    expected[eye], S_OK, consumer, device);
+                auto copied = capture;
+                ++copied.source_index;
+                ++copied.serial;
+                frame.image_index = copied.source_index;
+                release(copied);
+                metadata = resolve_eye_metadata(chain, copied, eye, consumer, device);
+                check(chosen && metadata && chosen->publication == metadata->publication,
+                    "a verified repeated render lost its original guide in a new slot");
+                ++frame.eyes[0].render_id;
+                release(copied);
+                check(!resolve_eye_metadata(chain, copied, eye, consumer, device),
+                    "a newly rendered eye reused an earlier guide");
+            }
         }
     }
     }
