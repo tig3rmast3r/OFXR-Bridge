@@ -13634,7 +13634,7 @@ static_assert(classify_synthesis_failure(
                   xrfg::kD3D12FrameSynthesisStaleGuides) ==
     GenerationPrepareReason::synthesis_stale_guides);
 
-[[nodiscard]] constexpr bool should_preserve_generation_anchor(
+[[nodiscard]] constexpr bool recoverable_stale_guides(
     HRESULT result,
     bool current_released,
     bool synthetic_released) noexcept {
@@ -13642,12 +13642,14 @@ static_assert(classify_synthesis_failure(
         current_released && synthetic_released;
 }
 
-static_assert(should_preserve_generation_anchor(
+static_assert(recoverable_stale_guides(
     xrfg::kD3D12FrameSynthesisStaleGuides, true, true));
-static_assert(!should_preserve_generation_anchor(
+static_assert(!recoverable_stale_guides(
     DXGI_ERROR_WAS_STILL_DRAWING, true, true));
-static_assert(!should_preserve_generation_anchor(
+static_assert(!recoverable_stale_guides(
     xrfg::kD3D12FrameSynthesisStaleGuides, false, true));
+static_assert(!recoverable_stale_guides(
+    xrfg::kD3D12FrameSynthesisStaleGuides, true, false));
 
 [[nodiscard]] constexpr bool should_preserve_missing_capture_anchor(
     bool request_pair,
@@ -13702,6 +13704,7 @@ struct PreparedGeneration {
     bool synthetics_in_target_camera{};
     bool aer_retimed{};
     bool preserve_previous{};
+    bool stale_guides_recoverable{};
     bool publication_deferred{};
     std::uint32_t current_destination_index{
         std::numeric_limits<std::uint32_t>::max()};
@@ -13735,11 +13738,12 @@ struct PreparedProjectionFrame {
 [[nodiscard]] bool stale_worker_transaction(const PreparedProjectionFrame& prepared) noexcept {
     return prepared.kind == PreparedGenerationKind::none &&
         prepared.reason == GenerationPrepareReason::synthesis_stale_guides &&
+        !prepared.resources.empty() &&
         std::all_of(prepared.resources.begin(), prepared.resources.end(), [](const auto& resource) {
             const auto& generation = resource.generation;
             return generation.reason == GenerationPrepareReason::ready ||
                 (generation.reason == GenerationPrepareReason::synthesis_stale_guides &&
-                 generation.preserve_previous);
+                 generation.stale_guides_recoverable);
         });
 }
 
@@ -14585,14 +14589,11 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             // users is ordinary backpressure. A repeated AFW guide is different:
             // pass this application frame through while retaining the last real
             // anchor, so the next advanced guide can still form an FSR pair.
-            const bool stale_guides = request_pair &&
-                should_preserve_generation_anchor(
-                    submit_result, current_released, synthetic_released);
-            output.reason = stale_guides
-                ? GenerationPrepareReason::synthesis_stale_guides
-                : classify_synthesis_failure(submit_result);
-            output.preserve_previous = stale_guides;
-            if (request_pair && !stale_guides) {
+            output.stale_guides_recoverable = recoverable_stale_guides(
+                submit_result, current_released, synthetic_released);
+            output.reason = classify_synthesis_failure(submit_result);
+            output.preserve_previous = request_pair && output.stale_guides_recoverable;
+            if (request_pair && !output.preserve_previous) {
                 std::scoped_lock gpu_lock(state->session->gpu_mutex);
                 static_cast<void>(synthesizer->retire_previous());
             }
@@ -15271,7 +15272,7 @@ void prime_worker_source(SynthesisJob& job) noexcept {
     job.current->previous_sequence = 0;
 }
 
-void log_skipped_worker_pair(const SynthesisJob& job, const PreparedProjectionFrame& prepared) noexcept {
+void log_skipped_stale_worker_source(const SynthesisJob& job, const PreparedProjectionFrame& prepared) noexcept {
     auto& logger = xrfg::bridge_flight_logger();
     logger.event(xrfg::BridgeFlightOperation::generation_prepare,
         static_cast<std::int64_t>(prepared.reason), handle_value(prepared.failed_swapchain), 0,
@@ -15343,10 +15344,10 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                     job->extra_camera ? &*job->extra_camera : nullptr,job->third_fraction,job->third_camera?&*job->third_camera:nullptr,job->sources);
             };
             prepared = prepare_source();
-            if (stale_worker_transaction(prepared)) {
+            if ((state->independent_pacing || job->pair) && stale_worker_transaction(prepared)) {
                 if (state->independent_pacing) {
-                    // A partial pair can advance one eye's history. The next
-                    // source must prime both eyes, even if already queued.
+                    // Either a prime or a pair can advance just one eye.
+                    // Prime both eyes on the next source, even if it is queued.
                     prime_after_stale = true;
                     std::scoped_lock lock(state->presenter_mutex);
                     if (state->director_anchor_sequence == job->current->source_sequence)
@@ -15355,7 +15356,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                                nullptr, 0, false, true)) {
                     // The serial director already reserved this real slot.
                     // Complete it as real-only using the same frozen source.
-                    log_skipped_worker_pair(*job, prepared);
+                    log_skipped_stale_worker_source(*job, prepared);
                     prime_worker_source(*job);
                     prepared = {};
                     prepared = prepare_source();
@@ -15426,7 +15427,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                 finish_worker_outputs(state, prepared, job->current->source_sequence,
                     &delayed_completion, preparation_us, deferred_completion, discard_stale);
             if (discard_stale && success) {
-                log_skipped_worker_pair(*job, prepared);
+                log_skipped_stale_worker_source(*job, prepared);
                 // Drop retired outputs and any remaining source pins before
                 // waking admission.
                 prepared = {};

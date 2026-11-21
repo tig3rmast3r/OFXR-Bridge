@@ -476,6 +476,16 @@ static int independent_stale_guide_worker_test() {
         work->job->current->source_sequence = sequence;
         return work;
     };
+    auto startup = make_work(1);
+    startup->prepared.reason = GenerationPrepareReason::synthesis_stale_guides;
+    startup->prepared.failed_swapchain = source;
+    startup->prepared.resources.resize(2);
+    for (auto& resource : startup->prepared.resources) {
+        resource.generation.reason = startup->prepared.reason;
+        resource.generation.stale_guides_recoverable = recoverable_stale_guides(
+            xrfg::kD3D12FrameSynthesisStaleGuides, true, true);
+    }
+
     auto dropped = make_work(2);
     dropped->job->pair = true;
     auto& prepared = dropped->prepared;
@@ -493,6 +503,7 @@ static int independent_stale_guide_worker_test() {
     stale_eye.reason = prepared.reason;
     check(!stale_worker_transaction(prepared), "stale guides cannot hide a failed output release");
     stale_eye.preserve_previous = true;
+    stale_eye.stale_guides_recoverable = true;
 
     auto next = make_work(3);
     next->job->metadata = std::make_shared<GeneratedFrameEndInfo>();
@@ -513,6 +524,7 @@ static int independent_stale_guide_worker_test() {
     next->prepared.resources.push_back({source, {}});
     next->prepared.resources.front().generation.current_handle = output;
 
+    state->independent_completions.push_back(std::move(startup));
     state->independent_completions.push_back(std::move(dropped));
     state->independent_completions.push_back(std::move(next));
     auto worker = std::thread([&] { synthesis_worker_main(state, true); });
@@ -533,8 +545,8 @@ static int independent_stale_guide_worker_test() {
     check(!early_release && released == 2, "both partial outputs must retire after their fence");
     check(resumed && XR_SUCCEEDED(state->presenter_failure) && state->independent_outputs.size() == 1 &&
         state->independent_outputs.front()->source_sequence == 3 && !state->independent_completion_busy,
-        "stale stereo pair stopped the worker or published a partial pair");
-    std::puts("STALE_GUIDE_WORKER partial stereo batch drained, next source published PASS");
+        "stale startup prime or stereo pair stopped the worker or published a partial batch");
+    std::puts("STALE_GUIDE_WORKER stale startup prime skipped, partial stereo batch drained, next source published PASS");
     return 0;
 }
 
