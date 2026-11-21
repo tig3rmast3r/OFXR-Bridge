@@ -5,8 +5,10 @@
 #include <d3d12.h>
 
 #include <cstdint>
+#include <cstddef>
 #include <array>
 #include <memory>
+#include <span>
 
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
@@ -219,6 +221,27 @@ void two_frame_capture_submission(
 inline constexpr char kVulkanMarkerCaptureStage[] = "vk_color_marker_after_stamp";
 // A diagnostic list that will never be submitted must not leave a pending shot.
 void two_frame_capture_abandon_list(ID3D12CommandList* list,HRESULT status) noexcept;
+
+// The GPU classifier writes these fields in probe order, using 32-bit words.
+inline constexpr unsigned kAerMotionProbeCount = 32 * 18;
+struct TwoFrameAerMotionProbe {
+    std::array<std::int32_t,2> texel;
+    std::array<float,2> current_uv,native_uv,raw_motion,target_native_uv,adjacent_uv,same_eye_uv,errors;
+    std::uint32_t flags;
+};
+static_assert(sizeof(TwoFrameAerMotionProbe)==68);
+struct TwoFrameAerMotionInfo {
+    std::uint64_t publication{},stream{},native_sequence{},swapchain{},release_serial{};
+    std::uint32_t token{},adjacent_token{},same_eye_token{},retained_adjacent_token{},retained_same_eye_token{},eye{},slice{};
+    std::array<float,4> current_rect{},adjacent_rect{},same_eye_rect{};
+    std::array<float,2> motion_size{},scale{},jitter{};
+    unsigned motion_format{};
+    bool history_enabled{},held{};
+};
+struct TwoFrameAerMotionCapture;
+std::shared_ptr<TwoFrameAerMotionCapture> two_frame_capture_begin_aer_motion(const TwoFrameAerMotionInfo&) noexcept;
+void two_frame_capture_finish_aer_motion(const std::shared_ptr<TwoFrameAerMotionCapture>&,HRESULT,
+    const std::array<unsigned,4>& result,std::span<const std::byte> probes={}) noexcept;
 
 // Associates a release-time final-eye image with its xrEndFrame projection.
 void two_frame_capture_annotate_projection(

@@ -261,7 +261,8 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
                         hr=cache.read_queue->Wait(producer.Get(),inputs[eye].capture.fence_value);
                         xrfg::AerMotionInterval::Result interval;
                         if(SUCCEEDED(hr))hr=cache.interval.observe(session->d3d12_device.Get(),cache.read_queue.Get(),eye,
-                            color.Get(),*frame,*placed,interval,retired.GetAddressOf(),&value);
+                            color.Get(),*frame,*placed,interval,retired.GetAddressOf(),&value,
+                            handle_value(chains[eye]->handle),inputs[eye].capture.serial);
                         if(retired&&value) {
                             if(FAILED(inputs[eye].history->retire_consumer(lease,retired.Get(),value)))cache.poisoned=true;
                         }else inputs[eye].history->cancel_consumer(lease);

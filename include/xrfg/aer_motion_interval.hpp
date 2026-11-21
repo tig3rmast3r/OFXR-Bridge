@@ -12,7 +12,7 @@ public:
     ~AerMotionInterval();
     HRESULT observe(ID3D12Device*,ID3D12CommandQueue*,unsigned eye,ID3D12Resource* color,
         const DlssMotionVectorFrame& original,const DlssMotionVectorFrame& placed,
-        Result&,ID3D12Fence**,std::uint64_t*) noexcept;
+        Result&,ID3D12Fence**,std::uint64_t*,std::uint64_t swapchain=0,std::uint64_t release_serial=0) noexcept;
 private:
     struct Impl;std::shared_ptr<Impl> impl_;
 };

@@ -1,4 +1,5 @@
 #include "xrfg/aer_motion_interval.hpp"
+#include "xrfg/two_frame_capture.hpp"
 #include "aer_motion_interval_shader.hpp"
 #include <algorithm>
 #include <mutex>
@@ -9,9 +10,16 @@ namespace {
 using Microsoft::WRL::ComPtr;
 struct Parameters {
     std::array<float,4> current{},middle{},previous{};
-    float size[2]{},scale[2]{},jitter[2]{};UINT enabled{},slice{};
+    std::array<float,2> size{},scale{},jitter{};
+    UINT enabled{},slice{},capture{};
 };
-static_assert(sizeof(Parameters)==80);
+static_assert(sizeof(Parameters)==84);
+constexpr unsigned kDecisionBytes=3*sizeof(UINT);
+constexpr unsigned kProbeBytes=kAerMotionProbeCount*sizeof(TwoFrameAerMotionProbe);
+constexpr unsigned kReadbackBytes=kDecisionBytes+kProbeBytes;
+std::array<unsigned,4> capture_result(const AerMotionInterval::Result& r) {
+    return {r.interval,r.middle_interval,r.one,r.two};
+}
 D3D12_RESOURCE_BARRIER barrier(ID3D12Resource* r,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b) {
     D3D12_RESOURCE_BARRIER v{};v.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     v.Transition={r,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,a,b};return v;
@@ -35,6 +43,8 @@ struct AerMotionInterval::Impl {
     ComPtr<ID3D12Fence> fence;std::uint64_t value{};bool copy_state{},pending{};
     HANDLE event{};unsigned pending_eye{};std::vector<ComPtr<ID3D12Resource>> active;
     std::shared_ptr<const DlssMotionVectorFrame> active_guide;
+    std::shared_ptr<TwoFrameAerMotionCapture> pending_capture;
+    unsigned probe_bytes{};
     ~Impl(){if(event)CloseHandle(event);}
     HRESULT finish() {
         if(!pending)return S_OK;
@@ -43,9 +53,14 @@ struct AerMotionInterval::Impl {
             auto hr=fence->SetEventOnCompletion(value,event);if(FAILED(hr))return hr;
             if(WaitForSingleObject(event,32)!=WAIT_OBJECT_0)return DXGI_ERROR_WAS_STILL_DRAWING;
         }
-        void* data{};D3D12_RANGE range{0,12};auto hr=readback->Map(0,&range,&data);if(FAILED(hr))return hr;
+        void* data{};D3D12_RANGE range{0,kDecisionBytes+probe_bytes};
+        auto hr=readback->Map(0,&range,&data);if(FAILED(hr))return hr;
         const auto* words=static_cast<const UINT*>(data);auto& r=history[pending_eye].result;
-        r.interval=words[0];r.one=words[1];r.two=words[2];D3D12_RANGE empty{};readback->Unmap(0,&empty);
+        r.interval=words[0];r.one=words[1];r.two=words[2];
+        two_frame_capture_finish_aer_motion(pending_capture,S_OK,capture_result(r),
+            {static_cast<const std::byte*>(data)+kDecisionBytes,probe_bytes});
+        pending_capture.reset();probe_bytes=0;
+        D3D12_RANGE empty{};readback->Unmap(0,&empty);
         pending=false;active.clear();active_guide.reset();return S_OK;
     }
     HRESULT initialize(ID3D12Device* d,ID3D12CommandQueue* q) {
@@ -70,7 +85,7 @@ struct AerMotionInterval::Impl {
         hr=d->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator));if(FAILED(hr))return hr;
         hr=d->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),pipeline.Get(),IID_PPV_ARGS(&list));if(FAILED(hr))return hr;
         hr=list->Close();if(FAILED(hr))return hr;
-        D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=12;
+        D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=kReadbackBytes;
         buffer.Height=1;buffer.DepthOrArraySize=buffer.MipLevels=1;buffer.SampleDesc.Count=1;buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         buffer.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
@@ -92,7 +107,7 @@ AerMotionInterval::~AerMotionInterval() {
 }
 HRESULT AerMotionInterval::observe(ID3D12Device* d,ID3D12CommandQueue* q,unsigned eye,ID3D12Resource* color,
     const DlssMotionVectorFrame& original,const DlssMotionVectorFrame& placed,Result& output,
-    ID3D12Fence** submitted,std::uint64_t* submitted_value) noexcept {
+    ID3D12Fence** submitted,std::uint64_t* submitted_value,std::uint64_t swapchain,std::uint64_t release_serial) noexcept {
     output={};if(submitted)*submitted=nullptr;if(submitted_value)*submitted_value=0;
     try {
         if(!d||!q||eye>1||!color||!original.motion_vectors||!original.color_origin_token)return E_INVALIDARG;
@@ -100,7 +115,23 @@ HRESULT AerMotionInterval::observe(ID3D12Device* d,ID3D12CommandQueue* q,unsigne
         auto& p=*impl_;if(p.device.Get()!=d||p.queue.Get()!=q)return E_INVALIDARG;
         auto hr=p.finish();if(FAILED(hr))return hr;
         auto& own=p.history[eye];auto& peer=p.history[eye^1];
-        if(own.token==original.color_origin_token){output=own.result;return S_OK;}
+        const bool capture=two_frame_capture_images_active();
+        TwoFrameAerMotionInfo info{};
+        if(capture) {
+            info.publication=original.publication;info.stream=original.stream;
+            info.native_sequence=original.native_production_sequence;info.token=original.color_origin_token;
+            info.eye=eye;info.slice=original.motion_slice;info.swapchain=swapchain;info.release_serial=release_serial;
+            if(original.previous_same_guide)info.same_eye_token=original.previous_same_guide->color_origin_token;
+            if(original.previous_opposite_guide)info.adjacent_token=original.previous_opposite_guide->color_origin_token;
+        }
+        if(own.token==original.color_origin_token) {
+            output=own.result;
+            if(capture) {
+                info.held=true;
+                two_frame_capture_finish_aer_motion(two_frame_capture_begin_aer_motion(info),S_FALSE,capture_result(output));
+            }
+            return S_OK;
+        }
         const auto cd=color->GetDesc();
         if(cd.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||cd.DepthOrArraySize!=1||cd.SampleDesc.Count!=1)return E_INVALIDARG;
         Parameters params{};const auto rect=guide_motion_rect(placed);
@@ -129,14 +160,26 @@ HRESULT AerMotionInterval::observe(ID3D12Device* d,ID3D12CommandQueue* q,unsigne
             if(i==3){srv.Texture2DArray.MipLevels=1;srv.Texture2DArray.ArraySize=inputs[i]->GetDesc().DepthOrArraySize;}
             else srv.Texture2D.MipLevels=1;d->CreateShaderResourceView(inputs[i],&srv,cpu);cpu.ptr+=increment;}
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};uav.Format=DXGI_FORMAT_R32_TYPELESS;uav.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;
-        uav.Buffer.NumElements=3;uav.Buffer.Flags=D3D12_BUFFER_UAV_FLAG_RAW;d->CreateUnorderedAccessView(p.decision.Get(),nullptr,&uav,cpu);
+        uav.Buffer.NumElements=kReadbackBytes/sizeof(UINT);
+        uav.Buffer.Flags=D3D12_BUFFER_UAV_FLAG_RAW;d->CreateUnorderedAccessView(p.decision.Get(),nullptr,&uav,cpu);
+        std::shared_ptr<TwoFrameAerMotionCapture> receipt;
+        if(capture) {
+            info.history_enabled=params.enabled!=0;
+            info.retained_adjacent_token=peer.token;info.retained_same_eye_token=own.token;
+            info.current_rect=params.current;info.adjacent_rect=params.middle;info.same_eye_rect=params.previous;
+            info.motion_size=params.size;info.scale=params.scale;info.jitter=params.jitter;
+            info.motion_format=readable(original.motion_vectors->GetDesc().Format);
+            receipt=two_frame_capture_begin_aer_motion(info);
+            params.capture=receipt&&params.enabled;
+        }
         auto b=barrier(color,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);p.list->ResourceBarrier(1,&b);
         if(p.copy_state){auto v=barrier(p.decision.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);p.list->ResourceBarrier(1,&v);}
         ID3D12DescriptorHeap* heaps[]{p.heap.Get()};p.list->SetDescriptorHeaps(1,heaps);p.list->SetComputeRootSignature(p.root.Get());
         auto gpu=p.heap->GetGPUDescriptorHandleForHeapStart();p.list->SetComputeRootDescriptorTable(0,gpu);gpu.ptr+=4*increment;p.list->SetComputeRootDescriptorTable(1,gpu);
         p.list->SetComputeRoot32BitConstants(2,sizeof(params)/4,&params,0);p.list->Dispatch(1,1,1);
         auto v=barrier(p.decision.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);p.list->ResourceBarrier(1,&v);
-        p.list->CopyBufferRegion(p.readback.Get(),0,p.decision.Get(),0,12);
+        const unsigned probe_bytes=params.capture?kProbeBytes:0;
+        p.list->CopyBufferRegion(p.readback.Get(),0,p.decision.Get(),0,kDecisionBytes+probe_bytes);
         std::array<D3D12_RESOURCE_BARRIER,2> copies{barrier(color,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE),
             barrier(own.color.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST)};
         p.list->ResourceBarrier(2,copies.data());
@@ -145,10 +188,14 @@ HRESULT AerMotionInterval::observe(ID3D12Device* d,ID3D12CommandQueue* q,unsigne
         source.pResource=color;source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         p.list->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
         copies={barrier(color,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON),barrier(own.color.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)};
-        p.list->ResourceBarrier(2,copies.data());hr=p.list->Close();if(FAILED(hr))return hr;
+        p.list->ResourceBarrier(2,copies.data());hr=p.list->Close();
+        if(FAILED(hr)){two_frame_capture_finish_aer_motion(receipt,hr,{});return hr;}
         ID3D12CommandList* lists[]{p.list.Get()};q->ExecuteCommandLists(1,lists);++p.value;p.pending=true;p.pending_eye=eye;p.copy_state=true;
         if(submitted)p.fence.CopyTo(submitted);if(submitted_value)*submitted_value=p.value;
-        hr=q->Signal(p.fence.Get(),p.value);if(FAILED(hr))return hr;
+        hr=q->Signal(p.fence.Get(),p.value);if(FAILED(hr)) {
+            two_frame_capture_finish_aer_motion(receipt,hr,{});return hr;
+        }
+        p.pending_capture=std::move(receipt);p.probe_bytes=probe_bytes;
         const auto middle_interval=params.enabled?peer.result.interval:0;
         own.token=original.color_origin_token;own.rect=params.current;own.result={0,middle_interval,0,0};p.pending=true;p.pending_eye=eye;
         hr=p.finish();if(FAILED(hr))return hr;output=own.result;return S_OK;

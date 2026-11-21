@@ -198,6 +198,91 @@ int aer_motion_interval_gpu_test() {
             if(n==2)check(result.interval==span,"moving textured scene chose the wrong native interval");
         }
     }
+    {
+        // Capture a deliberately ambiguous dispatch with nonzero motion,
+        // scale, jitter and three different view crops.
+        auto shifted=texture(DXGI_FORMAT_R32G32_FLOAT,{-16,4,0,0},true);
+        wchar_t executable[MAX_PATH]{};
+        GetModuleFileNameW(nullptr,executable,MAX_PATH);
+        const auto folder=std::filesystem::path(executable).parent_path();
+        const auto pid=std::to_string(GetCurrentProcessId());
+        const auto config=folder/("motion-capture-test-"+pid);
+        std::filesystem::create_directories(config);
+        std::ofstream(config/"ofxr_bridge.ini")<<"[diagnostics]\nlogging_enabled=1\n";
+        xrfg::bridge_flight_logger().initialize(config);
+        xrfg::AerMotionInterval classifier;
+        std::array<std::shared_ptr<xrfg::DlssMotionVectorFrame>,3> frames;
+        const std::array<std::array<float,4>,3> rects{{{0,0,128,128},{4,12,112,96},{8,16,96,80}}};
+        for(unsigned n=0;n<3;++n) {
+            auto& g=frames[n];g=std::make_shared<xrfg::DlssMotionVectorFrame>();
+            g->color_origin_token=g->publication=301+n;
+            g->stream=501+n%2;g->native_production_sequence=7+n;
+            g->motion_vectors=shifted;g->motion_width=g->motion_height=size;
+            g->placed=true;g->placed_motion_rect=rects[n];g->scale_x=2;g->scale_y=.5F;
+            g->jittered=true;g->jitter_x=.25F;g->previous_jitter_x=-.25F;
+            g->jitter_y=.125F;g->previous_jitter_y=-.125F;
+            if(n==2) {
+                g->previous_same_guide=frames[0];g->previous_opposite_guide=frames[1];
+                check(xrfg::two_frame_capture_request_origin_loss(),"arm the F8 image recorder without injecting a key");
+            }
+            xrfg::AerMotionInterval::Result result;
+            ok(classifier.observe(f.device12.Get(),f.queue.Get(),n%2,grey.Get(),*g,*g,result,nullptr,nullptr,
+                901+n%2,40+n),"capture exact classifier inputs");
+            check(result.interval==0&&result.one==0&&result.two==0,"F8 changed the decision for ambiguous motion");
+        }
+        xrfg::two_frame_capture_mark_afw_evaluation();xrfg::two_frame_capture_finish_end_frame(1);
+        xrfg::two_frame_capture_mark_afw_evaluation();xrfg::two_frame_capture_finish_end_frame(2);
+        std::filesystem::path capture;
+        for(const auto& entry:std::filesystem::directory_iterator(folder))
+            if(entry.is_directory()&&entry.path().filename().string().starts_with("ofxr-capture-v23286-"+pid+"-"))
+                capture=entry.path();
+        check(!capture.empty(),"classifier capture directory");
+        const auto deadline=GetTickCount64()+5000;
+        while(!std::filesystem::exists(capture/"settings.txt")&&GetTickCount64()<deadline)Sleep(10);
+        const auto fields=[](const std::string& line) {
+            std::vector<std::string> row;
+            std::istringstream input(line);
+            for(std::string value;std::getline(input,value,'\t');)row.push_back(std::move(value));
+            return row;
+        };
+        {
+            std::ifstream file(capture/"aer-motion-decisions.tsv");
+            std::string line;
+            check(bool(std::getline(file,line))&&bool(std::getline(file,line)),"F8 classifier decision row");
+            const auto row=fields(line);
+            check(row.size()==28&&row[2]=="303"&&row[4]=="501"&&row[6]=="901"&&row[7]=="42"&&
+                row[8]=="302"&&row[9]=="301"&&row[10]=="302"&&row[11]=="301"&&row[12]=="0"&&row[14]=="1"&&
+                row[15]=="0"&&row[17]=="0"&&row[18]=="0"&&row[27]=="576",
+                "F8 classifier receipt must identify the real release, both references and rejection");
+            check(!std::getline(file,line),"only the dispatch inside F8 may be captured");
+        }
+        {
+            std::ifstream file(capture/"aer-motion-probes.tsv");
+            std::string line;
+            check(bool(std::getline(file,line)),"F8 classifier probe header");
+            unsigned rows=0;
+            while(std::getline(file,line)) {
+                const auto row=fields(line);
+                check(row.size()==21&&row[2]=="303"&&std::stoul(row[3])==rows&&
+                    row[10]=="-16"&&row[11]=="4","F8 raw vectors come from the evaluated GPU texture");
+                if(rows==0)check(row[20]=="3","out-of-bounds reprojection never samples reference color");
+                if(rows==300) {
+                    const float u=.05F+.9F*12.5F/32;
+                    const float native_u=(8+u*96)/128;
+                    const float target_u=native_u+(-32+.5F)/128;
+                    const auto matches=[&](unsigned column,float expected) {
+                        return std::abs(std::stof(row[column])-expected)<1e-6F;
+                    };
+                    check(row[4]==std::to_string(int(native_u*128))&&matches(6,u)&&matches(8,native_u)&&
+                        matches(12,target_u)&&matches(14,(target_u*128-4)/112)&&matches(16,target_u)&&
+                        matches(18,0)&&matches(19,0)&&row[20]=="15","F8 probe coordinates, scaled vector, history crops and color errors");
+                }
+                ++rows;
+            }
+            check(rows==xrfg::kAerMotionProbeCount,"F8 captured every probe, including non-voters");
+        }
+        xrfg::bridge_flight_logger().shutdown();
+    }
     std::puts("AER variable motion: actual GPU N1/N2/ambiguous and translated-texture votes, exact fences and held-token reuse PASS");return 0;
 }
 

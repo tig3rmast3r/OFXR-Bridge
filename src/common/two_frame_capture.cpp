@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -27,6 +28,14 @@
 #include <vector>
 
 namespace xrfg {
+struct TwoFrameAerMotionCapture {
+    std::mutex mutex;
+    TwoFrameAerMotionInfo info;
+    unsigned frame{};
+    HRESULT status{E_PENDING};
+    std::array<unsigned,4> result{}; // interval, middle interval, N1 votes, N2 votes
+    std::vector<TwoFrameAerMotionProbe> probes;
+};
 namespace {
 
 using Microsoft::WRL::ComPtr;
@@ -90,6 +99,7 @@ struct Session {
     std::vector<TwoFrameNrEvaluation> nr_evaluations;
     std::vector<std::uint64_t> nr_handles;
     std::vector<TimelineShot> timeline;
+    std::vector<std::shared_ptr<TwoFrameAerMotionCapture>> aer_motion;
     std::vector<std::uint64_t> dlssg_streams;
     std::vector<std::uint64_t> application_swapchains;
     std::filesystem::path directory;
@@ -354,6 +364,41 @@ bool completed(const Shot& shot) noexcept {
         shot.fence->GetCompletedValue() >= shot.fence_value;
 }
 
+void write_aer_motion(const std::shared_ptr<Session>& session) {
+    // The session is sealed, so only completion of existing receipts can race.
+    if(session->aer_motion.empty())return;
+    std::ofstream decisions(session->directory/L"aer-motion-decisions.tsv",std::ios::binary);
+    std::ofstream samples(session->directory/L"aer-motion-probes.tsv",std::ios::binary);
+    decisions<<"frame\teye\tpublication\ttoken\tstream\tnative_sequence\tswapchain\trelease_serial\tadjacent_token\tsame_eye_token\tretained_adjacent_token\tretained_same_eye_token\tstatus\theld\thistory_enabled\tinterval\tmiddle_interval\tvotes_n1\tvotes_n2\tmotion_format\tslice\tmotion_size\tmotion_scale\tjitter\tcurrent_rect\tadjacent_rect\tsame_eye_rect\tprobe_count\n";
+    samples<<"frame\teye\tpublication\tprobe\ttexel_x\ttexel_y\tcurrent_u\tcurrent_v\tnative_u\tnative_v\traw_x\traw_y\ttarget_native_u\ttarget_native_v\tadjacent_u\tadjacent_v\tsame_eye_u\tsame_eye_v\terror_n1\terror_n2\tflags\n";
+    decisions<<std::setprecision(9);
+    samples<<std::setprecision(9);
+    for(const auto& entry:session->aer_motion) {
+        std::scoped_lock lock(entry->mutex);
+        const auto& i=entry->info;
+        decisions<<entry->frame<<'\t'<<i.eye<<'\t'<<i.publication<<'\t'<<i.token<<'\t'<<i.stream<<'\t'<<i.native_sequence
+            <<'\t'<<i.swapchain<<'\t'<<i.release_serial<<'\t'<<i.adjacent_token<<'\t'<<i.same_eye_token
+            <<'\t'<<i.retained_adjacent_token<<'\t'<<i.retained_same_eye_token<<'\t'
+            <<std::hex<<static_cast<std::uint32_t>(entry->status)<<std::dec<<'\t'<<i.held<<'\t'<<i.history_enabled;
+        for(auto result:entry->result)decisions<<'\t'<<result;
+        decisions<<'\t'<<i.motion_format<<'\t'<<i.slice;
+        const auto array=[&](const auto& values) {
+            decisions<<'\t';
+            for(unsigned n=0;n<values.size();++n){if(n)decisions<<',';decisions<<values[n];}
+        };
+        array(i.motion_size);array(i.scale);array(i.jitter);
+        array(i.current_rect);array(i.adjacent_rect);array(i.same_eye_rect);
+        decisions<<'\t'<<entry->probes.size()<<'\n';
+        for(unsigned n=0;n<entry->probes.size();++n) {
+            const auto& p=entry->probes[n];
+            samples<<entry->frame<<'\t'<<i.eye<<'\t'<<i.publication<<'\t'<<n<<'\t'<<p.texel[0]<<'\t'<<p.texel[1];
+            for(const auto& xy:{p.current_uv,p.native_uv,p.raw_motion,p.target_native_uv,p.adjacent_uv,p.same_eye_uv,p.errors})
+                samples<<'\t'<<xy[0]<<'\t'<<xy[1];
+            samples<<'\t'<<p.flags<<'\n';
+        }
+    }
+}
+
 void write_session(const std::shared_ptr<Session>& session) {
     std::error_code ec;
     std::filesystem::create_directories(session->directory, ec);
@@ -607,6 +652,7 @@ void write_session(const std::shared_ptr<Session>& session) {
             << '\t' << shot.info.jitter_x << '\t' << shot.info.jitter_y
             << '\t' << file << '\t' << static_cast<unsigned>(shot.description.Flags) << '\t' << shot.description.DepthOrArraySize << '\t' << shot.description.MipLevels << '\t' << shot.description.SampleDesc.Count << '\n';
     }
+    write_aer_motion(session);
     const std::string message = "OFXR V23286 capture: " +
         session->directory.string() + "\n";
     std::ofstream summary(session->directory / L"README.txt", std::ios::binary);
@@ -634,7 +680,8 @@ void write_session(const std::shared_ptr<Session>& session) {
     summary << "V576 DLSS-G stages: aligned_previous / packed_current / packed_motion / packed_depth -> ngx_generated -> composed_output.\n"
         << "One pair per stream, at most two streams. Native stage swapchain is resource identity, not XR handle.\n"
         << "native_dlssg_pair: original A/B pose/projection. native_dlssg_output_camera: B -> output-to-B quaternion, mode = output index.\n";
-    summary<<"RDR2 Vulkan vk_color_marker_after_stamp holds only the native HDR marker bands, stacked in 8-row blocks in the same order as vk_marker_band entries in xr-timeline.tsv. For each publication, vk_marker_token contains the expected token in code, native production sequence in display_time and guide stream in detail. vk_marker_band stores the band index in code and native x/y in the high/low 32 bits of detail. In both entries serial is the publication. Match it to manifest serial and guide-contracts publication. The GPU reads the original Vulkan output after stamping, before application work resumes.\n"
+    summary<<"aer-motion-decisions.tsv records the exact classifier receipt and parameters. Join swapchain and release_serial to xr_final_eye in manifest.tsv when that image was captured. Adjacent and same-eye tokens identify the two tested source frames. aer-motion-probes.tsv records the in-shader inputs and errors for each of 576 probes, grouped by publication and eye. Raw RG is before scale and jitter. Native and image UVs are normalized to their respective domains. Flags: 1 loaded raw motion, 2 motion finite and in range, 4 both history UVs in range, 8 valid color samples and errors, 16 N1 vote, 32 N2 vote. Unused fields are zero. An already held decision made before F8, a missing exact history, or an unfinished GPU pass may have no probes.\n"
+        <<"RDR2 Vulkan vk_color_marker_after_stamp holds only the native HDR marker bands, stacked in 8-row blocks in the same order as vk_marker_band entries in xr-timeline.tsv. For each publication, vk_marker_token contains the expected token in code, native production sequence in display_time and guide stream in detail. vk_marker_band stores the band index in code and native x/y in the high/low 32 bits of detail. In both entries serial is the publication. Match it to manifest serial and guide-contracts publication. The GPU reads the original Vulkan output after stamping, before application work resumes.\n"
         <<"V885 manual F8: separate max8 private-endpoint packets,32images/1GiB, up to1second after the AFW capture closes. fg_delivery_original is the already reconstructed real FG input; fg_delivery_interpolated is temporal frame generation, unknown remains explicit.\n"
         <<"Join manifest stream to fg-deliveries.tsv token, then fg-delivery-views.tsv token/view/slice. Images are the actual waited native target after its copy, before release. Pose/FOV/rect are the owned submitted projection. content_time and native submitted_time differ deliberately.\n"
         <<"Native End result/completed/layer_count prove acceptance only, not physical headset visibility. Pending/refused/empty remain explicit. Reused already-released targets are never read again; reference_token names an earlier captured identical generation,0 means unavailable. No new copy or CPU wait at native End.\n"
@@ -771,6 +818,41 @@ bool two_frame_capture_active() noexcept {
 
 bool two_frame_capture_images_active() noexcept {
     return manager().active_frame.load() != 0;
+}
+
+std::shared_ptr<TwoFrameAerMotionCapture> two_frame_capture_begin_aer_motion(const TwoFrameAerMotionInfo& info) noexcept {
+    if(!two_frame_capture_images_active())return {};
+    try {
+        auto& state=manager();
+        std::scoped_lock state_lock(state.mutex);
+        const auto frame=state.active_frame.load();
+        if(!state.session||!frame)return {};
+        auto& session=*state.session;
+        std::scoped_lock lock(session.mutex);
+        auto& captures=session.aer_motion;
+        if(session.sealed||captures.size()>=24||std::any_of(captures.begin(),captures.end(),[&](const auto& entry){
+            return entry->info.token==info.token&&entry->info.eye==info.eye;
+        }))return {};
+        auto entry=std::make_shared<TwoFrameAerMotionCapture>();
+        entry->info=info;
+        entry->frame=frame;
+        captures.push_back(entry);
+        return entry;
+    } catch(...) {return {};}
+}
+
+void two_frame_capture_finish_aer_motion(const std::shared_ptr<TwoFrameAerMotionCapture>& entry,HRESULT status,
+    const std::array<unsigned,4>& result,std::span<const std::byte> probes) noexcept {
+    if(!entry)return;
+    try {
+        std::scoped_lock lock(entry->mutex);
+        entry->result=result;
+        entry->status=status;
+        if(probes.size()==kAerMotionProbeCount*sizeof(TwoFrameAerMotionProbe)) {
+            entry->probes.resize(kAerMotionProbeCount);
+            std::memcpy(entry->probes.data(),probes.data(),probes.size());
+        }
+    } catch(...) {}
 }
 
 bool two_frame_capture_delivery_active() noexcept {
