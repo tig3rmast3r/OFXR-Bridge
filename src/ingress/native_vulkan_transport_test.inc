@@ -1228,7 +1228,7 @@ struct PublicGuideGpuProbe {
         // A first frame, or the first one after an abandoned recording, has
         // no previous guide to resolve into a stereo pair.
         const bool inspect_pair=serial==2||serial==5||(hdr&&serial>=6)||
-            (test_rdr2_camera&&(serial==25||serial==29));
+            (test_rdr2_camera&&(serial==25||serial==28||serial==29));
         if(inspect_pair)verify_snapshots(frame,serial);
         if(test_rdr2_camera&&inspect_pair)
             require_transport(frame->source_clock_owner==42&&frame->source_clock_sequence==serial,
@@ -1238,7 +1238,7 @@ struct PublicGuideGpuProbe {
             pre_rejection_motion=frame->previous_opposite_guide->motion_vectors;
             pre_rejection_depth=frame->previous_opposite_guide->depth;
         }
-        if(test_rdr2_camera&&serial==29)
+        if(test_rdr2_camera&&serial==28)
             require_transport(frame->motion_vectors.Get()==pre_rejection_motion.Get()&&
                 frame->depth.Get()==pre_rejection_depth.Get(),
                 "a recoverable camera miss rebuilt the compatible guide snapshots");
@@ -1342,7 +1342,8 @@ struct PublicGuideGpuProbe {
             require_transport(prepared && !resolve_luke_guide_token(old_token,hardware.device->queue.Get(),
                 hardware.device->owner.Get()),"camera refusal exposed guides from the rejected epoch");
             camera_available=true;
-            run(27,false,false,false);
+            // The first exact camera after a miss must stamp immediately.
+            run(27);
             run(28);
             run(29);
             // A different shape on the same device must qualify again.

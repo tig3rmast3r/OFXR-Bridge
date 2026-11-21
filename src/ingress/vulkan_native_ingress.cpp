@@ -353,16 +353,11 @@ public:
         if(owner->rejected_||!owner->preparation_attempted_||owner->claims_!=1||owner->capture_consumed_){owner->reject();return true;}
         owner->capture_consumed_=true;capture=owner->original_capture_;return true;
     }
-    static void observe_rdr2_readiness(const std::shared_ptr<Device>& device,
-        const Rdr2GuideShape& shape,bool ready) {
+    static void qualify_rdr2_shape(const std::shared_ptr<Device>& device,const Rdr2GuideShape& shape) {
         auto& lifetime=*current_->lifetime_;
         std::scoped_lock lock(lifetime.rdr2_warmup_mutex);
-        if(ready) {
-            lifetime.rdr2_camera_owner=device;
-            lifetime.rdr2_ready_shape=shape;
-        } else if(lifetime.rdr2_camera_owner.lock()==device&&lifetime.rdr2_ready_shape==shape) {
-            lifetime.rdr2_ready_shape.reset();
-        }
+        lifetime.rdr2_camera_owner=device;
+        lifetime.rdr2_ready_shape=shape;
     }
     static void final_capture(std::function<bool()> completion,const NVSDK_NGX_Handle* handle,std::uint32_t identity) {
         if(current_){current_->final_capture_=std::move(completion);current_->native_handle_=handle;current_->native_identity_=identity;}
@@ -1394,7 +1389,6 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         // exact owner/render/ring matrix and immutable camera-history identity.
         const auto sample=take_rdr2_camera();
         const auto usable=apply_rdr2_camera(g,sample,g.output_width,g.output_height,g.depth_inverted);
-        PublicFeatureInvocationScope::observe_rdr2_readiness(d,*original_capture->rdr2_shape,usable);
         if(!usable) {
             const auto refusal=sample.valid?15U:rdr2_camera_probe::state().refusal.load();
             ingress_reason(16,refusal);
@@ -1403,8 +1397,10 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
             lock.unlock();
             PublicFeatureInvocationScope::refuse_child();return raw();
         }
+        // Keep preparation qualified through a missed frame of the same shape.
         // Qualification applies only to future preparations. The camera of
         // each actual copied frame is still read at its own typed boundary.
+        PublicFeatureInvocationScope::qualify_rdr2_shape(d,*original_capture->rdr2_shape);
         if(!original_capture->slot){lock.unlock();return raw();}
         original_capture->deferred_camera=false;
         native_ingress::record_native_camera_accepted();
