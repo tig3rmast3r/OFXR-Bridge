@@ -347,6 +347,9 @@ struct DlssMotionVectorSet {
     // (report_dlss_eye_order).
     std::shared_ptr<const DlssMotionVectorFrame> alternate;
     int resolved_eye{-1};
+    // Two-slice XR guide sets use logical eye order until the submitted views
+    // establish which physical array slice holds each eye.
+    bool array_guides_in_eye_order{};
 };
 
 enum class DlssMotionVectorStatus : std::uint32_t {

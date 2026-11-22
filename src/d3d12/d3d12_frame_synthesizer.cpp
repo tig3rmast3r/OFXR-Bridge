@@ -593,6 +593,31 @@ static_assert(kSynthesisConstantCount + 2U <= 64U);
         : std::numeric_limits<UINT>::max();
 }
 
+[[nodiscard]] std::shared_ptr<const DlssMotionVectorSet> guides_in_slice_order(
+    std::shared_ptr<const DlssMotionVectorSet> guides,
+    std::span<const D3D12ReprojectionView> views) noexcept {
+    if (!guides || !guides->array_guides_in_eye_order) return guides;
+    if (views.size() != 2) return {};
+
+    std::array<UINT, 2> eyes{};
+    std::array<UINT, 2> slices{};
+    for (UINT i = 0; i < eyes.size(); ++i) {
+        eyes[i] = views[i].logical_eye == std::numeric_limits<UINT>::max() ? i : views[i].logical_eye;
+        slices[i] = resolved_array_slice(views[i], i, views.size(), 2);
+        if (eyes[i] >= 2 || slices[i] >= 2) return {};
+    }
+    if (eyes[0] == eyes[1] || slices[0] == slices[1]) return {};
+    if (eyes[0] == slices[0]) return guides;
+    try {
+        auto reordered = std::make_shared<DlssMotionVectorSet>(*guides);
+        std::swap(reordered->eyes[0], reordered->eyes[1]);
+        reordered->array_guides_in_eye_order = false;
+        return reordered;
+    } catch (...) {
+        return {};
+    }
+}
+
 [[nodiscard]] UINT resolved_fsr_guide_eye(
     const D3D12ReprojectionView& view,
     std::size_t view_index,
@@ -7351,7 +7376,7 @@ struct D3D12FrameSynthesizer::Impl {
         if (FAILED(result)) {
             return result;
         }
-        next.motion_vectors = std::move(motion_vectors);
+        next.motion_vectors = guides_in_slice_order(std::move(motion_vectors), current_source_views);
         next.presentation_transform = std::move(presentation_transform);
         const auto cancel_next = [this, &next]() noexcept {
             history->cancel_consumer(next.lease);
@@ -7751,7 +7776,7 @@ struct D3D12FrameSynthesizer::Impl {
         if (FAILED(result)) {
             return result;
         }
-        next.motion_vectors = std::move(motion_vectors);
+        next.motion_vectors = guides_in_slice_order(std::move(motion_vectors), current_source_views);
         next.presentation_transform = std::move(presentation_transform);
         const auto cancel_next = [this, &next]() noexcept {
             history->cancel_consumer(next.lease);
@@ -8401,7 +8426,8 @@ bool D3D12FrameSynthesizer::can_pair_fsr(std::shared_ptr<const DlssMotionVectorS
     std::scoped_lock lock(mutex_);
     if (!impl_ || !impl_->previous.active()) return false;
     Impl::RollingSource next{};
-    next.motion_vectors = std::move(current);
+    next.motion_vectors = guides_in_slice_order(std::move(current),
+        std::span(impl_->previous.views.data(), impl_->previous.view_count));
     const UINT expected_guide_eyes = std::min<UINT>(
         std::max<UINT>(impl_->image_description.DepthOrArraySize,
                        impl_->previous.view_count),

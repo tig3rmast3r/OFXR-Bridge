@@ -15,6 +15,7 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <numeric>
 #include <unordered_map>
 #include <vector>
 #include <deque>
@@ -1539,6 +1540,41 @@ constexpr std::uint64_t kMaximumViewPublicationGap = 8;
         static_cast<double>(g.position[2]) * right[2];
 }
 
+// A two-slice XR image can be assembled from separate DLSS textures whose
+// offsets are identical. Publication order has no relationship to eye order.
+[[nodiscard]] std::optional<bool> first_guide_is_left(
+    const DlssMotionVectorFrame& first, const DlssMotionVectorFrame& second) noexcept {
+    const auto first_offset = input_offset(first);
+    const auto second_offset = input_offset(second);
+    if (first_offset != second_offset) return first_offset < second_offset;
+    if (!first.camera_data_valid || !second.camera_data_valid) return std::nullopt;
+
+    const auto& a = first.camera_right;
+    const auto& b = second.camera_right;
+    const double a_length = std::hypot(a[0], a[1], a[2]);
+    const double b_length = std::hypot(b[0], b[1], b[2]);
+    const double axes_dot = std::inner_product(a.begin(), a.end(), b.begin(), 0.0);
+    // Agreement of the right axes and a predominantly lateral baseline guard
+    // against a degenerate camera basis or two positions along a camera move.
+    constexpr double minimum_axis_alignment = 0.90;
+    if (!(a_length > 0.0 && b_length > 0.0 &&
+          axes_dot >= minimum_axis_alignment * a_length * b_length)) return std::nullopt;
+
+    std::array<double, 3> delta{};
+    std::array<double, 3> right{};
+    for (std::size_t i = 0; i < delta.size(); ++i) {
+        delta[i] = static_cast<double>(second.camera_position[i]) - first.camera_position[i];
+        right[i] = a[i] / a_length + b[i] / b_length;
+    }
+    const double distance = std::hypot(delta[0], delta[1], delta[2]);
+    if (!std::isfinite(distance) || distance <= 1e-5) return std::nullopt;
+    const double lateral = std::inner_product(delta.begin(), delta.end(), right.begin(), 0.0) /
+        std::hypot(right[0], right[1], right[2]);
+    if (!(std::fabs(lateral) >= minimum_axis_alignment * distance))
+        return std::nullopt;
+    return lateral > 0.0;
+}
+
 }  // namespace
 
 std::shared_ptr<const DlssMotionVectorFrame> place_guide_in_view(
@@ -2084,20 +2120,31 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         std::uint32_t eye_count = std::min<std::uint32_t>(
             std::max<std::uint32_t>(description.DepthOrArraySize, 1U),
             kDlssMotionVectorEyeCount);
+        const bool array_stereo = description.DepthOrArraySize == kDlssMotionVectorEyeCount;
+        const auto array_publication_limit = released_at ? released_at : state.next_publication - 1;
 
         std::vector<Candidate> candidates;
         std::uint32_t streams_with_frames = 0;
         candidates.reserve(state.streams.size());
         for (const auto& [unused_stream_id, stream] : state.streams) {
             static_cast<void>(unused_stream_id);
-            if (!stream.latest) continue;
+            Candidate candidate{stream.first_publication, stream.latest, stream.previous, stream.previous2};
+            if (array_stereo && candidate.frame && candidate.frame->publication > array_publication_limit) {
+                candidate.frame = std::move(candidate.previous);
+                candidate.previous = std::move(candidate.older);
+                if (candidate.frame && candidate.frame->publication > array_publication_limit) {
+                    candidate.frame = std::move(candidate.previous);
+                }
+            }
+            if (!candidate.frame || (array_stereo &&
+                (candidate.frame->publication > array_publication_limit ||
+                 array_publication_limit - candidate.frame->publication > kMaximumStereoPublicationGap))) continue;
             ++streams_with_frames;
-            if (same_identity(stream.latest->producer_queue.Get(), consumer_queue) ||
-                (stream.latest->producer_fence &&
-                 stream.latest->producer_fence_value != 0 &&
-                 same_device(stream.latest->producer_fence.Get(), consumer_queue))) {
-                candidates.push_back(
-                    {stream.first_publication, stream.latest, stream.previous, stream.previous2});
+            if (same_identity(candidate.frame->producer_queue.Get(), consumer_queue) ||
+                (candidate.frame->producer_fence &&
+                 candidate.frame->producer_fence_value != 0 &&
+                 same_device(candidate.frame->producer_fence.Get(), consumer_queue))) {
+                candidates.push_back(std::move(candidate));
             }
         }
         const auto synchronize = [&](const auto& frame) {
@@ -2527,15 +2574,23 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 current->publication - previous->publication <=
                     kMaximumStereoPublicationGap &&
                 synchronize(previous) && synchronize(current)) {
+                const auto first_offset = input_offset(*previous);
+                const auto second_offset = input_offset(*current);
+                // With a single stream, a lateral camera move between two
+                // evaluations does not establish a stereo baseline.
+                if (array_stereo && first_offset == second_offset) {
+                    ++state.statistics.invalid_rejections;
+                    state.statistics.status = DlssMotionVectorStatus::invalid_input;
+                    return {};
+                }
                 auto left = std::make_shared<DlssMotionVectorFrame>(*previous);
                 auto right = std::make_shared<DlssMotionVectorFrame>(*current);
-                // The first of the pair is the left eye unless the inputs
-                // say otherwise.
-                if (input_offset(*right) < input_offset(*left)) std::swap(left, right);
+                if (second_offset < first_offset) std::swap(left, right);
                 left->previous_serial = left->serial > 2 ? left->serial - 2 : 0;
                 right->previous_serial = right->serial > 2 ? right->serial - 2 : 0;
                 auto result = std::make_shared<DlssMotionVectorSet>();
                 result->eye_count = 2;
+                result->array_guides_in_eye_order = array_stereo;
                 result->eyes[0] = std::move(left);
                 result->eyes[1] = std::move(right);
                 ++state.statistics.matched;
@@ -2553,6 +2608,11 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                     ? DlssMotionVectorStatus::waiting_for_dlss
                     : DlssMotionVectorStatus::output_not_direct;
             }
+            return {};
+        }
+        if (array_stereo && candidates.size() != eye_count) {
+            ++state.statistics.invalid_rejections;
+            state.statistics.status = DlssMotionVectorStatus::invalid_input;
             return {};
         }
 
@@ -2576,20 +2636,25 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             return {};
         }
 
-        // Eye order follows the two DLSS evaluation streams rather than the
-        // final colour resource, which survives any post-DLSS shader passes:
-        // by where each stream's inputs sit, then by first-seen order. First
-        // seen alone gave Galactic Racer under UEVR each eye the other's
-        // guides whenever the right eye evaluated first.
-        std::sort(candidates.begin(), candidates.end(), [](const Candidate& a,
-                                                           const Candidate& b) {
-            const auto ao = input_offset(*a.frame), bo = input_offset(*b.frame);
-            if (ao != bo) return ao < bo;
-            return a.first_publication < b.first_publication;
-        });
+        if (array_stereo) {
+            const auto order = first_guide_is_left(*candidates[0].frame, *candidates[1].frame);
+            if (!order) {
+                ++state.statistics.invalid_rejections;
+                state.statistics.status = DlssMotionVectorStatus::invalid_input;
+                return {};
+            }
+            if (!*order) std::swap(candidates[0], candidates[1]);
+        } else {
+            std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+                const auto ao = input_offset(*a.frame), bo = input_offset(*b.frame);
+                if (ao != bo) return ao < bo;
+                return a.first_publication < b.first_publication;
+            });
+        }
 
         auto result = std::make_shared<DlssMotionVectorSet>();
         result->eye_count = eye_count;
+        result->array_guides_in_eye_order = array_stereo;
         for (std::uint32_t eye = 0; eye < eye_count; ++eye) {
             if (packed_stereo) {
                 auto frame = std::make_shared<DlssMotionVectorFrame>(*candidates[eye].frame);

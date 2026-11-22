@@ -4732,6 +4732,83 @@ void test_guide_composer(D3D12WarpFixture& fixture) {
 
 #include "guide_composer_occlusion.inc"
 
+void test_array_stereo_guide_pairing(D3D12WarpFixture& fixture) {
+    const auto texture = [&](UINT width, UINT height, UINT16 slices) {
+        auto desc = stereo_texture_description(width, height);
+        desc.DepthOrArraySize = slices;
+        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> result;
+        require_hresult(fixture.device()->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
+            nullptr, IID_PPV_ARGS(result.GetAddressOf())), "create array guide test texture");
+        return result;
+    };
+    const auto left_color = texture(64, 32, 1);
+    const auto right_color = texture(64, 32, 1);
+    const auto motion = texture(32, 16, 1);
+    const auto xr_color = texture(68, 40, 2);
+    constexpr std::uint64_t left = 101;
+    constexpr std::uint64_t right = 202;
+    constexpr std::array<float, 3> left_position{10.0F, 20.0F, 30.0F};
+    constexpr std::array<float, 3> right_position{10.0F, 20.063F, 30.0F};
+    const auto publish = [&](std::uint64_t stream, std::array<float, 3> position, bool camera_valid = true) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::DlssMotionVectorPublication publication{
+                stream, stream == left ? left_color.Get() : right_color.Get(), motion.Get(), fixture.queue(),
+                0, 0, 64, 32, 0, 0, 32, 16, 1.0F, 1.0F, 0.0F, 0.0F,
+                D3D12_RESOURCE_STATE_COMMON, false, false, list};
+            publication.camera_data_valid = camera_valid;
+            publication.camera_position = position;
+            publication.camera_right = {0.0F, 1.0F, 0.0F};
+            publication.camera_up = {0.0F, 0.0F, 1.0F};
+            publication.camera_forward = {-1.0F, 0.0F, 0.0F};
+            require(xrfg::publish_dlss_motion_vectors(publication) != nullptr, "publish array guide");
+        });
+    };
+    const auto resolve = [&](std::uint64_t release = 0) {
+        return xrfg::resolve_dlss_motion_vectors(xr_color.Get(), fixture.queue(), -1, release);
+    };
+    const auto check_pair = [&](std::uint64_t serial, std::uint64_t release = 0) {
+        const auto pair = resolve(release);
+        require(pair && pair->eye_count == 2 && pair->array_guides_in_eye_order &&
+            pair->eyes[0] && pair->eyes[0]->stream == left && pair->eyes[0]->serial == serial &&
+            pair->eyes[1] && pair->eyes[1]->stream == right && pair->eyes[1]->serial == serial,
+            "two-slice DLSS guides did not follow their cameras and XR release");
+    };
+
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    publish(right, right_position);
+    require(!resolve(), "single eye supplied a stereo guide pair");
+    publish(left, left_position);
+    check_pair(1);
+    publish(left, left_position);
+    publish(right, right_position);
+    check_pair(2);
+    const auto release = xrfg::dlss_motion_vector_publications();
+    publish(right, right_position);
+    publish(right, right_position);
+    check_pair(2, release);
+
+    publish(left, left_position, false);
+    require(!resolve(), "guide without camera identity defeated the optical-flow fallback");
+    publish(left, right_position);
+    require(!resolve(), "coincident cameras were treated as a stereo pair");
+    publish(left, {10.0F, 20.0F, 31.0F});
+    require(!resolve(), "primarily vertical camera separation was treated as stereo");
+    publish(left, {10.0F, std::numeric_limits<float>::infinity(), 30.0F});
+    require(!resolve(), "non-finite camera metadata was treated as stereo");
+
+    publish(left, left_position);
+    publish(right, right_position);
+    publish(303, right_position);
+    require(!resolve(), "three live streams were guessed into a stereo pair");
+    xrfg::retire_dlss_motion_vector_stream(303);
+    for (int i = 0; i < 5; ++i) publish(right, right_position);
+    require(!resolve(), "stale left eye was accepted or replaced by a second right-eye evaluation");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+}
+
 void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
     xrfg::configure_dlss_motion_vector_tracking(true);
     constexpr UINT width = 64;
@@ -4773,10 +4850,10 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
             D3D12_RESOURCE_STATE_COMMON;
         verified_publication.snapshot_output = true;
         xrfg::publish_dlss_motion_vectors(verified_publication);
-        xrfg::publish_dlss_motion_vectors({
-            202, shared_output.Get(), motion.Get(), fixture.queue(), 0, 0, width, height,
-            0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
-            D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+        verified_publication.stream = 202;
+        verified_publication.camera_position[0] = 1.063F;
+        verified_publication.snapshot_output = false;
+        xrfg::publish_dlss_motion_vectors(verified_publication);
     });
 
     const auto resolved = xrfg::resolve_dlss_motion_vectors(
@@ -4815,17 +4892,19 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
     require(resolved->eyes[0]->output.Get() != left_output.Get(),
         "diagnostic DLSS output was retained by alias instead of snapshot");
 
-    // Publish in the opposite order. Eye assignment must remain tied to the
-    // stable first-seen stream order, not to this frame's evaluation order.
+    // Changing the publication order must preserve the camera-based eye match.
     fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
-        xrfg::publish_dlss_motion_vectors({
+        xrfg::DlssMotionVectorPublication publication{
             202, shared_output.Get(), motion.Get(), fixture.queue(), 0, 0, width, height,
             0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
-            D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
-        xrfg::publish_dlss_motion_vectors({
-            101, shared_output.Get(), motion.Get(), fixture.queue(), 0, 0, width, height,
-            0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
-            D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+            D3D12_RESOURCE_STATE_COMMON, false, false, command_list};
+        publication.camera_data_valid = true;
+        publication.camera_right = {1.0F, 0.0F, 0.0F};
+        publication.camera_position = {1.063F, 2.0F, 3.0F};
+        xrfg::publish_dlss_motion_vectors(publication);
+        publication.stream = 101;
+        publication.camera_position[0] = 1.0F;
+        xrfg::publish_dlss_motion_vectors(publication);
     });
     const auto reordered = xrfg::resolve_dlss_motion_vectors(
         xr_output.Get(), fixture.queue());
@@ -6980,6 +7059,12 @@ int main(int argc, char** argv) {
         }
         if(argc>1 && std::string_view(argv[1])=="v474-wait") {
             D3D12WarpFixture fixture;test_v474_bounded_history_wait(fixture);return 0;
+        }
+        if (argc > 1 && std::string_view(argv[1]) == "array-stereo-guides") {
+            D3D12WarpFixture fixture;
+            test_array_stereo_guide_pairing(fixture);
+            fixture.require_no_debug_errors();
+            return 0;
         }
         if (argc>1 && std::string_view(argv[1])=="stellar-guides") {
             D3D12WarpFixture guides_fixture;
