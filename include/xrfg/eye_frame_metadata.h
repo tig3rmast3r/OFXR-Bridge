@@ -25,7 +25,7 @@ typedef struct OfxrEyeSourceV1 {
     // Allocate a new nonzero stream ID when render numbering resets. Preserve
     // this pair when an old image is copied forward, including across slots.
     uint64_t stream_id;
-    uint64_t render_id;
+    uint64_t render_id; // IDs in the same stream identify the same render time across eyes.
     uint32_t guide_token; // OFXR colour-origin token, or zero when unavailable.
     uint32_t eye; // 0 = left, 1 = right, independent of the subimage layout.
 } OfxrEyeSourceV1;

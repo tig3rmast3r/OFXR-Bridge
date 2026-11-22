@@ -52,6 +52,20 @@ int main() {
             check(!tracker.observe(invalid).continuity);
             check(tracker.observe(source).fresh==3);
         }
+        InputDetection detection;
+        std::array<Source,2> input{{{11,101,1},{22,202,1}}};
+        check(!detection.observe(input));
+        for(unsigned frame=0;frame<12;++frame) {
+            ++input[0].serial;++input[1].serial;
+            check(!detection.observe(input)); // ordinary split stereo
+        }
+        for(unsigned frame=0;frame<6;++frame) {
+            ++input[frame%2].serial;
+            check(detection.observe(input)==(frame>=3));
+            check(detection.observe(input)==(frame>=3)); // a held poll is neutral
+        }
+        ++input[0].serial;++input[1].serial;
+        check(!detection.observe(input)); // back to ordinary stereo
         std::cout<<"OFR paired/alternating, swaps, 2400 steps, repeats, gaps and epochs PASS\n";return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

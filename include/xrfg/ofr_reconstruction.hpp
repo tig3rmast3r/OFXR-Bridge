@@ -52,6 +52,25 @@ public:
         return decision;
     }
 };
+// Detect unmarked alternating producers from repeated left/right source changes.
+// Paired releases by themselves carry no evidence of staggered render timing.
+class InputDetection {
+    std::array<Source,2> previous_{};
+    unsigned last_eye_{}, alternating_{};
+public:
+    bool observe(const std::array<Source,2>& current) noexcept {
+        const auto decision=classify(previous_,current);
+        previous_=current;
+        if(!decision.continuity || decision.paired()) {
+            last_eye_=alternating_=0;
+        } else if(decision.fresh) {
+            alternating_=last_eye_ && last_eye_!=decision.fresh
+                ? (alternating_<4?alternating_+1:4) : 1;
+            last_eye_=decision.fresh;
+        }
+        return alternating_>=4;
+    }
+};
 // Temporal phase only; never exchange physical eye resources.
 constexpr unsigned newer_eye(bool swap) noexcept { return swap?0:1; }
 }

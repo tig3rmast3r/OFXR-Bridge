@@ -1205,7 +1205,9 @@ void write_status(const AppState& state, bool final = false) {
             now.wMilliseconds);
         inputs.updated = updated;
         const auto current = xrfg::autonomous::snapshot();
-        inputs.configured_multiplier=xrfg::autonomous::generation_multiplier(current.desired);
+        auto effective=current.desired;
+        effective.ofr_enabled=current.connected && xrfg::autonomous::aer_requested(effective,current.runtime);
+        inputs.configured_multiplier=xrfg::autonomous::generation_multiplier(effective);
         if (!final && current.connected && current.runtime.process_id) {
             const auto& runtime = current.runtime;
             const auto& m = runtime.telemetry;

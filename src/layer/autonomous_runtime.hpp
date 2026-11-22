@@ -65,7 +65,7 @@ inline void apply_runtime_settings() {
     if(e.hybrid) e.backend=s.hybrid_backend; // Hybrid's own engine, independent of OFXR's.
     e.native_scale=static_cast<unsigned>(s.native_scale);
     if(independent && (s.frame_generation==0 || e.hybrid)) {
-        e.backend=e.backend==0?0:1;e.rife_multiplier=runtime_multiplier(s);
+        e.backend=e.backend==0?0:1;
         e.lower_vram=e.separate_synthesis=0;
     }
     if (!embedded::request(e)) return;
@@ -80,7 +80,7 @@ inline void apply_runtime_settings() {
     a.ofr=s.ofr_enabled;a.ofr_backend=s.ofr_backend;a.ofr_scale=s.ofr_scale;a.ofr_swap=s.ofr_swap;
     a.osr=s.luke_osr; a.osr_cover=s.luke_osr_cover; a.osr_trim=s.luke_osr_trim; a.osr_fill=s.luke_osr_fill;
     if (!embedded::request_afw(a)) return;
-    if (!embedded::set_djules_triple_frame_gen(s.triple_frame_gen&&!s.ofr_enabled)) return;
+    if (!embedded::set_djules_triple_frame_gen(s.triple_frame_gen)) return;
     if (!embedded::set_djules_prefer_fps(s.prefer_fps || s.triple_frame_gen)) return;
     if (!embedded::set_overlay_setting(s.overlay_enabled?s.overlay_position:0)) return;
     if (!embedded::set_logging_setting(s.diagnostics)) return;
@@ -109,11 +109,13 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     GenerationState generation=GenerationState::waiting, HRESULT initialization_result=S_OK,
     bool vulkan_detected=false, std::uint32_t provider_error=0,
     const SwapchainBudgetStatus* swapchains=nullptr,int pacing_mode=-1,bool steamvr=false,bool afw_only=false,
-    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false,unsigned buffer_capacity=0,unsigned rife_max_multiplier=2,std::uint64_t rife_after_ms=0,std::uint64_t consumer_guides_ms=0,std::uint64_t pacing_expired=0,std::int64_t pacing_allowance_ns=0,unsigned frame_multiplier=2) {
+    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false,unsigned buffer_capacity=0,unsigned rife_max_multiplier=2,std::uint64_t rife_after_ms=0,std::uint64_t consumer_guides_ms=0,std::uint64_t pacing_expired=0,std::int64_t pacing_allowance_ns=0,unsigned frame_multiplier=2,bool aer_detected=false) {
     const auto control=embedded::snapshot();
     const auto afw=embedded::afw_snapshot();
     const auto nr=neural_rendering::status();
     RuntimeStatus out{};out.rife_max_multiplier=rife_max_multiplier;
+    out.aer_detected=aer_detected;
+    const bool aer=aer_detected && control.desired.ofr && control.desired.enabled && !afw_only;
     out.frame_multiplier=std::clamp(frame_multiplier,2U,4U);
     out.dlssg_max_multiplier=native_generated_frames?std::min(native_generated_frames+1,4U):0;
     out.afw_only_session=afw_only;
@@ -137,18 +139,18 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.afw_flat_scene=afw.flat_scene;
     if(const auto evidence=std::atomic_load(&embedded::ofr_evidence))out.ofr_evidence=evidence->snapshot();
     const auto ofr_last=out.ofr_evidence.last_output_ms;
-    out.ofr_running=afw.desired.ofr && control.desired.enabled && ofr_last && now>=ofr_last && now-ofr_last<1000 &&
+    out.ofr_running=aer && ofr_last && now>=ofr_last && now-ofr_last<1000 &&
         ofr_last>=out.ofr_evidence.last_bypass_ms;
     out.ofr_delivery=embedded::ofr_delivery.load(std::memory_order_relaxed);
     out.independent_aer_double_state=embedded::independent_aer_double_state.load();
-    if(afw.desired.ofr && control.desired.enabled && bridge_flight_logger().enabled()) {
+    if(aer && bridge_flight_logger().enabled()) {
         static std::atomic_uint64_t next_aer_report{};auto next=next_aer_report.load();
         if(now>=next && next_aer_report.compare_exchange_strong(next,now+1000))
             bridge_flight_logger().event(BridgeFlightOperation::presenter_transition,9231,
                 out.ofr_evidence.outputs,out.ofr_evidence.bypasses,
                 (out.ofr_evidence.unknown<<2)|out.ofr_evidence.delivery);
     }
-    out.afw_running=!(afw.desired.ofr&&control.desired.enabled) && !afw.flat_scene && afw.desired.mode!=0 && afw.last_success_ms &&
+    out.afw_running=!aer && !afw.flat_scene && afw.desired.mode!=0 && afw.last_success_ms &&
         now>=afw.last_success_ms && now-afw.last_success_ms<2000;
     out.nr_running=nr.running;
     out.nr_model_missing=nr.enabled && nr.model_missing;
@@ -186,7 +188,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.upscaler_motion=observed.motion; out.upscaler_depth=observed.depth;
     out.guide_publications=guides.published; out.guide_matches=guides.matched; out.guide_uses=guides.used;
     out.generation_mode=desired.frame_generation; out.motion_source=control.desired.motion_vectors;
-    const bool post_afw = !(afw.desired.ofr && control.desired.enabled) && out.luke_detected && afw.desired.mode != 0;
+    const bool post_afw = !aer && out.luke_detected && afw.desired.mode != 0;
     if (post_afw && (out.generation_mode == 0 || out.generation_mode == 3))
         out.motion_source = 0; // Complete post-AFW color pair, no native peer-eye guides.
     if (!control.desired.enabled) generation=GenerationState::paused;

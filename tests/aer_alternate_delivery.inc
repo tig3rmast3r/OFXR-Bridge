@@ -87,11 +87,15 @@ int aer_alternate_delivery_test(std::string_view route) {
         immutable.createFlags=XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
         fixed=create_source(immutable);
     }
+    std::uint64_t render_id{};
     f.release_callback=[&](XrSwapchain handle,unsigned index)->XrResult {
         auto chain=find_swapchain(handle);check(bool(chain),"AER release source exists");
         {std::scoped_lock lock(chain->mutex);chain->acquired_indices.push_back(index);++chain->waited_count;}
         XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        return layer_release_swapchain_image_impl(handle,&release);
+        if(handle==fixed)return layer_release_swapchain_image_impl(handle,&release);
+        const OfxrEyeFrameMetadataV1 metadata{sizeof(metadata),OFXR_EYE_SOURCE_MUTAR,index,1,
+            {{1,++render_id,0,unsigned(handle==app[1])}}};
+        return release_swapchain_with_identity(chain,&release,std::nullopt,&metadata);
     };
     std::vector<std::array<float,2>> poses;
     f.inspect_layers=[&](const XrFrameEndInfo* end) {

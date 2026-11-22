@@ -962,13 +962,19 @@ int main(int argc,char** argv) {
             xrfg::autonomous::apply_runtime_settings();
             auto requested=xrfg::embedded::snapshot().desired;
             check(requested.ofr && requested.ofr_swap==swap,"AER reaches shipping runtime");
+            session->luke_afw_enabled=false;
+            auto stereo=effective_session_settings(*session,requested);
+            check(!stereo.ofr && !stereo.ofr_swap && stereo.rife_multiplier==requested.rife_multiplier,
+                "ordinary stereo ignores the saved AER preference and keeps its multiplier");
+            session->luke_afw_enabled=true;
             auto effective=effective_session_settings(*session,requested);
             check(effective.enabled && effective.backend==requested.backend && effective.scale==requested.scale &&
                 effective.hybrid==(method==3) && effective.rife_model==(method==4?controls.rife_model:-1) &&
                 effective.frame_generation==(method>=3?0:method) && effective.rife_multiplier==2,
                 "AER preserves chosen generator and quality, limits only multiplier");
-            check(!xrfg::embedded::djules_pipeline_snapshot().triple_frame_gen,"AER suppresses normal triple request");
-            check(selected_afw_mode()==0,"AER bypasses OSR/AFW while framegen runs");
+            check(xrfg::embedded::djules_pipeline_snapshot().triple_frame_gen==(method!=4),
+                "the ordinary triple preference stays saved for applicable generators");
+            check(selected_afw_mode(*session)==0,"AER bypasses OSR/AFW while framegen runs");
             session->nvidia_options.ofr=true;session->nvidia_options.ofr_swap=swap;
             session->menu_enabled=true;session->djules_triple_requested=true;
             session->ofr_delivery=2;check(djules_application_period(*session,11'111'111)==22'222'222,"paired physical pacing");
@@ -1009,12 +1015,41 @@ int main(int argc,char** argv) {
             controls.enabled=false;
             check(xrfg::autonomous::request(controls),"AER master off");xrfg::autonomous::apply_runtime_settings();
             check(!effective_session_settings(*session,xrfg::embedded::snapshot().desired).enabled &&
-                selected_afw_mode()==xrfg::embedded::afw_snapshot().desired.mode,"FG master off disables AER and restores reconstruction policy");
+                selected_afw_mode(*session)==xrfg::embedded::afw_snapshot().desired.mode,"FG master off disables AER and restores reconstruction policy");
             controls.enabled=true;controls.ofr_enabled=false;
             check(xrfg::autonomous::request(controls),"AER deselect");xrfg::autonomous::apply_runtime_settings();
             effective=effective_session_settings(*session,xrfg::embedded::snapshot().desired);
             check(!effective.ofr && effective.enabled && effective.rife_multiplier==xrfg::autonomous::runtime_multiplier(xrfg::autonomous::snapshot().desired),"ordinary multiplier preference restored");
         }
+        auto enabled=xrfg::autonomous::snapshot().desired;
+        enabled.ofr_enabled=true;enabled.afw_mode=0;
+        check(xrfg::autonomous::request(enabled),"keep AER enabled across source changes");
+        xrfg::autonomous::apply_runtime_settings();
+        session->luke_afw_enabled=false;
+        auto chain=std::make_shared<SwapchainState>(session,XrSwapchainCreateInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO});
+        chain->handle=reinterpret_cast<XrSwapchain>(1);
+        chain->last_released_index=0;
+        {std::scoped_lock lock(g_state_mutex);g_swapchains[chain->handle]=chain;}
+        std::array<XrCompositionLayerProjectionView,2> views{};
+        for(auto& view:views)view.subImage.swapchain=chain->handle;
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projection.viewCount=2;projection.views=views.data();
+        const auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.layerCount=1;frame.layers=&layer;
+        for(const auto producer:{OFXR_EYE_SOURCE_REAL_VR,OFXR_EYE_SOURCE_UEVR,OFXR_EYE_SOURCE_MUTAR}) {
+            OfxrEyeFrameMetadataV1 metadata{sizeof(metadata),static_cast<std::uint32_t>(producer),0,2,
+                {{1,10,0,0},{1,11,0,1}}};
+            record_eye_frame_release(*chain,0,&metadata);update_aer_input(*session,&frame);
+            check(effective_session_settings(*session,xrfg::embedded::snapshot().desired).ofr,
+                "staggered paired render metadata qualifies any producer");
+            metadata.eyes[1].render_id=metadata.eyes[0].render_id;
+            record_eye_frame_release(*chain,0,&metadata);update_aer_input(*session,&frame);
+            check(!effective_session_settings(*session,xrfg::embedded::snapshot().desired).ofr,
+                "matching render metadata falls back immediately");
+        }
+        record_eye_frame_release(*chain,0,nullptr);update_aer_input(*session,&frame);
+        check(!aer_available(*session),"two ordinary eyes in a shared release never establish AER");
+        {std::scoped_lock lock(g_state_mutex);g_swapchains.erase(chain->handle);}
         auto disabled=xrfg::autonomous::snapshot().desired;
         disabled.enabled=false;disabled.afw_mode=0;disabled.nr_enabled=false;disabled.r19_camera=true;
         check(xrfg::autonomous::request(disabled),"all image effects off");xrfg::autonomous::apply_runtime_settings();
@@ -1956,6 +1991,7 @@ int main(int argc,char** argv) {
     unsigned stream_base_pixels{};bool stream_probe_armed{},stream_probe_done{};
     ComPtr<ID3D12Fence> stream_input_gate;std::unique_ptr<std::jthread> stream_rescue;
     if(independent_stream_hold)ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&stream_input_gate)),"stream layer gate");
+    std::uint64_t aer_render_id{};
     f.release_callback=[&](XrSwapchain handle,unsigned index){
         if(stream_probe_armed && handle==right) {
             ok(f.queue->Wait(stream_input_gate.Get(),1),"block newer-eye history capture after its game rendering");stream_probe_armed=false;
@@ -1976,6 +2012,13 @@ int main(int argc,char** argv) {
         XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         if(hfw) {static std::uint64_t serial{};
             return release_swapchain_with_identity(c,&release,xrfg::LukeRenderIdentity{0x649,++serial});}
+        if((independent_aer || aer_path) && (handle==chain || handle==right)) {
+            const auto eye=unsigned(handle!=chain);
+            OfxrEyeFrameMetadataV1 metadata{sizeof(metadata),OFXR_EYE_SOURCE_MUTAR,index,split_eyes?1U:2U,
+                {{1,++aer_render_id,0,eye}}};
+            if(!split_eyes)metadata.eyes[1]={1,++aer_render_id,0,1};
+            return release_swapchain_with_identity(c,&release,std::nullopt,&metadata);
+        }
         return layer_release_swapchain_image_impl(handle,&release);
     };
     if(steady_memory) {
@@ -2910,7 +2953,7 @@ int main(int argc,char** argv) {
             xr_ok(f.transport->drain(),"RIFE phase physical output drained");
             if(rife_luke) {
                 const auto generation=find_swapchain(chain)->frame_generation;
-                const bool post_afw=selected_afw_mode()!=0;
+                const bool post_afw=selected_afw_mode(*state)!=0;
                 const auto active=generation ? (post_afw ? generation->afw_temporal_synthesizer : generation->synthesizer) : nullptr;
                 check(generation && generation->asynchronous_luke_rife &&
                     active && active->asynchronous_rife_enabled(),

@@ -33,7 +33,7 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     xrfg::autonomous::apply_runtime_settings();
     auto effective=desired;effective.independent_acquire_fix=true;
     effective.independent_aer_double=desired.independent_pacing && desired.ofr && desired.independent_aer_double;
-    if(effective.ofr)effective.rife_multiplier=2;
+    effective.rife_multiplier=xrfg::autonomous::runtime_multiplier(xrfg::autonomous::snapshot().desired);
     effective.hybrid=canonical_generation==3;
     effective.frame_generation=canonical_generation>=3?0:canonical_generation;
     if (effective.frame_generation == 2) effective.backend = 0;

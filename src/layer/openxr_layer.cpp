@@ -987,6 +987,8 @@ struct SessionState {
     std::atomic_uint ofr_delivery{}; // 0 learning,1 alternate,2 paired
     unsigned ofr_fresh_mask{3},ofr_last_mask{};
     xrfg::ofr::SourceTracker ofr_source_tracker;
+    xrfg::ofr::InputDetection aer_input_detection;
+    std::atomic_bool aer_input_detected{};
     std::shared_ptr<AerNativeGuideCache> aer_native_guide_cache;
     std::array<XrPosef,2> ofr_source_poses{};
     std::array<XrFovf,2> ofr_source_fovs{};
@@ -1776,9 +1778,19 @@ private:
 
 // Keep the user's OFXR selection untouched on disk. AFW-only is a startup
 // transport choice, not another generation backend or a Neural Rendering switch.
-[[nodiscard]] int selected_afw_mode() {
+[[nodiscard]] bool aer_available(const SessionState& state) noexcept {
+    return !state.afw_only &&
+        (state.luke_afw_enabled || state.aer_input_detected.load(std::memory_order_acquire));
+}
+
+[[nodiscard]] bool session_aer_requested(const SessionState& state,
+    const xrfg::embedded::Settings& requested) noexcept {
+    return aer_available(state) && requested.enabled && requested.ofr;
+}
+
+[[nodiscard]] int selected_afw_mode(const SessionState& state) {
     const auto reconstruction=xrfg::embedded::afw_snapshot().desired;
-    return reconstruction.ofr&&xrfg::embedded::snapshot().desired.enabled?0:reconstruction.mode;
+    return session_aer_requested(state,xrfg::embedded::snapshot().desired)?0:reconstruction.mode;
 }
 [[nodiscard]] bool temporal_generation_requested() {
     const auto control=xrfg::embedded::snapshot().desired;
@@ -1802,6 +1814,9 @@ private:
 #endif
         }
     }
+    requested.ofr=session_aer_requested(state,requested);
+    requested.ofr_swap=requested.ofr && requested.ofr_swap;
+    requested.independent_aer_double=requested.ofr && requested.independent_aer_double;
     if(requested.ofr) requested.rife_multiplier=2;
 #if !defined(_WIN64)
     // 0.2 V576: the 32-bit layer has NVIDIA optical flow alone - FidelityFX,
@@ -2238,14 +2253,14 @@ void log_benchmark_configuration(SessionState& state) noexcept {
         xrfg::embedded::snapshot().revision != state.control_revision) return;
     const auto& s = control.desired;
     if (djules_native_scheduler(state) &&
-        (state.djules_triple_requested != s.triple_frame_gen ||
+        (state.djules_triple_requested != (s.triple_frame_gen && !state.nvidia_options.ofr) ||
          state.djules_deep_pipeline != (s.prefer_fps || s.triple_frame_gen))) return;
     const int engine = s.frame_generation == 3 ? s.hybrid_backend : s.backend;
     const std::uint64_t bits = (s.enabled ? 1ULL : 0ULL) | (std::uint64_t(engine) << 1) |
         (std::uint64_t(s.frame_generation==4?0:s.frame_generation) << 3) | (s.frame_generation==4 ? 1ULL<<63 : 0ULL) | (s.separate_synthesis ? 1ULL << 5 : 0ULL) |
         (s.lower_vram ? 1ULL << 6 : 0ULL) | (s.frame_generation == 3 ? 1ULL << 7 : 0ULL) |
         (state.nvidia_options.hybrid ? 1ULL << 8 : 0ULL) | (s.prefer_fps ? 1ULL << 9 : 0ULL) |
-        (s.triple_frame_gen ? 1ULL << 10 : 0ULL) | (s.motion_vectors ? 1ULL << 11 : 0ULL) |
+        (s.triple_frame_gen && !state.nvidia_options.ofr ? 1ULL << 10 : 0ULL) | (s.motion_vectors ? 1ULL << 11 : 0ULL) |
         (std::uint64_t(s.afw_mode) << 12) | (s.nr_enabled ? 1ULL << 14 : 0ULL) |
         (state.binding_queue ? 1ULL << 15 : 0ULL) | (state.luke_afw_enabled ? 1ULL << 16 : 0ULL) |
         (std::uint64_t(xrfg::standalone::process_dlssg_preset()) << 17) |
@@ -2253,7 +2268,7 @@ void log_benchmark_configuration(SessionState& state) noexcept {
         (s.pacing_mode==1 ? 1ULL << 40 : 0ULL) | (std::uint64_t(s.pacing_mode)<<42) | (single_director_pacing(state) ? 1ULL << 41 : 0ULL) |
         (state.private_runtime ? (1ULL<<45) | (state.private_runtime->buffer_capacity()>=3 ? 1ULL<<44:0ULL):0ULL) |
         (s.increase_buffer ? 1ULL<<46:0ULL) |
-        (s.ofr_enabled && s.enabled ? 1ULL<<48:0ULL) | (s.ofr_swap ? 1ULL<<49:0ULL) | (1ULL<<51) /* fixed native-publication policy, retained trace bit */ |
+        (state.nvidia_options.ofr ? 1ULL<<48:0ULL) | (state.nvidia_options.ofr_swap ? 1ULL<<49:0ULL) | (1ULL<<51) /* fixed native-publication policy, retained trace bit */ |
         (state.private_runtime && state.private_runtime->clean_bypass_enabled() ? 1ULL<<50:0ULL) |
         (xrfg::autonomous::benchmark_active(control.benchmark) ? (1ULL<<24) | (std::uint64_t(control.benchmark.index)<<25) : 0ULL);
     logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, control.revision, bits,
@@ -3258,13 +3273,13 @@ void configure_session_guide_capture(const SessionState& state) {
     // turning AFW back on, but do not record native snapshots/markers here.
     const bool raw_luke_ofxr = state.luke_afw_enabled &&
         state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr &&
-        !state.hybrid_requested && selected_afw_mode() == 0;
+        !state.hybrid_requested && selected_afw_mode(state) == 0;
     const bool outputs_needed=(!state.pressure_resources_active.load(std::memory_order_acquire) && temporal_generation_requested()) ||
-        (state.luke_afw_enabled && selected_afw_mode()!=0);
+        (state.luke_afw_enabled && selected_afw_mode(state)!=0);
     const bool enabled=session_has_independent_guide_consumer(state) ||
         (!state.manual_control.stop_requested() && outputs_needed && !raw_luke_ofxr &&
          state.dlss_motion_vectors && (!state.luke_fresh_only ||
-            (!state.afw_only && temporal_generation_requested()) || selected_afw_mode()!=0));
+            (!state.afw_only && temporal_generation_requested()) || selected_afw_mode(state)!=0));
     if(!enabled)
         xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::configure_ngx_guide_capture(state.d3d12_queue.Get(),enabled);
@@ -4773,7 +4788,7 @@ void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) 
         session->graphics_binding!=SessionGraphicsBinding::d3d11 ||
         session->application_frame_in_progress)return;
     const bool native_ready=(session->graphics_binding_capabilities&8ULL)!=0;
-    const bool afw_needed=selected_afw_mode()!=0;
+    const bool afw_needed=selected_afw_mode(*session)!=0;
     if(native_ready && (!afw_needed || session->luke_afw))return;
     // A sealed Outlaws session cannot discover a different owner or allocate
     // new XR outputs. A provider retired while OFF may resume on the already
@@ -6733,7 +6748,7 @@ XrResult layer_create_session_impl(
     state->independent_pacing=initial_control.desired.independent_pacing;
     if(state->independent_pacing)state->vdxr_legacy=false;
     state->afw_only=state->luke_afw_enabled && game_preferences.afw_only &&
-        !(initial_control.desired.ofr&&initial_control.desired.enabled);
+        !session_aer_requested(*state,initial_control.desired);
     state->luke_shared_swapchains=game_preferences.luke_shared_swapchains;
     initial_control.desired=effective_session_settings(*state,initial_control.desired);
     state->optical_flow_backend = initial_control.desired.backend == 0
@@ -6741,7 +6756,7 @@ XrResult layer_create_session_impl(
     state->nvidia_new_route = initial_control.desired.backend >= 2;
     state->djules_route = initial_control.desired.backend == 3;
     state->djules_pipeline_switchable=true;
-    state->djules_triple_requested=game_preferences.triple_frame_gen;
+    state->djules_triple_requested=game_preferences.triple_frame_gen && !initial_control.desired.ofr;
     state->djules_deep_pipeline=state->djules_triple_requested || game_preferences.prefer_fps;
     xrfg::embedded::register_djules_pipeline(state->control_id, state->djules_deep_pipeline, state->djules_triple_requested);
     state->nvidia_options = {
@@ -6759,7 +6774,7 @@ XrResult layer_create_session_impl(
     state->luke_afw_enabled = xrfg::native_ingress::luke_detected();
     state->hybrid_requested=initial_control.desired.hybrid;
     if(state->hybrid_requested &&
-        !(state->luke_afw_enabled && selected_afw_mode() != 0) &&
+        !(state->luke_afw_enabled && selected_afw_mode(*state) != 0) &&
         xrfg::dlss_motion_vector_publications()!=0) {
         // The flow runs at the Hybrid route's own resolution.
         state->nvidia_options.hybrid=true;
@@ -6776,7 +6791,7 @@ XrResult layer_create_session_impl(
     state->djules_history_wait_enabled.store(ordinary_djules_route(*state), std::memory_order_relaxed);
     state->control_revision = initial_control.revision;
     state->generation_outputs_needed=state->menu_enabled ||
-        (state->luke_afw_enabled && selected_afw_mode()!=0);
+        (state->luke_afw_enabled && selected_afw_mode(*state)!=0);
     state->separate_synthesis = effective_memory_control(*state,initial_control.desired.separate_synthesis);
     state->lower_vram = effective_memory_control(*state,initial_control.desired.lower_vram);
     state->single_director_requested = (initial_control.desired.pacing_mode==1);
@@ -7186,7 +7201,7 @@ XrResult layer_create_session_impl(
             if(SUCCEEDED(queue_result) && state->d3d12_queue)
                 state->graphics_binding_capabilities |= 8ULL;
             if (state->luke_afw_enabled && SUCCEEDED(queue_result) &&
-                selected_afw_mode()!=0) {
+                selected_afw_mode(*state)!=0) {
                 auto afw = std::make_shared<xrfg::LukeAfwSynthesizer>();
                 const HRESULT afw_result = afw->initialize(
                     state->d3d12_device.Get(), state->d3d12_queue.Get(),
@@ -7296,7 +7311,7 @@ XrResult layer_create_session_impl(
         state->independent_pacing?xrfg::autonomous::kIndependentPacingMode:state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && state->luke_shared_swapchains,
         false, // no title forces the INI-only sharing policy
-        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,0,session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state),0,0,native_frame_multiplier(*state));
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,0,session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state),0,0,0,0,native_frame_multiplier(*state),aer_available(*state));
     return result;
 }
 
@@ -7347,6 +7362,7 @@ XrResult layer_destroy_session_impl(XrSession session) {
     if (XR_SUCCEEDED(result) && !remaining_sessions) {
         auto report = xrfg::autonomous::snapshot().runtime;
         report.sessions = 0;
+        report.aer_detected=false;
         xrfg::autonomous::report_runtime(report);
         xrfg::autonomous::report_interface_telemetry({});
     }
@@ -7360,6 +7376,8 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         state->application_wait_pending_begin = false;
         state->application_frame_in_progress = false;
         state->application_frame_has_overlapping_wait = false;
+        state->aer_input_detection={};
+        state->aer_input_detected=false;
         state->pipelined_wait_streak = 0;
         state->pipelined_presenter_mode = false;
         state->pipelined_presenter_start_requested = false;
@@ -7963,7 +7981,7 @@ XrResult layer_wait_frame_impl(
         // ownership is resolved only at the release/EndFrame handoffs.
         if (!state->independent_pacing && !adaptive_nvidia_presenter && !(state->luke_fresh_only &&
             (state->afw_only || !temporal_generation_requested()) &&
-            selected_afw_mode()==0)) {
+            selected_afw_mode(*state)==0)) {
             if (!state->d3d12_synthesis_queue)
                 static_cast<void>(wait_for_previous_session_synthesis(state,true));
             else
@@ -9170,7 +9188,7 @@ XrResult release_swapchain_image_locked(
     const bool idle_luke = state->session->luke_fresh_only &&
         (!state->session->luke_source_filter_armed ||
          ((state->session->afw_only || !temporal_generation_requested()) &&
-          selected_afw_mode() == 0));
+          selected_afw_mode(*state->session) == 0));
     if (idle_luke) { history.reset(); d3d11_interop.reset(); }
     // Worker handoff precedes call_mutex on both APIs. The synchronous/pipelined
     // routes still need their own ownership gate, but never enter it from the director.
@@ -9188,7 +9206,7 @@ XrResult release_swapchain_image_locked(
     }
     std::unique_lock<std::mutex> gpu_lock;
     const bool captures_needed=temporal_generation_requested() ||
-        (state->session->luke_afw_enabled && selected_afw_mode()!=0);
+        (state->session->luke_afw_enabled && selected_afw_mode(*state->session)!=0);
     if (state->session->pressure_resources_active.load(std::memory_order_acquire) || state->session->manual_control.stop_requested() || !captures_needed ||
         !state->projection_history_needed.load(std::memory_order_acquire)) {
         // Preserve the application's acquire/wait/release bookkeeping, but
@@ -9634,7 +9652,7 @@ XrResult release_swapchain_with_identity(
     bool worker_source = false;
     bool luke_duplicate = false;
     const bool afw_producer = state->session->luke_afw_enabled &&
-        selected_afw_mode() != 0;
+        selected_afw_mode(*state->session) != 0;
     {
         std::scoped_lock lock(state->mutex);
         worker_source = state->frame_generation != nullptr;
@@ -18289,7 +18307,7 @@ HRESULT reconcile_multiplier_outputs(const std::shared_ptr<SessionState>& state)
     if(now<state->djules_pipeline_poll) return XR_SUCCESS;
     state->djules_pipeline_poll=now+std::chrono::milliseconds(250);
     const auto desired=xrfg::embedded::djules_pipeline_snapshot();
-    const auto target=std::pair{desired.triple_frame_gen,desired.prefer_fps};
+    const auto target=std::pair{desired.triple_frame_gen && !session_aer_requested(*state,xrfg::embedded::snapshot().desired),desired.prefer_fps};
     // One owned INI and two matching observations for both live policy controls.
     XrResult result=XR_SUCCESS;
     if(state->djules_pipeline_candidate && *state->djules_pipeline_candidate==target)
@@ -18339,9 +18357,9 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     if (force_startup_rendezvous && control.desired.enabled) return E_ABORT;
     // Published AER guides are not guides for the reconstructed peer eye.
     const bool hybrid_ready=control.desired.hybrid &&
-        !(state->luke_afw_enabled && selected_afw_mode() != 0) &&
+        !(state->luke_afw_enabled && selected_afw_mode(*state) != 0) &&
         xrfg::dlss_motion_vector_publications()!=0;
-    const bool afw_needed=!(control.desired.ofr&&control.desired.enabled) && state->luke_afw_enabled && selected_afw_mode()!=0;
+    const bool afw_needed=!(control.desired.ofr&&control.desired.enabled) && state->luke_afw_enabled && selected_afw_mode(*state)!=0;
     const bool outputs_needed=control.desired.enabled || afw_needed;
     const bool afw_use_changed=state->luke_afw_resources_needed &&
         afw_needed!=*state->luke_afw_resources_needed;
@@ -18349,8 +18367,9 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     const bool output_use_changed=state->generation_outputs_needed &&
         outputs_needed!=*state->generation_outputs_needed;
     if (!state->generation_outputs_needed) state->generation_outputs_needed=outputs_needed;
+    const bool aer_changed=control.desired.ofr!=state->nvidia_options.ofr;
     if (recovery!=S_OK && state->control_revision == control.revision && !force_startup_rendezvous && !output_use_changed && !afw_use_changed &&
-        hybrid_ready==state->nvidia_options.hybrid) return S_OK;
+        !aer_changed && hybrid_ready==state->nvidia_options.hybrid) return S_OK;
     struct ReconfigurationTrace {
         xrfg::BridgeFlightLogger& logger;xrfg::BridgeFlightToken token;std::uint64_t revision;
         ~ReconfigurationTrace(){logger.end(token,xrfg::BridgeFlightOperation::embedded_configuration,89830,revision,0,0);}
@@ -19284,6 +19303,57 @@ struct PrivateDepthStrip {
     return FsrStereoGuideReason::ready;
 }
 
+bool uevr_reports_aer() noexcept;
+
+// Observe accepted application releases even while frame generation is off.
+// Use the projected scene, never panel swapchains or the runtime output images.
+void update_aer_input(SessionState& state,const XrFrameEndInfo* info) {
+    if(state.luke_afw_enabled || !info || info->type!=XR_TYPE_FRAME_END_INFO || !info->layers)
+        return;
+    const bool known=state.uevr_afr && uevr_reports_aer();
+    struct RenderIdentity { std::uint32_t producer{}; std::uint64_t stream{}, id{}; };
+    std::array<xrfg::ofr::Source,2> releases{};
+    std::array<RenderIdentity,2> renders{};
+    bool scene=false;
+    for(std::uint32_t i=0;i<info->layerCount;++i) {
+        const auto* layer=info->layers[i];
+        if(!layer || layer->type!=XR_TYPE_COMPOSITION_LAYER_PROJECTION)continue;
+        const auto& projection=*reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+        if(projection.viewCount!=2 || !projection.views)continue;
+        std::array<xrfg::ofr::Source,2> projection_releases{};
+        std::array<RenderIdentity,2> projection_renders{};
+        for(unsigned eye=0;eye<2;++eye) {
+            const auto chain=find_swapchain(projection.views[eye].subImage.swapchain);
+            if(!chain || chain->session.get()!=&state || (chain->create_info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT))
+                continue;
+            std::scoped_lock lock(chain->mutex);
+            if(!chain->ownership_tracking_valid || !chain->last_released_index)continue;
+            const auto handle=static_cast<std::uintptr_t>(handle_value(chain->handle));
+            projection_releases[eye]={handle,reinterpret_cast<std::uintptr_t>(chain.get()),chain->eye_frame_release_serial};
+            const auto& frame=chain->released_eye_frame.frame;
+            for(unsigned index=0;index<frame.eye_count;++index) {
+                const auto& source=frame.eyes[index];
+                if(source.eye==eye)projection_renders[eye]={frame.producer,source.stream_id,source.render_id};
+            }
+        }
+        if(!projection_releases[0].serial || !projection_releases[1].serial)continue;
+        if(scene) {
+            // Ambiguous dynamic projections are not a basis for AER detection.
+            releases={};renders={};
+            break;
+        }
+        releases=projection_releases;
+        renders=projection_renders;
+        scene=true;
+    }
+    if(!scene)return; // Keep the last decision during empty/loading frames.
+    const bool comparable=renders[0].id && renders[1].id &&
+        renders[0].producer==renders[1].producer && renders[0].stream==renders[1].stream;
+    const bool alternating=state.aer_input_detection.observe(releases);
+    const bool detected=comparable ? renders[0].id!=renders[1].id : known || alternating;
+    state.aer_input_detected.store(detected,std::memory_order_release);
+}
+
 XrResult layer_end_frame_impl(
     XrSession session,
     const XrFrameEndInfo* end_info, xrfg::InterfaceCallTiming* api_timing = nullptr) {
@@ -19316,7 +19386,7 @@ XrResult layer_end_frame_impl(
     // for a repeat, so the application's releases name the scene instead and
     // the meter shows new game frames, as it does with AFW or OSR on.
     if(!interface_stamp.scene_owner && state->luke_afw_enabled &&
-        selected_afw_mode()==0) {
+        selected_afw_mode(*state)==0) {
         interface_stamp.scene_owner=0x52454C4541534501ULL;
         interface_stamp.scene_serial=state->app_image_releases.load(std::memory_order_relaxed)+1;
     }
@@ -19373,7 +19443,7 @@ XrResult layer_end_frame_impl(
             state->independent_pacing?xrfg::autonomous::kIndependentPacingMode:state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && state->luke_shared_swapchains,
         false, // no title forces the INI-only sharing policy
-        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state),state->rife_ready_after_ms.load(),state->guided_generation_ms.load(),pacing.expired,pacing.reserve,native_frame_multiplier(*state)); }
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state),state->rife_ready_after_ms.load(),state->guided_generation_ms.load(),pacing.expired,pacing.reserve,native_frame_multiplier(*state),aer_available(*state)); }
     } runtime_report_scope{state,end_info};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =
@@ -19443,6 +19513,7 @@ XrResult layer_end_frame_impl(
     }
     state->application_frame_in_progress = false;
     state->frame_call_condition.notify_all();
+    update_aer_input(*state,end_info);
     state->application_frame_has_overlapping_wait = false;
     if (!frame_had_overlapping_wait && !pipelined_presenter_mode) {
         state->pipelined_wait_streak = 0;
@@ -19471,7 +19542,8 @@ XrResult layer_end_frame_impl(
     };
 
     const auto afw_control = xrfg::embedded::afw_snapshot();
-    const auto desired_control = xrfg::embedded::snapshot();
+    auto desired_control = xrfg::embedded::snapshot();
+    desired_control.desired=effective_session_settings(*state,desired_control.desired);
     bool afw_selected = state->luke_afw_enabled && afw_control.desired.mode != 0 &&
         !(desired_control.desired.ofr&&desired_control.desired.enabled);
     const bool ofxr_was_enabled = state->menu_enabled;
