@@ -460,7 +460,7 @@ constexpr Help kHelpPreset{"DLSS-G preset","C uses Lite blending; A uses Full qu
 constexpr Help kHelpGenerated{"Generated resolution","Resolution of DLSS-G generated frames. Requires compatible NVIDIA DLSS-G hardware and runtime."};
 constexpr Help kHelpMethod{"Reconstruction","Rebuilds the eye the game skipped this frame. Supported with compatible Luke Ross mods and DLSS enabled. Applies live; frame generation and Neural Rendering stay independent."};
 constexpr Help kHelpOsr{"OSR","OFXR Stereo Reconstruction. OFXR renders the missing eye itself from the real eye's colour and depth, the camera of both eyes, and that eye's own previous frame. Supported with compatible Luke Ross mods and DLSS enabled."};
-constexpr Help kHelpOfr{"AER framegen","Declares AER input and alternates real/generated eyes using the selected generator. 2X only. Requires history; source phase is assumed. Saved per game."};
+constexpr Help kHelpOfr{"AER Frame Gen","Works best with Luke Ross and Mutar mods, and may also work with other games that use alternate-eye rendering. These games render one eye at a time. AER Frame Gen uses frame generation to create the missing eye's image, giving you a view in both eyes with quality approaching full stereo rendering."};
 constexpr Help kHelpOfrSwap{"Swap","Reverses which eye is assumed older. Does not exchange left and right images. Re-primes both histories."};
 constexpr Help kHelpAfw{"AFW","Legacy. Reconstructs the missing eye with the AFW provider. Luke Ross only."};
 constexpr Help kHelpOnly{"Frame Reconstruction only","Removes frame generation from the pipeline. Each application frame goes straight to the headset, and only the missing eye is reconstructed. The best choice for latency."};
@@ -646,7 +646,7 @@ bool generation(Panel& p) {
     const auto saved=draft;
     ImGui::BeginDisabled(!controls_enabled);
     bool aer=controls_enabled && draft.ofr_enabled;
-    if(toggle_row(p,"AER framegen","AER framegen",aer,kHelpOfr)) {
+    if(toggle_row(p,"AER Frame Gen (Luke Ross, Mutar...)","AER framegen",aer,kHelpOfr)) {
         draft.ofr_enabled=aer;changed=true;
     }
     if(draft.advanced_mode) {

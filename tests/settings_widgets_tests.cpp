@@ -883,7 +883,7 @@ void aer_framegen_widgets() {
     for(bool compact:{false,true}) {
         Context view(compact?ImVec2(1024,768):ImVec2(690,1000),compact);
         view.draw();view.draw(true);
-        require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"Basic shows AER and hides only Swap on desktop and VR");
+        require(view.rendered_text.find("AER Frame Gen (Luke Ross, Mutar...)")!=std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"Basic shows AER and hides only Swap on desktop and VR");
         view.activate("/Generation_","AER framegen");view.draw();view.draw();
         require(snapshot().desired.ofr_enabled && snapshot().desired.frame_generation==4,"Basic AER toggle works and preserves selected RIFE method");
         view.draw(true);
@@ -892,7 +892,7 @@ void aer_framegen_widgets() {
 
         settings=snapshot().desired;
         settings.advanced_mode=true;settings.ofr_swap=false;require(request(settings),"AER Advanced setup");view.draw();view.draw(true);
-        require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")!=std::string::npos,"Advanced shows both AER flags");
+        require(view.rendered_text.find("AER Frame Gen (Luke Ross, Mutar...)")!=std::string::npos && view.rendered_text.find("Swap")!=std::string::npos,"Advanced shows both AER flags");
         require(view.rendered_text.find("Separate AER swapchains")==std::string::npos,
             "retired AER publication test switch is absent in Advanced too");
         view.activate("/Generation_","AER Swap");view.draw();view.draw();
@@ -900,7 +900,7 @@ void aer_framegen_widgets() {
         auto basic=snapshot().desired;basic.advanced_mode=false;
         require(request(basic),"return enabled AER and Swap to Basic");view.draw();view.draw(true);
         require(snapshot().desired.ofr_enabled && !snapshot().desired.ofr_swap,"returning to Basic preserves AER and clears Advanced-only Swap");
-        require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"returning to Basic keeps AER visible and hides Swap");
+        require(view.rendered_text.find("AER Frame Gen (Luke Ross, Mutar...)")!=std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"returning to Basic keeps AER visible and hides Swap");
         settings=snapshot().desired;settings.advanced_mode=true;settings.independent_pacing=false;
         require(request(settings),"restore Advanced legacy for disabled-control coverage");view.draw();view.draw();
         const auto multiplier=snapshot().desired.rife_multiplier;
