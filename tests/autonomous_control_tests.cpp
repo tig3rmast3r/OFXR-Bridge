@@ -36,11 +36,7 @@ void codec() {
         passive.motion && !passive.depth && passive.last_seen_ms!=0,
         "passive observation distinguishes motion from depth without activating guide capture");
     xrfg::autonomous::Settings desired;
-    require(desired.ofr_enabled && desired.ofr_scale==2 && !desired.ofr_swap,"AER preference defaults on, with normal phase");
-    require(xrfg::autonomous::parse_settings("").ofr_enabled &&
-        !xrfg::autonomous::parse_settings("[ofxr]\nofr_enabled=0\n").ofr_enabled,
-        "new profiles enable AER and existing explicit opt-outs survive");
-    desired.ofr_enabled=false;
+    require(!desired.ofr_enabled && desired.ofr_scale==2 && !desired.ofr_swap,"OFR defaults off, 50%, normal phase");
     for(bool advanced:{false,true})for(int backend:{0,1})for(bool swap:{false,true}) {
         auto ofr=desired;ofr.advanced_mode=advanced;ofr.ofr_enabled=true;ofr.ofr_backend=backend;ofr.ofr_swap=swap;
         const auto saved=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(ofr,true));
@@ -52,7 +48,7 @@ void codec() {
     for(int method:{0,1,2,3,4}) {
         auto aer=desired;aer.frame_generation=method;aer.ofr_enabled=true;
         aer.rife_multiplier=4;aer.frame_multiplier=4;aer.triple_frame_gen=true;
-        require(xrfg::autonomous::generation_multiplier(aer)==2,
+        require(xrfg::autonomous::generation_multiplier(aer)==2 && xrfg::autonomous::runtime_multiplier(aer)==2,
             "AER framegen is 2X for every method");
         require(aer.rife_multiplier==4 && aer.frame_multiplier==4 && aer.triple_frame_gen,
             "AER effective cap retains stored ordinary multiplier preferences");
@@ -108,7 +104,7 @@ void codec() {
         auto optical=desired;optical.independent_pacing=true;optical.frame_generation=0;optical.backend=3;optical.frame_multiplier=factor;
         require(xrfg::autonomous::generation_multiplier(optical)==factor && xrfg::autonomous::runtime_multiplier(optical)==factor,"minimal OFXR honors selected normal multiplier despite saved legacy engine");
         optical.ofr_enabled=true;
-        require(xrfg::autonomous::generation_multiplier(optical)==(factor==4?4:2) && xrfg::autonomous::runtime_multiplier(optical)==factor,"AER cadence keeps the requested stereo fallback multiplier");
+        require(xrfg::autonomous::generation_multiplier(optical)==(factor==4?4:2) && xrfg::autonomous::runtime_multiplier(optical)==2,"AER first stage remains2 while4 selects coherent second stage");
     }
     for(int level:{0,1,2,3}) {
         auto cap=desired;cap.pacing_buffer=level;
@@ -332,7 +328,7 @@ void route_profiles() {
         "Basic retains visible Hybrid and inactive optical flow size choices");
     older.scale=2;older=parse_settings(serialize_settings(older));
     require(older.scale==2,"Hybrid's chosen flow resolution survives a save");
-    Settings multiplied;multiplied.ofr_enabled=false;multiplied.advanced_mode=true;select_generation(multiplied,0,2);multiplied.frame_multiplier=4;multiplied=sanitize(multiplied);
+    Settings multiplied;multiplied.advanced_mode=true;select_generation(multiplied,0,2);multiplied.frame_multiplier=4;multiplied=sanitize(multiplied);
     select_generation(multiplied,3,0);multiplied.frame_multiplier=3;multiplied=sanitize(multiplied);
     select_generation(multiplied,0,3);multiplied.frame_multiplier=4;multiplied=sanitize(multiplied);
     multiplied=parse_settings(serialize_settings(multiplied));
@@ -356,7 +352,7 @@ void route_profiles() {
     Settings hud_edited=depth;hud_edited.hybrid_hud_fix=true;
     require(merge_changes(depth,depth,hud_edited).hybrid_hud_fix,
         "the UI's HUD fix change survives the merge into the saved settings");
-    Settings dlssg;dlssg.ofr_enabled=false;select_generation(dlssg,2,0);dlssg.triple_frame_gen=true;dlssg=sanitize(dlssg);
+    Settings dlssg;select_generation(dlssg,2,0);dlssg.triple_frame_gen=true;dlssg=sanitize(dlssg);
     require(runtime_multiplier(dlssg)==2 && generation_multiplier(dlssg)==3,"DLSS-G 3X stays on triple_frame_gen");
     dlssg.frame_multiplier=4;dlssg.triple_frame_gen=false;dlssg=parse_settings(serialize_settings(dlssg));
     require(dlssg.triple_frame_gen && runtime_multiplier(dlssg)==4 && generation_multiplier(dlssg)==4,

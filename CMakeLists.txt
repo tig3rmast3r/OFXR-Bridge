@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1058.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1063.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1551,6 +1551,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_independent_native_preparation COMMAND xrfg_private_openxr_runtime_tests independent-native-preparation)
         add_test(NAME xrfg_independent_copy_pipeline COMMAND xrfg_private_openxr_runtime_tests independent-copy-pipeline)
         set_tests_properties(xrfg_independent_copy_pipeline PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
+        add_test(NAME xrfg_binding_queue_handoff COMMAND xrfg_private_openxr_runtime_tests binding-queue-handoff)
+        set_tests_properties(xrfg_binding_queue_handoff PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         set_tests_properties(xrfg_independent_native_preparation PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         set_tests_properties(xrfg_independent_native_wait PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         add_test(NAME xrfg_independent_d11_delivery COMMAND xrfg_private_openxr_runtime_tests independent-d11-delivery)

@@ -77,7 +77,7 @@ struct Settings {
     int luke_osr_cover{};  // OSR: band cover in depth texels beyond the hole, 0..8
     int luke_osr_trim{};   // OSR: object-edge texels replaced too, 0..2
     int luke_osr_fill{2};  // OSR: band fill gain, 1..8
-    bool ofr_enabled{true}; // Per-game preference, used only for detected AER input.
+    bool ofr_enabled{}; // Advanced AER framegen modifier, common to all 2X methods.
     int ofr_backend{}; // 0 FidelityFX, 1 OFXR optical flow (NVIDIA).
     int ofr_scale{2}; // 0 100%, 1 75%, 2 50%, 3 25%; per-axis flow size.
     bool ofr_swap{}; // Reverse temporal phase, never the logical eye mapping.
@@ -198,7 +198,6 @@ struct RuntimeStatus {
     unsigned rife_error{}; // fresh receipt: 1 timeout, 2 unavailable, 3 optimization failure
     int osr_mode{-1},osr_lower_quality{-1}; // last successfully submitted reconstruction
     AerFramegenEvidenceSnapshot ofr_evidence{};
-    bool aer_detected{}; // current session has an AER producer or alternating input
     bool ofr_running{}; // confirmed retimed output, not preparation or flag alone
     unsigned independent_aer_double_state{};
     unsigned ofr_delivery{}; // 0 learning, 1 alternating, 2 paired.
@@ -210,9 +209,6 @@ struct RuntimeStatus {
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
     return !r.vdxr_legacy;
-}
-inline bool aer_requested(const Settings& s, const RuntimeStatus& r) noexcept {
-    return s.enabled && s.ofr_enabled && r.aer_detected;
 }
 // A source of eyes for AFW/OSR to reconstruct: Luke Ross, or UEVR's Alternating/AFR.
 inline bool reconstruction_source(const RuntimeStatus& r) noexcept {
@@ -311,7 +307,6 @@ Settings sanitize(Settings value) noexcept;
 [[nodiscard]] int generation_multiplier(const Settings& s) noexcept;
 // The multiplier the layer receives as rife_multiplier: RIFE's, OFXR/Hybrid's
 // 2X-4X, or DLSS-G's 4X (its 3X stays on triple_frame_gen).
-// A session applies its AER cap after detecting the input.
 [[nodiscard]] int runtime_multiplier(const Settings& s) noexcept;
 Settings parse_settings(std::string_view text);
 std::string serialize_settings(const Settings& value,bool include_global_ui=false);

@@ -83,7 +83,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 105701;
+constexpr std::uint32_t kAbi = 106301;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -97,7 +97,6 @@ struct Shared {
     alignas(8) std::uint64_t visible_until_ms[4]{};
     alignas(8) std::uint64_t benchmark_metrics_until_ms{};
     Settings benchmark_saved{};
-    bool benchmark_aer{};
     alignas(8) std::uint64_t benchmark_memory_request{};
     BenchmarkMemory benchmark_memory{};
     Keybinds keybinds{};
@@ -387,6 +386,7 @@ int generation_multiplier(const Settings& s) noexcept {
     return s.triple_frame_gen ? 3 : 2;
 }
 int runtime_multiplier(const Settings& s) noexcept {
+    if(s.ofr_enabled)return 2;
     if (s.frame_generation == 4) return s.rife_multiplier;
     if (optical_multiplier_route(s)) return s.frame_multiplier;
     // DLSS-G 3X keeps its own triple_frame_gen route; only 4X is passed on.
@@ -1120,7 +1120,7 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
 }
 void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const RuntimeStatus& runtime,int rife_quality) {
     {auto* owner=rec.controller;rec=SuiteRecorder{};rec.controller=owner;}rec.run=b.run_id;
-    rec.steamvr=pacing_comparison_runtime(runtime);rec.independent=runtime.pacing_mode==kIndependentPacingMode;rec.aer=rec.controller && rec.controller->data->benchmark_aer;
+    rec.steamvr=pacing_comparison_runtime(runtime);rec.independent=runtime.pacing_mode==kIndependentPacingMode;rec.aer=rec.controller && rec.controller->data->benchmark_saved.ofr_enabled;
     rec.legacy_vdxr=runtime.vdxr_legacy;
     rec.runtime=runtime.vdxr_runtime?"VDXR":runtime.steamvr_runtime?"SteamVR":"Other";
     rec.dlssg_preset=preset;
@@ -1241,12 +1241,11 @@ bool start_benchmark(bool full,bool luke) noexcept {
             std::snprintf(b.message,sizeof(b.message),"Benchmarks require Independent pacing. Select it and restart the game.");return false;
         }
         shared.benchmark_saved=s.desired;
-        shared.benchmark_aer=s.runtime.aer_detected && s.desired.ofr_enabled;
         const auto now=GetTickCount64();
         const auto run=std::max(b.run_id+1,(now<<16)^GetCurrentProcessId());
         b={};b.full=full;b.luke=luke;b.advanced=s.desired.advanced_mode;b.auto_pick=s.desired.benchmark_auto_pick;b.csv=s.desired.benchmark_csv;b.game_pid=s.runtime.process_id;
         b.run_id=run;
-        auto plan=benchmark_execution_plan(full,luke,pacing_comparison_runtime(s.runtime),b.advanced,s.runtime.eye_long_side,s.runtime.rife_max_multiplier,shared.benchmark_saved.rife_resolution,s.runtime.pacing_mode==kIndependentPacingMode,shared.benchmark_aer,s.runtime.dlssg_max_multiplier);filter_radeon_benchmark_plan(plan,s.runtime.gpu_vendor?s.runtime.gpu_vendor:xrfg::rendering_gpu_vendor());b.count=static_cast<unsigned>(plan.size());
+        auto plan=benchmark_execution_plan(full,luke,pacing_comparison_runtime(s.runtime),b.advanced,s.runtime.eye_long_side,s.runtime.rife_max_multiplier,shared.benchmark_saved.rife_resolution,s.runtime.pacing_mode==kIndependentPacingMode,shared.benchmark_saved.ofr_enabled,s.runtime.dlssg_max_multiplier);filter_radeon_benchmark_plan(plan,s.runtime.gpu_vendor?s.runtime.gpu_vendor:xrfg::rendering_gpu_vendor());b.count=static_cast<unsigned>(plan.size());
         b.phase=BenchmarkPhase::applying;
         std::snprintf(b.label,sizeof(b.label),"%s",plan[0].label.c_str());
         if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,plan[0]),now)) {
@@ -1315,7 +1314,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 std::snprintf(b.message,sizeof(b.message),"Settings changed outside the suite; stopped.");return;
             }
             if(b.phase==BenchmarkPhase::applying) {
-                const bool quality_pending=(b.luke || s.runtime.luke_detected || s.runtime.afw_running) && !aer_requested(s.desired,s.runtime) && s.desired.afw_mode &&
+                const bool quality_pending=(b.luke || s.runtime.luke_detected || s.runtime.afw_running) && !(s.desired.ofr_enabled && s.desired.enabled) && s.desired.afw_mode &&
                     (s.runtime.afw_shading_rate!=s.desired.afw_shading_rate ||
                     (s.runtime.osr_mode>=0 && s.runtime.osr_mode!=s.desired.luke_osr) ||
                     (s.desired.luke_osr==2 && s.runtime.osr_lower_quality>=0 && s.runtime.osr_lower_quality!=int(s.desired.luke_osr_lower_quality)));
@@ -1532,7 +1531,7 @@ std::string_view interface_vectors_text(const Snapshot& s, std::uint64_t now) no
 }
 bool interface_aer_active(const Snapshot& s,std::uint64_t now) noexcept {
     const auto& r=s.runtime;const auto& e=r.ofr_evidence;
-    return s.connected && aer_requested(s.desired,r) && r.generation_state!=GenerationState::paused && !r.pending &&
+    return s.connected && s.desired.enabled && s.desired.ofr_enabled && r.generation_state!=GenerationState::paused && !r.pending &&
         r.applied_revision==s.revision && r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000 &&
         e.outputs && e.last_output_ms && now>=e.last_output_ms && now-e.last_output_ms<1000 &&
         e.last_output_ms>=e.last_bypass_ms;
@@ -1541,7 +1540,6 @@ std::string interface_aer_text(const Snapshot& s,std::uint64_t now) {
     if(!s.desired.ofr_enabled)return "AER: Off";
     if(!s.desired.enabled)return "AER: Inactive (framegen off)";
     if(!s.connected)return "AER: Waiting for game";
-    if(!s.runtime.aer_detected)return "AER: No source detected";
     const auto& r=s.runtime;const auto& e=r.ofr_evidence;
     if(r.pending || r.applied_revision!=s.revision)return "AER: Applying settings";
     if(r.generation_state==GenerationState::paused)return "AER: Paused";
@@ -1555,7 +1553,7 @@ std::string interface_aer_text(const Snapshot& s,std::uint64_t now) {
     return text;
 }
 std::string_view interface_aer_source_text(const Snapshot& s) noexcept {
-    if(!s.connected || !aer_requested(s.desired,s.runtime))return {};
+    if(!s.desired.ofr_enabled || !s.desired.enabled)return {};
     return s.runtime.ofr_delivery==1?"Input: alternating releases":
         s.runtime.ofr_delivery==2?"Input: paired releases; AER phase assumed":
         "Input: waiting for release cadence";
@@ -1584,7 +1582,7 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
         return "RIFE optimization error";
     if(s.desired.enabled && s.desired.frame_generation==4 && r.rife_optimizing)
         return "Optimizing, please wait";
-    if(aer_requested(s.desired,s.runtime)) {
+    if(s.desired.enabled && s.desired.ofr_enabled) {
         const bool active=interface_aer_active(s,GetTickCount64());
         const int mode=active?r.generation_mode:s.desired.frame_generation;
         const int route=mode==1?5:mode==2?6:mode==4?7:mode==3?4:std::clamp(s.desired.backend,0,3);
@@ -1631,7 +1629,7 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
     return r.ready ? "Real frames only" : "Waiting";
 }
 bool interface_generation_active(const Snapshot& s) noexcept {
-    if(aer_requested(s.desired,s.runtime))
+    if(s.desired.enabled && s.desired.ofr_enabled)
         return interface_aer_active(s,GetTickCount64()) && !s.runtime.provider_error &&
             !(s.desired.frame_generation==4 && s.runtime.rife_error);
     if(s.connected && s.desired.enabled && s.desired.frame_generation==4 && s.runtime.rife_optimizing) {
@@ -1646,7 +1644,7 @@ bool interface_generation_active(const Snapshot& s) noexcept {
 bool interface_afw_only_active(const Snapshot& s,std::uint64_t now) noexcept {
     const auto& r=s.runtime;
     return s.connected && r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000 &&
-        !aer_requested(s.desired,s.runtime) && s.desired.afw_mode!=0 && r.afw_running &&
+        !(s.desired.ofr_enabled && s.desired.enabled) && s.desired.afw_mode!=0 && r.afw_running &&
         (!s.desired.enabled || r.pacing_mode==kAfwOnlyPacingMode) && !r.pending && r.applied_revision==s.revision;
 }
 std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) noexcept {
@@ -1658,7 +1656,7 @@ std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) no
 }
 std::string_view interface_reconstruction_text(const Snapshot& s,std::uint64_t now_ms) noexcept {
     const auto& r=s.runtime;
-    if(aer_requested(s.desired,s.runtime))return "OSR/AFW off, using AER Frame Gen";
+    if(s.desired.ofr_enabled && s.desired.enabled)return "OSR/AFW off, using AER Frame Gen";
     if(!s.connected || s.desired.afw_mode==0)return "OSR: Off";
     const bool osr=normalize_osr_reconstruction(s.desired.luke_osr)==2;
     const bool active=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000 &&

@@ -200,9 +200,9 @@ public:
     // Wall-clock partition at the source End handoff, not GPU kernel durations.
     // Production requires an observed, source-associated engine origin. Missing
     // origins do not invalidate the independent generation/delivery intervals.
-    // Native generation/preparation ends
-    // only after the first confirmed synthetic's existing preparation fence
-    // and copy have completed. Delivery owns the remainder to the real target.
+    // Native preparation ends when the first confirmed synthetic is eligible
+    // for final delivery. A native binding that consumes queued GPU writes can
+    // accept the handoff before the copy fence completes.
     // No synthetic means zero OFXR generation, including the disabled baseline.
     bool stages(std::int64_t source_end,std::int64_t accepted,float estimated,
                 float& game,float& generation,float& delivery) const noexcept {

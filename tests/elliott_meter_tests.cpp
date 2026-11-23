@@ -87,9 +87,6 @@ int main(int argc,char** argv){try{
     const auto count_top=[](const auto& p,unsigned color){return std::count(p.begin(),p.begin()+std::min<std::size_t>(p.size(),1024*206),color);};
     check(count(good,green)>100 && count(good,red)==0,"working OFXR label and counters must be green");
     auto aer=active;aer.desired.ofr_enabled=true;
-    check(autonomous::interface_generation_active(aer) && !autonomous::interface_aer_active(aer,now),
-        "default AER preference without a source keeps ordinary generation active");
-    aer.runtime.aer_detected=true;
     check(!autonomous::interface_aer_active(aer,now),"enabled checkbox and ordinary FPS cannot prove AER reconstruction");
     check(autonomous::interface_aer_text(aer,now).find("NO CONFIRMED OUTPUT")!=std::string::npos,"missing proof is explicit");
     check(count_top(rasterize_elliott_meter(aer,now,false,false),red)>0,"ordinary generation cannot keep AER meter all green");

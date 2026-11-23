@@ -345,7 +345,7 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     // A model the user has not installed is told apart below: the frames are
     // fine, so the numbers keep their colour.
     const bool nr_model_missing=state.desired.nr_enabled && r.nr_model_missing;
-    const bool aer_requested=autonomous::aer_requested(state.desired,r);
+    const bool aer_requested=state.desired.ofr_enabled && state.desired.enabled;
     const bool optional_ready=(!state.desired.nr_enabled || (fresh && r.nr_running) || nr_model_missing) &&
         (aer_requested || !autonomous::reconstruction_source(r) || state.desired.afw_mode==0 || (fresh && r.afw_running));
     const bool ofxr_active=m.generating && state.desired.enabled && autonomous::interface_generation_active(state) && !r.provider_error;

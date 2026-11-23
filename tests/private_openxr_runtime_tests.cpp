@@ -35,6 +35,7 @@ bool native_contract_fixture_mode{},native_adaptive_wait_fixture_mode{};
 bool native_director_only_fixture_mode{};
 bool independent_fixture_mode{};
 bool independent_fixture_d11_delivery{};
+bool independent_fixture_binding_queue_handoff{};
 std::atomic_uint independent_fixture_buffer{};
 std::atomic_bool independent_fixture_auto{};
 std::atomic<std::int64_t> independent_fixture_begin_work{};
@@ -164,6 +165,7 @@ struct Fixture {
         options.d11_release_readiness=release_readiness;
         options.physical_period=[]{return independent_fixture_mode?0:period;};options.capacity=capacity;
         options.independent_pacing=independent_fixture_mode;
+        options.release_on_binding_queue_submit=independent_fixture_binding_queue_handoff;
         if(!independent_fixture_auto)options.independent_buffer=[]{return independent_fixture_buffer.load();};
         options.adaptive_buffer=adaptive_buffer;
         options.native_frame_contract=native_contract_fixture_mode;
@@ -301,8 +303,7 @@ struct Fixture {
         }
         f.delivery_thread=GetCurrentThreadId();
         if(info->layerCount){std::unique_lock lock(f.mutex);f.end_entered=true;f.changed.notify_all();f.changed.wait(lock,[&]{return !f.block_end.load();});}
-        if(!(f.independent_mode && f.transport && f.transport->clean_bypass_enabled()))
-            check(info->displayTime>=prediction && (info->displayTime-prediction)%period==0,"End uses its own runtime prediction, advancing whole physical periods only if expired");
+        check(info->displayTime>=prediction && (info->displayTime-prediction)%period==0,"End uses its own runtime prediction, advancing whole physical periods only if expired");
         if(info->displayTime>prediction)++f.advanced_predictions;
         unsigned color{},overlay_color{};bool has_overlay{};float position{};
         if(info->layerCount) {
@@ -1838,36 +1839,6 @@ void independent_window_test(bool d12,bool early_due=false) {
     f.transport->stop();independent_fixture_mode=false;period=saved_period;
     std::printf("Independent %s: mid-window arrival/early_due=%d/None0/exact heartbeat/owner destruction PASS\n",d12?"D12":"D11",early_due);
 }
-void independent_clean_admission_test(bool d12) {
-    const auto saved_period=period;period=11'111'111;
-    independent_fixture_mode=true;
-    Fixture f(d12,true,{},false,true,false,8,false);
-    f.transport->set_clean_bypass(true);
-    const auto chain=f.make_chain();
-    f.write(chain,40);f.begin_virtual();xr_ok(f.submit(chain,1),"first clean in-flight image");
-    f.wait_entered();
-    XrFrameState next{XR_TYPE_FRAME_STATE};
-    auto ahead=std::async(std::launch::async,[&]{return f.transport->wait_frame(nullptr,&next);});
-    const bool overlaps=ahead.wait_for(40ms)==std::future_status::ready;
-    if(!overlaps)f.unblock();
-    check(ahead.wait_for(2s)==std::future_status::ready,"clean first lookahead eventually resumes");
-    xr_ok(ahead.get(),"clean first lookahead");
-    check(overlaps,"clean bypass must allow the next render while the prior native End is in flight");
-    xr_ok(f.transport->begin_frame(nullptr),"clean lookahead Begin");
-    f.write(chain,80);xr_ok(f.submit(chain,2),"second clean image accepted");
-    auto bounded=std::async(std::launch::async,[&]{return f.transport->wait_frame(nullptr,&next);});
-    const bool blocked=bounded.wait_for(40ms)==std::future_status::timeout;
-    f.unblock();
-    check(bounded.wait_for(2s)==std::future_status::ready,"native completion opens bounded clean admission");
-    xr_ok(bounded.get(),"bounded clean Wait");
-    check(blocked,"clean source lookahead must not fill the generation FIFO");
-    xr_ok(f.transport->begin_frame(nullptr),"third clean Begin");
-    f.write(chain,120);xr_ok(f.submit(chain,3),"third clean image");
-    f.wait_count(3);xr_ok(f.transport->drain(),"bounded clean source drain");
-    check(f.pixels==std::vector<unsigned>({40,80,120}),"bounded clean sources preserve FIFO pixels");
-    xr_ok(f.transport->destroy_swapchain(chain),"bounded clean source destroy");
-    f.transport->stop();independent_fixture_mode=false;period=saved_period;
-}
 void independent_clean_source_test(bool d12) {
     const auto saved_period=period;
     period=11'111'111;
@@ -1881,15 +1852,15 @@ void independent_clean_source_test(bool d12) {
         const auto* projection=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
         const auto identity=static_cast<unsigned>(projection->views[0].pose.position.x);
         check(identity>0 && identity<=source_times.size(),"clean source pose identity");
-        check(info->displayTime==source_times[identity-1].load(),
-            "clean delivery/replay preserves the time matching the exact source pose");
+        check(info->displayTime>source_times[identity-1].load(),
+            "clean delivery/replay uses native prediction despite stale source time, preserving source pose");
     };
     for(unsigned n=1;n<=3;++n) {
         XrFrameState predicted{XR_TYPE_FRAME_STATE};
         xr_ok(f.transport->wait_frame(nullptr,&predicted),"clean Independent source Wait");
         xr_ok(f.transport->begin_frame(nullptr),"clean Independent source Begin");
         f.write(chain,n*40);
-        source_times[n-1]=predicted.predictedDisplayTime;
+        source_times[n-1]=predicted.predictedDisplayTime-static_cast<XrTime>(n)*10*period;
         XrCompositionLayerProjectionView view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
         view.pose.orientation.w=1;view.pose.position.x=static_cast<float>(n);
         view.subImage.swapchain=chain;view.subImage.imageRect.extent={1,1};
@@ -1897,7 +1868,7 @@ void independent_clean_source_test(bool d12) {
         projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=1;projection.views=&view;
         const XrCompositionLayerBaseHeader* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
-        end.displayTime=predicted.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        end.displayTime=source_times[n-1];end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         end.layerCount=1;end.layers=&layer;
         xr_ok(f.transport->end_frame(&end),"clean Independent exact source submission");
         f.wait_count(n);
@@ -2216,7 +2187,81 @@ void independent_copy_pipeline_test(bool cancel,bool diagnostics) {
     independent_fixture_mode=false;period=saved_period;
     std::printf("INDEPENDENT_COPY_PIPELINE cancel=%d diagnostics=%d two submissions before GPU gate; exact ownership/FIFO/pixels/restart PASS\n",cancel,diagnostics);
 }
+void binding_queue_handoff_test(bool render) {
+    independent_fixture_mode=true;
+    independent_fixture_binding_queue_handoff=true;
+    Fixture f(true);
+    f.throttled=false;
+    f.native_should_render=render;
+    const auto chain=f.make_chain(false,1);
+    f.write(chain,83);
+    std::promise<void> feedback,second_copy;
+    auto sample=feedback.get_future();
+    auto queued_second=second_copy.get_future();
+    f.diagnostic_work=[&](int stage,std::uint64_t seq,std::int64_t) {
+        if(stage==63 && seq==1)feedback.set_value();
+        if(stage==90 && seq==2)second_copy.set_value();
+    };
+    ok(f.delivery_queue->Wait(f.gate.Get(),1),"hold native D3D12 queue after source is ready");
+    auto receipt=std::make_shared<xrfg::InterfaceDeliveryReceipt>(false);
+    f.begin_virtual();
+    xr_ok(f.submit(chain,1,XR_NULL_HANDLE,receipt),"submit source behind held native GPU queue");
+    if(render) {
+        f.wait_entered();
+    } else {
+        const auto limit=std::chrono::steady_clock::now()+2s;
+        while((!receipt->outcome.load() || f.transport->independent_load().pending) &&
+              std::chrono::steady_clock::now()<limit)std::this_thread::sleep_for(1ms);
+        check(receipt->outcome==-1 && !f.transport->independent_load().pending,
+              "empty native End retires its delivery credit while copy fence is pending");
+    }
+    check(f.native_releases==1 && !f.copy_clock_receipts,"real image released once before GPU gate opens");
+    check(sample.wait_for(0ms)==std::future_status::timeout,"buffer has no GPU completion sample while the queue is blocked");
+    unsigned index{};
+    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    check(f.transport->try_acquire_image(chain,&acquire,&index)==XR_TIMEOUT_EXPIRED,"private image still has an in-flight copy reader");
+    check(f.transport->try_destroy_swapchain(chain)==XR_ERROR_CALL_ORDER_INVALID,"in-flight copy keeps the chain alive");
+    auto drained=std::async(std::launch::async,[&]{return f.transport->drain();});
+    check(drained.wait_for(20ms)==std::future_status::timeout,"drain waits for the outstanding copy");
+    ok(f.gate->Signal(1),"allow GPU copy to finish");
+    f.unblock();
+    if(render)f.wait_count(1);
+    check(drained.wait_for(3s)==std::future_status::ready,"drain wakes after both owners retire");
+    xr_ok(drained.get(),"drain completed binding queue handoff");
+    if(render) {
+        check(receipt->outcome==1 && f.pixels==std::vector<unsigned>{83} && f.positions==std::vector<float>{1},
+              "native runtime sees the exact submitted pixels and pose");
+    }
+    check(f.copy_clock_receipts==1,"GPU completion is reported once");
+    check(sample.wait_for(2s)==std::future_status::ready,"buffer receives the measured completion of the delivered copy");
+    f.write(chain,116);
+    if(render) {
+        ok(f.delivery_queue->Wait(f.gate.Get(),2),"hold second copy during shutdown");
+        f.begin_virtual();
+        xr_ok(f.submit(chain,2),"submit second source");
+        check(queued_second.wait_for(2s)==std::future_status::ready,"second native copy was queued");
+        auto stopped=std::async(std::launch::async,[&]{f.transport->stop();});
+        check(stopped.wait_for(20ms)==std::future_status::timeout,"stop retains submitted copy resources");
+        ok(f.gate->Signal(2),"complete second copy during shutdown");
+        check(stopped.wait_for(3s)==std::future_status::ready,"stop drains worker and director");
+        stopped.get();
+        f.diagnostic_work={};
+        f.previous_end_layers=nullptr;
+        xr_ok(f.transport->start(),"restart queue-ordered handoff");
+        f.write(chain,151);
+        f.begin_virtual();
+        xr_ok(f.submit(chain,3),"submit after restart");
+        xr_ok(f.transport->drain(),"drain after restart");
+        check(f.pixels.back()==151 && f.positions.back()==3 && f.native_releases==3,
+              "restart presents the new image and each acquire is released once");
+    }
+    xr_ok(f.transport->destroy_swapchain(chain),"release and destroy after copy retirement");
+    independent_fixture_binding_queue_handoff=false;
+    independent_fixture_mode=false;
+}
+
 int main(int argc,char** argv){
+    if(argc>1 && std::string_view(argv[1])=="binding-queue-handoff"){binding_queue_handoff_test(true);binding_queue_handoff_test(false);return 0;}
     if(argc>1 && std::string_view(argv[1])=="legacy-optical-clock"){for(bool directed:{false,true})optical_tagged_clock_checks(directed);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-startup"){independent_startup_session_test(true);independent_startup_session_test(false);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-copy-pipeline"){for(bool cancel:{false,true})for(bool diagnostics:{true,false})independent_copy_pipeline_test(cancel,diagnostics);return 0;}
@@ -2247,7 +2292,7 @@ int main(int argc,char** argv){
         for(bool d12:{true,false})for(bool paced:{true,false})aer_optical_handoff_test(d12,paced);
         return 0;
     }
-    if(const auto r=rife_aer_handoff_test(argc,argv);r>=0)return r;if(argc>1 && std::string_view(argv[1])=="rife-handoff"){rife_handoff_matrix();return 0;}if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){independent_clean_admission_test(true);independent_clean_admission_test(false);independent_clean_source_test(true);independent_clean_source_test(false);stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);clean_bypass_admission(true,false,true);clean_bypass_admission(true,true,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
+    if(const auto r=rife_aer_handoff_test(argc,argv);r>=0)return r;if(argc>1 && std::string_view(argv[1])=="rife-handoff"){rife_handoff_matrix();return 0;}if(argc>1 && std::string_view(argv[1])=="held-aer"){held_aer_virtual_cycles(true);held_aer_virtual_cycles(false);return 0;}if(argc>1 && std::string_view(argv[1])=="clean-bypass"){independent_clean_source_test(true);independent_clean_source_test(false);stale_native_clock(true,true,true);stale_native_clock(false,true,true);clean_bypass_roundtrip(true);clean_bypass_roundtrip(false);clean_bypass_admission(true);clean_bypass_admission(false);clean_bypass_admission(true,true);clean_bypass_admission(false,true);clean_bypass_admission(true,false,true);clean_bypass_admission(true,true,true);return 0;}if(argc>1 && std::string_view(argv[1])=="ui-destroy"){optional_overlay_destroy(true);optional_overlay_destroy(false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="content-refusal"){content_refusal_paths();return 0;}
 if(argc>1 && std::string_view(argv[1])=="begin-renewal"){
     for(bool native:{false,true})for(bool director_only:{false,true}) {

@@ -46,8 +46,8 @@ struct PrivateRuntimeDispatch {
 // Source read leases end only after the copy GPU fence completes. Real target
 // ownership and FIFO credits remain until native End; source generations prevent
 // a rewritten private image from reusing an older prepared copy.
-// A preparer owns real acquisition/copy/GPU waits; the physical frame thread
-// consumes completed packets only and releases that FIFO head's real targets.
+// A preparer owns real acquisition and copy submission. The physical frame
+// thread releases the FIFO head when the native binding can safely consume it.
 // The next image may be acquired/waited/copied while an older RELEASED image
 // is presented, but stays unreleased until its own EndFrame can capture it.
 // This retains last-released image semantics without additional XR swapchains.
@@ -76,7 +76,9 @@ public:
         // QPC ns and accumulated phase displacement (not a latency meter).
         // Stage3 instead carries submitted and raw predicted XR displayTime.
         // Stages4/5: preparer source GPU ready / real image copy complete,
-        // with the real target still waited/unreleased until FIFO delivery.
+        // Stage5 still reports GPU completion when the presenter can hand off
+        // earlier. Stage90 then records submission on the native binding queue
+        // (packet, QPC ns, fence value), stage91 its native swapchain and index.
         // Stages7/6: saved real Wait entry/return (overlaps preparation, emitted
         // when the ready packet is known). Stage8: saved handoff edge
         // after the residual wait/copy, emitted after real End to keep the edge
@@ -88,8 +90,7 @@ public:
         // A real-chain backlog never triggers a refill.
         // Stages12/13/14: targets acquired/waited, copy submitted/signalled,
         // and copy-fence completion observed. F9-only CPU QPC observations,
-        // not GPU execution timestamps. Real release follows on the consumer,
-        // after stage5 and before this packet's native EndFrame.
+        // not GPU execution timestamps. The consumer releases before native End.
         // Stages15/16: release entry QPC/duration, Begin-complete QPC/next
         // native-entry budget. Optional CPU observations, never GPU queries.
         // Stage17: exact native-margin deficit retained in the output phase.
@@ -121,6 +122,7 @@ public:
         std::function<void(std::int64_t)> accepted_output; // optional native End success, never enqueue
         std::function<unsigned()> independent_buffer; // optional fixture override; production uses automatic 4-refresh ceiling
         bool independent_pacing{}; // dedicated common consumer; ignores legacy clocks/reserves
+        bool release_on_binding_queue_submit{}; // queue12 is the actual native D3D12 binding
         bool director_enabled{true}; // false: ordered native-runtime paced bypass
         // SteamVR only. Framework capacity3 enables its adaptive timing reserve.
         // Native Director: Normal3, Buffer4, with the same near-refresh reserve learner.

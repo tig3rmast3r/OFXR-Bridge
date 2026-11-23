@@ -182,11 +182,6 @@ UevrModSettings uevr_mod_settings() noexcept {
     return cached;
 }
 
-bool uevr_reports_aer() noexcept {
-    const auto settings=uevr_mod_settings();
-    return settings.valid && settings.rendering_method==xrfg::kUevrRenderingMethodAlternating;
-}
-
 // ---- Per session ----
 
 // Marks this layer's own frame and swapchain calls for the hooks above.
@@ -287,8 +282,7 @@ bool uevr_afr_osr_wanted(const SessionState& session) noexcept {
         session.graphics_binding != SessionGraphicsBinding::d3d12 ||
         session.d3d11_bridge || session.vulkan_bridge || !session.d3d12_device || !session.d3d12_queue) return false;
     const auto afw = xrfg::embedded::afw_snapshot().desired;
-    const auto control=xrfg::embedded::snapshot().desired;
-    return !(control.ofr && control.enabled && uevr_reports_aer()) && afw.mode != 0 && afw.osr == static_cast<int>(xrfg::OsrReconstruction::full);
+    return !(afw.ofr&&xrfg::embedded::snapshot().desired.enabled) && afw.mode != 0 && afw.osr == static_cast<int>(xrfg::OsrReconstruction::full);
 }
 
 // UEVR's xrEndFrame as it must reach the layer: owned copies of what changed.

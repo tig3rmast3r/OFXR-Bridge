@@ -726,7 +726,7 @@ void independent_benchmark_widgets() {
         require(request(settings),"Independent benchmark widget setup");settings=snapshot().desired;
         RuntimeStatus runtime{};runtime.process_id=GetCurrentProcessId();runtime.sessions=1;
         runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;runtime.pacing_mode=kIndependentPacingMode;
-        runtime.luke_detected=true;runtime.aer_detected=true;runtime.rife_max_multiplier=4;runtime.dlssg_max_multiplier=4;report_runtime(runtime);
+        runtime.luke_detected=true;runtime.rife_max_multiplier=4;runtime.dlssg_max_multiplier=4;report_runtime(runtime);
         Context view({compact?1024.f:690.f,1400},compact);view.draw();view.select_tab("Tests");view.draw(true);
         require(view.rendered_text.find("Up to 7 tests")!=std::string::npos && view.rendered_text.find("Up to 14 tests")!=std::string::npos,"desktop/VR show Independent counts rather than legacy35/59/42");
         view.activate("/Tests_","###Tests without vectors");view.draw();view.draw();
@@ -829,17 +829,15 @@ void independent_widgets() {
             require(snapshot().desired.frame_multiplier==factor && generation_multiplier(snapshot().desired)==factor,
                 "Independent OFXR stereo multiplier reaches production settings wanted="+std::to_string(factor)+" actual="+std::to_string(snapshot().desired.frame_multiplier));
         }
-        runtime.aer_detected=true;report_runtime(runtime);
         for(int method:{0,4}) {
             settings=snapshot().desired;settings.frame_generation=method;settings.ofr_enabled=true;
             require(request(settings),"Independent AER multiplier setup");view.draw();view.draw(true);
             for(int factor:{4,2}) {
                 view.choose("AER multiplier",factor==4?1:0,factor==4?"4X":"2X");
-                require(generation_multiplier(snapshot().desired)==factor && runtime_multiplier(snapshot().desired)==factor,
-                    "AER output selection preserves the stereo fallback multiplier");
+                require(generation_multiplier(snapshot().desired)==factor && runtime_multiplier(snapshot().desired)==2,
+                    "AER has two/four output cadence while first reconstruction stays 2X");
             }
         }
-        report_runtime(runtime_before);
         view.select_tab("Logging");view.draw();view.draw(true);
         require(view.rendered_text.find("V1103 acquire fix")==std::string::npos,"retired A/B is absent from desktop and headset");
     }
@@ -855,18 +853,10 @@ void aer_framegen_widgets() {
     settings.afw_mode=3;settings.luke_osr=2;
     require(!sanitize(settings).ofr_swap,"Basic clears an Advanced-only saved Swap");
     require(request(settings),"AER UI basic setup");
-    const auto runtime_before=snapshot().runtime;
-    auto runtime=runtime_before;runtime.sessions=1;runtime.process_id=GetCurrentProcessId();
     for(bool compact:{false,true}) {
         Context view(compact?ImVec2(1024,768):ImVec2(690,1000),compact);
         view.draw();view.draw(true);
         require(view.rendered_text.find("AER framegen")!=std::string::npos && view.rendered_text.find("Swap")==std::string::npos,"Basic shows AER and hides only Swap on desktop and VR");
-        runtime.aer_detected=false;report_runtime(runtime);view.draw();
-        view.activate("/Generation_","AER framegen");view.draw();view.draw(true);
-        require(!snapshot().desired.ofr_enabled,"ordinary stereo blocks activation of the AER toggle");
-        require(view.rendered_text.find("No AER input detected")!=std::string::npos,
-            "ordinary stereo explains why the AER toggle is disabled");
-        runtime.aer_detected=true;report_runtime(runtime);view.draw();
         view.activate("/Generation_","AER framegen");view.draw();view.draw();
         require(snapshot().desired.ofr_enabled && snapshot().desired.frame_generation==4,"Basic AER toggle works and preserves selected RIFE method");
         view.draw(true);
@@ -923,7 +913,6 @@ void aer_framegen_widgets() {
         require(snapshot().desired.afw_mode==0,"reconstruction controls work again after AER is disabled");
         settings.advanced_mode=false;settings.ofr_enabled=false;settings.ofr_swap=false;require(request(settings),"reset AER UI pass");
     }
-    report_runtime(runtime_before);
     require(request(saved),"restore AER UI fixture settings");
 }
 
@@ -936,7 +925,7 @@ void aer_native_guide_widgets() {
         settings.ofr_swap=true;settings.enabled=true;settings.afw_mode=3;
         select_generation(settings,method,2);
         require(request(settings),"AER native-guide selected method setup");
-        Snapshot sample=snapshot();sample.connected=true;sample.runtime.luke_detected=true;sample.runtime.aer_detected=true;
+        Snapshot sample=snapshot();sample.connected=true;sample.runtime.luke_detected=true;
         sample.runtime.vdxr_legacy=false;sample.runtime.ofr_delivery=1;
         // Historical activity is not evidence of current per-eye availability.
         sample.runtime.guide_publications=99;sample.runtime.guide_matches=99;sample.runtime.guide_uses=99;
@@ -998,7 +987,7 @@ void radeon_routes() {
 void release_040_widgets() {
     require(initialize_user_configuration(),"create new default configuration");
     require(GetPrivateProfileIntW(L"benchmark",L"enabled",-1,global_configuration_path().c_str())==0,"fresh configuration disables benchmarks");
-    Settings settings;settings.enabled=true;settings.backend=1;settings.afw_mode=0;settings.ofr_enabled=false;
+    Settings settings;settings.enabled=true;settings.backend=1;settings.afw_mode=0;
     require(request(settings),"seed release0.4 UI");
     require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",global_configuration_path().c_str()),"old saved enabled benchmark preference");
     require(!benchmark_enabled() && !start_benchmark(false,false),"Basic blocks even direct benchmark requests");
@@ -1012,7 +1001,7 @@ void release_040_widgets() {
         require(view.rendered_text.find("Without vectors")==std::string::npos,"Basic never renders test controls");
         view.choose("Frame generation",1,"RIFE");require(snapshot().desired.frame_generation==4,"second card selects RIFE stable ID");
         view.choose("Frame generation",0,"OpticalFlow");
-        RuntimeStatus runtime{};runtime.sessions=1;runtime.process_id=GetCurrentProcessId();runtime.luke_detected=true;runtime.aer_detected=true;
+        RuntimeStatus runtime{};runtime.sessions=1;runtime.process_id=GetCurrentProcessId();runtime.luke_detected=true;
         runtime.heartbeat_ms=GetTickCount64();runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         auto desired=snapshot().desired;desired.afw_mode=3;require(request(desired),"select reconstruction");
         view.draw();view.draw(true);const auto original=snapshot().desired.frame_generation;
@@ -1026,7 +1015,7 @@ void release_040_widgets() {
         desired=snapshot().desired;desired.ofr_enabled=true;require(request(desired),"AER bypasses reconstruction");view.draw();
         view.choose("Frame generation",3,"FSR 3.1");require(snapshot().desired.frame_generation==1,"raw AER permits vector generation");
         desired=snapshot().desired;desired.ofr_enabled=false;desired.afw_mode=0;require(request(desired),"restore normal stereo");
-        runtime.luke_detected=false;runtime.aer_detected=false;runtime.afw_running=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);view.draw();
+        runtime.luke_detected=false;runtime.afw_running=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);view.draw();
         view.choose("Frame generation",4,"DLSS-G");require(snapshot().desired.frame_generation==2,"stereo permits vector generation");
         runtime.swapchains.other=7;runtime.swapchains.refused=2;runtime.swapchains.unassigned_native=1;
         report_runtime(runtime);view.draw(true);require(interface_status_text(snapshot()).find("swapchain")==std::string::npos,"irrelevant swapchains do not produce global warnings");

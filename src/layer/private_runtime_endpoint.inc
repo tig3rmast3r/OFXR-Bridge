@@ -113,6 +113,8 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         options.device12=state->d3d12_device.Get();
         options.producer_queue12=runtime_queue(*state);
         options.queue12=state->private_delivery_queue?state->private_delivery_queue.Get():options.producer_queue12;
+        options.release_on_binding_queue_submit=state->independent_pacing && original->steamvr_runtime &&
+            state->private_delivery_queue.Get()!=nullptr;
     } else {options.device11=state->d3d11_device.Get();options.context11=state->d3d11_context.Get();}
     options.delivery_device11=state->private_delivery_device11.Get();
     options.delivery_context11=state->private_delivery_context11.Get();

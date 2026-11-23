@@ -115,7 +115,7 @@ struct PrivateOpenXrRuntime::Impl {
         std::weak_ptr<Chain> chain;
         unsigned source{},index{},users{};
         std::uint64_t source_generation{};
-        bool acquired{},waited{},complete{},released{};
+        bool acquired{},waited{},ready_for_release{},released{};
     };
     struct Packet {
         bool batch_credit{};
@@ -146,6 +146,8 @@ struct PrivateOpenXrRuntime::Impl {
         std::uint64_t copy_value{};
         std::int64_t copy_started{},reserved_at{};
         bool measure_copy{};
+        bool copy_owns_sources{}; // the completion worker retires these readers, even after End
+        std::atomic<std::int64_t> copy_completed_at{};
     };
     struct WaitResult {
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
@@ -399,9 +401,10 @@ struct PrivateOpenXrRuntime::Impl {
         {std::scoped_lock lock(mutex);
          if(!options.independent_pacing)optical_wait_ordinals.erase(packet->accepted_ordinal);
          for(auto& lease:packet->leases) {
-             if(!lease.source_released && lease.chain->images[lease.image].readers)
-                 --lease.chain->images[lease.image].readers;
-             lease.source_released=true;
+             if(!packet->copy_owns_sources && !lease.source_released) {
+                 if(lease.chain->images[lease.image].readers)--lease.chain->images[lease.image].readers;
+                 lease.source_released=true;
+             }
              if(lease.chain->consumers)--lease.chain->consumers;
          }
          for(auto& target:packet->targets) {
@@ -439,7 +442,7 @@ struct PrivateOpenXrRuntime::Impl {
     }
     void release_copied_sources(Packet& packet) {
         // Only publish()'s completed copy fence authorizes this transition.
-        // Real targets, chain consumers and FIFO credits remain owned until End.
+        // Native End retires its own target and FIFO credit independently.
         {std::scoped_lock lock(mutex);
          for(auto& lease:packet.leases)if(!lease.source_released) {
              if(lease.chain->images[lease.image].readers)--lease.chain->images[lease.image].readers;
@@ -578,10 +581,12 @@ struct PrivateOpenXrRuntime::Impl {
                     info.pose={view.pose.position.x,view.pose.position.y,view.pose.position.z,view.pose.orientation.x,view.pose.orientation.y,view.pose.orientation.z,view.pose.orientation.w};
                     info.fov={view.fov.angleLeft,view.fov.angleRight,view.fov.angleUp,view.fov.angleDown};
                     info.rect={view.subImage.imageRect.offset.x,view.subImage.imageRect.offset.y,view.subImage.imageRect.extent.width,view.subImage.imageRect.extent.height};
-                    // Released/repeated targets are immutable but no longer
-                    // ours to read. Reference their earlier witness instead.
-                    auto* image=commands && !target->released && target->index<endpoint.real12.size()?endpoint.real12[target->index].Get():nullptr;
-                    if(!commands && context11 && !target->released && target->index<endpoint.real11.size())
+                    // Record native reads only with this packet's own writes.
+                    // A repeated target can already be released by its owner.
+                    const bool owned_copy=std::find(packet.copies_needed.begin(),packet.copies_needed.end(),target)!=packet.copies_needed.end() &&
+                        target->waited;
+                    auto* image=commands && owned_copy && target->index<endpoint.real12.size()?endpoint.real12[target->index].Get():nullptr;
+                    if(!commands && context11 && owned_copy && target->index<endpoint.real11.size())
                         two_frame_capture_delivery_view_d3d11(info,delivery_context11.Get(),endpoint.real11[target->index].Get());
                     else two_frame_capture_delivery_view(info,device12.Get(),commands,image,chain->image_state);
                     break;
@@ -613,6 +618,8 @@ struct PrivateOpenXrRuntime::Impl {
             XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=XR_INFINITE_DURATION;
             result=options.real.wait_image(endpoint.handle,&wait);if(XR_FAILED(result))break;
             target->waited=true;
+            if(diagnostic && options.release_on_binding_queue_submit)
+                options.trace(91,packet.sequence,xr_handle_bits(endpoint.handle),index);
             // A runtime may return the same physical image that an earlier
             // released generation still needs for EndFrame (including repeats).
             // Only that actual alias waits; different real indices keep their
@@ -720,7 +727,7 @@ struct PrivateOpenXrRuntime::Impl {
                 const auto elapsed=clock_ns()-copy_started;packet.work_ns+=elapsed;
                 if(!options.independent_pacing)packet.copy_ns+=elapsed;
                 if(diagnostic)trace(14,packet.sequence);
-                if(SUCCEEDED(copied))for(auto& target:targets)target->complete=true;
+                if(SUCCEEDED(copied))for(auto& target:targets)target->ready_for_release=true;
             }
             if(XR_SUCCEEDED(result))result=xr(copied);
         }else{begin_capture(packet);capture_views(packet,nullptr);finish_capture_copy(packet,S_OK);}
@@ -728,7 +735,7 @@ struct PrivateOpenXrRuntime::Impl {
     }
     XrResult release_prepared(Packet& packet) {
         for(auto& target:packet.targets)if(!target->released) {
-            auto chain=target->chain.lock();if(!chain || !target->waited || !target->complete)return XR_ERROR_CALL_ORDER_INVALID;
+            auto chain=target->chain.lock();if(!chain || !target->waited || !target->ready_for_release)return XR_ERROR_CALL_ORDER_INVALID;
             auto& endpoint=destination(*chain);
             XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             const auto result=options.real.release(endpoint.handle,&release);if(XR_FAILED(result))return result;
@@ -789,9 +796,18 @@ struct PrivateOpenXrRuntime::Impl {
                 trace(4,packet->sequence);
                 const auto result=publish(*packet);
                 if(XR_FAILED(result)) {if(!stopping)fail(result);retire(packet);fifo->retire();break;}
-                if(pipelined_copy()) {
+                if(pipelined_copy() && !options.release_on_binding_queue_submit) {
                     {std::scoped_lock lock(mutex);copying.push_back(std::move(packet));}
                     changed.notify_all();
+                } else if(packet->copy_value) {
+                    // All writes are submitted to the graphics queue bound to
+                    // this XR session. The runtime can order its own reads on
+                    // that queue while the copy worker still owns our sources.
+                    for(auto& target:packet->copies_needed)target->ready_for_release=true;
+                    packet->copy_owns_sources=true;
+                    {std::scoped_lock lock(mutex);copying.push_back(packet);}
+                    trace(90,packet->sequence,packet->copy_value);
+                    enqueue_prepared(std::move(packet));
                 } else finish_preparation(std::move(packet));
             }
         } catch(...) {if(!stopping)fail(XR_ERROR_RUNTIME_FAILURE);}
@@ -801,6 +817,9 @@ struct PrivateOpenXrRuntime::Impl {
     void finish_preparation(std::shared_ptr<Packet> packet) {
         release_copied_sources(*packet);
         trace(5,packet->sequence);
+        enqueue_prepared(std::move(packet));
+    }
+    void enqueue_prepared(std::shared_ptr<Packet> packet) {
         packet->prepared_at=clock_ns();
         packet->independent_available_at=packet->source_ready_at+packet->prepared_at-packet->reserved_at;
         {std::scoped_lock lock(mutex);prepared.push_back(std::move(packet));}
@@ -817,29 +836,35 @@ struct PrivateOpenXrRuntime::Impl {
             // This event belongs ONLY to the completer. The preparer may be
             // waiting concurrently on a different source/publication fence.
             const auto completed=await(copy12.Get(),packet->copy_value,false,copy_completion_event);
+            if(SUCCEEDED(completed) && packet->copy_owns_sources)packet->copy_completed_at=clock_ns();
             try {
                 if(packet->copy_bank<copy_banks.size()) {
                     auto& bank=copy_banks[packet->copy_bank];
                     if(SUCCEEDED(completed)) {
                         if(packet->measure_copy)report_copy_clock(packet->sequence,&bank);
-                        for(auto& target:packet->copies_needed)target->complete=true;
+                        if(packet->copy_owns_sources) {
+                            release_copied_sources(*packet);
+                            trace(5,packet->sequence);
+                        } else {
+                            for(auto& target:packet->copies_needed)target->ready_for_release=true;
+                        }
                     }
-                    packet->work_ns+=clock_ns()-packet->copy_started;
+                    if(!packet->copy_owns_sources)packet->work_ns+=clock_ns()-packet->copy_started;
                     if(tracing())trace(14,packet->sequence);
                     {std::scoped_lock lock(mutex);bank.busy=false;}
                     changed.notify_all();
                 }
                 if(FAILED(completed) || stopping) {
                     if(FAILED(completed) && !stopping)fail(xr(completed));
-                    retire(packet);fifo->retire();
-                } else finish_preparation(std::move(packet));
+                    if(!packet->copy_owns_sources){retire(packet);fifo->retire();}
+                } else if(!packet->copy_owns_sources)finish_preparation(std::move(packet));
             }catch(...) {
                 if(packet && packet->copy_bank<copy_banks.size()) {
                     {std::scoped_lock lock(mutex);copy_banks[packet->copy_bank].busy=false;}
                     changed.notify_all();
                 }
                 if(!stopping)fail(XR_ERROR_RUNTIME_FAILURE);
-                if(packet){retire(packet);fifo->retire();}
+                if(packet && !packet->copy_owns_sources){retire(packet);fifo->retire();}
             }
         }
     }
@@ -1138,6 +1163,13 @@ struct PrivateOpenXrRuntime::Impl {
             ~FinishCycle(){if(advance)clock.finish(handed);}
         };
         std::int64_t last_wait_cost{},last_period{11'111'111};
+        struct DeliverySample {std::shared_ptr<Packet> packet;std::int64_t entered{};};
+        std::deque<DeliverySample> pending_samples;
+        const auto record_residence=[&](std::int64_t entered,std::int64_t ready,std::int64_t physical) {
+            const auto age=std::clamp(entered-ready,std::int64_t{},physical*4);
+            const auto prior=independent_ready_residence.load();
+            independent_ready_residence=prior?prior+(age-prior)/16:age;
+        };
         std::shared_ptr<Packet> held;
         std::vector<std::uint64_t> held_serials;
         const auto remember=[&](const std::shared_ptr<Packet>& packet) {
@@ -1147,7 +1179,7 @@ struct PrivateOpenXrRuntime::Impl {
         };
         const auto pin_held=[&] {
             std::scoped_lock lock(mutex);
-            if(stopping || (!clean_bypass.load() && pending) || !held || held->leases.size()!=held_serials.size())return false;
+            if(stopping || pending || !held || held->leases.size()!=held_serials.size())return false;
             for(std::size_t i=0;i<held->leases.size();++i) {
                 const auto& chain=held->leases[i].chain;
                 const auto found=chains.find(chain->handle);
@@ -1212,6 +1244,23 @@ struct PrivateOpenXrRuntime::Impl {
                 std::deque<std::pair<std::int64_t,std::int64_t>> misses;
                 {std::scoped_lock lock(mutex);misses.swap(independent_misses);}
                 for(const auto& [due,at]:misses)reserve.observe(at,due+reserve.reserve(),physical);
+                // Retire measurements in presentation order. The presenter
+                // never waits here. Only measured GPU completion can train
+                // the buffer or shorten its allowance on a queued handoff.
+                while(!pending_samples.empty()) {
+                    const auto& [sample,entered]=pending_samples.front();
+                    const auto ready=sample->copy_completed_at.load();
+                    if(!ready)break;
+                    const auto available=sample->source_ready_at+ready-sample->reserved_at;
+                    if(sample->independent_due) {
+                        reserve.observe(available,sample->independent_due+reserve.reserve(),physical);
+                        if(entered && independent_ready_residence.load()<=physical/2+2'000'000)
+                            reserve.delivered(available,sample->independent_due+reserve.reserve(),entered,physical);
+                    }
+                    if(entered)record_residence(entered,ready,physical);
+                    if(tracing())options.trace(63,sample->sequence,available,sample->independent_due);
+                    pending_samples.pop_front();
+                }
                 independent_reserve=reserve.reserve();
                 std::shared_ptr<Packet> preparing;
                 {std::scoped_lock lock(mutex);preparing=independent_preparing.lock();}
@@ -1240,13 +1289,18 @@ struct PrivateOpenXrRuntime::Impl {
                     {std::scoped_lock lock(mutex);
                      if(stopping || prepared.empty() || clock_ns()>=entry_deadline)break;
                      packet=std::move(prepared.front());prepared.pop_front();}
-                    if(packet->independent_due && !packet->deadline_observed.exchange(true)) {
+                    if(packet->copy_owns_sources)pending_samples.push_back({packet});
+                    if(!pending_samples.empty()) {
+                        // An immutable repeat behind an outstanding write has
+                        // no independent GPU sample to add to the learner.
+                        packet->deadline_observed=true;
+                    } else if(packet->independent_due && !packet->deadline_observed.exchange(true)) {
                         reserve.observe(packet->independent_available_at,packet->independent_due+reserve.reserve(),physical);
                         independent_reserve=reserve.reserve();
                         packet->deadline_observed=true;
                     }
                     // Even an expired native image must balance acquire/wait/
-                    // release, after its exact copy fence. It is never Ended.
+                    // release under the binding's synchronization contract.
                     result=release_prepared(*packet);
                     if(XR_FAILED(result)){if(!stopping)fail(result);retire(packet);fifo->retire();packet.reset();break;}
                     if(!packet->expired_by_director.load() && !independent_expired(packet->independent_due,clock_ns(),reserve.reserve(),physical))break;
@@ -1262,8 +1316,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // any pending copy, new release or destroyed owner vetoes
                     // replay. Pins prevent concurrent overwrite/destruction.
                     if(prediction.shouldRender && clock_ns()<entry_deadline && pin_held()) {
-                        auto end=held->info;
-                        if(!held->clean_bypass)end.displayTime=prediction.predictedDisplayTime;
+                        auto end=held->info;end.displayTime=prediction.predictedDisplayTime;
                         const auto entered=clock_ns();
                         result=options.real.end(options.real.session,&end);begun=false;
                         if(result==XR_SUCCESS)cycle.handed=entered;
@@ -1277,13 +1330,12 @@ struct PrivateOpenXrRuntime::Impl {
                 // A smaller final guard protects the actual native call edge;
                 // testing the exact window can pass then enter after prediction.
                 if(clock_ns()>=entry_deadline) {retire_expired(packet);continue;}
-                auto end=packet->info;
-                if(!packet->clean_bypass)end.displayTime=prediction.predictedDisplayTime;
+                auto end=packet->info;end.displayTime=prediction.predictedDisplayTime;
                 if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
                 const auto entered=clock_ns();result=options.real.end(options.real.session,&end);
                 if(result==XR_SUCCESS && end.layerCount)cycle.handed=entered;
                 const auto returned=clock_ns();begun=false;
-                if(result==XR_SUCCESS && end.layerCount && packet->independent_due) {
+                if(pending_samples.empty() && result==XR_SUCCESS && end.layerCount && packet->independent_due) {
                     // GPU readiness alone does not prove that native queue age
                     // has drained. Preserve expiry allowance while source-phase
                     // recovery consumes that age, using its same residence goal.
@@ -1292,9 +1344,8 @@ struct PrivateOpenXrRuntime::Impl {
                     independent_reserve=reserve.reserve();
                 }
                 if(result==XR_SUCCESS && end.layerCount) {
-                    const auto age=std::clamp(entered-packet->prepared_at,std::int64_t{},physical*4);
-                    const auto prior=independent_ready_residence.load();
-                    independent_ready_residence=prior?prior+(age-prior)/16:age;
+                    if(packet->copy_owns_sources)pending_samples.back().entered=entered;
+                    else if(pending_samples.empty())record_residence(entered,packet->prepared_at,physical);
                     ++independent_delivered_count;
                 }
                 observe_capture(*packet,end,result,entered,returned);
@@ -1306,7 +1357,7 @@ struct PrivateOpenXrRuntime::Impl {
                     options.trace(60,packet->sequence,wait_enter,wait_leave);
                     options.trace(61,packet->sequence,entered,packet->prepared_at);
                     options.trace(62,packet->sequence,reserve.reserve(),reserve.take_refill());
-                    options.trace(63,packet->sequence,packet->independent_available_at,packet->independent_due);
+                    if(pending_samples.empty())options.trace(63,packet->sequence,packet->independent_available_at,packet->independent_due);
                     options.trace(64,packet->sequence,std::max(std::int64_t{},boundary-wait_leave),wait_leave-wait_enter);
                     options.trace(65,packet->sequence,cap,physical*cap);
                     options.trace(67,packet->sequence,packet->independent_due+reserve.reserve(),entered);
@@ -2002,7 +2053,7 @@ void PrivateOpenXrRuntime::stop() {
          // Static runtime images can be acquired/released only once for their
          // entire lifetime, including a session stop/start with retained chains.
          if(c->latest_target && (c->info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) &&
-             c->latest_target->complete && c->latest_target->released)c->latest_target->users=0;
+             c->latest_target->ready_for_release && c->latest_target->released)c->latest_target->users=0;
          else c->latest_target.reset();
          c->pending_target.reset();c->retained_targets.clear();}}
     // FIFO stop discards packets that never reached the consumer's retire().
@@ -2016,7 +2067,9 @@ void PrivateOpenXrRuntime::stop() {
 }
 XrResult PrivateOpenXrRuntime::drain() {
     auto& s=*impl_;std::unique_lock lock(s.mutex);
-    s.changed.wait(lock,[&]{return s.stopping || (!s.pending && !s.outstanding_reservations);});return s.failure;
+    s.changed.wait(lock,[&]{return s.stopping || (!s.pending && !s.outstanding_reservations &&
+        std::none_of(s.copy_banks.begin(),s.copy_banks.end(),[](const auto& bank){return bank.busy;}));});
+    return s.failure;
 }
 void PrivateOpenXrRuntime::set_ready_clock(bool enabled) noexcept {
     auto& s=*impl_;
@@ -2131,15 +2184,13 @@ XrResult PrivateOpenXrRuntime::wait_frame(const XrFrameWaitInfo* info,XrFrameSta
     std::scoped_lock lock(impl_->mutex);++impl_->waits;return result;
 }
 XrResult PrivateOpenXrRuntime::wait_for_clean_admission() {
-    // With no effects, bound future source production before rendering.
-    // Independent retains one native frame in flight so GPU/copy completion
-    // can overlap the next render, without filling the generation FIFO.
+    // With no image effects, apply backpressure before the next game render,
+    // rather than letting virtual Wait run ahead until End fills the FIFO.
     // An accepted packet keeps its native owner and is never cancelled here.
     {
         auto& s=*impl_;std::unique_lock lock(s.mutex);
         s.changed.wait(lock,[&]{return s.stopping || XR_FAILED(s.failure) ||
-            !s.running || !s.clean_bypass.load() ||
-            s.pending<=(s.options.independent_pacing?1U:0U);});
+            !s.running || s.options.independent_pacing || !s.clean_bypass.load() || s.pending==0;});
         if(XR_FAILED(s.failure))return s.failure;
         if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
     }
