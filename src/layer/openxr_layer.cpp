@@ -987,6 +987,9 @@ struct SessionState {
     std::atomic_uint ofr_delivery{}; // 0 learning,1 alternate,2 paired
     unsigned ofr_fresh_mask{3},ofr_last_mask{};
     xrfg::ofr::SourceTracker ofr_source_tracker;
+    xrfg::ofr::InputDetection aer_input_detection;
+    std::uint64_t aer_warning_started_ms{};
+    std::atomic_bool aer_input_warning{};
     std::shared_ptr<AerNativeGuideCache> aer_native_guide_cache;
     std::array<XrPosef,2> ofr_source_poses{};
     std::array<XrFovf,2> ofr_source_fovs{};
@@ -7343,6 +7346,7 @@ XrResult layer_destroy_session_impl(XrSession session) {
     if (XR_SUCCEEDED(result) && !remaining_sessions) {
         auto report = xrfg::autonomous::snapshot().runtime;
         report.sessions = 0;
+        report.aer_input_warning=false;
         xrfg::autonomous::report_runtime(report);
         xrfg::autonomous::report_interface_telemetry({});
     }
@@ -7356,6 +7360,9 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         state->application_wait_pending_begin = false;
         state->application_frame_in_progress = false;
         state->application_frame_has_overlapping_wait = false;
+        state->aer_input_detection={};
+        state->aer_warning_started_ms=0;
+        state->aer_input_warning=false;
         state->pipelined_wait_streak = 0;
         state->pipelined_presenter_mode = false;
         state->pipelined_presenter_start_requested = false;
@@ -19284,6 +19291,70 @@ struct PrivateDepthStrip {
     return FsrStereoGuideReason::ready;
 }
 
+bool uevr_reports_aer() noexcept;
+
+// Advisory only. Observe the application's scene before reconstruction, never
+// use this result to select a generator or change the manual AER preference.
+void update_aer_input(SessionState& state,const XrFrameEndInfo* info,
+    std::uint64_t now=GetTickCount64()) {
+    const auto requested=xrfg::embedded::snapshot().desired;
+    if(!requested.enabled || !requested.ofr || state.luke_afw_enabled ||
+        !info || info->type!=XR_TYPE_FRAME_END_INFO || !info->layers) {
+        state.aer_input_detection={};
+        state.aer_warning_started_ms=0;
+        state.aer_input_warning=false;
+        return;
+    }
+    const bool known=state.uevr_afr && uevr_reports_aer();
+    struct RenderIdentity { std::uint32_t producer{}; std::uint64_t stream{}, id{}; };
+    std::array<xrfg::ofr::Source,2> releases{};
+    std::array<RenderIdentity,2> renders{};
+    bool scene=false;
+    for(std::uint32_t i=0;i<info->layerCount;++i) {
+        const auto* layer=info->layers[i];
+        if(!layer || layer->type!=XR_TYPE_COMPOSITION_LAYER_PROJECTION)continue;
+        const auto& projection=*reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+        if(projection.viewCount!=2 || !projection.views)continue;
+        std::array<xrfg::ofr::Source,2> projection_releases{};
+        std::array<RenderIdentity,2> projection_renders{};
+        for(unsigned eye=0;eye<2;++eye) {
+            const auto chain=find_swapchain(projection.views[eye].subImage.swapchain);
+            if(!chain || chain->session.get()!=&state || (chain->create_info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT))
+                continue;
+            std::scoped_lock lock(chain->mutex);
+            if(!chain->ownership_tracking_valid || !chain->last_released_index)continue;
+            const auto handle=static_cast<std::uintptr_t>(handle_value(chain->handle));
+            projection_releases[eye]={handle,reinterpret_cast<std::uintptr_t>(chain.get()),chain->eye_frame_release_serial};
+            const auto& frame=chain->released_eye_frame.frame;
+            for(unsigned index=0;index<frame.eye_count;++index) {
+                const auto& source=frame.eyes[index];
+                if(source.eye==eye)projection_renders[eye]={frame.producer,source.stream_id,source.render_id};
+            }
+        }
+        if(!projection_releases[0].serial || !projection_releases[1].serial)continue;
+        if(scene) {
+            scene=false; // Multiple dynamic projections have ambiguous source timing.
+            break;
+        }
+        releases=projection_releases;
+        renders=projection_renders;
+        scene=true;
+    }
+    const bool comparable=renders[0].id && renders[1].id &&
+        renders[0].producer==renders[1].producer && renders[0].stream==renders[1].stream;
+    const bool alternating=state.aer_input_detection.observe(releases);
+    const bool detected=comparable ? renders[0].id!=renders[1].id : known || alternating;
+    if(!scene || detected) {
+        if(!scene)state.aer_input_detection={};
+        state.aer_warning_started_ms=0;
+        state.aer_input_warning=false;
+        return;
+    }
+    if(!state.aer_warning_started_ms || now<state.aer_warning_started_ms)
+        state.aer_warning_started_ms=now;
+    state.aer_input_warning=now-state.aer_warning_started_ms>=3000;
+}
+
 XrResult layer_end_frame_impl(
     XrSession session,
     const XrFrameEndInfo* end_info, xrfg::InterfaceCallTiming* api_timing = nullptr) {
@@ -19373,7 +19444,7 @@ XrResult layer_end_frame_impl(
             state->independent_pacing?xrfg::autonomous::kIndependentPacingMode:state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && state->luke_shared_swapchains,
         false, // no title forces the INI-only sharing policy
-        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state),state->rife_ready_after_ms.load(),state->guided_generation_ms.load(),pacing.expired,pacing.reserve,native_frame_multiplier(*state)); }
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0,rife_benchmark_max_multiplier(*state),state->rife_ready_after_ms.load(),state->guided_generation_ms.load(),pacing.expired,pacing.reserve,native_frame_multiplier(*state),state->aer_input_warning.load()); }
     } runtime_report_scope{state,end_info};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =
@@ -19444,6 +19515,7 @@ XrResult layer_end_frame_impl(
     state->application_frame_in_progress = false;
     state->frame_call_condition.notify_all();
     state->application_frame_has_overlapping_wait = false;
+    update_aer_input(*state,end_info);
     if (!frame_had_overlapping_wait && !pipelined_presenter_mode) {
         state->pipelined_wait_streak = 0;
     }

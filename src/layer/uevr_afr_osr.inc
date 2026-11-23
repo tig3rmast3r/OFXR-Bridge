@@ -182,6 +182,11 @@ UevrModSettings uevr_mod_settings() noexcept {
     return cached;
 }
 
+bool uevr_reports_aer() noexcept {
+    const auto settings=uevr_mod_settings();
+    return settings.valid && settings.rendering_method==xrfg::kUevrRenderingMethodAlternating;
+}
+
 // ---- Per session ----
 
 // Marks this layer's own frame and swapchain calls for the hooks above.

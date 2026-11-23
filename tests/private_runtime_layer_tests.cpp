@@ -587,7 +587,82 @@ static int legacy_latency_scope_test() {
     std::puts("Legacy optical admission scope: Framework/Director only; Independent/2X/RIFE preserved PASS");return 0;
 }
 
+static int aer_input_warning_test() {
+    xrfg_fixture::ControlProfile profile;
+    auto controls=xrfg::autonomous::snapshot().desired;
+    controls.enabled=true;controls.ofr_enabled=true;
+    check(xrfg::autonomous::request(controls),"manual AER warning setup");
+    xrfg::autonomous::apply_runtime_settings();
+    auto state=std::make_shared<SessionState>(std::make_shared<Dispatch>());
+    std::array<std::shared_ptr<SwapchainState>,2> chains;
+    std::array<XrCompositionLayerProjectionView,2> views;
+    for(unsigned eye=0;eye<2;++eye) {
+        chains[eye]=std::make_shared<SwapchainState>(state,XrSwapchainCreateInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO});
+        auto& chain=*chains[eye];
+        chain.handle=reinterpret_cast<XrSwapchain>(std::uintptr_t(100+eye));
+        chain.last_released_index=0;chain.eye_frame_release_serial=1;
+        views[eye]={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};views[eye].subImage.swapchain=chain.handle;
+        std::scoped_lock lock(g_state_mutex);g_swapchains[chain.handle]=chains[eye];
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.viewCount=2;projection.views=views.data();
+    const auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.layerCount=1;end.layers=&layer;
+    update_aer_input(*state,&end,1000);
+    update_aer_input(*state,&end,3999);
+    check(!state->aer_input_warning,"initial scene detection gets three seconds");
+    update_aer_input(*state,&end,4000);
+    check(state->aer_input_warning,"unrecognized paired input produces the delayed warning");
+    check(xrfg::autonomous::snapshot().desired.ofr_enabled &&
+        effective_session_settings(*state,xrfg::embedded::snapshot().desired).ofr,
+        "warning leaves manually selected AER enabled on stereo input");
+    for(unsigned tick=0;tick<4;++tick) {
+        ++chains[tick%2]->eye_frame_release_serial;
+        update_aer_input(*state,&end,4100+tick);
+    }
+    check(!state->aer_input_warning,"alternating input clears the warning immediately");
+    ++chains[0]->eye_frame_release_serial;++chains[1]->eye_frame_release_serial;
+    update_aer_input(*state,&end,5000);
+    update_aer_input(*state,&end,7999);
+    check(!state->aer_input_warning,"returning stereo input gets a fresh detection period");
+    update_aer_input(*state,&end,8000);check(state->aer_input_warning,"persistent stereo warns again");
+    for(unsigned eye=0;eye<2;++eye) {
+        auto& frame=chains[eye]->released_eye_frame.frame;
+        frame.producer=OFXR_EYE_SOURCE_MUTAR;frame.eye_count=1;
+        frame.eyes[0]={7,10+eye,0,eye};
+    }
+    update_aer_input(*state,&end,8100);
+    check(!state->aer_input_warning,"paired input with staggered render metadata is recognized as AER");
+    chains[1]->released_eye_frame.frame.eyes[0].render_id=10;
+    update_aer_input(*state,&end,9000);update_aer_input(*state,&end,12000);
+    check(state->aer_input_warning,"same-render metadata alone does not establish AER");
+    XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};
+    update_aer_input(*state,&empty,12100);
+    check(!state->aer_input_warning && !state->aer_warning_started_ms,"empty loading frames clear the warning and timer");
+    update_aer_input(*state,&end,20000);update_aer_input(*state,&end,22999);
+    check(!state->aer_input_warning,"loading time does not consume the detection period");
+    update_aer_input(*state,&end,23000);check(state->aer_input_warning,"warning returns after scene observation");
+    controls.enabled=false;check(xrfg::autonomous::request(controls),"turn framegen off");
+    xrfg::autonomous::apply_runtime_settings();update_aer_input(*state,&end,24000);
+    check(!state->aer_input_warning && !state->aer_warning_started_ms,"global off clears the warning and timer");
+    controls.enabled=true;check(xrfg::autonomous::request(controls),"turn framegen on");
+    xrfg::autonomous::apply_runtime_settings();update_aer_input(*state,&end,25000);
+    check(!state->aer_input_warning,"re-enabling AER starts a fresh delay");
+    update_aer_input(*state,&end,28000);check(state->aer_input_warning,"re-enabled AER eventually warns");
+    controls.ofr_enabled=false;check(xrfg::autonomous::request(controls),"turn AER off");
+    xrfg::autonomous::apply_runtime_settings();update_aer_input(*state,&end,29000);
+    check(!state->aer_input_warning,"AER off clears the warning");
+    controls.ofr_enabled=true;check(xrfg::autonomous::request(controls),"restore manual AER");
+    xrfg::autonomous::apply_runtime_settings();state->luke_afw_enabled=true;
+    update_aer_input(*state,&end,30000);update_aer_input(*state,&end,40000);
+    check(!state->aer_input_warning,"known REAL VR input avoids an unrecognized-input warning");
+    {std::scoped_lock lock(g_state_mutex);g_swapchains.clear();}
+    std::puts("AER advisory detection, three-second delay, metadata, loading and manual control PASS");
+    return 0;
+}
+
 int main(int argc,char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="aer-input-warning")return aer_input_warning_test();
     if(argc>1 && std::string_view(argv[1])=="legacy-latency-scope")return legacy_latency_scope_test();
     std::string route=argc>1?argv[1]:"new";
     if(route.starts_with("late-2x-"))return private_completion_recovery_test(route.substr(8));

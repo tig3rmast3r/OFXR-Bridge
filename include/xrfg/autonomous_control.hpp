@@ -206,6 +206,7 @@ struct RuntimeStatus {
     unsigned gpu_vendor{}; // actual rendering adapter PCI vendor from DXCore, never DXGI spoofing
     std::uint64_t pacing_expired{};
     std::int64_t pacing_allowance_ns{};
+    bool aer_input_warning{}; // manual AER enabled, input unrecognized after the detection delay
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
     return !r.vdxr_legacy;

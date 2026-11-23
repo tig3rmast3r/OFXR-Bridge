@@ -28,6 +28,21 @@ int main() {
             next=previous;next[0].serial=0;check(!classify(previous,next).continuity);
         }
         check(newer_eye(false)==1 && newer_eye(true)==0);
+        {
+            InputDetection detection;
+            std::array<Source,2> source{{{11,101,1},{22,202,1}}};
+            check(!detection.observe(source));
+            for(unsigned tick=0;tick<8;++tick) {
+                ++source[0].serial;++source[1].serial;
+                check(!detection.observe(source));
+            }
+            for(unsigned tick=0;tick<8;++tick) {
+                ++source[tick%2].serial;
+                check(detection.observe(source)==(tick>=3));
+                check(detection.observe(source)==(tick>=3));
+            }
+            ++source[0].epoch;check(!detection.observe(source));
+        }
         for(bool paired:{false,true}) {
             SourceTracker tracker;
             std::array<Source,2> source{{{11,101,1},{22,202,1}}};

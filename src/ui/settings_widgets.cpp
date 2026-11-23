@@ -655,6 +655,10 @@ bool generation(Panel& p) {
     if(draft.ofr_enabled && controls_enabled) {
         notice(p,Tone::idle,"AER framegen uses the selected generator, quality and pacing. OSR/AFW are bypassed while framegen is enabled.");
         if(state.connected) {
+            const auto now=GetTickCount64();
+            if(state.runtime.aer_input_warning && state.runtime.applied_revision==state.revision &&
+                state.runtime.heartbeat_ms && now>=state.runtime.heartbeat_ms && now-state.runtime.heartbeat_ms<2000)
+                notice(p,Tone::warn,"AER input not detected\nAER Frame Gen is enabled. Turn it off if your game uses normal stereo rendering. You can ignore this warning for Mutar mods or when you know AER is active, as detection may fail in some situations.");
             const char* delivery=state.runtime.ofr_delivery==1?"Alternating eye releases":state.runtime.ofr_delivery==2?"Paired releases (phase assumed)":"Learning release cadence";
             reason(p,delivery);
             notice(p,interface_aer_active(state,GetTickCount64())?Tone::ok:Tone::warn,

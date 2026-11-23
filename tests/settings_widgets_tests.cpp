@@ -848,6 +848,33 @@ void independent_widgets() {
 
 void aer_framegen_widgets() {
     auto saved=snapshot().desired;auto settings=saved;
+    for(bool compact:{false,true}) {
+        settings.enabled=true;settings.ofr_enabled=true;
+        require(request(settings),"AER advisory widget setup");
+        Snapshot sample=snapshot();sample.connected=true;
+        sample.runtime.aer_input_warning=true;sample.runtime.applied_revision=sample.revision;
+        sample.runtime.heartbeat_ms=GetTickCount64();
+        Context view(compact?ImVec2(1024,768):ImVec2(690,1200),compact);
+        view.injected_snapshot=&sample;view.draw();view.draw(true);
+        require(view.rendered_text.find("AER input not detected")!=std::string::npos &&
+            view.rendered_text.find("You can ignore this warning for Mutar mods")!=std::string::npos &&
+            view.rendered_text.find("as detection may fail in some situations.")!=std::string::npos,
+            "desktop and VR show the requested advisory and detection caveat");
+        require(snapshot().desired.ofr_enabled,"showing the warning preserves manual AER");
+        sample.runtime.aer_input_warning=false;view.draw(true);
+        require(view.rendered_text.find("AER input not detected")==std::string::npos,"recognized input clears the advisory");
+        sample.runtime.aer_input_warning=true;sample.runtime.heartbeat_ms=GetTickCount64()-5000;view.draw(true);
+        require(view.rendered_text.find("AER input not detected")==std::string::npos,"stale reports do not show the advisory");
+        sample.runtime.heartbeat_ms=GetTickCount64();sample.connected=false;view.draw(true);
+        require(view.rendered_text.find("AER input not detected")==std::string::npos,"offline profiles do not show the advisory");
+        sample.connected=true;sample.desired.ofr_enabled=false;++sample.revision;view.draw(true);
+        require(view.rendered_text.find("AER input not detected")==std::string::npos,"AER off hides the advisory");
+        sample.desired.ofr_enabled=true;++sample.revision;view.draw(true);
+        require(view.rendered_text.find("AER input not detected")==std::string::npos,"an unapplied toggle cannot reuse an old warning");
+        sample.runtime.applied_revision=sample.revision;sample.desired.enabled=false;++sample.revision;view.draw(true);
+        require(view.rendered_text.find("AER input not detected")==std::string::npos,"global off hides the advisory");
+    }
+    settings=saved;
     settings.frame_generation=4;settings.enabled=true;settings.advanced_mode=false;
     settings.ofr_enabled=false;settings.ofr_swap=true;settings.rife_multiplier=4;
     settings.afw_mode=3;settings.luke_osr=2;
