@@ -204,13 +204,12 @@ public:
     // The next end_frame's content was rendered (or relocated) for the head
     // pose at that time: the native End carries that display time, so the
     // runtime reprojects the frame from the pose it was made for even when it
-    // reaches a later slot than planned. Native-paced delivery only.
+    // reaches a later slot than planned. Native-paced and Independent delivery.
     void set_next_end_content_time(XrTime time) noexcept;
     void set_next_independent_deadline(std::int64_t) noexcept; // QPC ns, source-owned delivery slot
-    // The display time of the last frame handed to the native runtime (0
-    // before the first). The application's predicted display time runs ahead
-    // of it by the queue depth; a frame prepared now is shown one period after
-    // this, so content aimed at a head pose belongs to that slot.
+    // The last native delivery slot (0 before the first). Independent delivery
+    // exposes its actual native prediction here, separately from the OSR
+    // content timestamp carried by End, so OSR's grid stays tied to the runtime.
     [[nodiscard]] XrTime last_native_display_time() const noexcept;
     XrResult create_swapchain(const XrSwapchainCreateInfo*, XrSwapchain*,
         D3D12_RESOURCE_STATES image_state=D3D12_RESOURCE_STATE_RENDER_TARGET,

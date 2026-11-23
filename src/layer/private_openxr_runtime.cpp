@@ -215,7 +215,7 @@ struct PrivateOpenXrRuntime::Impl {
     std::atomic<XrTime> next_content_time{};
     std::atomic<std::int64_t> next_independent_due{};
     std::atomic<XrTime> last_end_display{}; // written by the consumer thread: the slot time of the last native End
-    XrTime last_end_prediction{}; // consumer thread: the runtime's prediction for the last native End
+    std::atomic<XrTime> last_end_prediction{}; // native cycle, independent of an OSR content timestamp
     XrResult failure{XR_SUCCESS};
     XrFrameState anchor{XR_TYPE_FRAME_STATE};
     std::int64_t anchor_at{};
@@ -384,9 +384,10 @@ struct PrivateOpenXrRuntime::Impl {
     // failed End closed the frame (see trace 43 below), so nothing is ended
     // again. Trace 43, c=1: refused for its contents. kPrivateRefusedFrameLimit
     // in a row still fail the session. Consumer thread only.
-    [[nodiscard]] XrResult drop_refused_frame(std::uint64_t sequence,XrResult result) {
+    [[nodiscard]] XrResult drop_refused_frame(std::uint64_t sequence,XrResult result,bool content_time=false) {
         if(XR_SUCCEEDED(result))refused_frames=0;
-        if(!frame_content_refused(result) || ++refused_frames>=kPrivateRefusedFrameLimit)return result;
+        const bool refused=frame_content_refused(result) || (content_time && result==XR_ERROR_TIME_INVALID);
+        if(!refused || ++refused_frames>=kPrivateRefusedFrameLimit)return result;
         if(options.trace)options.trace(43,sequence,static_cast<std::int64_t>(result),1);
         return XR_SUCCESS;
     }
@@ -1179,7 +1180,10 @@ struct PrivateOpenXrRuntime::Impl {
         };
         const auto pin_held=[&] {
             std::scoped_lock lock(mutex);
-            if(stopping || pending || !held || held->leases.size()!=held_serials.size())return false;
+            // Replaying OSR with a new display time would relabel an image
+            // reconstructed for an older head pose. Let the compositor retain
+            // its last scene until a fresh, correctly timestamped image arrives.
+            if(stopping || pending || !held || held->content_time || held->leases.size()!=held_serials.size())return false;
             for(std::size_t i=0;i<held->leases.size();++i) {
                 const auto& chain=held->leases[i].chain;
                 const auto found=chains.find(chain->handle);
@@ -1303,7 +1307,9 @@ struct PrivateOpenXrRuntime::Impl {
                     // release under the binding's synchronization contract.
                     result=release_prepared(*packet);
                     if(XR_FAILED(result)){if(!stopping)fail(result);retire(packet);fifo->retire();packet.reset();break;}
-                    if(!packet->expired_by_director.load() && !independent_expired(packet->independent_due,clock_ns(),reserve.reserve(),physical))break;
+                    const bool stale_pose=packet->content_time && packet->content_time<=last_end_prediction.load();
+                    if(stale_pose && options.trace)options.trace(95,packet->sequence,packet->content_time,last_end_prediction.load());
+                    if(!stale_pose && !packet->expired_by_director.load() && !independent_expired(packet->independent_due,clock_ns(),reserve.reserve(),physical))break;
                     retire_expired(packet);packet.reset();
                 }
                 if(XR_FAILED(result))break;
@@ -1330,7 +1336,11 @@ struct PrivateOpenXrRuntime::Impl {
                 // A smaller final guard protects the actual native call edge;
                 // testing the exact window can pass then enter after prediction.
                 if(clock_ns()>=entry_deadline) {retire_expired(packet);continue;}
-                auto end=packet->info;end.displayTime=prediction.predictedDisplayTime;
+                auto end=packet->info;
+                // OSR has already reconstructed both eyes for content_time.
+                // SteamVR must reproject from that pose instant even when the
+                // Independent consumer uses a different native delivery slot.
+                end.displayTime=packet->content_time?packet->content_time:prediction.predictedDisplayTime;
                 if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
                 const auto entered=clock_ns();result=options.real.end(options.real.session,&end);
                 if(result==XR_SUCCESS && end.layerCount)cycle.handed=entered;
@@ -1354,6 +1364,10 @@ struct PrivateOpenXrRuntime::Impl {
                 if(options.accepted_output && result==XR_SUCCESS && end.layerCount)options.accepted_output(returned);
                 if(result==XR_SUCCESS && end.layerCount)remember(packet);
                 if(options.trace) {
+                    // Relate OSR's reconstruction instant to this packet's
+                    // actual native delivery slot. Diagnostic receipts only.
+                    options.trace(93,packet->sequence,prediction.predictedDisplayTime,packet->content_time);
+                    options.trace(94,packet->sequence,packet->info.displayTime,packet->clean_bypass);
                     options.trace(60,packet->sequence,wait_enter,wait_leave);
                     options.trace(61,packet->sequence,entered,packet->prepared_at);
                     options.trace(62,packet->sequence,reserve.reserve(),reserve.take_refill());
@@ -1364,8 +1378,9 @@ struct PrivateOpenXrRuntime::Impl {
                     options.trace(71,packet->sequence,cadence.target(),cadence.lead());
                     options.trace(72,packet->sequence,window,entered);
                 }
-                if(XR_SUCCEEDED(result)){last_end_display=end.displayTime;last_end_prediction=prediction.predictedDisplayTime;trace(2,packet->sequence);}
-                result=drop_refused_frame(packet->sequence,result);
+                last_end_prediction=prediction.predictedDisplayTime;
+                if(XR_SUCCEEDED(result)){last_end_display=end.displayTime;trace(2,packet->sequence);}
+                result=drop_refused_frame(packet->sequence,result,packet->content_time>0);
                 if(XR_FAILED(result) && !stopping)fail(result);
                 retire(packet);fifo->retire();
                 if(XR_FAILED(result))break;
@@ -2232,7 +2247,9 @@ XrResult PrivateOpenXrRuntime::discard_virtual_frame() {
      s.begun=0;s.pair_next=false;s.next_content_time=0;}
     s.changed.notify_all();return XR_SUCCESS;
 }
-XrTime PrivateOpenXrRuntime::last_native_display_time() const noexcept {return impl_->last_end_display.load();}
+XrTime PrivateOpenXrRuntime::last_native_display_time() const noexcept {
+    return impl_->options.independent_pacing?impl_->last_end_prediction.load():impl_->last_end_display.load();
+}
 void PrivateOpenXrRuntime::set_next_end_content_time(XrTime time) noexcept {impl_->next_content_time.store(time);}
 void PrivateOpenXrRuntime::set_next_independent_deadline(std::int64_t time) noexcept {impl_->next_independent_due.store(time);}
 XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::shared_ptr<InterfaceDeliveryReceipt>& delivery) {

@@ -50,6 +50,8 @@ struct Fixture;
 Fixture* current;
 struct Fixture {
     bool native12;
+    bool osr_content_timestamps{};
+    std::atomic<XrTime> last_osr_native_prediction{};
     ComPtr<ID3D12Device> device12;
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12CommandQueue> delivery_queue;
@@ -73,6 +75,7 @@ struct Fixture {
     std::atomic_uint native_releases{},replayed_ends{};
     const XrCompositionLayerBaseHeader* const* previous_end_layers{};
     std::atomic_uint refuse_end_call{},refuse_end_count{1};
+    XrResult refused_end_result{XR_ERROR_SWAPCHAIN_RECT_INVALID};
     std::atomic<std::int64_t> native_wait_tick_ns{}; // layer fixture's throttling runtime
     bool cycle_waited{},cycle_begun{};
     unsigned successful_waits{};
@@ -284,6 +287,7 @@ struct Fixture {
         XrTime prediction{};std::int64_t predicted_at{};
         {std::scoped_lock protocol(f.protocol);check(f.cycle_begun,"real End follows real Begin even if next Wait completed");f.cycle_begun=false;prediction=f.begun_prediction;predicted_at=f.begun_wait_return;}
         if(!info->layerCount){++f.empty_ends;return XR_SUCCESS;}
+        if(f.osr_content_timestamps)f.last_osr_native_prediction=prediction;
         // Independent replay retains the same owned packet's layer array.
         // A fresh packet owns different metadata even when an immutable native
         // target is reused without another ReleaseSwapchainImage.
@@ -303,7 +307,8 @@ struct Fixture {
         }
         f.delivery_thread=GetCurrentThreadId();
         if(info->layerCount){std::unique_lock lock(f.mutex);f.end_entered=true;f.changed.notify_all();f.changed.wait(lock,[&]{return !f.block_end.load();});}
-        check(info->displayTime>=prediction && (info->displayTime-prediction)%period==0,"End uses its own runtime prediction, advancing whole physical periods only if expired");
+        if(!f.osr_content_timestamps)
+            check(info->displayTime>=prediction && (info->displayTime-prediction)%period==0,"End uses its own runtime prediction, advancing whole physical periods only if expired");
         if(info->displayTime>prediction)++f.advanced_predictions;
         unsigned color{},overlay_color{};bool has_overlay{};float position{};
         if(info->layerCount) {
@@ -341,7 +346,7 @@ struct Fixture {
         {std::scoped_lock lock(f.mutex);f.pixels.push_back(color);if(has_overlay)f.overlay_pixels.push_back(overlay_color);f.positions.push_back(position);f.handoffs.push_back(start);f.native_wait_to_end.push_back(start-f.wait_return);f.director_policies.push_back(f.transport?f.transport->director_enabled():true);f.targets.push_back(info->displayTime);++f.real_ends;}
         f.changed.notify_all();
         if(f.refuse_end_call && f.real_ends>=f.refuse_end_call && f.real_ends<f.refuse_end_call+f.refuse_end_count)
-            return XR_ERROR_SWAPCHAIN_RECT_INVALID;
+            return f.refused_end_result;
         return f.fail_end?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;
     }
     static XrResult XRAPI_CALL create(XrSession,const XrSwapchainCreateInfo* info,XrSwapchain* output) {
@@ -1912,6 +1917,66 @@ void independent_paced_wait_test() {
     f.transport->stop();independent_fixture_mode=false;
     std::puts("Independent throttled native Wait: immediate End/no unconditional period/no reserve PASS");
 }
+void independent_osr_content_test(bool d12) {
+    independent_fixture_mode=true;
+    Fixture f(d12,true,[](unsigned){return int(period/2/1000);},false,true,false,8,false);
+    f.osr_content_timestamps=true;f.expected_views=2;f.prediction_horizon_ns=period;f.unblock();
+    const std::array<XrSwapchain,2> eyes{f.make_chain(),f.make_chain()};
+    std::array<XrTime,6> pose_times{};
+    f.inspect_layers=[&](const XrFrameEndInfo* info) {
+        const auto* projection=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+        const auto identity=static_cast<unsigned>(projection->views[0].pose.position.x);
+        check(identity>=1 && identity<=pose_times.size(),"OSR stereo source identity survives native copying");
+        if(info->displayTime!=pose_times[identity-1])std::fprintf(stderr,
+            "OSR timestamp mismatch: source=%u native=%lld reconstructed=%lld delta=%.6fms\n",
+            identity,info->displayTime,pose_times[identity-1],(info->displayTime-pose_times[identity-1])/1e6);
+        check(info->displayTime==pose_times[identity-1],
+            "native End must preserve the exact timestamp used to reconstruct both OSR eyes");
+    };
+    const auto submit=[&](unsigned identity,XrTime pose_time) {
+        f.begin_virtual();f.write(eyes[0],40+identity);f.write(eyes[1],100+identity);
+        pose_times[identity-1]=pose_time;
+        std::array<XrCompositionLayerProjectionView,2> views{};
+        for(unsigned eye=0;eye<2;++eye) {
+            views[eye].type=XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+            views[eye].pose.orientation.w=1;views[eye].pose.position.x=float(identity);
+            views[eye].subImage.swapchain=eyes[eye];views[eye].subImage.imageRect.extent={1,1};
+        }
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();
+        const auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+        XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=pose_time-123'456;
+        end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
+        f.transport->set_next_end_content_time(pose_time);
+        xr_ok(f.transport->end_frame(&end),"submit timestamped OSR stereo through the actual private endpoint");
+    };
+    for(unsigned identity=1;identity<=3;++identity) {
+        submit(identity,epoch+ns()+2*period);
+        f.wait_count(identity);
+        if(identity==1)std::this_thread::sleep_for(3*std::chrono::nanoseconds(period));
+    }
+    xr_ok(f.transport->drain(),"OSR timestamped stereo drain");
+    check(f.transport->last_native_display_time()==f.last_osr_native_prediction.load(),
+        "OSR grid anchor remains the actual native cycle, independently of the content time");
+    check(f.replayed_ends==0,"an idle OSR source cannot be replayed with a different pose timestamp");
+    const auto expired=f.transport->independent_load().expired;
+    submit(4,pose_times[0]);
+    xr_ok(f.transport->drain(),"stale OSR pose retires without relabelling its pixels");
+    check(f.real_ends==3 && f.transport->independent_load().expired==expired+1,
+        "an inadmissible old OSR pose is discarded before native End");
+    f.refuse_end_call=4;f.refused_end_result=XR_ERROR_TIME_INVALID;
+    submit(5,epoch+ns()+2*period);f.wait_count(4);
+    xr_ok(f.transport->drain(),"a refused OSR timestamp closes one native cycle without stopping the session");
+    submit(6,epoch+ns()+2*period);f.wait_count(5);
+    xr_ok(f.transport->drain(),"fresh OSR pose recovers after stale input and a native timestamp refusal");
+    f.transport->stop();
+    check(f.pixels==std::vector<unsigned>({41,42,43,45,46}) &&
+        f.right_pixels==std::vector<unsigned>({101,102,103,105,106}),
+        "both OSR eye images retain FIFO identity across a gap and stale-pose rejection");
+    independent_fixture_mode=false;
+    std::puts(d12?"Independent D12 OSR exact pose timestamps, idle, stale rejection and recovery PASS":
+        "Independent D11 OSR exact pose timestamps, idle, stale rejection and recovery PASS");
+}
 void independent_auto_buffer_test(bool d12) {
     const auto saved_period=period;period=50'000'000;
     independent_fixture_mode=true;independent_fixture_auto=true;
@@ -2283,6 +2348,7 @@ int main(int argc,char** argv){
     if(argc>1 && std::string_view(argv[1])=="independent-deadline-d12") {independent_deadline_test(true);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-deadline-d11") {independent_deadline_test(false);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-paced") {independent_paced_wait_test();return 0;}
+    if(argc>1 && std::string_view(argv[1])=="independent-osr-content") {independent_osr_content_test(true);independent_osr_content_test(false);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent") {independent_contract_test(true);independent_contract_test(false);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-queued") {independent_fixture_mode=true;queued_d11_publication_test(false);queued_d11_publication_test(true);return 0;}
     if(argc>1 && std::string_view(argv[1])=="queued-publication") {
