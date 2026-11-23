@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1064.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1065.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2994,6 +2994,8 @@ endif()
 if(TARGET xrfg_private_runtime_layer_tests)
     add_test(NAME xrfg_ofr_controls COMMAND xrfg_private_runtime_layer_tests ofr-controls)
     add_test(NAME xrfg_aer_input_warning COMMAND xrfg_private_runtime_layer_tests aer-input-warning)
+    add_test(NAME xrfg_aer_stereo_fallback COMMAND xrfg_private_runtime_layer_tests aer-stereo-fallback)
+    set_tests_properties(xrfg_aer_stereo_fallback PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
     set_tests_properties(xrfg_ofr_controls PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()
 

@@ -13937,7 +13937,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     std::span<const xrfg::D3D12ReprojectionView> synthetic_views = {},
     std::span<const xrfg::D3D12ReprojectionView> extra_views = {},
     float third_fraction=.75F, std::span<const xrfg::D3D12ReprojectionView> third_views={},
-    const PanelInput* panel_input=nullptr,unsigned aer_fresh_mask=3) noexcept {
+    const PanelInput* panel_input=nullptr,unsigned aer_fresh_mask=3,bool real_copy=false) noexcept {
     PreparedGeneration output{};
     try {
         // AFW's frozen source is transport, never a temporal OFXR prime.
@@ -14345,10 +14345,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 generation->d3d11_interop == nullptr &&
                 !state->session->queued_nvidia_presenter;
             if (!generation->d3d11_interop || SUCCEEDED(submit_result)) {
-                if (afw_source) {
-                    // All Luke games/modes consume the exact immutable input
-                    // color here. Backend warm-up belongs only to real OFXR
-                    // priming, not this per-frame AFW scratch-image copy.
+                if (afw_source || real_copy) {
+                    // Transport the frozen colour without temporal guide validation.
                     submit_result = synthesizer->submit_copy(
                         *capture, current_source_views,
                         current_destination_index, &ticket, preserve_ofxr_anchor);
@@ -14566,7 +14564,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             output.extra_handle = request_extra ? extra_image.handle : XR_NULL_HANDLE;
             output.third_handle=request_third?third_image.handle:XR_NULL_HANDLE;
             output.synthesizer = synthesizer;
-            output.anchor_is_current = true;
+            output.anchor_is_current = !real_copy;
             output.kind = request_pair ? PreparedGenerationKind::pair
                                        : PreparedGenerationKind::prime;
             output.reason = GenerationPrepareReason::ready;
@@ -14610,7 +14608,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             return output;
         }
 
-        output.anchor_is_current = true;
+        output.anchor_is_current = !real_copy;
         output.current_handle = current_image.handle;
         output.synthetic_handle = synthetic_image.handle;
         output.extra_handle = request_extra ? extra_image.handle : XR_NULL_HANDLE;
@@ -14695,7 +14693,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     const ProjectionSnapshot* synthetic_camera = nullptr,
     const ProjectionSnapshot* extra_camera = nullptr,
     float third_fraction=.75F,const ProjectionSnapshot* third_camera=nullptr,
-    std::span<const std::shared_ptr<PanelInput>> frozen_sources={}) noexcept {
+    std::span<const std::shared_ptr<PanelInput>> frozen_sources={},bool real_copy=false) noexcept {
     PreparedProjectionFrame output{};
     try {
         if (mappings.empty()) {
@@ -14741,7 +14739,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 target ? std::span<const xrfg::D3D12ReprojectionView>{*target} : std::span<const xrfg::D3D12ReprojectionView>{},
                 extra ? std::span<const xrfg::D3D12ReprojectionView>{*extra} : std::span<const xrfg::D3D12ReprojectionView>{},
                 third_fraction,third?std::span<const xrfg::D3D12ReprojectionView>{*third}:std::span<const xrfg::D3D12ReprojectionView>{},
-                [&]() -> const PanelInput* {for(const auto& input:frozen_sources)if(input->source.swapchain==mapping.application_swapchain)return input.get();return nullptr;}(),snapshot.aer_fresh_mask);
+                [&]() -> const PanelInput* {for(const auto& input:frozen_sources)if(input->source.swapchain==mapping.application_swapchain)return input.get();return nullptr;}(),snapshot.aer_fresh_mask,real_copy);
             all_expected_kind =
                 all_expected_kind && generation.kind == expected_kind;
             all_anchor_current =
@@ -15359,9 +15357,24 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                     // Either a prime or a pair can advance just one eye.
                     // Prime both eyes on the next source, even if it is queued.
                     prime_after_stale = true;
-                    std::scoped_lock lock(state->presenter_mutex);
-                    if (state->director_anchor_sequence == job->current->source_sequence)
-                        state->director_anchor_sequence = 0;
+                    {
+                        std::scoped_lock lock(state->presenter_mutex);
+                        if (state->director_anchor_sequence == job->current->source_sequence)
+                            state->director_anchor_sequence = 0;
+                    }
+                    if(state->nvidia_options.ofr) {
+                        // Retire every partial eye before reusing output banks.
+                        // Publish this frozen scene as real-only while its AER
+                        // guides are unavailable, so the menu keeps updating.
+                        if(finish_worker_outputs(state,prepared,job->current->source_sequence,
+                                nullptr,0,false,true)) {
+                            log_skipped_stale_worker_source(*job,prepared);
+                            prime_worker_source(*job);
+                            prepared={};
+                            prepared=prepare_projection_frame(job->snapshot,job->mappings,false,.5F,true,
+                                &job->presentation_transform,{},2.0F/3.0F,nullptr,nullptr,.75F,nullptr,job->sources,true);
+                        } else preparation_cleanup_failed=true;
+                    }
                 } else if (finish_worker_outputs(state, prepared, job->current->source_sequence,
                                nullptr, 0, false, true)) {
                     // The serial director already reserved this real slot.

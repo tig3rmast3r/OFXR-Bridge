@@ -40,7 +40,7 @@ A game running in 3X:
   "display_hz": 90.0,
   "latency_ms": 41.3,
   "updated": "2026-10-28T09:12:03.512Z",
-  "ofxr": { "build": 1064 },
+  "ofxr": { "build": 1065 },
   "session": {
     "process": "FlightSimulator2024.exe",
     "pid": 23456,
@@ -64,7 +64,7 @@ With no game running, the game's fields are `null`:
   "display_hz": null,
   "latency_ms": null,
   "updated": "2026-10-28T09:15:41.007Z",
-  "ofxr": { "build": 1064 },
+  "ofxr": { "build": 1065 },
   "session": null
 }
 ```

@@ -302,6 +302,7 @@ static int panel_metadata_contract() {
 #include "rife_output_banks_tests.inc"
 #include "aer_alternate_delivery.inc"
 #include "aer_native_guide_cache_fixture.inc"
+#include "aer_stereo_fallback_test.inc"
 
 static int independent_ready_admission_test(bool learned=false) {
     xrfg_fixture::ControlProfile profile;
@@ -662,6 +663,7 @@ static int aer_input_warning_test() {
 }
 
 int main(int argc,char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="aer-stereo-fallback")return aer_stereo_fallback_test();
     if(argc>1 && std::string_view(argv[1])=="aer-input-warning")return aer_input_warning_test();
     if(argc>1 && std::string_view(argv[1])=="legacy-latency-scope")return legacy_latency_scope_test();
     std::string route=argc>1?argv[1]:"new";
