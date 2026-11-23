@@ -126,6 +126,8 @@ struct UevrOsrRenderer::Impl {
 
     std::array<ComPtr<ID3D12Resource>, 2> source_color{};
     std::array<bool, 2> source_valid{};
+    std::array<std::uint64_t, 2> source_serial{};
+    std::uint64_t next_source_serial{};
     DXGI_FORMAT color_format{DXGI_FORMAT_UNKNOWN};
     UINT color_width{}, color_height{};
     bool typed_store_checked{};
@@ -407,10 +409,20 @@ void UevrOsrRenderer::reset_history() noexcept {
     if (!impl_) return;
     impl_->previous_publication = {};
     impl_->history_camera_valid = {};
+    impl_->history_engine_valid = {};
+    // A source gap also breaks the generated guides' camera/motion chain.
+    // Never advertise motion back to an OSR endpoint from before that gap.
+    impl_->shown_valid = {};
+    impl_->render_valid = {};
+    impl_->guide_serial = {};
+    impl_->guide_near = 0;
+    ++impl_->guide_epoch;
 }
 
 HRESULT UevrOsrRenderer::capture_source(ID3D12Device* device, ID3D12CommandQueue* queue,
-    ID3D12Resource* image, D3D12_RESOURCE_STATES state, unsigned eye) noexcept {
+    ID3D12Resource* image, D3D12_RESOURCE_STATES state, unsigned eye, UevrOsrSource* captured) noexcept {
+    if (captured) *captured = {};
+    if (impl_ && eye < 2) impl_->source_valid[eye] = false;
     try {
         if (!device || !queue || !image || eye > 1) return E_INVALIDARG;
         if (impl_ && (impl_->device.Get() != device || impl_->queue.Get() != queue)) {
@@ -444,11 +456,21 @@ HRESULT UevrOsrRenderer::capture_source(ID3D12Device* device, ID3D12CommandQueue
         s.resolve_marks();
         s.slot_kind[s.current_slot] = 1;
         hr = s.submit();
-        if (SUCCEEDED(hr)) s.source_valid[eye] = true;
+        if (SUCCEEDED(hr)) {
+            s.source_valid[eye] = true;
+            s.source_serial[eye] = ++s.next_source_serial;
+            if (captured) *captured = {s.source_color[eye], s.source_serial[eye], eye};
+        }
         return hr;
     } catch (...) {
         return E_UNEXPECTED;
     }
+}
+
+bool UevrOsrRenderer::source_matches(const UevrOsrSource& source) const noexcept {
+    return impl_ && source.eye < 2 && source.serial && impl_->source_valid[source.eye] &&
+        source.serial == impl_->source_serial[source.eye] &&
+        source.image.Get() == impl_->source_color[source.eye].Get();
 }
 
 UevrOsrResult UevrOsrRenderer::render(ID3D12Device* device, ID3D12CommandQueue* queue,
@@ -464,6 +486,7 @@ UevrOsrResult UevrOsrRenderer::render(ID3D12Device* device, ID3D12CommandQueue* 
         if (s.device.Get() != device || s.queue.Get() != queue) return refuse(2, E_INVALIDARG);
         const unsigned source_eye = frame.source_eye, peer = 1 - source_eye;
         if (!s.source_valid[source_eye]) return refuse(3, E_NOT_VALID_STATE);
+        if (frame.source.eye != source_eye || !source_matches(frame.source)) return refuse(20, E_NOT_VALID_STATE);
         const auto& guide = *frame.guide;
         if (!guide.depth || !guide.motion_vectors) return refuse(4);
         if (!guide.depth_inverted) return refuse(5);
@@ -507,7 +530,7 @@ UevrOsrResult UevrOsrRenderer::render(ID3D12Device* device, ID3D12CommandQueue* 
             if (FAILED(hr)) return refuse(19, hr);
         }
 
-        if (frame.reset) { s.previous_publication = {}; s.history_camera_valid = {}; }
+        if (frame.reset) reset_history();
         const auto& history = s.osr.history(peer);
         const int effective_mode = frame.mode == 1 ? 1 : frame.mode == 2 ? 2 : 3;
         const bool history_usable = frame.cameras_valid && s.history_camera_valid[peer] && !frame.reset &&

@@ -19370,7 +19370,8 @@ void update_aer_input(SessionState& state,const XrFrameEndInfo* info,
 
 XrResult layer_end_frame_impl(
     XrSession session,
-    const XrFrameEndInfo* end_info, xrfg::InterfaceCallTiming* api_timing = nullptr) {
+    const XrFrameEndInfo* end_info, xrfg::InterfaceCallTiming* api_timing = nullptr,
+    bool discard_uevr_frame = false) {
     const auto interface_entered_ns = api_timing ? api_timing->started_ns()
         : xrfg::interface_measurement_requested() ? xrfg::interface_clock_ns() : 0;
     xrfg::InterfaceCallTiming local_timing(api_timing ? 0 : interface_entered_ns, true);
@@ -19533,6 +19534,15 @@ XrResult layer_end_frame_impl(
         state->pipelined_wait_streak = 0;
     }
     bool use_continuous_presenter = continuous_presenter_active(state);
+    if (discard_uevr_frame && state->independent_pacing && state->private_runtime && !state->menu_enabled) {
+        const auto discarded = state->private_runtime->discard_virtual_frame();
+        if (XR_FAILED(discarded)) return discarded;
+        consume_application_frame(state, end_info ? end_info->displayTime : 0,
+            consume_in_submission_order, match_latest_by_submission);
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+            0, 1419, end_info ? static_cast<std::uint64_t>(end_info->displayTime) : 0, 0);
+        return XR_SUCCESS;
+    }
     if (use_continuous_presenter &&
         (end_info == nullptr || end_info->type != XR_TYPE_FRAME_END_INFO)) {
         return XR_ERROR_VALIDATION_FAILURE;
@@ -21678,7 +21688,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_end_frame(
         const XrFrameEndInfo* info = end_info;
         if (const auto state = find_session(session); state && state->uevr_afr)
             if (uevr_afr_observe_end_frame(*state, end_info, rewritten)) info = &rewritten.info;
-        return layer_end_frame_impl(session, info, &interface_call);
+        return layer_end_frame_impl(session, info, &interface_call, rewritten.discard);
     });
     xrfg::bridge_flight_logger().end(
         token,

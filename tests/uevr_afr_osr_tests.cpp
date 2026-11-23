@@ -156,6 +156,67 @@ int main() {
         auto back_left = lost.take_eye(0, 125, 100);
         check(back_left && back_left->camera.sequence == 12, "and the next left release its own: back in step");
     }
+    // The first view can be mislabelled by head translation across pairs.
+    // A pair sharing an XR pose resolves both labels before either release.
+    {
+        UevrEyePhase phase;
+        UevrEyeCameraQueue queue;
+        for (unsigned pair = 0; pair < 8; ++pair) {
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                UevrEyeCamera camera{};
+                camera.sequence = 2 * pair + eye + 1;
+                camera.ticks = 100 + camera.sequence;
+                camera.xr_valid = true;
+                camera.xr_time = 1'000'000 + pair * 11'111'111;
+                camera.world_to_meters = 100;
+                camera.base_location = {1000.0 * pair, 100.0 * eye, 170};
+                camera.rotation = {0, 3.0 * pair + eye * 2.0, 0};
+                std::array<double, 3> forward{}, right{}, up{};
+                uevr_rotator_axes(camera.rotation, forward, right, up);
+                const double head_side = pair % 2 ? 12.0 : -12.0;
+                const double side = head_side + (eye ? 3.2 : -3.2);
+                for (unsigned k = 0; k < 3; ++k)
+                    camera.location[k] = camera.base_location[k] + right[k] * side + forward[k] * 5.0;
+                queue.push(camera, phase.observe(camera, 2.0F).value_or(2));
+            }
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                const auto selected = queue.take_eye(eye, 200, 200);
+                check(selected && selected->eye == eye && selected->camera.sequence == 2 * pair + eye + 1,
+                    "paired XR cameras retain exact source identity through head translation and engine turns");
+            }
+        }
+        queue.clear();
+        UevrEyeCamera left{}, right{};
+        left.xr_valid = right.xr_valid = true;
+        left.xr_time = right.xr_time = 900'000'000;
+        left.world_to_meters = right.world_to_meters = 100;
+        left.sequence = 100; right.sequence = 101; left.ticks = right.ticks = 200;
+        left.location = {5, -11.4, 0};
+        right.rotation = {0, 90, 0}; right.base_rotation = right.rotation;
+        right.location = {5, 5, 0};
+        queue.push(left, 0); queue.push(right, 2);
+        const auto paired_left = queue.take_eye(0, 200, 200);
+        const auto paired_right = queue.take_eye(1, 200, 200);
+        check(paired_left && paired_left->camera.sequence == 100 && paired_right && paired_right->camera.sequence == 101,
+            "a same-pose pair resolves an undecided view using each camera's own right axis");
+        queue.clear();
+        right.xr_time += 1;
+        queue.push(left, 0); queue.push(right, 2);
+        check(!queue.take_eye(1, 200, 200), "different XR samples cannot be relabelled as a stereo pair");
+        queue.clear();
+        right.xr_time = left.xr_time;
+        right.xr_eyes[1].orientation = {0, 0.1F, 0, 0.994987F};
+        queue.push(left, 0); queue.push(right, 2);
+        check(!queue.take_eye(1, 200, 200), "canted views retain the existing eye classifier");
+        queue.clear();
+        UevrEyeCamera future{}; future.sequence = 200; future.ticks = 200;
+        future.xr_valid = true; future.xr_time = 1'000'000'000;
+        queue.push(future, 0);
+        check(!queue.take_eye(0, 200, 200, 950'000'000) && queue.size() == 1,
+            "a missing camera cannot borrow a future frame's view");
+        const auto later = queue.take_eye(0, 200, 200, future.xr_time);
+        check(later && later->camera.sequence == 200, "the future camera remains available for its own frame");
+    }
     // Stick share of the engine's yaw step over a pair (r39 receipts).
     {
         check(near(uevr_stick_yaw_step(2.82, 0.03, 0.0), 2.82), "Dead Island 2: a stick turn keeps its whole step");

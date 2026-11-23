@@ -349,6 +349,33 @@ class UevrEyeCameraQueue {
 public:
     struct Taken { UevrEyeCamera camera; unsigned eye; };
     void push(const UevrEyeCamera& camera, unsigned eye) {
+        if (!entries_.empty() && camera.xr_valid && camera.xr_time > 0 && camera.world_to_meters > 0) {
+            auto& previous = entries_.back();
+            // Both views of an AFR pair use one sampled head pose. Resolve
+            // their labels together, independently of the head movement at
+            // the transition from the preceding pair. Camera-local right
+            // axes also remove changes in the engine's base rotation.
+            double stereo_rotation = 0;
+            for (unsigned i = 0; i < 4; ++i)
+                stereo_rotation += double(camera.xr_eyes[0].orientation[i]) * camera.xr_eyes[1].orientation[i];
+            if (previous.camera.xr_valid && previous.camera.xr_time == camera.xr_time &&
+                previous.camera.world_to_meters == camera.world_to_meters && std::abs(stereo_rotation) > 0.99999) {
+                const auto lateral = [](const UevrEyeCamera& view) {
+                    std::array<double, 3> forward{}, right{}, up{};
+                    uevr_rotator_axes(view.rotation, forward, right, up);
+                    double result = 0;
+                    for (unsigned i = 0; i < 3; ++i)
+                        result += (view.location[i] - view.base_location[i]) * right[i];
+                    return result;
+                };
+                const double separation = lateral(camera) - lateral(previous.camera);
+                const double minimum = std::max(0.02, double(camera.world_to_meters) * 0.02);
+                if (std::isfinite(separation) && std::abs(separation) >= minimum) {
+                    eye = separation > 0 ? 1u : 0u;
+                    previous.eye = 1u - eye;
+                }
+            }
+        }
         entries_.push_back({camera, eye});
         while (entries_.size() > kCapacity) entries_.pop_front();
     }
@@ -357,11 +384,13 @@ public:
     // (take_oldest) stays one view off forever once a view is lost, and every
     // reconstruction then used the other eye's camera, mirrored (Dead Island
     // 2, 2026-11-02 22:05, after a hitch at 48 s). Undecided views are skipped.
-    std::optional<Taken> take_eye(unsigned eye, std::uint64_t now_ticks, std::uint64_t max_age_ticks) {
+    std::optional<Taken> take_eye(unsigned eye, std::uint64_t now_ticks, std::uint64_t max_age_ticks,
+        std::int64_t latest_pose_time = 0) {
         for (std::size_t i = 0; i < entries_.size(); ++i) {
             const auto& entry = entries_[i];
             if (entry.eye != eye) continue;
             if (now_ticks >= entry.camera.ticks && now_ticks - entry.camera.ticks > max_age_ticks) continue;
+            if (latest_pose_time > 0 && entry.camera.xr_valid && entry.camera.xr_time > latest_pose_time) continue;
             const Taken taken{entry.camera, entry.eye};
             entries_.erase(entries_.begin(), entries_.begin() + static_cast<std::ptrdiff_t>(i) + 1);
             return taken;

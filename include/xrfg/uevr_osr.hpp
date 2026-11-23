@@ -10,11 +10,18 @@
 #include "xrfg/uevr_afr_osr.hpp"
 
 namespace xrfg {
+// Identifies one completed capture, not merely the reusable per-eye texture.
+struct UevrOsrSource {
+    Microsoft::WRL::ComPtr<ID3D12Resource> image;
+    std::uint64_t serial{};
+    unsigned eye{};
+};
 // One reconstruction for UEVR's Alternating/AFR rendering: the eye UEVR just
 // rendered (source) is turned into the other eye (destination) with Full OSR,
 // from the DLSS depth and vectors of that frame and the destination eye's own
 // last frame. Cameras are world cameras relative to the caller's origin.
 struct UevrOsrFrame {
+    UevrOsrSource source;
     const DlssMotionVectorFrame* guide{};
     unsigned source_eye{};
     UevrMatrix source_view_to_clip{}, destination_view_to_clip{};
@@ -76,7 +83,10 @@ public:
     // `state` is the image's state at release (render target for OpenXR D3D12
     // colour images); it is restored.
     HRESULT capture_source(ID3D12Device* device, ID3D12CommandQueue* queue,
-        ID3D12Resource* image, D3D12_RESOURCE_STATES state, unsigned eye) noexcept;
+        ID3D12Resource* image, D3D12_RESOURCE_STATES state, unsigned eye,
+        UevrOsrSource* captured = nullptr) noexcept;
+
+    [[nodiscard]] bool source_matches(const UevrOsrSource& source) const noexcept;
 
     // Reconstructs the destination eye from the last captured source eye and
     // writes it into `destination` (an acquired swapchain image in `state`).

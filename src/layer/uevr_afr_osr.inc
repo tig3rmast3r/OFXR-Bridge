@@ -239,9 +239,15 @@ struct UevrAfrOsrState {
     XrDuration display_period{};
     std::optional<XrTime> rewrite_display_time;
     unsigned eye_releases{};
+    bool pair_reconstructed{};
     bool inside{}; // our own frame calls and swapchain cycles
     bool active{};
     std::uint64_t last_publication{};
+    std::uint64_t source_generation{1};
+    std::uint64_t last_camera_sequence{};
+    std::array<std::uint64_t, 2> used_source_serial{};
+    struct SourceIdentity { XrSwapchain swapchain{}; std::uint64_t stream{}, epoch{}; };
+    std::array<SourceIdentity, 2> source_identity{};
     // OSR's guide for the real eye of the frame being released, bound once
     // UEVR's own release has bound the game's.
     std::shared_ptr<const xrfg::DlssMotionVectorSet> source_guide;
@@ -271,6 +277,44 @@ struct UevrAfrOsrState {
     xrfg::UevrOsrRenderer renderer;
 };
 
+// One release owns these observations and its exact private colour capture.
+// Reconstruction must never take another camera or resolve a newer guide.
+struct UevrAfrSource {
+    XrSwapchain swapchain{};
+    unsigned eye{}, image_index{}, physical_eye{};
+    std::uint64_t generation{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> application_image;
+    xrfg::UevrOsrSource pixels;
+    std::shared_ptr<const xrfg::DlssMotionVectorFrame> guide;
+    std::optional<xrfg::UevrEyeCamera> camera;
+    std::optional<std::pair<std::int64_t, std::array<XrPosef, 2>>> pair_pose;
+    xrfg::UevrXrPose newest_xr{};
+    std::int64_t newest_xr_time{};
+    std::size_t queued_before{};
+    std::int64_t front_offset_us{INT32_MIN};
+    bool fresh_guide{};
+    HRESULT result{E_FAIL};
+};
+
+void uevr_afr_source_gap(UevrAfrOsrState& afr) noexcept {
+    afr.reset_pending = true;
+    afr.pair_view_valid = afr.pair_yaw_valid = afr.pair_head_valid = false;
+}
+
+void uevr_afr_reset_sources(UevrAfrOsrState& afr) {
+    uevr_afr_source_gap(afr);
+    ++afr.source_generation;
+    afr.source_identity = {};
+    afr.last_camera_sequence = 0;
+    afr.frame_pose_valid = afr.second_pose_valid = afr.pair_reconstructed = false;
+    auto& feed = uevr_camera_feed();
+    std::scoped_lock lock(feed.mutex);
+    feed.queue.clear();
+    feed.phase.reset();
+    feed.last_xr_valid = false;
+    feed.located = {};
+}
+
 std::shared_ptr<UevrAfrOsrState> make_uevr_afr_osr_state() noexcept {
     try { return std::make_shared<UevrAfrOsrState>(); } catch (...) { return {}; }
 }
@@ -292,6 +336,7 @@ bool uevr_afr_osr_wanted(const SessionState& session) noexcept {
 
 // UEVR's xrEndFrame as it must reach the layer: owned copies of what changed.
 struct UevrEndFrameRewrite {
+    bool discard{};
     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
     std::vector<const XrCompositionLayerBaseHeader*> layers;
     std::deque<XrCompositionLayerProjection> projections;
@@ -318,6 +363,7 @@ bool uevr_afr_observe_end_frame(SessionState& session, const XrFrameEndInfo* inf
     afr->rewrite_display_time.reset();
     afr->eye_releases = 0;
     const auto second_pose = afr->second_pose_valid ? std::optional<std::array<XrPosef, 2>>(afr->second_pose) : std::nullopt;
+    const bool pair_reconstructed = std::exchange(afr->pair_reconstructed, false);
     const XrTime second_time = afr->second_pose_valid ? afr->second_time : 0;
     afr->second_pose_valid = false;
     bool layout = false;
@@ -389,6 +435,10 @@ bool uevr_afr_observe_end_frame(SessionState& session, const XrFrameEndInfo* inf
         (settings.rendering_method == xrfg::kUevrRenderingMethodAlternating ? 0u : 4u) |
         (settings.synchronization == xrfg::kUevrSynchronizationVeryLate ? 0u : 8u) | (layout ? 0u : 16u);
     const bool wanted = off_reasons == 0;
+    // Changed pixels require a completed second-frame receipt. Untouched raw
+    // pairs can pass through when no reconstruction source was available.
+    out.discard = wanted && session.independent_pacing && session.private_runtime &&
+        !session.menu_enabled && pair_reconstructed && (!second_pose || second_time <= 0);
     if (off_reasons != afr->off_reasons) {
         // 1407: why OSR is off (0 = on): 1 session (binding, Luke, Reconstruction
         // setting, ini), 2 UEVR settings unreadable, 4 not Alternating/AFR,
@@ -406,14 +456,14 @@ bool uevr_afr_observe_end_frame(SessionState& session, const XrFrameEndInfo* inf
             (layout ? 1u : 0u) | (settings.valid ? 2u : 0u) | (settings.ghosting_fix ? 4u : 0u) |
             (static_cast<std::uint64_t>(settings.synchronization & 0xff) << 8));
         afr->active = wanted;
-        afr->reset_pending = true;
+        uevr_afr_reset_sources(*afr);
         afr->captured_eye.reset();
         {std::scoped_lock pose_lock(afr->pose_mutex); afr->located = false;}
         session.uevr_osr_active.store(wanted, std::memory_order_release);
         xrfg::autonomous::uevr_osr_attached.store(wanted, std::memory_order_release);
     }
     if (layout) {
-        if (afr->eye_swapchain != eyes) afr->reset_pending = true;
+        if (afr->eye_swapchain != eyes) uevr_afr_reset_sources(*afr);
         afr->layout = true;
         afr->eye_swapchain = eyes;
         afr->eye_layer = eye_layer;
@@ -537,11 +587,77 @@ xrfg::UevrXrPose uevr_xr_pose(const XrPosef& pose) noexcept {
         {pose.position.x, pose.position.y, pose.position.z}};
 }
 
-bool uevr_afr_reconstruct(SessionState& session, UevrAfrOsrState& afr, unsigned source_eye,
-    ID3D12Resource* same_image);
+bool uevr_afr_reconstruct(SessionState& session, UevrAfrOsrState& afr, const UevrAfrSource& captured);
 
-// Before the application's release of an eye image: copy it while UEVR owns
-// it, then build both eyes of this frame.
+// Consume observations for EVERY actual source capture, including a source
+// that reconstruction will refuse. Otherwise its camera survives to warp the
+// next image. Observation advances independently of generation, as in AER.
+UevrAfrSource uevr_afr_capture_source(SessionState& session, UevrAfrOsrState& afr,
+    XrSwapchain swapchain, unsigned eye, unsigned index, ID3D12Resource* image) {
+    UevrAfrSource captured{};
+    captured.swapchain = swapchain; captured.eye = eye; captured.image_index = index;
+    captured.application_image = image; captured.generation = afr.source_generation;
+    captured.physical_eye = afr.last_physical < 2 ? 1 - afr.last_physical : eye;
+    const auto now = GetTickCount64();
+    {
+        auto& feed = uevr_camera_feed();
+        std::scoped_lock lock(feed.mutex);
+        captured.newest_xr = feed.last_xr[0]; captured.newest_xr_time = feed.last_xr_time;
+        captured.queued_before = feed.queue.size();
+        if (const auto* front = feed.queue.front()) captured.front_offset_us = front->xr_valid
+            ? (front->xr_time - afr.application_display_time) / 1000 : INT32_MIN;
+        const auto latest_pose = afr.application_display_time > 0 && afr.display_period > 0
+            ? afr.application_display_time + afr.display_period / 2 : 0;
+        if (const auto taken = feed.queue.take_eye(eye, now, 200, latest_pose)) {
+            captured.camera = taken->camera;
+            captured.physical_eye = taken->eye;
+        }
+        for (const auto& located : feed.located) {
+            if (!located.time) continue;
+            if (!captured.pair_pose || std::llabs(located.time - afr.application_display_time) <
+                std::llabs(captured.pair_pose->first - afr.application_display_time))
+                captured.pair_pose = std::make_pair(located.time, located.poses);
+        }
+    }
+    afr.last_physical = captured.physical_eye;
+    if (captured.camera) {
+        if (afr.last_camera_sequence && captured.camera->sequence != afr.last_camera_sequence + 1)
+            uevr_afr_source_gap(afr);
+        afr.last_camera_sequence = captured.camera->sequence;
+    } else uevr_afr_source_gap(afr);
+    const auto guides = xrfg::resolve_dlss_motion_vectors(1, session.d3d12_queue.Get());
+    captured.guide = guides && guides->eye_count ? guides->eyes[0] : nullptr;
+    if (captured.guide && captured.guide->publication > afr.last_publication) {
+        const auto& guide = *captured.guide;
+        captured.fresh_guide = true;
+        if (afr.last_publication && guide.publication != afr.last_publication + 1)
+            uevr_afr_source_gap(afr);
+        auto& prior = afr.source_identity[eye];
+        if (prior.swapchain && (prior.swapchain != swapchain || prior.stream != guide.stream || prior.epoch != guide.epoch))
+            uevr_afr_source_gap(afr);
+        prior = {swapchain, guide.stream, guide.epoch};
+        afr.last_publication = guide.publication;
+    } else uevr_afr_source_gap(afr);
+    {
+        std::scoped_lock gpu_lock(session.gpu_mutex);
+        captured.result = afr.renderer.capture_source(session.d3d12_device.Get(), session.d3d12_queue.Get(),
+            image, D3D12_RESOURCE_STATE_RENDER_TARGET, eye, &captured.pixels);
+    }
+    if (FAILED(captured.result)) uevr_afr_source_gap(afr);
+    // 1420/1421 join the exact colour-capture serial to its guide and camera.
+    auto& logger = xrfg::bridge_flight_logger();
+    logger.event(xrfg::BridgeFlightOperation::luke_afw_stage, eye, 1420,
+        captured.pixels.serial, captured.guide ? captured.guide->publication : 0);
+    logger.event(xrfg::BridgeFlightOperation::luke_afw_stage, eye, 1421,
+        captured.pixels.serial, captured.camera ? captured.camera->sequence : 0);
+    logger.event(xrfg::BridgeFlightOperation::luke_afw_stage, eye | (captured.physical_eye << 8), 1409,
+        captured.camera ? captured.camera->sequence : 0,
+        (static_cast<std::uint64_t>(captured.queued_before) << 32) |
+            static_cast<std::uint32_t>(static_cast<std::int32_t>(captured.front_offset_us)));
+    return captured;
+}
+
+// Before the application's release: own the pixels, guide and pose together.
 void uevr_afr_before_release(const std::shared_ptr<SwapchainState>& chain) {
     if (!chain || !chain->session) return;
     auto* afr = chain->session->uevr_afr.get();
@@ -551,98 +667,63 @@ void uevr_afr_before_release(const std::shared_ptr<SwapchainState>& chain) {
     unsigned eye = 2;
     for (unsigned i = 0; i < 2; ++i) if (afr->eye_swapchain[i] == chain->handle) eye = i;
     if (eye > 1) return;
-    afr->captured_eye.reset();
+    afr->captured_eye.reset(); afr->reconstructed_eye = 2;
+    afr->frame_pose_valid = false; afr->source_guide.reset();
     Microsoft::WRL::ComPtr<ID3D12Resource> image;
+    unsigned index{};
     {
         std::scoped_lock chain_lock(chain->mutex);
         if (chain->acquired_indices.empty()) return;
-        const auto index = chain->acquired_indices.front();
-        if (index >= chain->enumerated_d3d12_images.size()) return;
-        image = chain->enumerated_d3d12_images[index];
+        index = chain->acquired_indices.front();
+        if (index < chain->enumerated_d3d12_images.size()) image = chain->enumerated_d3d12_images[index];
     }
-    if (!image) return;
     auto& session = *chain->session;
-    HRESULT hr;
-    {
-        std::scoped_lock gpu_lock(session.gpu_mutex);
-        hr = afr->renderer.capture_source(session.d3d12_device.Get(), session.d3d12_queue.Get(),
-            image.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, eye);
-    }
-    if (FAILED(hr)) {
-        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage, hr, 1406, eye, 0);
+    const auto captured = uevr_afr_capture_source(session, *afr, chain->handle, eye, index, image.Get());
+    if (FAILED(captured.result)) {
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage, captured.result, 1406, eye, 0);
         return;
     }
     afr->captured_eye = eye;
-    // Both eyes of this frame are built now, while UEVR still owns the image:
-    // the other eye into its own swapchain, this eye relocated in place.
-    afr->reconstructed_eye = uevr_afr_reconstruct(session, *afr, eye, image.Get()) ? eye : 2;
+    afr->reconstructed_eye = uevr_afr_reconstruct(session, *afr, captured) ? eye : 2;
 }
 
 // Reconstructs the other eye from the eye just released and writes it into
 // the other eye's swapchain. Locked by the caller.
-bool uevr_afr_reconstruct(SessionState& session, UevrAfrOsrState& afr, unsigned source_eye,
-    ID3D12Resource* same_image) {
+bool uevr_afr_reconstruct(SessionState& session, UevrAfrOsrState& afr, const UevrAfrSource& captured) {
+    const unsigned source_eye = captured.eye;
+    const auto same_image = captured.application_image.Get();
     const unsigned destination_eye = 1 - source_eye;
     const auto refuse = [&](std::uint32_t reason, std::uint64_t detail = 0) {
         ++afr.refusals;
+        uevr_afr_source_gap(afr);
+        afr.frame_pose_valid = false;
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
             static_cast<std::int64_t>(reason), 1404, source_eye, detail);
         return false;
     };
+    if (source_eye > 1 || captured.swapchain != afr.eye_swapchain[source_eye] ||
+        captured.generation != afr.source_generation || !afr.renderer.source_matches(captured.pixels) ||
+        captured.pixels.serial <= afr.used_source_serial[source_eye]) return refuse(11, captured.pixels.serial);
+    afr.used_source_serial[source_eye] = captured.pixels.serial;
     const auto destination = find_swapchain(afr.eye_swapchain[destination_eye]);
     const auto source = find_swapchain(afr.eye_swapchain[source_eye]);
     if (!destination || !source) return refuse(1);
     if (destination->create_info.width != source->create_info.width ||
         destination->create_info.height != source->create_info.height) return refuse(2);
 
-    // This frame's DLSS depth and vectors: the newest evaluation, which must
-    // be newer than the one the previous eye used.
-    const auto set = xrfg::resolve_dlss_motion_vectors(1, session.d3d12_queue.Get());
-    const auto guide = set && set->eye_count ? set->eyes[0] : nullptr;
+    const auto& guide = captured.guide;
     if (!guide) return refuse(3);
-    if (guide->publication <= afr.last_publication) return refuse(4, guide->publication);
-
-    // The eye's world camera from UEVR, and the units of its world.
+    if (!captured.fresh_guide) return refuse(4, guide->publication);
     const auto now = GetTickCount64();
-    std::optional<xrfg::UevrEyeCamera> camera;
-    // The eye the released image was rendered from, by where UEVR placed its
-    // viewpoint; it decides the baseline. The swapchain index keys the history.
-    unsigned physical_source = afr.last_physical < 2 ? 1 - afr.last_physical : source_eye;
-    std::size_t queued_before{};
-    std::int64_t front_offset_us{INT32_MIN};
-    // The pose query for this pair's own display time (UEVR's xrWaitFrame):
-    // the one this pair's eyes were rendered with when the camera carries none.
-    std::optional<std::pair<std::int64_t, std::array<XrPosef, 2>>> pair_pose;
-    xrfg::UevrXrPose newest_xr{};
-    std::int64_t newest_xr_time{};
-    {
-        auto& feed = uevr_camera_feed();
-        std::scoped_lock feed_lock(feed.mutex);
-        newest_xr = feed.last_xr[0];
-        newest_xr_time = feed.last_xr_time;
-        queued_before = feed.queue.size();
-        if (const auto* front = feed.queue.front()) front_offset_us = front->xr_valid
-            ? (front->xr_time - afr.application_display_time) / 1000 : INT32_MIN;
-        // The view of the eye this swapchain shows. In Dead Island 2 every
-        // release's view had this eye while the pairing held (3,500 of 3,500).
-        if (auto taken = feed.queue.take_eye(source_eye, now, 200)) {
-            camera = taken->camera;
-            if (taken->eye < 2) physical_source = taken->eye;
-        }
-        for (const auto& located : feed.located) {
-            if (!located.time) continue;
-            const auto distance = std::llabs(located.time - afr.application_display_time);
-            if (!pair_pose || distance < std::llabs(pair_pose->first - afr.application_display_time))
-                pair_pose = std::make_pair(located.time, located.poses);
-        }
+    const auto& camera = captured.camera;
+    const unsigned physical_source = captured.physical_eye;
+    const auto& pair_pose = captured.pair_pose;
+    const auto& newest_xr = captured.newest_xr;
+    const auto newest_xr_time = captured.newest_xr_time;
+    if (session.independent_pacing && session.private_runtime && (!camera || !camera->xr_valid)) {
+        afr.reset_pending = true;
+        return refuse(9, camera ? camera->sequence : 0);
     }
-    afr.last_physical = physical_source;
-    // 1409: result = released eye | physical eye << 8; a = stage; b = camera sequence (0 none);
-    // c = views queued before taking << 32 | (pose time of the oldest queued
-    // view - this frame's display time, microseconds, int32).
-    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage, source_eye | (physical_source << 8), 1409,
-        camera ? camera->sequence : 0,
-        (static_cast<std::uint64_t>(queued_before) << 32) | static_cast<std::uint32_t>(static_cast<std::int32_t>(front_offset_us)));
     const auto settings = uevr_mod_settings();
     const float world_to_meters = camera && camera->world_to_meters > 0 ? camera->world_to_meters : 100.0F;
     const float units = world_to_meters * settings.world_scale;
@@ -714,6 +795,10 @@ bool uevr_afr_reconstruct(SessionState& session, UevrAfrOsrState& afr, unsigned 
         }
     }
     const auto& submitted = relocated ? slot : poses;
+    if (session.independent_pacing && session.private_runtime && !relocated) {
+        afr.reset_pending = true;
+        return refuse(10, static_cast<std::uint64_t>(pose_time));
+    }
     // 1408: result = source eye | pose source << 8 (0 last submitted, 1 the
     // query nearest this pair's display time, 2 the camera's own query, 3 the
     // slot pose both eyes are relocated to, 4 the same snapped to the native
@@ -743,6 +828,7 @@ bool uevr_afr_reconstruct(SessionState& session, UevrAfrOsrState& afr, unsigned 
         uevr_xr_pose(slot[physical_source]), units);
 
     xrfg::UevrOsrFrame frame{};
+    frame.source = captured.pixels;
     frame.guide = guide.get();
     frame.source_eye = source_eye;
     // Whole images: the field of each eye's image, from its submitted field and rectangle.
@@ -956,7 +1042,6 @@ bool uevr_afr_reconstruct(SessionState& session, UevrAfrOsrState& afr, unsigned 
     if (XR_FAILED(xr) || !image) return refuse(6, static_cast<std::uint64_t>(xr));
     if (XR_FAILED(released)) return refuse(7, static_cast<std::uint64_t>(released));
     if (FAILED(result.result)) return refuse(8, result.reason);
-    afr.last_publication = guide->publication;
     afr.frame_pose = submitted;
     afr.frame_pose_valid = true;
     afr.frame_time = relocated ? slot_time : 0;
@@ -1079,7 +1164,8 @@ void uevr_afr_after_release(const std::shared_ptr<SwapchainState>& chain, XrResu
     }
     afr->source_guide.reset();
     const bool first_eye = afr->eye_releases++ == 0;
-    if (XR_FAILED(release_result)) return;
+    if (reconstructed) afr->pair_reconstructed = true;
+    if (XR_FAILED(release_result)) { uevr_afr_source_gap(*afr); return; }
     // Only a pair whose first eye was completed gets a frame of its own;
     // otherwise UEVR's frame goes out as UEVR made it.
     if (reconstructed && first_eye && session.application_frame_in_progress) uevr_afr_insert_frame(session, *afr);
