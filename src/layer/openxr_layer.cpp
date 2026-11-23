@@ -9495,6 +9495,12 @@ XrResult release_swapchain_image_locked(
 
     state->session->app_image_releases.fetch_add(1, std::memory_order_relaxed);
     const auto application_release = mark_application_release(state->session.get());
+    if (state->session->independent_pacing && state->session->private_runtime) {
+        // Independent snapshots readiness at Release, on the binding queue.
+        // Order that marker after the actual application/OSR writes first;
+        // the EndFrame join is too late to protect a separate copy queue.
+        join_runtime_queue_to_application(state->session.get(), application_release);
+    }
     if (pimax_native_binding_queue(*state->session)) {
         const bool relock = gpu_lock.owns_lock();
         if (relock) gpu_lock.unlock();

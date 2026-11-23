@@ -19,6 +19,7 @@
 #include "private_input_resource_test.inc"
 #include "private_completion_recovery_test.inc"
 #include "uevr_camera_loss_test.inc"
+#include "independent_source_queue_test.inc"
 
 // Model the native timing owner used by the shipping SteamVR endpoint. The old
 // fixture's instantaneous Wait only tested a consumer that imposed its own CPU
@@ -1245,6 +1246,7 @@ int main(int argc,char** argv) {
     if(route=="meter-native-confirmation")return independent_meter_test();
     if(route=="uevr-camera-loss")return uevr_camera_loss_test();
     if(route=="uevr-source-binding")return uevr_camera_loss_test(true);
+    if(route=="uevr-independent-source-fence")return independent_source_queue_test();
     const bool rife_luke=route.starts_with("rife-luke");
     const unsigned rife_luke_factor=route.find("luke4")!=std::string::npos?4:route.find("luke2")!=std::string::npos?2:3;
     const bool rife_tail=route.starts_with("rife-tail");
