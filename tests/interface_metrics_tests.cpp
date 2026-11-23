@@ -231,14 +231,14 @@ void wording() {
     s.desired.afw_mode=3;
     check(interface_status_text(s).find("OSR: Luke Ross")==std::string::npos, "Luke selection cannot fake OSR activity");
     {
-        // Experimental source receipts must not advertise supported UEVR reconstruction.
+        // The status identifies the active UEVR source after reconstruction succeeds.
         Snapshot u=s;
         u.desired.enabled=false;u.runtime.uevr_osr=true;
         check(interface_reconstruction_text(u,GetTickCount64())=="OSR: Off", "UEVR OSR attached, nothing reconstructed yet");
         u.runtime.heartbeat_ms=GetTickCount64();u.runtime.afw_running=true;
         check(interface_state_text(u)=="OSR" && interface_afw_only_active(u,GetTickCount64()), "UEVR OSR running reads as OSR");
-        check(interface_reconstruction_text(u,GetTickCount64())=="OSR: Unsupported source", "experimental source is not advertised as supported");
-        check(interface_status_text(u).find("UEVR")==std::string::npos, "experimental UEVR support is not advertised in the status line");
+        check(interface_reconstruction_text(u,GetTickCount64())=="OSR: UEVR", "active UEVR reconstruction identifies its source");
+        check(interface_status_text(u).find("UEVR Alternating detected")!=std::string::npos, "attached UEVR source appears in the status line");
     }
     s.runtime.luke_detected=s.runtime.vulkan_detected=true;
     s.runtime.generation_state=GenerationState::invalid_stereo;

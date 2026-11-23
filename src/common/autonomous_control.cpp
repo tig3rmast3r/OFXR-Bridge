@@ -1662,7 +1662,7 @@ std::string_view interface_reconstruction_text(const Snapshot& s,std::uint64_t n
     const bool active=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000 &&
         r.afw_running && !r.afw_flat_scene;
     if(!active)return osr?"OSR: Off":"AFW: Off";
-    if(osr)return r.luke_detected?"OSR: Luke Ross":"OSR: Unsupported source";
+    if(osr)return r.luke_detected?"OSR: Luke Ross":r.uevr_osr?"OSR: UEVR":"OSR: Unsupported source";
     return r.luke_detected?"AFW: Luke Ross":"AFW: Unsupported source";
 }
 std::string interface_status_text(const Snapshot& s,bool include_reconstruction) {
@@ -1710,6 +1710,7 @@ std::string interface_status_text(const Snapshot& s,bool include_reconstruction)
     }
     if (r.overlay_limit_mask) add("Overlay swapchain limit reached");
     if (r.luke_detected) add("Luke Ross detected");
+    if (r.uevr_osr) add("UEVR Alternating detected");
     if (r.vulkan_detected) add("Vulkan detected");
     if (r.vulkan_capture_suspended) add((r.generation_mode == 0 || r.generation_mode == 3)
         ? "Vulkan game-vector capture suspended: OFXR uses optical flow"
