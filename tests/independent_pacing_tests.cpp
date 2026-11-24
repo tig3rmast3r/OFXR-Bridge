@@ -8,9 +8,67 @@
 void automatic_buffer_tests();
 void source_phase_tests();
 void aer_copy_overlap_tests();
+static void osr_pair_phase_tests() {
+ for(const std::int64_t period:{8'333'333LL,11'111'111LL,13'888'889LL}) {
+  xrfg::IndependentSourcePhase phase;
+  const auto margin=std::min<std::int64_t>(1'000'000,period/8);
+  constexpr std::int64_t base=1'000'000'000;
+  std::int64_t shift=0;
+  std::uint64_t delivered=0;
+  auto now=base;
+  xrfg::IndependentPairHead head{};
+  // At each source appointment the previous pair has already retired. Keep
+  // the native S/B slots fixed while the next source gradually starts later.
+  for(unsigned pair=0;pair<300;++pair) {
+   now+=2*period;delivered+=2;
+   head.entered=now-period/4;
+   head.ready=head.entered-(period+margin-shift);
+   const auto step=phase.observe(now,period,2,0,2*period,delivered,0,0,false,&head);
+   check(step>=0 && step<=200'000 && head.ready+step<=head.entered-margin);
+   shift+=step;
+  }
+  check(shift==period && phase.trimmed()==period);
+  for(bool tagged:{false,true})for(bool distinct:{false,true}) {
+   xrfg::IndependentDeliveryClock grid;
+   grid.claim(base,period);grid.finish(base);
+   check(grid.claim(base+1,period)==base+period);
+   const auto late=base+period+3*period/4;
+   grid.finish(late,tagged);
+   grid.claim(late+1,period); // before the prefetched Wait is consumed
+   const auto target=grid.claim(late+2,period,distinct);
+   if(tagged && distinct) {
+    check(target==base+2*period);
+    const auto real=grid.entry(late+2);
+    check(real==late+period/2 && grid.entry(late+2,false)==real);
+    grid.finish(real);
+    check(grid.claim(real+1,period)==base+3*period);
+   } else check(target==base+3*period);
+  }
+  // A long residence of the real, stale observations, GPU completion after
+  // native entry, and missed deliveries cannot earn another adjustment.
+  const auto observe=[&](std::uint64_t idle) {
+   return phase.observe(now,period,2,3,4*period,delivered,0,idle,false,&head);
+  };
+  now+=2*period;delivered+=2;check(!observe(0)); // same receipt
+  now+=2*period;delivered+=2;
+  head={now-4*period,now-6*period};check(!observe(0)); // newly seen but stale
+  now+=2*period;delivered+=2;
+  head={now-period,now-period/2};check(!observe(0));
+  now+=2*period;delivered+=1;
+  head={now-period,now-3*period};check(!observe(1));
+  // A long run below refresh cannot trim, even with a full reported queue.
+  phase.reset();
+  for(unsigned n=0;n<300;++n) {
+   now+=2*period;++delivered;head={now-period,now-3*period};
+   check(!observe(1));
+  }
+  std::printf("OSR stereo pair: recovered %.3fms with zero pending at source appointments, stable native slots\n",shift/1e6);
+ }
+}
 int main(){
  source_phase_tests();
  aer_copy_overlap_tests();
+ osr_pair_phase_tests();
  // Captured-shaped startup backlog: older work completes in19ms and the
  // current job in44ms, followed by25ms/source. Keep exactly the same GPU
  // service and output schedule. A source budget can still remove19ms of

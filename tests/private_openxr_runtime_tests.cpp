@@ -1894,10 +1894,17 @@ void independent_grid_test(bool d12) {
     constexpr unsigned count=64;
     for(unsigned i=0;i<count;++i) {
         const auto chain=f.make_chain();f.begin_virtual();f.write(chain,40+i);
+        // Only the penultimate native packet is a tagged first synthetic.
+        // These submissions have no telemetry receipt or overlay.
+        if(i+2==count)f.transport->set_next_independent_deadline(0,true);
         xr_ok(f.submit(chain,float(i)),"absolute grid queued source");
     }
-    f.wait_count(count);xr_ok(f.transport->drain(),"absolute grid native drain");f.transport->stop();
+    f.wait_count(count);xr_ok(f.transport->drain(),"absolute grid native drain");
+    const auto head=f.transport->independent_load().pair_head;
+    f.transport->stop();
     check(f.handoffs.size()==count && f.positions.size()==count,"absolute grid lost or invented native images");
+    check(head.ready>0 && head.entered>=head.ready && head.entered<=f.handoffs[count-2] &&
+        head.entered>f.handoffs[count-3],"source phase did not retain the tagged native handoff");
     for(unsigned i=0;i<count;++i)check(f.positions[i]==float(i) && f.pixels[i]==40+i,"absolute grid changed FIFO image/pose");
     const auto mean=double(f.handoffs.back()-f.handoffs.front())/(count-1);
     std::printf("Independent %s absolute grid mean=%.6fms physical=%.6fms overhead=200us\n",d12?"D12":"D11",mean/1e6,period/1e6);
@@ -1948,6 +1955,7 @@ void independent_osr_content_test(bool d12) {
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=pose_time-123'456;
         end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
         f.transport->set_next_end_content_time(pose_time);
+        f.transport->set_next_independent_deadline(0, identity == 1);
         xr_ok(f.transport->end_frame(&end),"submit timestamped OSR stereo through the actual private endpoint");
     };
     for(unsigned identity=1;identity<=3;++identity) {
@@ -1958,6 +1966,9 @@ void independent_osr_content_test(bool d12) {
     xr_ok(f.transport->drain(),"OSR timestamped stereo drain");
     check(f.transport->last_native_display_time()==f.last_osr_native_prediction.load(),
         "OSR grid anchor remains the actual native cycle, independently of the content time");
+    const auto pair_head = f.transport->independent_load().pair_head;
+    check(pair_head.entered > 0 && pair_head.ready > 0,
+        "the timestamped OSR packet also contributes its Independent pair-head timing");
     check(f.replayed_ends==0,"an idle OSR source cannot be replayed with a different pose timestamp");
     const auto expired=f.transport->independent_load().expired;
     submit(4,pose_times[0]);

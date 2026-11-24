@@ -119,6 +119,7 @@ struct PrivateOpenXrRuntime::Impl {
     };
     struct Packet {
         bool batch_credit{};
+        bool phase_head{};
         std::uint64_t accepted_ordinal{};
         std::int64_t first_output_target{},spare_ns{},copy_ns{};
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
@@ -202,6 +203,7 @@ struct PrivateOpenXrRuntime::Impl {
     std::atomic<std::uint64_t> independent_expired_count{};
     std::atomic<std::uint64_t> independent_delivered_count{},independent_idle_count{};
     std::atomic<std::int64_t> independent_ready_residence{};
+    IndependentPairHead independent_pair_head; // guarded by mutex
     std::atomic<std::int64_t> independent_cycle_at{};
     std::deque<std::pair<std::int64_t,std::int64_t>> independent_misses; // due, queue-free availability; mutex guarded
     bool expired_independent(const Packet& packet) const noexcept {
@@ -213,7 +215,8 @@ struct PrivateOpenXrRuntime::Impl {
     unsigned refused_frames{};
     std::atomic_bool pair_next{};
     std::atomic<XrTime> next_content_time{};
-    std::atomic<std::int64_t> next_independent_due{};
+    struct EndTiming {std::int64_t due{};bool phase_head{};DWORD thread{};};
+    EndTiming next_independent_end; // passed to the submitting thread's reservation under mutex
     std::atomic<XrTime> last_end_display{}; // written by the consumer thread: the slot time of the last native End
     std::atomic<XrTime> last_end_prediction{}; // native cycle, independent of an OSR content timestamp
     XrResult failure{XR_SUCCESS};
@@ -1161,15 +1164,21 @@ struct PrivateOpenXrRuntime::Impl {
             IndependentDeliveryClock& clock;
             std::int64_t handed{};
             bool advance{true};
-            ~FinishCycle(){if(advance)clock.finish(handed);}
+            bool pair_head{};
+            ~FinishCycle(){if(advance)clock.finish(handed,pair_head);}
         };
         std::int64_t last_wait_cost{},last_period{11'111'111};
         struct DeliverySample {std::shared_ptr<Packet> packet;std::int64_t entered{};};
         std::deque<DeliverySample> pending_samples;
-        const auto record_residence=[&](std::int64_t entered,std::int64_t ready,std::int64_t physical) {
+        const auto record_residence=[&](const Packet& packet,std::int64_t entered,std::int64_t ready,std::int64_t physical) {
             const auto age=std::clamp(entered-ready,std::int64_t{},physical*4);
             const auto prior=independent_ready_residence.load();
             independent_ready_residence=prior?prior+(age-prior)/16:age;
+            if(packet.phase_head) {
+                std::scoped_lock lock(mutex);
+                if(entered>independent_pair_head.entered)
+                    independent_pair_head={entered,std::max(ready,packet.prepared_at)};
+            }
         };
         std::shared_ptr<Packet> held;
         std::vector<std::uint64_t> held_serials;
@@ -1225,7 +1234,7 @@ struct PrivateOpenXrRuntime::Impl {
                 if(!post_wait(0,false)){if(!stopping)fail(XR_ERROR_CALL_ORDER_INVALID);break;}
                 const auto physical=period(prediction.predictedDisplayPeriod);
                 last_wait_cost=wait_leave-wait_enter;last_period=physical;
-                cadence.claim(begun_at,physical);
+                cadence.claim(begun_at,physical,prediction.predictedDisplayTime>last_end_prediction);
                 FinishCycle cycle{cadence};
                 // A prefetched prediction can arrive during the prior End.
                 // Bound its delivery horizon at THIS Begin, while a genuinely
@@ -1237,7 +1246,7 @@ struct PrivateOpenXrRuntime::Impl {
                 // A fresh blocking native Wait already grants a paced cycle.
                 // Fast Waits enter a little BEFORE the absolute appointment;
                 // Wait/Begin/Release cost is not added to every new period.
-                const auto granted=cadence.delivered() && last_wait_cost<physical/2?cadence.entry(clock_ns()):clock_ns();
+                const auto granted=cadence.entry(clock_ns(),cadence.delivered() && last_wait_cost<physical/2);
                 // A prefetched prediction may be too old for this appointment.
                 // Consume a fresh native cycle without advancing the output
                 // grid or discarding the prepared FIFO head.
@@ -1261,7 +1270,7 @@ struct PrivateOpenXrRuntime::Impl {
                         if(entered && independent_ready_residence.load()<=physical/2+2'000'000)
                             reserve.delivered(available,sample->independent_due+reserve.reserve(),entered,physical);
                     }
-                    if(entered)record_residence(entered,ready,physical);
+                    if(entered)record_residence(*sample,entered,ready,physical);
                     if(tracing())options.trace(63,sample->sequence,available,sample->independent_due);
                     pending_samples.pop_front();
                 }
@@ -1343,7 +1352,7 @@ struct PrivateOpenXrRuntime::Impl {
                 end.displayTime=packet->content_time?packet->content_time:prediction.predictedDisplayTime;
                 if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
                 const auto entered=clock_ns();result=options.real.end(options.real.session,&end);
-                if(result==XR_SUCCESS && end.layerCount)cycle.handed=entered;
+                if(result==XR_SUCCESS && end.layerCount){cycle.handed=entered;cycle.pair_head=packet->phase_head;}
                 const auto returned=clock_ns();begun=false;
                 if(pending_samples.empty() && result==XR_SUCCESS && end.layerCount && packet->independent_due) {
                     // GPU readiness alone does not prove that native queue age
@@ -1355,7 +1364,7 @@ struct PrivateOpenXrRuntime::Impl {
                 }
                 if(result==XR_SUCCESS && end.layerCount) {
                     if(packet->copy_owns_sources)pending_samples.back().entered=entered;
-                    else if(pending_samples.empty())record_residence(entered,packet->prepared_at,physical);
+                    else if(pending_samples.empty())record_residence(*packet,entered,packet->prepared_at,physical);
                     ++independent_delivered_count;
                 }
                 observe_capture(*packet,end,result,entered,returned);
@@ -1953,6 +1962,7 @@ struct PrivateOpenXrRuntime::Impl {
 
 struct PrivateOpenXrRuntime::EndFrameReservation {
     std::shared_ptr<Impl> owner;
+    Impl::EndTiming independent_end;
     std::unique_lock<std::mutex> acceptance;
     DWORD thread{GetCurrentThreadId()};
     bool reserved{},counted{};
@@ -2028,6 +2038,7 @@ XrResult PrivateOpenXrRuntime::start() {
     s.independent_misses.clear();s.independent_preparing.reset();
     s.copying.clear();s.preparer_done=false;for(auto& bank:s.copy_banks)bank.busy=false;
     s.independent_delivered_count=0;s.independent_idle_count=0;s.independent_ready_residence=0;
+    s.independent_pair_head={};s.next_independent_end={};
     s.refresh_wait_policy=PrivateRefreshWaitPolicy{};s.independent_period=0;s.independent_reserve=0;s.independent_expired_count=0;s.independent_cycle_at=0;
     s.failure=XR_SUCCESS;s.stopping=false;s.seeded=false;s.independent_frame_requested=false;s.running=true;s.waits=s.begun=0;s.virtual_time=0;
     if(s.options.independent_pacing || !s.options.native_frame_contract || s.options.native_adaptive_wait_lookahead || s.options.native_director_only)s.waiter=std::thread([&s]{s.wait_loop();});
@@ -2190,7 +2201,7 @@ PrivateOpenXrRuntime::IndependentLoad PrivateOpenXrRuntime::independent_load() c
     const auto observed=s.independent_period.load();
     const auto physical=observed>0?observed:11'111'111;
     return {s.pending,std::min(s.independent_reserve.load(),physical*cap),physical,s.independent_expired_count.load(),s.independent_cycle_at.load(),
-        s.prepared.size(),s.independent_ready_residence.load(),s.independent_delivered_count.load(),s.independent_idle_count.load()};
+        s.prepared.size(),s.independent_ready_residence.load(),s.independent_delivered_count.load(),s.independent_idle_count.load(),s.independent_pair_head};
 }
 XrResult PrivateOpenXrRuntime::wait_frame(const XrFrameWaitInfo* info,XrFrameState* output) {
     if(!valid(info,XR_TYPE_FRAME_WAIT_INFO) || !output || output->type!=XR_TYPE_FRAME_STATE || output->next)return XR_ERROR_VALIDATION_FAILURE;
@@ -2244,14 +2255,17 @@ XrResult PrivateOpenXrRuntime::discard_virtual_frame() {
      if(XR_FAILED(s.failure))return s.failure;
      if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
      if(!s.begun)return XR_ERROR_CALL_ORDER_INVALID;
-     s.begun=0;s.pair_next=false;s.next_content_time=0;}
+     s.begun=0;s.pair_next=false;s.next_content_time=0;s.next_independent_end={};}
     s.changed.notify_all();return XR_SUCCESS;
 }
 XrTime PrivateOpenXrRuntime::last_native_display_time() const noexcept {
     return impl_->options.independent_pacing?impl_->last_end_prediction.load():impl_->last_end_display.load();
 }
 void PrivateOpenXrRuntime::set_next_end_content_time(XrTime time) noexcept {impl_->next_content_time.store(time);}
-void PrivateOpenXrRuntime::set_next_independent_deadline(std::int64_t time) noexcept {impl_->next_independent_due.store(time);}
+void PrivateOpenXrRuntime::set_next_independent_deadline(std::int64_t due,bool phase_head) noexcept {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->next_independent_end={due,phase_head,GetCurrentThreadId()};
+}
 XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::shared_ptr<InterfaceDeliveryReceipt>& delivery) {
     if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
     std::shared_ptr<EndFrameReservation> reservation;
@@ -2262,7 +2276,10 @@ XrResult PrivateOpenXrRuntime::reserve_end_frame(std::shared_ptr<EndFrameReserva
     output.reset();
     auto reservation=std::make_shared<EndFrameReservation>(impl_);
     auto& s=*impl_;
-    {std::scoped_lock lock(s.mutex);if(XR_FAILED(s.failure))return s.failure;if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
+    {std::scoped_lock lock(s.mutex);
+     if(s.options.independent_pacing && s.next_independent_end.thread==reservation->thread)
+         reservation->independent_end=std::exchange(s.next_independent_end,{});
+     if(XR_FAILED(s.failure))return s.failure;if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
      if(!s.begun){s.refused_end(1,GetCurrentThreadId(),s.waits);return XR_ERROR_CALL_ORDER_INVALID;}}
     {std::scoped_lock lock(s.mutex);++s.outstanding_reservations;reservation->counted=true;}
     if(!s.fifo->reserve()){std::scoped_lock lock(s.mutex);return XR_FAILED(s.failure)?s.failure:XR_ERROR_SESSION_NOT_RUNNING;}
@@ -2298,7 +2315,8 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
             s.changed.notify_all();}
     } transaction{s,packet};
     packet=std::make_shared<Impl::Packet>();packet->delivery=delivery;
-    packet->independent_due=s.options.independent_pacing?s.next_independent_due.exchange(0):0;
+    packet->independent_due=reservation->independent_end.due;
+    packet->phase_head=reservation->independent_end.phase_head;
     packet->clean_bypass=s.clean_bypass.load();
     packet->director=!packet->clean_bypass && s.director_enabled.load();
     packet->rife_handoff=!packet->clean_bypass && s.rife_handoff.load();

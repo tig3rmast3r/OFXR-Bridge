@@ -11,6 +11,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include "xrfg/private_output_distributor.hpp"
+#include "xrfg/independent_pacing.hpp"
 
 namespace xrfg {
 struct InterfaceDeliveryReceipt;
@@ -173,7 +174,8 @@ public:
     XrResult set_buffer_capacity(std::size_t,bool stabilization_active=true,bool reset_learning=false);
     [[nodiscard]] std::size_t buffer_capacity() const noexcept;
     struct IndependentLoad {std::size_t pending{};std::int64_t reserve{},period{};std::uint64_t expired{};std::int64_t cycle_ns{};
-        std::size_t prepared{};std::int64_t ready_residence{};std::uint64_t delivered{},idle{};};
+        std::size_t prepared{};std::int64_t ready_residence{};std::uint64_t delivered{},idle{};
+        IndependentPairHead pair_head{};};
     [[nodiscard]] IndependentLoad independent_load() const;
     [[nodiscard]] bool director_enabled() const noexcept;
     XrResult wait_frame(const XrFrameWaitInfo*, XrFrameState*);
@@ -206,7 +208,7 @@ public:
     // runtime reprojects the frame from the pose it was made for even when it
     // reaches a later slot than planned. Native-paced and Independent delivery.
     void set_next_end_content_time(XrTime time) noexcept;
-    void set_next_independent_deadline(std::int64_t) noexcept; // QPC ns, source-owned delivery slot
+    void set_next_independent_deadline(std::int64_t,bool phase_head=false) noexcept;
     // The last native delivery slot (0 before the first). Independent delivery
     // exposes its actual native prediction here, separately from the OSR
     // content timestamp carried by End, so OSR's grid stays tied to the runtime.

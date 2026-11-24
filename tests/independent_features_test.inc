@@ -54,6 +54,22 @@ static int independent_feature_inputs_test(bool reconstructed=false) {
     ProjectionResourceMapping mapping;mapping.application_swapchain=handle;mapping.views={{0,0}};
     std::shared_ptr<CompletedAfwFrame> afw;
     if(reconstructed) {
+        auto controls=xrfg::autonomous::snapshot().desired;
+        controls.afw_mode=3;controls.luke_osr=2;
+        check(xrfg::autonomous::request(controls),"enable OSR reconstruction");
+        xrfg::autonomous::apply_runtime_settings();
+        state->luke_afw_enabled=true;
+        state->dispatch->steamvr_runtime=true;
+        state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::nvidia;
+        state->dlss_motion_vectors=true; // OSR uses guides even with plain optical framegen
+        check(independent_osr_optical_pair(*state),"OSR with NVIDIA optical 2X uses measured pair phase");
+        state->nvidia_options.ofr=true;
+        check(!independent_osr_optical_pair(*state),"AER retains its own phase policy");
+        state->nvidia_options.ofr=false;state->nvidia_options.rife_model=0;
+        check(!independent_osr_optical_pair(*state),"RIFE retains its own phase policy");
+        state->nvidia_options.rife_model=-1;state->hybrid_requested=true;
+        check(!independent_osr_optical_pair(*state),"Hybrid retains its own phase policy");
+        state->hybrid_requested=false;
         afw=std::make_shared<CompletedAfwFrame>();afw->snapshot=snapshot;
         GeneratedFrameEndInfo owned;std::array<ProjectionResourceDestination,1> destinations{{{handle,handle}}};
         check(build_generated_frame_end_info(&end,snapshot,false,destinations,&owned),"completed reconstruction metadata");
@@ -65,6 +81,7 @@ static int independent_feature_inputs_test(bool reconstructed=false) {
     check(state->independent_sources.size()==1,"worker owns source");
     auto job=state->independent_sources.front();check(job->sources.size()==1 && job->sources[0]->history==history &&
         job->sources[0]->capture.serial==capture.serial && job->sources[0]->source_pin,"exact color capture survives admission");
+    check(job->osr_pair_phase==reconstructed,"phase eligibility belongs to the captured source");
     if(reconstructed)check(job->post_afw_frame==afw,"completed reconstruction identity retained");
     else check(job->sources[0]->motion_vectors==guides && job->sources[0]->motion_vectors->eyes[0]->serial==11,"later release cannot replace captured guides");
     state->independent_sources.clear();job.reset();state->presenter_stop_requested=true;

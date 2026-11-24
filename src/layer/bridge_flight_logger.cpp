@@ -413,7 +413,7 @@ struct BridgeFlightLogger::Impl {
         const bool fsr_description=record.operation>=BridgeFlightOperation::fsr_eye_binding &&
             record.operation<=BridgeFlightOperation::fsr_hudless_pair;
         const bool pacing_receipt=record.operation==BridgeFlightOperation::presenter_transition &&
-            ((record.result>=5770 && record.result<=5783) || record.result==113500 || record.result==5796 || record.result==5797 || record.result==5798 || record.result==5711 || record.result==5712 || record.result==5715 || record.result==5718 || record.result==5743 ||
+            ((record.result>=5770 && record.result<=5783) || record.result==113500 || record.result==113501 || record.result==5796 || record.result==5797 || record.result==5798 || record.result==5711 || record.result==5712 || record.result==5715 || record.result==5718 || record.result==5743 ||
              record.result==5716 || record.result==5717 || record.result==5733 ||
              record.result==5734 || record.result==5741 || record.result==5750 || record.result==5751 || record.result==9230 ||
              record.result==5756 || record.result==5757 || record.result==5758 || record.result==110010 || (record.result>=112900 && record.result<=112903) || record.result==98610 || record.result==112000 ||

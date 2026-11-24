@@ -51,6 +51,11 @@ inline std::size_t independent_phase_ready_count(bool split_aer,
     std::size_t pending,std::size_t prepared) noexcept {
     return split_aer?prepared:pending;
 }
+// First synthetic of a reconstructed stereo pair, measured at native End.
+// A queued GPU publication supplies its completed copy time.
+struct IndependentPairHead {
+    std::int64_t entered{},ready{};
+};
 // Consume surplus output ownership by postponing future source appointments,
 // never by accelerating native End or discarding rendered images. Qualification
 // survives isolated empty-ready/idle samples. Stereo still needs two ready
@@ -61,15 +66,22 @@ class IndependentSourcePhase {
     std::uint64_t delivered_{},expired_{},idle_{};
     IndependentRecoveryWindow recovery_;
     bool split_aer_{},aer_recovering_{};
+    bool paired_head_mode_{};
+    std::int64_t last_head_{};
 public:
     void reset() noexcept {*this={};}
     std::int64_t trimmed() const noexcept {return trimmed_;}
     std::int64_t observe(std::int64_t now,std::int64_t physical,unsigned divisor,
         std::size_t ready,std::int64_t residence,std::uint64_t delivered,
-        std::uint64_t expired,std::uint64_t idle,bool split_aer=false) noexcept {
+        std::uint64_t expired,std::uint64_t idle,bool split_aer=false,
+        const IndependentPairHead* head=nullptr) noexcept {
         if((divisor<1 || divisor>4) || physical<2'000'000 || physical>50'000'000 || now<=0){reset();return 0;}
-        if(period_!=physical || split_aer_!=split_aer || delivered<delivered_ || expired<expired_ || idle<idle_) {
+        const bool paired=head && divisor==2 && !split_aer;
+        if(period_!=physical || split_aer_!=split_aer || paired_head_mode_!=paired ||
+            delivered<delivered_ || expired<expired_ || idle<idle_) {
             reset();period_=physical;split_aer_=split_aer;
+            paired_head_mode_=paired;
+            if(paired)last_head_=head->entered;
         }
         if(last_ && now<=last_)return 0;
         const auto elapsed=last_?now-last_:0;last_=now;
@@ -78,7 +90,17 @@ public:
         const bool missed=lost || idle!=idle_;
         delivered_=delivered;expired_=expired;idle_=idle;
         const bool healthy=recovery_.observe(now,physical,fresh-std::min(fresh,lost));
-        const auto target=physical/2+2'000'000;
+        auto target=physical/2+2'000'000;
+        if(paired) {
+            // Sampling the queue from the next app Wait misses a head that
+            // has already left for SteamVR. Count each successful head once.
+            // The following real necessarily occupies a later refresh.
+            if(head->entered<=last_head_ || head->entered>now || now-head->entered>physical*3 ||
+                head->ready<=0)return 0;
+            last_head_=head->entered;
+            residence=head->entered-head->ready;
+            target=std::min<std::int64_t>(1'000'000,physical/8);
+        }
         if(split_aer) {
             // A real native output can already own the other prepared image;
             // requiring two remaining FIFO entries then preserves an extra
@@ -89,7 +111,7 @@ public:
                 ready && residence>target+physical/4)aer_recovering_=true;
         }
         if(!healthy || !fresh || missed || !elapsed || elapsed>physical*8 ||
-            ready<(split_aer?1U:2U) || residence<=target || (split_aer&&!aer_recovering_))return 0;
+            (!paired && ready<(split_aer?1U:2U)) || residence<=target || (split_aer&&!aer_recovering_))return 0;
         // At most8ms/second and200us per source. Closed-loop ready ownership
         // and residence end recovery; a lifetime one-P cap cannot recover a
         // second menu transient. No accumulated catch-up step after a veto.
@@ -178,27 +200,36 @@ inline std::int64_t independent_first_deadline(std::int64_t source,std::int64_t 
 // already supplies pacing; an immediately returning Wait uses this grid.
 class IndependentDeliveryClock {
     std::int64_t period_{},target_{},last_handoff_{};
+    std::int64_t paired_earliest_{};
     bool delivered_{};
 public:
-    std::int64_t claim(std::int64_t now,std::int64_t period) noexcept {
+    std::int64_t claim(std::int64_t now,std::int64_t period,bool distinct_prediction=true) noexcept {
         period=std::clamp<std::int64_t>(period,2'000'000,50'000'000);
-        if(period_!=period || !target_){period_=period;target_=now;last_handoff_=0;delivered_=false;}
+        if(period_!=period || !target_){period_=period;target_=now;last_handoff_=paired_earliest_=0;delivered_=false;}
+        if(!distinct_prediction)paired_earliest_=0;
         // Skip whole missed appointments, never manufacture a catch-up burst.
         if(now>target_+period_/2)target_+=((now-target_+period_/2)/period_)*period_;
-        if(last_handoff_ && target_<last_handoff_+period_/2+lead())target_+=period_;
+        if(last_handoff_ && !paired_earliest_ && target_<last_handoff_+period_/2+lead())target_+=period_;
         return target_;
     }
     std::int64_t target() const noexcept {return target_;}
     std::int64_t lead() const noexcept {return std::min<std::int64_t>(300'000,period_/8);}
-    std::int64_t entry(std::int64_t now) const noexcept {return std::max(now,target_-lead());}
+    std::int64_t entry(std::int64_t now,bool use_grid=true) const noexcept {
+        return std::max(paired_earliest_,use_grid?std::max(now,target_-lead()):now);
+    }
     bool delivered() const noexcept {return delivered_;}
-    void finish(std::int64_t handoff=0) noexcept {
+    void finish(std::int64_t handoff=0,bool pair_head=false) noexcept {
         // The first real handoff seeds phase once, including after loading.
         if(handoff) {
             if(!delivered_)target_=handoff;
             last_handoff_=handoff;delivered_=true;
         }
         target_+=period_;
+        // A late first synthetic can leave its real less than half a refresh
+        // away. Keep the next distinct native slot and its minimum spacing.
+        // The following appointment stays on the physical grid.
+        paired_earliest_=pair_head && handoff && target_-lead()<handoff+period_/2
+            ? handoff+period_/2 : 0;
     }
 };
 // At a source appointment, allow one outstanding batch plus earned reserve.
