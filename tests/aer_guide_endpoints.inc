@@ -114,6 +114,13 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
             require(synthesizer.can_pair_fsr(guides(serial)),"AER accepts exact next same-eye guides");
             require_hresult(history->capture(serial%2,&capture),"AER fresh eye capture");
             require_hresult(history->commit(capture),"AER fresh eye commit");
+            if (mode == xrfg::D3D12FrameGenerationMode::fsr3 && serial == 2 && !n1) {
+                xrfg::D3D12FrameSynthesisTicket refused{};
+                require(synthesizer.submit_pair(capture,{&view,1},{&view,1},0,0,&refused,
+                    std::nullopt,guides(serial+1),false,.5F,{},std::nullopt,false,1u<<eye) ==
+                    xrfg::kD3D12FrameSynthesisStaleGuides,
+                    "FSR skips a nonconsecutive guide pair through the recoverable worker path");
+            }
             auto input=guides(serial);
             ComPtr<ID3D12CommandQueue> producer;
             ComPtr<ID3D12Fence> gate,receipt;

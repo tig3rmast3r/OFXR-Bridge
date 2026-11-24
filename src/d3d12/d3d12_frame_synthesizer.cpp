@@ -4095,6 +4095,8 @@ struct D3D12FrameSynthesizer::Impl {
     // ALLOW_SIMULTANEOUS_ACCESS and copying across on the application's
     // queue - which is what the D3D11 interop path already does.
 
+    static constexpr std::uint64_t kGuidePredecessorMismatch = 16;
+
     [[nodiscard]] std::uint64_t game_motion_pair_failure_code(
         const RollingSource& previous_source,
         const RollingSource& current_source,
@@ -4116,7 +4118,7 @@ struct D3D12FrameSynthesizer::Impl {
             if (a->stream != b->stream) return 13 + 100 * eye;
             if (a->epoch != b->epoch) return 14 + 100 * eye;
             if (a->serial == 0) return 15 + 100 * eye;
-            if (b->previous_serial != a->serial) return 16 + 100 * eye;
+            if (b->previous_serial != a->serial) return kGuidePredecessorMismatch + 100 * eye;
             if (b->serial <= a->serial) return 17 + 100 * eye;
             if (!b->motion_vectors) return 18 + 100 * eye;
             if (!b->producer_queue) return 19 + 100 * eye;
@@ -4611,6 +4613,11 @@ struct D3D12FrameSynthesizer::Impl {
         if (guide_failure != 0) {
             report_fsr_frame_generation_status(
                 FsrFrameGenerationStatus::waiting_for_guides);
+            // A skipped DLSS publication leaves no motion for this interval.
+            // Discard the pair and let the worker prime both eyes again.
+            const HRESULT refusal = guide_failure % 100 == kGuidePredecessorMismatch
+                ? kD3D12FrameSynthesisStaleGuides
+                : DXGI_ERROR_WAS_STILL_DRAWING;
             const auto previous_serial = previous_source.motion_vectors &&
                     previous_source.motion_vectors->eye_count != 0 &&
                     previous_source.motion_vectors->eyes[0]
@@ -4623,11 +4630,11 @@ struct D3D12FrameSynthesizer::Impl {
                 : 0;
             bridge_flight_logger().event(
                 BridgeFlightOperation::fsr_recovery,
-                DXGI_ERROR_WAS_STILL_DRAWING,
+                refusal,
                 100 + guide_failure,
                 previous_serial,
                 current_serial);
-            return DXGI_ERROR_WAS_STILL_DRAWING;
+            return refusal;
         }
         if (cinema_projection &&
             (current_source.presentation_transform.view_count !=
