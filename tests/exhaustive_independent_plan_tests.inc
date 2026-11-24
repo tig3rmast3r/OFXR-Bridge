@@ -7,7 +7,28 @@ void exhaustive_independent_plan_cases() {
         Settings original;original.advanced_mode=true;original.independent_pacing=true;original.ofr_enabled=aer;
         original.afw_mode=3;original.luke_osr=2;original.nr_enabled=true;original.ofr_swap=true;
         original.pacing_mode=1;original.increase_buffer=true;original.lower_vram=original.separate_synthesis=1;
-        check(std::is_sorted(plan.begin(),plan.end(),[](const auto& a,const auto& b){return a.rife_multiplier<b.rife_multiplier;}),"all2X complete before3X and4X");
+        const auto other_end = luke ? std::find_if(plan.begin(), plan.end(),
+            [](const auto& step) { return step.generation == 4; }) : plan.end();
+        check(std::is_sorted(plan.begin(), other_end, [](const auto& a, const auto& b) {
+            return a.rife_multiplier < b.rife_multiplier;
+        }), "preserve tier order outside the Luke RIFE block");
+        if (luke) {
+            std::vector<std::tuple<int,int,int>> rife_order;
+            for (auto trial = other_end; trial != plan.end(); ++trial) {
+                check(trial->generation == 4, "Luke measures every RIFE trial in one block");
+                rife_order.emplace_back(trial->aer, trial->rife_multiplier, trial->osr_lower_quality);
+            }
+            check(rife_order == std::vector<std::tuple<int,int,int>>{
+                {1,2,-1}, {1,4,-1}, {0,2,0}, {0,2,1}, {0,3,0}, {0,3,1}, {0,4,0}, {0,4,1}
+            }, "Luke RIFE keeps AER together and pairs OSR variants at the same multiplier");
+
+            // The wide CSV is keyed by the original ordered trial labels.
+            const auto columns = benchmark_export_plan(full,true,true,true,quality,true,aer);
+            check(columns.size() == plan.size() && columns[4].generation == 4 &&
+                std::is_sorted(columns.begin(), columns.end(), [](const auto& a, const auto& b) {
+                    return a.rife_multiplier < b.rife_multiplier;
+                }), "Luke execution order does not move the CSV columns");
+        }
         for(const auto& step:plan) {
             check(seen.emplace(step.generation,step.backend,step.rife_multiplier,step.disabled,step.osr_lower_quality,step.aer).second,"no duplicate method/multiplier/reconstruction combinations");
             check(step.pacing==-1 && step.buffer==-1 && !step.a && !step.b,"no legacy pacing permutations");

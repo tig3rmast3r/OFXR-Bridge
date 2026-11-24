@@ -141,6 +141,14 @@ inline std::vector<BenchmarkStep> benchmark_execution_plan(bool full,bool luke,b
     if(luke)std::erase_if(steps,[&](const auto& step) {
         return !(independent && step.aer==1) && !benchmark_afw_quality_allowed(step.shading,eye_long_side);
     });
+    if (independent && luke) {
+        // Enter RIFE once after the other methods. AER is already selected
+        // there, and each pair of OSR variants can share the same multiplier.
+        const auto rife_begin = std::stable_partition(steps.begin(), steps.end(),
+            [](const auto& step) { return step.generation != 4; });
+        std::stable_partition(rife_begin, steps.end(),
+            [](const auto& step) { return step.aer == 1; });
+    }
     return steps;
 }
 inline std::vector<BenchmarkStep> benchmark_export_plan(bool full,bool luke,bool steamvr,bool advanced=false,int rife_quality=18,bool independent=false,bool aer=false) {

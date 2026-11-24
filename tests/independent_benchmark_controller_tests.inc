@@ -24,6 +24,8 @@ void independent_controller(bool aer,bool full,bool luke,double two,double three
     while(benchmark_active(snapshot().benchmark)) {
         auto state=snapshot();const auto settings=state.desired;const auto& step=plan.at(done);
         const auto factor=generation_multiplier(settings);const bool rife=settings.frame_generation==4;
+        require(settings.frame_generation==step.generation && std::string_view(state.benchmark.label)==step.label,
+            "controller applies and labels each method in execution order");
         require(settings.pacing_mode==saved.pacing_mode && settings.increase_buffer && settings.lower_vram==saved.lower_vram && settings.nr_enabled && settings.ofr_swap,"NR and dormant preferences unchanged");
         require(settings.ofr_enabled==bool(step.aer) && settings.afw_mode==step.afw,"per-trial mode applied");
         require(settings.frame_generation!=0 || settings.backend==1,"no FidelityFX");
