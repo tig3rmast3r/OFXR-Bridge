@@ -23,6 +23,34 @@ static int independent_feature_settings_test() {
         const auto effective=effective_session_settings(*session,xrfg::embedded::snapshot().desired);
         check(saved.hybrid_backend==backend && effective.backend==(backend==0?0:1),"Independent Hybrid uses the same single NVIDIA engine as Independent OFXR without destroying the saved legacy preference");
     }
+    // Direct embedded controls can precede the first Luke status publication.
+    // Verify the actual session transition even with no UI-side correction.
+    session->luke_afw_enabled = true;
+    auto afw = xrfg::embedded::afw_snapshot().desired;
+    afw.mode = 3;
+    afw.osr = 2;
+    auto settings = xrfg::embedded::snapshot().desired;
+    settings.enabled = true;
+    settings.hybrid = false;
+    settings.motion_vectors = 1;
+    settings.rife_model = -1;
+    settings.rife_multiplier = 2;
+    settings.frame_generation = 1;
+    settings.ofr = afw.ofr = true;
+    check(xrfg::embedded::request_afw(afw) && xrfg::embedded::request(settings),
+        "stage direct AER FSR control");
+    ok(apply_embedded_control(session), "apply direct AER FSR");
+    check(session->nvidia_options.ofr &&
+        session->frame_generation_mode == xrfg::D3D12FrameGenerationMode::fsr3 &&
+        session->dlss_motion_vectors, "AER still consumes native FSR guides");
+    settings.ofr = afw.ofr = false;
+    check(xrfg::embedded::request_afw(afw) && xrfg::embedded::request(settings),
+        "turn off AER without changing the direct FSR preference");
+    ok(apply_embedded_control(session), "switch the existing session back to OSR");
+    check(session->menu_enabled && !session->nvidia_options.ofr &&
+        session->frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr &&
+        session->luke_afw_resources_needed.value_or(false) && session->dlss_motion_vectors,
+        "optical generation and OSR guide capture both remain available after FSR");
     std::puts("INDEPENDENT_FEATURES methods0..4, immutable route, reconstruction/camera/NR and legacy pacing bypass PASS");return 0;
 }
 

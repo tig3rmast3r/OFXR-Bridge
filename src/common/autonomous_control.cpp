@@ -83,7 +83,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 107101;
+constexpr std::uint32_t kAbi = 107201;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -862,7 +862,9 @@ bool request(Settings desired) noexcept {
         if(!connection.global) {const auto advanced=global_advanced_mode(2000);if(!advanced)return false;desired.advanced_mode=*advanced;}
         desired = sanitize(desired);
         Lock lock(connection, 2000);
-        if (!lock.acquired || !save(*connection.data,desired)) return false;
+        if (!lock.acquired) return false;
+        xrfg::select_luke_reconstruction_generator(desired, connection.data->snapshot.runtime);
+        if (!save(*connection.data,desired)) return false;
         if (connection.data->snapshot.desired != desired) {
             if(benchmark_active(connection.data->snapshot.benchmark)) {
                 auto& b=connection.data->snapshot.benchmark;b.phase=BenchmarkPhase::stopped;
@@ -922,7 +924,8 @@ bool request_changes(const Settings& base, const Settings& desired) noexcept {
         if (!lock.acquired) return false;
         auto current=connection.data->snapshot.desired,prior=base,edited=desired;
         if(!global)current.advanced_mode=prior.advanced_mode=edited.advanced_mode=*advanced;
-        const auto merged = merge_changes(current, prior, edited);
+        auto merged = merge_changes(current, prior, edited);
+        xrfg::select_luke_reconstruction_generator(merged, connection.data->snapshot.runtime);
         if (merged == connection.data->snapshot.desired) return true;
         if (!save(*connection.data,merged)) return false;
         if(benchmark_active(connection.data->snapshot.benchmark)) {
@@ -1013,7 +1016,9 @@ bool suite_publish(Shared& shared,Settings desired,std::uint64_t now) {
     return true;
 }
 void suite_restore(Shared& shared,BenchmarkPhase phase,const char* message,std::uint64_t now) {
-    const bool restored=suite_publish(shared,shared.benchmark_saved,now);
+    auto desired=shared.benchmark_saved;
+    xrfg::select_luke_reconstruction_generator(desired, shared.snapshot.runtime);
+    const bool restored=suite_publish(shared,desired,now);
     auto& b=shared.snapshot.benchmark;
     b.phase=restored ? phase : BenchmarkPhase::error;
     std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(0,std::memory_order_release);
@@ -1433,7 +1438,12 @@ void report_runtime(RuntimeStatus status) noexcept {
             status.gpu_usage = connection.data->snapshot.runtime.gpu_usage;
             status.cpu_usage = connection.data->snapshot.runtime.cpu_usage;
         }
-        connection.data->snapshot.runtime = status;
+        auto& snapshot = connection.data->snapshot;
+        snapshot.runtime = status;
+        // An older profile may already have this combination when Luke attaches.
+        if (!benchmark_active(snapshot.benchmark) &&
+            xrfg::select_luke_reconstruction_generator(snapshot.desired, status))
+            ++snapshot.revision;
 #ifdef _WIN32
         discovery().report(status);
 #endif

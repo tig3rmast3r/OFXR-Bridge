@@ -1786,7 +1786,19 @@ private:
 
 [[nodiscard]] xrfg::embedded::Settings effective_session_settings(
     const SessionState& state, xrfg::embedded::Settings requested) noexcept {
-    xrfg::constrain_radeon_routes(requested,xrfg::rendering_gpu_vendor());
+    const auto vendor = xrfg::rendering_gpu_vendor();
+    // The session can detect Luke before the first UI status publication.
+    // Keep native stereo admission from intercepting reconstruction on that boundary.
+    if (state.luke_afw_enabled && !state.afw_only && requested.enabled && !requested.ofr &&
+        xrfg::framegen_requires_native_stereo(requested.frame_generation) &&
+        xrfg::embedded::afw_snapshot().desired.mode != 0) {
+        requested.frame_generation = 0;
+        requested.backend = xrfg::reconstruction_optical_backend(vendor);
+        requested.motion_vectors = 0;
+        requested.rife_multiplier = 2;
+        requested.native_scale = 100;
+    }
+    xrfg::constrain_radeon_routes(requested,vendor);
     requested.independent_pacing=state.independent_pacing;
     if(state.independent_pacing) {
         requested.pacing_mode=0;requested.increase_buffer=false;

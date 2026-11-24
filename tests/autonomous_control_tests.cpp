@@ -1,4 +1,5 @@
 #include "xrfg/autonomous_control.hpp"
+#include "xrfg/gpu_route_support.hpp"
 #include "xrfg/upscaler_observation.hpp"
 #include <windows.h>
 #include <cwctype>
@@ -16,6 +17,47 @@ int checks{};
 void require(bool value, const char* detail) {
     ++checks;
     if (!value) throw std::runtime_error(detail);
+}
+void luke_reconstruction_framegen() {
+    using namespace xrfg::autonomous;
+    for (unsigned vendor : {0x10deU, 0x1002U}) {
+        RuntimeStatus runtime;
+        runtime.luke_detected = true;
+        runtime.sessions = 1;
+        runtime.gpu_vendor = vendor;
+        for (int generator : {1, 2}) {
+            Settings aer;
+            aer.advanced_mode = aer.independent_pacing = aer.ofr_enabled = true;
+            select_generation(aer, generator, 0);
+            aer.afw_mode = 3;
+            aer.luke_osr = 2;
+            aer.nr_enabled = true;
+            auto next = aer;
+            require(!xrfg::select_luke_reconstruction_generator(next, runtime) && next == aer,
+                "AER keeps its native stereo generator and guide settings");
+            next.ofr_enabled = false;
+            auto other = runtime;
+            other.luke_detected = false;
+            require(!xrfg::select_luke_reconstruction_generator(next, other),
+                "ordinary stereo can still use native guides");
+            auto off = next;
+            off.afw_mode = 0;
+            require(!xrfg::select_luke_reconstruction_generator(off, runtime),
+                "explicitly disabled reconstruction keeps the selected generator");
+            off = next;
+            off.enabled = false;
+            require(!xrfg::select_luke_reconstruction_generator(off, runtime),
+                "reconstruction-only with framegen off keeps its saved preference");
+            require(xrfg::select_luke_reconstruction_generator(next, runtime),
+                "turning off AER selects optical flow when OSR resumes");
+            require(next.frame_generation == 0 && next.backend == (vendor == 0x1002U ? 0 : 1) &&
+                next.motion_vectors == 0 && next.generation_profiles[next.backend].motion_vectors == 0 &&
+                next.enabled && next.afw_mode == 3 && next.luke_osr == 2 && next.nr_enabled,
+                "uses the active GPU's optical flow without changing reconstruction");
+            require(!xrfg::select_luke_reconstruction_generator(next, runtime),
+                "compatible selection does not require another transition");
+        }
+    }
 }
 void codec() {
     using xrfg::autonomous::GenerationState;
@@ -490,6 +532,7 @@ int wmain(int count, wchar_t** arguments) {
             return 0;
         }
         codec();
+        luke_reconstruction_framegen();
         basic_defaults_policy();
         route_profiles();
         const auto fixture = std::filesystem::temp_directory_path() /
@@ -590,6 +633,43 @@ int wmain(int count, wchar_t** arguments) {
         require(xrfg::autonomous::request_changes(merged.desired, generation), "generation switch delta");
         require(xrfg::autonomous::snapshot().desired.motion_vectors == 1,
             "merged generation selection still enforces native guides");
+        // Reproduce the in-game delta, then simulate a profile which already
+        // had FSR and OSR selected before Luke's first status heartbeat.
+        using namespace xrfg::autonomous;
+        auto fsr = snapshot().desired;
+        select_generation(fsr, 1, 0);
+        fsr.enabled = fsr.ofr_enabled = true;
+        fsr.afw_mode = 3;
+        fsr.luke_osr = 2;
+        fsr.frame_multiplier = 4;
+        RuntimeStatus luke{};
+        luke.sessions = 1;
+        luke.luke_detected = true;
+        report_runtime(luke);
+        require(request(fsr), "start on AER FSR");
+        const auto old_aer = snapshot();
+        auto fsr_to_osr = old_aer.desired;
+        fsr_to_osr.ofr_enabled = false;
+        require(old_aer.desired.frame_generation == 1 && request_changes(old_aer.desired, fsr_to_osr),
+            "publish the headset's AER-off edit without touching the generator control");
+        const auto osr = snapshot();
+        require(osr.desired.frame_generation == 0 && osr.desired.enabled && osr.desired.afw_mode == 3 &&
+            osr.desired.backend == xrfg::reconstruction_optical_backend(osr.runtime.gpu_vendor) &&
+            osr.revision == old_aer.revision + 1, "IPC publishes the compatible engine and OSR together");
+        const auto saved_path = configuration_path();
+        std::ifstream saved(saved_path);
+        const std::string text((std::istreambuf_iterator<char>(saved)), {});
+        saved.close();
+        require(parse_settings(text).frame_generation == 0, "the compatible engine persists in the profile");
+        report_runtime({});
+        require(request(fsr_to_osr) && snapshot().desired.frame_generation == 1,
+            "an old profile could retain the incompatible native generator before detection");
+        report_runtime(luke);
+        const auto attached = snapshot();
+        require(attached.desired.frame_generation == 0 && attached.desired.afw_mode == 3,
+            "first Luke heartbeat resolves the preexisting unsupported combination");
+        report_runtime(luke);
+        require(snapshot().revision == attached.revision, "following heartbeats keep the compatible revision");
         using xrfg::autonomous::OverlaySwapchain;
         xrfg::autonomous::report_runtime({}); // current reporter takes over the completed peer fixture
         xrfg::autonomous::report_gpu_usage({GetTickCount64(),83,true});
