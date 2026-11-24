@@ -1,13 +1,14 @@
 #pragma once
+#include "xrfg/luke_depth_format.hpp"
 #include <d3d12.h>
 
 namespace DlssNr {
 inline DXGI_FORMAT NrTypedGuideFormat(DXGI_FORMAT f) noexcept {
+    // The private copy must be shader-readable when NR resizes its guides.
+    // Keep the depth plane's numeric format, including typed DSV sources.
+    if (const auto depth = xrfg::luke_depth_format(f); depth.srv != DXGI_FORMAT_UNKNOWN)
+        return depth.srv;
     switch (f) {
-    case DXGI_FORMAT_R32_TYPELESS: return DXGI_FORMAT_R32_FLOAT;
-    case DXGI_FORMAT_R16_TYPELESS: return DXGI_FORMAT_R16_UNORM;
-    case DXGI_FORMAT_R24G8_TYPELESS: return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-    case DXGI_FORMAT_R32G8X24_TYPELESS: return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
     case DXGI_FORMAT_R32G32_TYPELESS: return DXGI_FORMAT_R32G32_FLOAT;
     case DXGI_FORMAT_R16G16_TYPELESS: return DXGI_FORMAT_R16G16_FLOAT;
     case DXGI_FORMAT_R8G8B8A8_TYPELESS: return DXGI_FORMAT_R8G8B8A8_UNORM;

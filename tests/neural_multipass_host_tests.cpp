@@ -184,6 +184,112 @@ void padded_output_run(nr_test::Gpu& gpu,float scale) {
     gpu.reset();settings.enabled=false;xrfg::neural_rendering::configure(settings);gpu.submit();
     std::printf("NR_PADDED_DISPLAY scale=%.2f:two eye ROIs,4px output padding,full-resolution MV,2pass exact guides/scales/output,padding preserved PASS\n",scale);
 }
+
+void depth_stencil_scale_run(nr_test::Gpu& gpu, bool cold, bool before) {
+    using namespace nr_test;
+    constexpr unsigned size = 96;
+    constexpr unsigned eye = 901;
+    constexpr auto readable = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    constexpr auto writable = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    constexpr float scene_depth = .375f;
+    need(gpu.messages != nullptr, "depth/stencil test requires D3D12 validation");
+    hr(gpu.messages->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE));
+    hr(gpu.messages->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE));
+    auto depth = gpu.texture(size, size, DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, 1, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    heap_desc.NumDescriptors = 1;
+    ComPtr<ID3D12DescriptorHeap> dsv;
+    hr(gpu.device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&dsv)));
+    const auto view = dsv->GetCPUDescriptorHandleForHeapStart();
+    gpu.device->CreateDepthStencilView(depth.Get(), nullptr, view);
+    gpu.list->ClearDepthStencilView(view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+        scene_depth, 93, 0, nullptr);
+    move(gpu.list.Get(), depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, readable);
+
+    auto motion = gpu.texture(size, size, DXGI_FORMAT_R32G32_FLOAT, readable);
+    gpu.fill(motion.Get(), readable, {.125f, -.25f, 0, 0});
+    auto color = gpu.texture(size, size, DXGI_FORMAT_R32G32B32A32_FLOAT, readable);
+    const unsigned output_size = before ? 2 * size : size;
+    auto output = gpu.texture(output_size, output_size, DXGI_FORMAT_R32G32B32A32_FLOAT, writable);
+    Params params;
+    params.Set(NVSDK_NGX_Parameter_Color, color.Get());
+    params.Set(NVSDK_NGX_Parameter_Output, output.Get());
+    params.Set(NVSDK_NGX_Parameter_Depth, depth.Get());
+    params.Set(NVSDK_NGX_Parameter_MotionVectors, motion.Get());
+    params.Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, 0x6aU);
+    params.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, size);
+    params.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, size);
+    params.Set(NVSDK_NGX_Parameter_OutWidth, output_size);
+    params.Set(NVSDK_NGX_Parameter_OutHeight, output_size);
+    params.Set(NVSDK_NGX_Parameter_MV_Scale_X, -float(size));
+    params.Set(NVSDK_NGX_Parameter_MV_Scale_Y, -float(size));
+
+    auto* target = before ? color.Get() : output.Get();
+    const auto target_state = before ? readable : writable;
+    const auto record = [&] {
+        gpu.fill(target, target_state, {.2f, .3f, .4f, .6f});
+        if (before)
+            xrfg::neural_rendering::before_sr(eye, gpu.list.Get(), &params, gpu.queue.Get());
+        else
+            xrfg::neural_rendering::after_sr(eye, gpu.list.Get(), &params, gpu.queue.Get());
+    };
+    const auto validate = [&] {
+        unsigned errors{};
+        for (UINT64 i = 0; i < gpu.messages->GetNumStoredMessages(); ++i) {
+            SIZE_T bytes{};
+            hr(gpu.messages->GetMessage(i, nullptr, &bytes));
+            std::vector<char> storage(bytes);
+            auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+            hr(gpu.messages->GetMessage(i, message, &bytes));
+            if (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+                message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION) {
+                std::fprintf(stderr, "D3D12: %s\n", message->pDescription);
+                ++errors;
+            }
+        }
+        need(!errors, "NR may only record valid depth/stencil copies and views");
+    };
+    xrfg::neural_rendering::Settings settings;
+    settings.enabled = true;
+    settings.before_sr = before;
+    settings.transfer_strength = settings.colour_strength = 1.f;
+    const std::array scales{cold ? .5f : 1.f, .5f, 1.f};
+    for (float scale : scales) {
+        settings.working_scale = scale;
+        xrfg::neural_rendering::configure(settings);
+        Readback result;
+        // Each working scale first creates its model on its own GPU recording.
+        for (unsigned i = 0; i < 3; ++i) {
+            record();
+            validate();
+            result = gpu.capture(target, target_state);
+            gpu.submit();
+            validate();
+            if (i < 2) gpu.reset();
+        }
+        need(gpu.device->GetDeviceRemovedReason() == S_OK, "GPU survives the NR scale change");
+        need(gpu.evaluations.size() == 1 && xrfg::neural_rendering::status().running,
+            "NR evaluates at the requested scale");
+        const auto& evaluation = gpu.evaluations[0];
+        const auto work = static_cast<unsigned>(size * scale);
+        need(evaluation.width == work && evaluation.height == work, "model uses the requested working extent");
+        need(std::abs(gpu.pixel(evaluation.depthPixels)[0] - scene_depth) < .0001f,
+            "the model receives the depth plane rather than stencil");
+        const auto resolved = gpu.pixel(result, size / 2, size / 2);
+        need(std::abs(resolved[0] - .325f) < .0001f &&
+            std::abs(resolved[3] - .6f) < .0001f, "NR resolves edited colour back to the original extent");
+        gpu.reset();
+    }
+    xrfg::neural_rendering::retire_handle(eye);
+    TickNrRetired();
+    need(live.empty(), "scale changes and final retirement release the models");
+    gpu.submit();
+    validate();
+    std::printf("NR %s %s 50%%: D32+S8 depth, working extent, colour resolve and D3D12 validation PASS\n",
+        before ? "pre-SR" : "post-SR", cold ? "cold" : "live");
+}
 void quad_run(nr_test::Gpu& gpu,float scale,bool noUav=false,bool arrayDepth=false) {
     using namespace nr_test;
     constexpr auto state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -295,6 +401,12 @@ int main(int argc,char** argv)try{
     g_runtime.forwarder=LoadLibraryW(L"kernel32.dll");g_runtime.forwarderReady=true;g_runtime.floatSlotKnown=true;
     g_runtime.create=create;g_runtime.evaluate=evaluate;g_runtime.release=release;g_runtime.setContract=contract;g_runtime.setExtras=extras;g_capabilityFloatSlot=1;
     services().initialized=true;services().capability=capabilities;services().destroy=destroy_parameters;
+    if (mode.ends_with("depth-stencil-half") || mode == "depth-stencil-live") {
+        depth_stencil_scale_run(gpu, mode != "depth-stencil-live", before);
+        std::filesystem::remove(folder/L"nvngx_dlssnr.dll");
+        std::filesystem::remove(folder);
+        return 0;
+    }
     if(mode.starts_with("padded-display")) {
         padded_output_run(gpu,mode=="padded-display-half"?.5f:1.f);
         if(gpu.messages)for(UINT64 i=0;i<gpu.messages->GetNumStoredMessages();++i){SIZE_T size{};gpu.messages->GetMessage(i,nullptr,&size);std::vector<char> b(size);auto* m=reinterpret_cast<D3D12_MESSAGE*>(b.data());hr(gpu.messages->GetMessage(i,m,&size));need(m->Severity!=D3D12_MESSAGE_SEVERITY_ERROR&&m->Severity!=D3D12_MESSAGE_SEVERITY_CORRUPTION,m->pDescription);}
