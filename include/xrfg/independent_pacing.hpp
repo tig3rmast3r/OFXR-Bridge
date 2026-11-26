@@ -84,8 +84,13 @@ public:
         receipt_=head.entered;
         const auto target=p/2+2'000'000;
         const auto age=head.entered-head.ready;
+        // A head is sampled at the next source appointment, after its copy
+        // completion can be retired on a later native cycle. Allow that source
+        // interval, one native cycle and ordinary quarter-refresh jitter for
+        // 3X/4X. Keep the validated 2X freshness bound unchanged.
+        const auto receipt_window=divisor<=2?3*p:(std::int64_t(divisor)+1)*p+p/4;
         if(!head.source_due || head.source_due<=cooldown_due_ || !head.ready ||
-            head.ready>head.entered || head.entered>now || now-head.entered>3*p ||
+            head.ready>head.entered || head.entered>now || now-head.entered>receipt_window ||
             age>4*p || age<=target+p/4 || !fresh) {clear();return 0;}
         if(!first_ || head.entered-last_>std::int64_t(divisor)*p*2) {
             clear();first_=head.entered;minimum_=age;

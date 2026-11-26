@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1088.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1089.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -152,6 +152,10 @@ if(XRFG_BUILD_TESTS)
     target_include_directories(xrfg_independent_startup_replay_tests PRIVATE include)
     target_compile_features(xrfg_independent_startup_replay_tests PRIVATE cxx_std_20)
     add_test(NAME xrfg_independent_startup_replay COMMAND xrfg_independent_startup_replay_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/pimax_r15_startup_recovery.csv")
+    add_executable(xrfg_independent_receipt_freshness_tests tests/independent_receipt_freshness_tests.cpp)
+    target_include_directories(xrfg_independent_receipt_freshness_tests PRIVATE include)
+    target_compile_features(xrfg_independent_receipt_freshness_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_independent_receipt_freshness COMMAND xrfg_independent_receipt_freshness_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/pimax_r16_phase_receipts.csv")
 
     add_executable(xrfg_rife_handoff_schedule_tests tests/rife_handoff_schedule_tests.cpp)
     target_include_directories(xrfg_rife_handoff_schedule_tests PRIVATE include)

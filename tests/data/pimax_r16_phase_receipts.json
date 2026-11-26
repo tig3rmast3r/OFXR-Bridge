@@ -1,0 +1,18 @@
+{
+  "log": "ofxr-bridge-flight-20261126-014254-430-pid63892-0.log",
+  "log_sha256": "53d56738755c33243444b561af715da594e8ae96a3ff9eaecf10731cf10de1c6",
+  "fixture_sha256": "946b45cbb09a2349bddcb420d0661b4f02eb1c7f2fb5ee0b82a9f21282c35b5e",
+  "period_ns": 11111128,
+  "multiplier": 3,
+  "rows": 155,
+  "columns": [
+    "observed_qpc_ns",
+    "head_entered_ns",
+    "head_completed_ready_ns",
+    "first_source_due_ns_or_zero_if_backlogged",
+    "delivered",
+    "expired",
+    "idle"
+  ],
+  "scope": "First VR session only, source checks from38.5s to43.65s, before the subsequent2X switch. Native/copy receipts are joined by session-scoped packet ID. Observation QPC is reconstructed at logged timestamp precision using arming receipts. Replays original measurements for phase eligibility and correction bounds; no counterfactual GPU work, native deadline shift or headset recovery duration is claimed."
+}
