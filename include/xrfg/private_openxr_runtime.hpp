@@ -177,6 +177,9 @@ public:
         std::size_t prepared{};std::int64_t ready_residence{};std::uint64_t delivered{},idle{};
         IndependentPairHead pair_head{};};
     [[nodiscard]] IndependentLoad independent_load() const;
+    // One-off generator construction is not recurring source lateness. Expire
+    // affected outputs normally, but exclude their source batch from training.
+    void finish_generation_initialization() noexcept;
     [[nodiscard]] bool director_enabled() const noexcept;
     XrResult wait_frame(const XrFrameWaitInfo*, XrFrameState*);
     XrResult predict_frame(XrFrameState*); // upper virtual application clock

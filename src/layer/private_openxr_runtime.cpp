@@ -216,6 +216,7 @@ struct PrivateOpenXrRuntime::Impl {
     std::atomic<std::int64_t> independent_cycle_at{};
     std::atomic_uint optional_work_active{};
     std::atomic<std::int64_t> optional_work_finished{};
+    std::atomic<std::int64_t> generation_initialized_at{};
     struct OptionalWork {
         Impl& owner;bool enabled;std::int64_t started{};
         OptionalWork(Impl& owner,bool enabled):owner(owner),enabled(enabled&&owner.options.independent_pacing) {
@@ -818,8 +819,7 @@ struct PrivateOpenXrRuntime::Impl {
             std::scoped_lock lock(mutex);
             // Learn only when its GPU/source readiness is known. Our FIFO and
             // native target ownership must not purchase more expiry allowance.
-            const auto available=packet->independent_available_at
-                ? packet->independent_available_at : packet->source_ready_at;
+            const auto available=packet->source_ready_at;
             if(available)independent_misses.push_back({packet->independent_due,available,packet->recovery.scheduled_offset});
         }
         if(packet->delivery)packet->delivery->discarded();
@@ -888,7 +888,10 @@ struct PrivateOpenXrRuntime::Impl {
     }
     void enqueue_prepared(std::shared_ptr<Packet> packet) {
         packet->prepared_at=clock_ns();
-        packet->independent_available_at=packet->source_ready_at+packet->prepared_at-packet->reserved_at;
+        // Native target acquisition and final-copy queue residence are delivery
+        // costs, not recurring producer lateness. Counting them here trains
+        // startup backpressure into future stale-frame tolerance.
+        packet->independent_available_at=packet->source_ready_at;
         {std::scoped_lock lock(mutex);prepared.push_back(std::move(packet));}
         changed.notify_all();
         if(options.independent_pacing)SetEvent(independent_ready);
@@ -1228,7 +1231,7 @@ struct PrivateOpenXrRuntime::Impl {
             // recurring synthesis lateness. Keep stale-image expiry intact;
             // do not purchase persistent tolerance for deadlines it crossed.
             const auto first_due=due-std::clamp(offset,std::int64_t{},physical*3);
-            if(!optional_work_active.load() && first_due>optional_work_finished.load())
+            if(!optional_work_active.load() && first_due>std::max(optional_work_finished.load(),generation_initialized_at.load()))
                 reserve.observe(available,due+reserve.reserve(),physical);
             else if(tracing() && available>due+reserve.reserve()+physical/2)
                 options.trace(101,0,due,available);
@@ -1353,7 +1356,7 @@ struct PrivateOpenXrRuntime::Impl {
                     const auto& [sample,entered]=pending_samples.front();
                     const auto ready=sample->copy_completed_at.load();
                     if(!ready)break;
-                    const auto available=sample->source_ready_at+ready-sample->reserved_at;
+                    const auto available=sample->source_ready_at;
                     if(sample->independent_due) {
                         observe_lateness(available,sample->independent_due,physical,sample->recovery.scheduled_offset);
                         if(entered && independent_ready_residence.load()<=physical/2+2'000'000)
@@ -2228,6 +2231,12 @@ XrResult PrivateOpenXrRuntime::set_director_enabled(bool enabled) {
 }
 bool PrivateOpenXrRuntime::director_enabled() const noexcept {
     return impl_->director_enabled.load(std::memory_order_relaxed);
+}
+void PrivateOpenXrRuntime::finish_generation_initialization() noexcept {
+    if(!impl_->options.independent_pacing)return;
+    const auto finished=clock_ns();
+    impl_->generation_initialized_at=finished;
+    if(impl_->tracing())impl_->options.trace(103,0,finished,0);
 }
 void PrivateOpenXrRuntime::tag_next_end_for_source_batch(bool tracked,std::int64_t target) noexcept {
     if(impl_->options.independent_pacing)return;

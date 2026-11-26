@@ -2386,6 +2386,7 @@ void binding_queue_handoff_test(bool render) {
 
 int main(int argc,char** argv){
 if(argc>1 && std::string_view(argv[1])=="ui-ready") {optional_ui_ready_image(true,true);optional_ui_ready_image(false,true);optional_ui_ready_image(true,false);return 0;}
+if(argc>1 && std::string_view(argv[1])=="startup-learning") {independent_copy_queue_learning();independent_initialization_learning();return 0;}
 if(argc>1 && std::string_view(argv[1])=="ui-learning") {optional_creation_learning(true);return 0;}
 if(argc>1 && std::string_view(argv[1])=="ui-create") {
     for(bool d12:{true,false}) {

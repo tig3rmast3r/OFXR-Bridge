@@ -20291,8 +20291,9 @@ XrResult layer_end_frame_impl(
         if (!generation_arming_pending && !panel_arming_pending) {
             return passthrough_result;
         }
-        // The application's frame is already downstream; nothing this costs is
-        // on its deadline any more.
+        // This frame is already downstream, but synchronous setup delays the
+        // next application frame. Do not train that one-off cost into the
+        // Independent consumer's recurring source-lateness allowance.
         if (continuous_presenter_active(state)) {
             const auto idle=wait_for_presenter_idle(state);
             if (XR_FAILED(idle)) return idle;
@@ -20319,6 +20320,7 @@ XrResult layer_end_frame_impl(
             xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
                 764,panels.size(),handle_value(state->handle));
         }
+        if(state->private_runtime)state->private_runtime->finish_generation_initialization();
         return passthrough_result;
     }
     const std::optional<PendingApplicationFrame> application_frame =

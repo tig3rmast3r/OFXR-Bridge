@@ -171,3 +171,68 @@ static void optional_ui_ready_image(bool previous,bool optional) {
     independent_fixture_mode=false;
     std::printf("UI_READY previous=%d optional=%d fresh pixels/poses, completed UI, fixed image counts PASS\n",previous,optional);
 }
+
+static void independent_copy_queue_learning() {
+    const auto saved=period;period=50'000'000;
+    independent_fixture_mode=true;independent_fixture_auto=true;
+    {
+        Fixture f(true);f.throttled=false;f.block_end=false;
+        const std::array<XrSwapchain,2> scenes{f.make_chain(),f.make_chain()};
+        for(auto h:scenes)f.write(h,80);
+        f.gpu_wait();
+        ok(f.delivery_queue->Wait(f.gate.Get(),1),"gate final delivery copy queue only");
+        std::array<std::shared_ptr<xrfg::InterfaceDeliveryReceipt>,2> receipts;
+        for(unsigned n=0;n<2;++n) {
+            f.begin_virtual();f.transport->set_next_independent_deadline(ns()+period);
+            receipts[n]=std::make_shared<xrfg::InterfaceDeliveryReceipt>(false);
+            xr_ok(f.submit(scenes[n],float(n+1),XR_NULL_HANDLE,receipts[n]),"ready source before copy queue stall");
+        }
+        std::this_thread::sleep_for(std::chrono::nanoseconds(3*period));
+        ok(f.gate->Signal(1),"release copy queue stall");
+        xr_ok(f.transport->drain(),"expired delivery copies retire");
+        std::this_thread::sleep_for(std::chrono::nanoseconds(2*period));
+        check(!f.transport->independent_load().reserve,"delivery-copy queue delay trained persistent source lateness reserve");
+        check(receipts[0]->outcome==-2 && receipts[1]->outcome==-2,"copy stall rescued stale scene pixels/poses");
+        f.begin_virtual();f.transport->set_next_independent_deadline(ns()+period);
+        auto fresh=std::make_shared<xrfg::InterfaceDeliveryReceipt>(false);
+        xr_ok(f.submit(scenes[0],3,XR_NULL_HANDLE,fresh),"fresh scene after startup copy backlog");
+        xr_ok(f.transport->drain(),"fresh scene recovers");
+        check(fresh->outcome==1 && !f.transport->independent_load().reserve,"copy backlog left a recovery tail");
+        f.transport->stop();
+        for(auto h:scenes)xr_ok(f.transport->destroy_swapchain(h),"copy queue source cleanup");
+    }
+    independent_fixture_mode=false;independent_fixture_auto=false;period=saved;
+    std::puts("COPY_QUEUE no self-trained reserve, stale expiry, immediate fresh recovery PASS");
+}
+
+static void independent_initialization_learning() {
+    const auto saved=period;period=25'000'000;
+    independent_fixture_mode=true;independent_fixture_auto=true;
+    {
+        Fixture f(true);f.throttled=false;f.block_end=false;
+        const auto scene=f.make_chain();f.write(scene,80);f.gpu_wait();
+        const auto first_due=ns();
+        // Real one-off generator initialization crosses this source deadline.
+        std::this_thread::sleep_for(40ms);
+        f.transport->finish_generation_initialization();
+        std::this_thread::sleep_for(std::chrono::nanoseconds(4*period));
+        const auto send=[&](std::int64_t due,float identity,std::int64_t offset=0) {
+            f.begin_virtual();f.transport->set_next_independent_deadline(due,false,{offset,true,true});
+            auto receipt=std::make_shared<xrfg::InterfaceDeliveryReceipt>(false);
+            xr_ok(f.submit(scene,identity,XR_NULL_HANDLE,receipt),"initialization learning packet");
+            xr_ok(f.transport->drain(),"initialization learning retirement");return receipt;
+        };
+        for(unsigned slot=0;slot<4;++slot)
+            check(send(first_due+slot*period,1+slot,slot*period)->outcome==-2,"initialization affected batch must expire");
+        std::this_thread::sleep_for(std::chrono::nanoseconds(period));
+        check(!f.transport->independent_load().reserve && f.ignored_optional_lateness>=4,
+            "one-off initialization delay trained future 2X/3X/4X tolerance");
+        check(send(ns()+2*period,5)->outcome==1,"fresh startup scene did not resume");
+        for(unsigned n=0;n<4 && !f.transport->independent_load().reserve;++n)send(ns()-period,6+n);
+        for(unsigned n=0;n<200 && !f.transport->independent_load().reserve;++n)std::this_thread::sleep_for(1ms);
+        check(f.transport->independent_load().reserve>0,"initialization exclusion disabled later genuine source lateness learning");
+        f.transport->stop();xr_ok(f.transport->destroy_swapchain(scene),"initialization source cleanup");
+    }
+    independent_fixture_mode=false;independent_fixture_auto=false;period=saved;
+    std::puts("INITIALIZATION no stale batch tolerance, fresh recovery, later genuine learning PASS");
+}
