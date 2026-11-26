@@ -114,3 +114,60 @@ static void optional_creation_learning(bool d12) {
     independent_fixture_auto=false;independent_fixture_mode=false;period=saved;
     std::printf("OPTIONAL_LEARNING %s stale outputs expire without reserve, fresh output recovers, later genuine losses learn PASS\n",d12?"D12":"D11");
 }
+
+// Hold only the next UI release marker, after its pixels have been drawn.
+// Eye images and the native delivery queue remain ready throughout the test.
+static void optional_ui_ready_image(bool previous,bool optional) {
+    independent_fixture_mode=true;
+    {
+        Fixture f(true);f.throttled=false;f.block_end=false;
+        const auto scene=f.make_chain();f.write(scene,80);
+        const auto info=optional_surface_info();XrSwapchain ui{};
+        xr_ok(optional?f.transport->create_optional_swapchain(&info,&ui):
+            f.transport->create_swapchain(&info,&ui),"create readiness UI source");
+        if(previous) {
+            f.write(ui,40);f.gpu_wait();
+            f.begin_virtual();xr_ok(f.submit(scene,1,ui),"seed completed UI");
+            xr_ok(f.transport->drain(),"completed UI seed retires");
+        }
+        f.release_callback=[&](XrSwapchain h,unsigned) {
+            ok(f.queue->Wait(f.gate.Get(),1),"gate newer UI release marker");
+            XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            return f.transport->release_image(h,&release);
+        };
+        f.write(ui,120);f.release_callback={};
+        // Acquisition must preserve the old completed image as well as the
+        // latest pending release, using the same existing three UI images.
+        unsigned spare{};XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=XR_INFINITE_DURATION;
+        xr_ok(f.transport->try_acquire_image(ui,&acquire,&spare),"third existing UI image remains writable");
+        xr_ok(f.transport->wait_image(ui,&wait),"wait spare UI image");
+        const auto before=f.real_ends.load();
+        f.begin_virtual();xr_ok(f.submit(scene,2,ui),"fresh scene with pending menu");
+        auto drained=std::async(std::launch::async,[&]{return f.transport->drain();});
+        const bool progressed=drained.wait_for(150ms)==std::future_status::ready;
+        ok(f.gate->Signal(1),"release newer UI gate before checking results");
+        xr_ok(drained.get(),"UI gate cleanup");
+        check(progressed==optional,"optional menu readiness blocked fresh scene, or application quad lost its readiness contract");
+        check(f.real_ends==before+1 && f.positions.back()==2 && f.pixels.back()==80,
+            "UI readiness changed fresh scene pixels or pose");
+        if(optional)check(previous?f.overlay_pixels==std::vector<unsigned>({40,40}):f.overlay_pixels.empty(),
+            "pending UI must retain the exact completed image or omit its unfinished first image");
+        else check(f.overlay_pixels.back()==120,"ordinary application quad must wait for its current release");
+        // Finish the acquired spare without rewriting its pixels. It remains
+        // acquired until after promotion, so it cannot supersede the new draw.
+        f.gpu_wait();
+        f.begin_virtual();xr_ok(f.submit(scene,3,ui),"promote completed newer menu");
+        xr_ok(f.transport->drain(),"new UI image delivered");
+        check(f.overlay_pixels.back()==120 && f.positions.back()==3,"completed menu was not promoted on a fresh scene");
+        unsigned count{};xr_ok(f.transport->enumerate_images(ui,0,&count,nullptr),"existing UI count");
+        check(count==3 && f.chains.size()==2,"readiness recovery allocated additional images/chains");
+        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        xr_ok(f.transport->release_image(ui,&release),"retire spare UI acquisition");
+        f.transport->stop();
+        xr_ok(f.transport->destroy_swapchain(ui),"UI readiness cleanup");
+        xr_ok(f.transport->destroy_swapchain(scene),"scene readiness cleanup");
+    }
+    independent_fixture_mode=false;
+    std::printf("UI_READY previous=%d optional=%d fresh pixels/poses, completed UI, fixed image counts PASS\n",previous,optional);
+}

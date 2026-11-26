@@ -78,6 +78,7 @@ struct PrivateOpenXrRuntime::Impl {
         ComPtr<ID3D11Texture2D> delivery11;
         unsigned readers{};
         std::uint64_t generation{};
+        std::uint64_t ui_publication{};
         std::uint64_t ready11_value{};
         std::uint64_t ready12_value{};
         ComPtr<ID3D12Fence> publication_fence;
@@ -100,6 +101,9 @@ struct PrivateOpenXrRuntime::Impl {
         std::vector<ComPtr<ID3D11Texture2D>> real11;
         std::deque<unsigned> acquired;
         std::optional<unsigned> released;
+        std::optional<unsigned> completed_ui;
+        std::uint64_t ui_publications{};
+        bool optional_ui{};
         unsigned cursor{};
         unsigned consumers{}; // retain the real XR chain until every native End finishes
         unsigned replay_users{};
@@ -449,26 +453,47 @@ struct PrivateOpenXrRuntime::Impl {
         if(!options.independent_pacing && std::exchange(packet->batch_credit,false))notify_output_retired(0);
         changed.notify_all();
     }
+    // Optional UI is allowed to retain its last finished image. Never make
+    // fresh eye pixels wait for a newer menu draw on the producer queue.
+    // Called under mutex; acquire protects this image from producer reuse.
+    std::optional<unsigned> completed_ui_image(Chain& chain) {
+        for(unsigned i=0;i<chain.images.size();++i) {
+            const auto& image=chain.images[i];
+            if(!image.ui_publication || image.acquired ||
+                (chain.completed_ui && image.ui_publication<=chain.images[*chain.completed_ui].ui_publication))continue;
+            const auto ready=ready12->GetCompletedValue();
+            if(ready==UINT64_MAX || ready<image.ready12_value)continue;
+            if(image.publication_fence) {
+                const auto published=image.publication_fence->GetCompletedValue();
+                if(published==UINT64_MAX || published<image.publication_value)continue;
+            }
+            chain.completed_ui=i;
+        }
+        return chain.completed_ui;
+    }
     XrResult lease(Packet& packet,XrSwapchain handle) {
         if(std::any_of(packet.leases.begin(),packet.leases.end(),[&](auto& x){return x.chain->handle==handle;}))return XR_SUCCESS;
         auto it=chains.find(handle);
         if(it==chains.end() || it->second->destroying)return XR_ERROR_HANDLE_INVALID;
         auto& chain=*it->second;
-        if(!chain.released || chain.images[*chain.released].acquired) {
+        const auto released=chain.optional_ui?completed_ui_image(chain):chain.released;
+        if(chain.optional_ui && released!=chain.released && tracing())
+            options.trace(102,xr_handle_bits(handle),chain.released?*chain.released+1:0,released?*released+1:0);
+        if(!released || chain.images[*released].acquired) {
             // Trace 44 (refused End, code 4): this chain and why.
             refused_lease=xr_handle_bits(handle);
             refused_lease_state=!chain.released ? -1 : static_cast<std::int64_t>(*chain.released);
             return XR_ERROR_CALL_ORDER_INVALID;
         }
-        packet.leases.push_back({it->second,*chain.released,chain.images[*chain.released].generation});
-        packet.leases.back().publication_fence=chain.images[*chain.released].publication_fence;
-        packet.leases.back().publication_value=chain.images[*chain.released].publication_value;
+        packet.leases.push_back({it->second,*released,chain.images[*released].generation});
+        packet.leases.back().publication_fence=chain.images[*released].publication_fence;
+        packet.leases.back().publication_value=chain.images[*released].publication_value;
         if(options.d11_release_readiness && !d12())
-            packet.ready=std::max(packet.ready,chain.images[*chain.released].ready11_value);
+            packet.ready=std::max(packet.ready,chain.images[*released].ready11_value);
         if(options.independent_pacing && d12())
-            packet.ready=std::max(packet.ready,chain.images[*chain.released].ready12_value);
+            packet.ready=std::max(packet.ready,chain.images[*released].ready12_value);
         ++chain.consumers;
-        ++chain.images[*chain.released].readers;return XR_SUCCESS;
+        ++chain.images[*released].readers;return XR_SUCCESS;
     }
     void release_copied_sources(Packet& packet) {
         // Only publish()'s completed copy fence authorizes this transition.
@@ -489,6 +514,16 @@ struct PrivateOpenXrRuntime::Impl {
         auto take=[&](XrSwapchain h){return lease(packet,h);};
         for(unsigned i=0;i<source.layerCount;++i) {
             auto* header=source.layers[i];if(!header)return XR_ERROR_LAYER_INVALID;
+            if(header->type==XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                const auto handle=reinterpret_cast<const XrCompositionLayerQuad*>(header)->subImage.swapchain;
+                const auto found=chains.find(handle);
+                // First draw may still be pending. Publish the scene now and
+                // add this optional layer once an image has actually finished.
+                if(found!=chains.end() && found->second->optional_ui && !completed_ui_image(*found->second)) {
+                    if(tracing())options.trace(102,xr_handle_bits(handle),found->second->released?*found->second->released+1:0,0);
+                    continue;
+                }
+            }
             packet.copies.emplace_back();auto& copy=packet.copies.back();
             if(header->next){auto* next=static_cast<const XrCompositionLayerColorScaleBiasKHR*>(header->next);
                 if(next->type!=XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR || next->next)return XR_ERROR_LAYER_INVALID;
@@ -523,6 +558,7 @@ struct PrivateOpenXrRuntime::Impl {
             if(copy.color_scale)std::visit([&](auto& layer){layer.next=&*copy.color_scale;},copy.value);
             packet.layers.push_back(copy.header());
         }
+        packet.info.layerCount=static_cast<std::uint32_t>(packet.layers.size());
         packet.info.layers=packet.layers.data();return XR_SUCCESS;
     }
     // The preparer may fill the next acquired real image while EndFrame uses
@@ -2442,6 +2478,7 @@ XrResult PrivateOpenXrRuntime::create_swapchain_impl(const XrSwapchainCreateInfo
     if(optional)*output=XR_NULL_HANDLE;
     publication_lane=s.options.independent_pacing?std::min(publication_lane,1U):0;
     auto chain=std::make_shared<Impl::Chain>();chain->info=*info;chain->info.next=nullptr;
+    chain->optional_ui=optional && s.options.independent_pacing && s.d12();
     chain->d11_output_owner=d11_output_owner;
     chain->image_state=(info->usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)?D3D12_RESOURCE_STATE_DEPTH_WRITE:image_state;
     if(pooled) {
@@ -2587,7 +2624,9 @@ XrResult PrivateOpenXrRuntime::acquire_image_impl(XrSwapchain handle,const XrSwa
     // already acquired its NEXT render target. Never choose that release as
     // the next target under pressure while older images are still being read.
     // Internal single-image outputs keep their explicit release/End/copy cycle.
-    const auto held_release=[&](unsigned index){return chain->images.size()>1 && chain->released==index;};
+    if(chain->optional_ui)s.completed_ui_image(*chain);
+    const auto held_release=[&](unsigned index){return chain->images.size()>1 &&
+        (chain->released==index || (chain->optional_ui && chain->completed_ui==index));};
     auto available=[&]() -> std::optional<unsigned> {
         for(unsigned n=0;n<chain->images.size();++n){auto index=(chain->cursor+n)%chain->images.size();auto& image=chain->images[index];if(!held_release(index) && !image.acquired && !image.readers)return static_cast<unsigned>(index);}return {};
     };
@@ -2625,6 +2664,7 @@ XrResult PrivateOpenXrRuntime::release_image(XrSwapchain handle,const XrSwapchai
         s.ready_serial=value;chain.images[index].ready11_value=value;
     }
     chain.images[index].publication_fence.Reset();chain.images[index].publication_value=0;
+    if(chain.optional_ui)chain.images[index].ui_publication=++chain.ui_publications;
     chain.acquired.pop_front();chain.images[index].acquired=false;chain.images[index].waited=false;++chain.images[index].generation;chain.released=index;s.changed.notify_all();return XR_SUCCESS;
 }
 XrResult PrivateOpenXrRuntime::release_completed_image12(XrSwapchain handle,

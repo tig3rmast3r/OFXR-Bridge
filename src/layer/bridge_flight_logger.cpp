@@ -417,7 +417,7 @@ struct BridgeFlightLogger::Impl {
              record.result==5716 || record.result==5717 || record.result==5733 ||
              record.result==5734 || record.result==5741 || record.result==5750 || record.result==5751 || record.result==9230 ||
              record.result==5756 || record.result==5757 || record.result==5758 || record.result==110010 || (record.result>=112900 && record.result<=112903) || record.result==98610 || record.result==112000 ||
-             (record.result>=5793 && record.result<=5795) || (record.result>=5806 && record.result<=5811) || (record.result>=111000 && record.result<=111119) || record.result==110740 || record.result==110741 ||
+             (record.result>=5793 && record.result<=5795) || (record.result>=5806 && record.result<=5812) || (record.result>=111000 && record.result<=111119) || record.result==110740 || record.result==110741 ||
              (record.result>=110100 && record.result<=110141) || record.result==110400);
         const bool rife_timing=record.phase=='E' &&
             (record.operation==BridgeFlightOperation::rife_pack_wait ||

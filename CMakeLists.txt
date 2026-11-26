@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1082.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1083.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -921,6 +921,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_private_optional_ui_retirement_gpu COMMAND xrfg_private_openxr_runtime_tests ui-destroy)
         set_tests_properties(xrfg_private_optional_ui_retirement_gpu PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
         add_test(NAME xrfg_private_optional_ui_creation_gpu COMMAND xrfg_private_openxr_runtime_tests ui-create)
+        add_test(NAME xrfg_private_optional_ui_readiness_gpu COMMAND xrfg_private_openxr_runtime_tests ui-ready)
+        set_tests_properties(xrfg_private_optional_ui_readiness_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         set_tests_properties(xrfg_private_optional_ui_creation_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         add_test(NAME xrfg_private_framework_bypass_gpu COMMAND xrfg_private_openxr_runtime_tests bypass)
         add_test(NAME xrfg_private_content_refusal_gpu COMMAND xrfg_private_openxr_runtime_tests content-refusal)
