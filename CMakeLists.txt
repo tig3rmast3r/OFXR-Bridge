@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1090.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1091.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1574,6 +1574,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_independent_source_budget COMMAND xrfg_private_runtime_layer_tests independent-source-budget)
         add_test(NAME xrfg_independent_pipelined_admission COMMAND xrfg_private_runtime_layer_tests independent-pipelined-admission)
         add_test(NAME xrfg_independent_credit_lifecycle COMMAND xrfg_private_runtime_layer_tests independent-credit-lifecycle)
+        add_test(NAME xrfg_independent_optical_first COMMAND xrfg_private_runtime_layer_tests independent-optical-first)
         add_test(NAME xrfg_independent_stale_guide_worker COMMAND xrfg_private_runtime_layer_tests independent-stale-guide-worker)
         set_tests_properties(xrfg_independent_stale_guide_worker PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         add_test(NAME xrfg_independent_ready_admission COMMAND xrfg_private_runtime_layer_tests independent-ready-admission)
@@ -2106,6 +2107,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_dependencies(xrfg_luke_depth_gpu_tests xrfg_implicit_layer xrfg_d3d12_history)
         add_test(NAME xrfg_luke_depth_gpu COMMAND xrfg_luke_depth_gpu_tests)
         add_executable(xrfg_d3d12_history_tests tests/d3d12_history_tests.cpp)
+        add_test(NAME xrfg_independent_optical_ready_gpu COMMAND xrfg_d3d12_history_tests independent-optical-ready)
         add_test(NAME xrfg_array_stereo_guides COMMAND xrfg_d3d12_history_tests array-stereo-guides)
         set_tests_properties(xrfg_array_stereo_guides PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         add_test(NAME xrfg_adaptive_history_memory COMMAND xrfg_d3d12_history_tests adaptive-history)

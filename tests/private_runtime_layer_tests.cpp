@@ -24,6 +24,7 @@
 #include "independent_midpoint_test.inc"
 #include "independent_async_creation_test.inc"
 #include "independent_source_admission_test.inc"
+#include "independent_optical_first_test.inc"
 
 // Model the native timing owner used by the shipping SteamVR endpoint. The old
 // fixture's instantaneous Wait only tested a consumer that imposed its own CPU
@@ -669,6 +670,7 @@ static int aer_input_warning_test() {
 }
 
 int main(int argc,char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="independent-optical-first")return independent_optical_first_test();
     if(argc>1 && std::string_view(argv[1])=="independent-pipelined-admission")return independent_pipelined_admission_test();
     if(argc>1 && std::string_view(argv[1])=="independent-credit-lifecycle")return independent_source_credit_lifecycle_test();
     if(argc>1 && std::string_view(argv[1])=="independent-native-binding-handoff"){for(unsigned runtime=0;runtime<4;++runtime)independent_native_binding_handoff(runtime);independent_native_binding_handoff(1,false);return 0;}

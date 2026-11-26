@@ -1037,6 +1037,7 @@ struct D3D12FrameSynthesizer::Impl {
         bool timing_pending{};
         bool timing_cached{};
         bool aer_streamed{},aer_early_copy{};
+        bool separate_synthetic_ready{};
         std::uint64_t aer_first_fence{};
         bool omit_current_write{}; // per-recorded transaction, including RIFE fallback
     };
@@ -5222,6 +5223,7 @@ struct D3D12FrameSynthesizer::Impl {
         }
         slot.rife_result.reset();
         slot.omit_current_write=false;slot.aer_streamed=slot.aer_early_copy=false;slot.aer_first_fence=0;
+        slot.separate_synthetic_ready=false;
         result = slot.current_copy_allocator->Reset();
         if (FAILED(result)) {
             synthesis_enabled = false;
@@ -6933,12 +6935,20 @@ struct D3D12FrameSynthesizer::Impl {
             pending_copy_slot = slot_index;
             pending_copy_fence_value = value;
         } else {
+            if(slot.separate_synthetic_ready) {
+                const auto synthetic_value=next_fence_value++;
+                const auto signaled=queue->Signal(fence.Get(),synthetic_value);
+                if(FAILED(signaled)) {
+                    synthesis_enabled=false;untracked_source=std::move(*newly_acquired);return signaled;
+                }
+                last_synthetic_fence_value=synthetic_value;
+            }
             ID3D12CommandList* copy_lists[] = {
                 slot.current_copy_command_list.Get()};
             queue->ExecuteCommandLists(1, copy_lists);
             value = next_fence_value;
             ++next_fence_value;
-            last_synthetic_fence_value = value;
+            if(!slot.separate_synthetic_ready)last_synthetic_fence_value = value;
             HRESULT signal_result = queue->Signal(fence.Get(), value);
             if (FAILED(signal_result)) {
                 synthesis_enabled = false;
@@ -7158,12 +7168,21 @@ struct D3D12FrameSynthesizer::Impl {
             pending_copy_slot = slot_index;
             pending_copy_fence_value = completion_value;
         } else {
+            if(slot.separate_synthetic_ready) {
+                const auto synthetic_value=next_fence_value++;
+                const auto signaled=queue->Signal(fence.Get(),synthetic_value);
+                if(FAILED(signaled)) {
+                    synthesis_enabled=false;untracked_source=std::move(*newly_acquired);return signaled;
+                }
+                last_synthetic_fence_value=synthetic_value;
+            }
             ID3D12CommandList* copy_lists[] = {
                 slot.current_copy_command_list.Get()};
             if(!slot.aer_early_copy)queue->ExecuteCommandLists(1, copy_lists);
             completion_value = next_fence_value;
             ++next_fence_value;
-            last_synthetic_fence_value = slot.aer_early_copy?slot.aer_first_fence:completion_value;
+            if(!slot.separate_synthetic_ready)
+                last_synthetic_fence_value = slot.aer_early_copy?slot.aer_first_fence:completion_value;
             HRESULT signal_result = queue->Signal(fence.Get(), completion_value);
             if (FAILED(signal_result)) {
                 synthesis_enabled = false;
@@ -7481,7 +7500,8 @@ struct D3D12FrameSynthesizer::Impl {
         float interpolation_fraction,
         D3D12PresentationTransform presentation_transform,
         const std::optional<D3D12ExtraSynthetic>& extra_synthetic,
-        bool allow_synthetic_camera, unsigned ofr_fresh_mask, bool current_output_unused, bool split_aer_first) noexcept {
+        bool allow_synthetic_camera, unsigned ofr_fresh_mask, bool current_output_unused, bool split_aer_first,
+        bool separate_synthetic_ready) noexcept {
         ofr_paired = ofr_fresh_mask == 3;
         if(nvidia_options.ofr) {defer_current_copy=false;interpolation_fraction=.5F;}
         rife_pair={}; // no abandoned pre-submission transaction survives a retry
@@ -7816,6 +7836,9 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
         slot.omit_current_write=omit_current_write;
+        slot.separate_synthetic_ready=separate_synthetic_ready && !defer_current_copy &&
+            generation_mode==D3D12FrameGenerationMode::ofxr && !nvidia_options.ofr &&
+            !rife && !native_dlss && !extra_output;
         slot.aer_streamed=split_aer_first && nvidia_options.ofr && ofr_paired &&
             backend==D3D12OpticalFlowBackend::nvidia && generation_mode==D3D12FrameGenerationMode::ofxr &&
             !rife && !native_dlss && !nvidia_options.hybrid && !next.motion_vectors && !extra_output &&
@@ -8470,7 +8493,8 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
     float interpolation_fraction,
     D3D12PresentationTransform presentation_transform,
     std::optional<D3D12ExtraSynthetic> extra_synthetic,
-    bool allow_synthetic_camera, unsigned ofr_fresh_mask, bool current_output_unused, bool split_aer_first) noexcept {
+    bool allow_synthetic_camera, unsigned ofr_fresh_mask, bool current_output_unused, bool split_aer_first,
+    bool separate_synthetic_ready) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -8494,7 +8518,8 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             std::move(motion_vectors),
             defer_current_copy,
             interpolation_fraction,
-            std::move(presentation_transform), extra_synthetic, allow_synthetic_camera, ofr_fresh_mask,current_output_unused,split_aer_first);
+            std::move(presentation_transform), extra_synthetic, allow_synthetic_camera, ofr_fresh_mask,current_output_unused,split_aer_first,
+            separate_synthetic_ready);
     } catch (...) {
         if (ticket != nullptr) {
             *ticket = {};

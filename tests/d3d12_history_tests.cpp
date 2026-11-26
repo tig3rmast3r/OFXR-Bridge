@@ -18,6 +18,7 @@
 #include "xrfg/d3d12_guide_composer.hpp"
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "../src/d3d12/d3d12_fsr_frame_generator.hpp"
 
@@ -1731,6 +1732,8 @@ private:
 
 class QueueWithReportedDeviceAlias final : public ID3D12CommandQueue {
 public:
+    std::function<void(ID3D12Fence*,UINT64)> after_signal;
+    std::function<void()> after_execute;
     QueueWithReportedDeviceAlias(ID3D12CommandQueue* native, ID3D12Device* reported,
         bool exposes_native = false)
         : native_(native), reported_(reported), exposes_native_(exposes_native) {}
@@ -1763,11 +1766,11 @@ public:
     void STDMETHODCALLTYPE CopyTileMappings(ID3D12Resource* d, const D3D12_TILED_RESOURCE_COORDINATE* dc,
         ID3D12Resource* s, const D3D12_TILED_RESOURCE_COORDINATE* sc, const D3D12_TILE_REGION_SIZE* z,
         D3D12_TILE_MAPPING_FLAGS f) override { native_->CopyTileMappings(d, dc, s, sc, z, f); }
-    void STDMETHODCALLTYPE ExecuteCommandLists(UINT n, ID3D12CommandList* const* l) override { native_->ExecuteCommandLists(n, l); }
+    void STDMETHODCALLTYPE ExecuteCommandLists(UINT n, ID3D12CommandList* const* l) override { native_->ExecuteCommandLists(n, l);if(after_execute)after_execute(); }
     void STDMETHODCALLTYPE SetMarker(UINT m, const void* d, UINT n) override { native_->SetMarker(m, d, n); }
     void STDMETHODCALLTYPE BeginEvent(UINT m, const void* d, UINT n) override { native_->BeginEvent(m, d, n); }
     void STDMETHODCALLTYPE EndEvent() override { native_->EndEvent(); }
-    HRESULT STDMETHODCALLTYPE Signal(ID3D12Fence* f, UINT64 v) override { return native_->Signal(f, v); }
+    HRESULT STDMETHODCALLTYPE Signal(ID3D12Fence* f, UINT64 v) override { const auto hr=native_->Signal(f,v);if(SUCCEEDED(hr)&&after_signal)after_signal(f,v);return hr; }
     HRESULT STDMETHODCALLTYPE Wait(ID3D12Fence* f, UINT64 v) override { return native_->Wait(f, v); }
     HRESULT STDMETHODCALLTYPE GetTimestampFrequency(UINT64* f) override { return native_->GetTimestampFrequency(f); }
     HRESULT STDMETHODCALLTYPE GetClockCalibration(UINT64* g, UINT64* c) override { return native_->GetClockCalibration(g, c); }
@@ -6631,7 +6634,13 @@ void test_native_private_context(bool hardware) {
 #endif
 }
 
+#include "independent_optical_ready_gpu.inc"
+
 int main(int argc, char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="independent-optical-ready") {
+        try{D3D12WarpFixture fixture;test_independent_optical_ready(fixture);return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1 && (std::string_view(argv[1])=="native-context-isolation" || std::string_view(argv[1])=="native-context-nvidia")) {
         try{test_native_private_context(std::string_view(argv[1])=="native-context-nvidia");return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

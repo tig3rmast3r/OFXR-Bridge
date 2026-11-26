@@ -329,7 +329,10 @@ public:
         // Caller guarantees this current output is not presented. Only raw
         // single-fresh-eye AER may omit its write; all ownership stays valid.
         bool current_output_unused = false,
-        bool split_aer_first = false) noexcept;
+        bool split_aer_first = false,
+        // Signal S on the existing fence before the immediately queued B copy.
+        // Ordinary Independent optical 2X only; all reuse still waits for B.
+        bool separate_synthetic_ready = false) noexcept;
 
     // Executes the current output's copy, which submit_pair records but
     // deliberately leaves unsubmitted. The synthetic frame is handed to the

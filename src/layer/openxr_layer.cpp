@@ -10361,6 +10361,7 @@ struct SynthesisJob {
     std::int64_t first_output_target{};
     unsigned admission_outputs{};
     bool first_published{};
+    std::int64_t independent_synthetic_ready_ns{};
     bool aer_double{}; // immutable requested second-stage mode for this source
     std::int64_t independent_source_ns{},independent_period_ns{},independent_first_due_ns{};
     std::vector<std::shared_ptr<PanelInput>> sources;
@@ -14636,7 +14637,9 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                                               state->session->graphics_binding==SessionGraphicsBinding::d3d12 &&
                                               !state->session->d3d11_bridge && !state->session->vulkan_bridge &&
                                               !state->session->luke_afw_enabled &&
-                                              !xrfg::embedded::snapshot().desired.independent_aer_double);
+                                              !xrfg::embedded::snapshot().desired.independent_aer_double,
+                                          worker_submission && independent_stereo_recovery(*state->session) &&
+                                              native_frame_multiplier(*state->session)==2);
                 } else {
                     submit_result = synthesizer->submit_prime(
                                           *capture,
@@ -15540,6 +15543,63 @@ HRESULT publish_independent_aer_first(const std::shared_ptr<SessionState>& state
     state->presenter_condition.notify_all();return S_OK;
 }
 
+// Ordinary stereo 2X: S has its own receipt, while B's copy is already queued.
+// Keep auxiliary-image transactions on their existing complete-batch path.
+HRESULT publish_independent_optical_first(const std::shared_ptr<SessionState>& state,
+    PreparedProjectionFrame& prepared,const std::shared_ptr<SynthesisJob>& job,bool& delayed) {
+    if(!independent_stereo_recovery(*state) || native_frame_multiplier(*state)!=2 ||
+       !job->pair || job->triple || job->quad || job->first_published || !job->metadata ||
+       !job->metadata->composition_images.empty() || prepared.kind!=PreparedGenerationKind::pair ||
+       prepared.resources.empty() || prepared.resources.size()!=job->mappings.size() ||
+       !std::all_of(prepared.resources.begin(),prepared.resources.end(),[](const auto& r){const auto& g=r.generation;
+           return !r.panel && !g.synthetic_released && g.worker_generation && !g.worker_generation->d3d11_interop &&
+               !g.staging_generation && !g.native_result && g.worker_fence && g.worker_synthetic_fence_value &&
+               g.worker_synthetic_fence_value<g.worker_fence_value &&
+               !g.direct_synthetic_publication;
+       }))return S_FALSE;
+    std::vector<ProjectionResourceDestination> destinations;
+    for(const auto& r:prepared.resources)destinations.push_back({r.application_swapchain,r.generation.synthetic_handle,
+        r.generation.synthetics_in_target_camera,false});
+    GeneratedFrameEndInfo first;
+    if(!build_generated_frame_end_info(&job->metadata->info,job->snapshot,true,destinations,&first,
+        job->synthetic_camera?&*job->synthetic_camera:nullptr,job->fraction))return S_FALSE;
+    unsigned views{};for(const auto& projection:first.projections)views+=unsigned(projection.views.size());
+    if(views!=2)return S_FALSE;
+    for(auto& r:prepared.resources) {
+        auto& g=r.generation;
+        const auto ready=wait_recoverable_private_fence(state,g.worker_fence.Get(),g.worker_synthetic_fence_value,delayed);
+        if(FAILED(ready))return ready;
+    }
+    // A late generation keeps the existing real-only recovery policy. Do not
+    // publish its old midpoint simply because the smaller fence finally passed.
+    if(delayed)return S_FALSE;
+    job->independent_synthetic_ready_ns=xrfg::interface_clock_ns();
+    unsigned complete_mask{},eye{};
+    for(auto& r:prepared.resources) {
+        auto& g=r.generation;auto& image=g.worker_generation->synthetic[g.synthetic_slot];
+        const auto index=g.synthetic_slot*g.worker_generation->synthetic_runtime_images_per_ring+image.acquired_index;
+        if(index>=g.worker_generation->synthetic_runtime_images.size())return E_UNEXPECTED;
+        if(g.worker_fence->GetCompletedValue()>=g.worker_fence_value)complete_mask|=1U<<eye;
+        ++eye;
+        if(!release_private_image(state.get(),state->dispatch,image,nullptr,nullptr,false,
+            g.worker_generation->synthetic_runtime_images[index].Get(),g.worker_fence.Get(),g.worker_synthetic_fence_value))return E_FAIL;
+        g.synthetic_released=true;
+        if(g.independent_synthetic_lease)first.independent_output_leases.push_back(g.independent_synthetic_lease);
+    }
+    first.synthetic=true;
+    auto frame=make_presenter_owned_frame(std::move(first));if(!frame)return E_OUTOFMEMORY;
+    assign_independent_output_timing(*job,*frame,0);
+    auto output=std::make_shared<ThreeSlotFrame>();output->queued_at=job->current->queued_at;
+    output->source_sequence=job->current->source_sequence;output->previous_sequence=job->current->previous_sequence;
+    output->frame=std::move(frame);
+    {std::scoped_lock lock(state->presenter_mutex);state->independent_outputs.push_back(std::move(output));
+     job->first_published=true;}
+    // Existing fence polls only: no timestamp heap, readback or GPU allocation.
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+        113506,job->current->source_sequence,job->independent_synthetic_ready_ns,complete_mask);
+    state->presenter_condition.notify_all();return S_OK;
+}
+
 void prime_worker_source(SynthesisJob& job) noexcept {
     job.pair = job.triple = job.quad = false;
     job.current->previous_sequence = 0;
@@ -15707,7 +15767,10 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             }
             }
             const bool discard_stale = completion && stale_worker_transaction(prepared);
-            const auto first_result=completion && !discard_stale ? publish_independent_aer_first(state,prepared,job):S_FALSE;
+            bool early_delayed{};
+            auto first_result=completion && !discard_stale ? publish_independent_aer_first(state,prepared,job):S_FALSE;
+            if(completion && !discard_stale && first_result==S_FALSE)
+                first_result=publish_independent_optical_first(state,prepared,job,early_delayed);
             const bool deferred_completion=!completion && job->pair && job->triple && fenced_optical_batch(*state,prepared);
             if(job->admission_outputs) {
                 std::scoped_lock lock(state->presenter_mutex);
@@ -15716,12 +15779,15 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                 state->native_batch_admission.set_async_gpu_handoff(!state->private_runtime && deferred_completion);
                 state->wake_source_admission_locked();
             }
-            bool delayed_completion{};
+            bool delayed_completion=early_delayed;
             const auto preparation_us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now()-work_started).count());
             bool success = !preparation_cleanup_failed && SUCCEEDED(first_result) &&
                 finish_worker_outputs(state, prepared, job->current->source_sequence,
                     &delayed_completion, preparation_us, deferred_completion, discard_stale);
+            if(success && job->independent_synthetic_ready_ns)
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                    113507,job->current->source_sequence,xrfg::interface_clock_ns(),job->independent_synthetic_ready_ns);
             if (discard_stale && success) {
                 log_skipped_stale_worker_source(*job, prepared);
                 // Drop retired outputs and any remaining source pins before
