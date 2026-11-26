@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1095.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1096.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2224,6 +2224,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_native_dlssg_unsupported COMMAND xrfg_d3d12_history_tests native-unsupported)
         add_test(NAME xrfg_hybrid_occlusion_wall COMMAND xrfg_d3d12_history_tests aer-guide-occlusion)
         set_tests_properties(xrfg_hybrid_occlusion_wall PROPERTIES RUN_SERIAL TRUE TIMEOUT 60)
+        add_test(NAME xrfg_hybrid_composition_gpu COMMAND xrfg_d3d12_history_tests hybrid)
+        add_test(NAME xrfg_hybrid_hud_gpu COMMAND xrfg_d3d12_history_tests hybrid-hud)
+        add_test(NAME xrfg_synthetic_camera_gpu COMMAND xrfg_d3d12_history_tests r19-camera)
+        set_tests_properties(xrfg_hybrid_composition_gpu xrfg_hybrid_hud_gpu xrfg_synthetic_camera_gpu
+            PROPERTIES RUN_SERIAL TRUE TIMEOUT 180)
         add_test(NAME xrfg_hybrid_depth_slices COMMAND xrfg_d3d12_history_tests hybrid-depth-slices)
         set_tests_properties(xrfg_hybrid_depth_slices PROPERTIES RUN_SERIAL TRUE TIMEOUT 60)
         add_test(NAME xrfg_native_resized_eye COMMAND xrfg_d3d12_history_tests native-resized-eye)

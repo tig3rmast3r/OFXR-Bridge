@@ -5,6 +5,10 @@ Texture2D<uint> FlowAuxiliary : register(t3);
 Texture2D<int2> ForwardFlow : register(t4);
 Texture2D<uint> ForwardAuxiliary : register(t5);
 Texture2DArray<float2> GameMotionVectors : register(t6);
+// The 0.2 Hybrid path filtered source colour in hardware. Keep manual
+// interpolation for the other reconstruction paths' existing pixel contract.
+SamplerState HybridLinearClamp : register(s0);
+static bool hybrid_layout = false;
 Texture2DArray<float4> SceneOnlyFrame : register(t7);
 // Hybrid's depth search (0.2 V505, V555): the game's depth beside its
 // vectors, at their resolution, and the midpoint splat BuildDepthSplat
@@ -231,6 +235,12 @@ float4 bilinear_previous_source(float2 coordinate, uint slice) {
         coordinate,
         float2(0.0, 0.0),
         float2(float(Width - 1), float(Height - 1)));
+    if (hybrid_layout) {
+        uint width, height, layers;
+        PreviousFrame.GetDimensions(width, height, layers);
+        return PreviousFrame.SampleLevel(HybridLinearClamp,
+            float3((bounded + 0.5) / float2(width, height), float(slice)), 0.0);
+    }
     int2 top_left = int2(floor(bounded));
     int2 bottom_right = min(
         top_left + int2(1, 1),
@@ -256,6 +266,12 @@ float4 bilinear_previous_source_extent(
         coordinate,
         float2(0.0, 0.0),
         float2(extent - 1U));
+    if (hybrid_layout) {
+        uint width, height, layers;
+        PreviousFrame.GetDimensions(width, height, layers);
+        return PreviousFrame.SampleLevel(HybridLinearClamp,
+            float3((bounded + 0.5) / float2(width, height), float(slice)), 0.0);
+    }
     int2 top_left = int2(floor(bounded));
     int2 bottom_right = min(
         top_left + int2(1, 1),
@@ -277,6 +293,12 @@ float4 bilinear_current_source(float2 coordinate, uint slice) {
         coordinate,
         float2(0.0, 0.0),
         float2(float(Width - 1), float(Height - 1)));
+    if (hybrid_layout) {
+        uint width, height, layers;
+        CurrentFrame.GetDimensions(width, height, layers);
+        return CurrentFrame.SampleLevel(HybridLinearClamp,
+            float3((bounded + 0.5) / float2(width, height), float(slice)), 0.0);
+    }
     int2 top_left = int2(floor(bounded));
     int2 bottom_right = min(
         top_left + int2(1, 1),
@@ -753,7 +775,6 @@ float2 forward_flow_for_pixel(
 // branches, so the flow keeps its constants and the DLSS output rectangle
 // travels 16 bits a value in UseGameMotion (x, y) and GameMotionPadding
 // (width, height).
-static bool hybrid_layout = false;
 // How far the last synthesize_midpoint's two samples disagreed: what the
 // hybrid composition chooses by.
 static float last_disagreement = 1.0;

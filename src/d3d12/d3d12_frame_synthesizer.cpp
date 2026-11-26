@@ -1412,8 +1412,20 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12_ROOT_SIGNATURE_DESC root_description{};
         root_description.NumParameters = static_cast<UINT>(parameters.size());
         root_description.pParameters = parameters.data();
-        root_description.NumStaticSamplers = 0;
-        root_description.pStaticSamplers = nullptr;
+        // Restore 0.2's hardware colour filtering for Hybrid. A static
+        // sampler needs neither a sampler heap nor another root DWORD.
+        D3D12_STATIC_SAMPLER_DESC linear_clamp{};
+        linear_clamp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        linear_clamp.AddressU = linear_clamp.AddressV = linear_clamp.AddressW =
+            D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linear_clamp.MaxAnisotropy = 1;
+        linear_clamp.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        linear_clamp.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
+        linear_clamp.MinLOD = linear_clamp.MaxLOD = 0;
+        linear_clamp.ShaderRegister = 0;
+        linear_clamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        root_description.NumStaticSamplers = 1;
+        root_description.pStaticSamplers = &linear_clamp;
         root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
         ComPtr<ID3DBlob> serialized;
