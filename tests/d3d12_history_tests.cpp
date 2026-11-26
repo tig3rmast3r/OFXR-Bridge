@@ -6635,8 +6635,13 @@ void test_native_private_context(bool hardware) {
 }
 
 #include "independent_optical_ready_gpu.inc"
+#include "independent_fidelity_overlap_gpu.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="independent-fidelity-overlap") {
+        try{D3D12WarpFixture fixture;test_independent_fidelity_overlap(fixture);return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="independent-optical-ready") {
         try{D3D12WarpFixture fixture;test_independent_optical_ready(fixture);return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

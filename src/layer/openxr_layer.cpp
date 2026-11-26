@@ -14639,7 +14639,9 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                                               !state->session->luke_afw_enabled &&
                                               !xrfg::embedded::snapshot().desired.independent_aer_double,
                                           worker_submission && independent_stereo_recovery(*state->session) &&
-                                              native_frame_multiplier(*state->session)==2);
+                                              native_frame_multiplier(*state->session)==2,
+                                          worker_submission && independent_stereo_recovery(*state->session) &&
+                                              state->session->nvidia_options.hybrid && native_frame_multiplier(*state->session)<=3);
                 } else {
                     submit_result = synthesizer->submit_prime(
                                           *capture,

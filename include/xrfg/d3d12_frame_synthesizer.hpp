@@ -332,7 +332,10 @@ public:
         bool split_aer_first = false,
         // Signal S on the existing fence before the immediately queued B copy.
         // Ordinary Independent optical 2X only; all reuse still waits for B.
-        bool separate_synthetic_ready = false) noexcept;
+        bool separate_synthetic_ready = false,
+        // Same-queue FidelityFX overlap uses only existing, retired work slots
+        // and free destinations, as in 0.2. No additional frame is admitted.
+        bool allow_queued_fidelity_pair = false) noexcept;
 
     // Executes the current output's copy, which submit_pair records but
     // deliberately leaves unsubmitted. The synthetic frame is handed to the

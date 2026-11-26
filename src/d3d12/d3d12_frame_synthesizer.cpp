@@ -7501,7 +7501,7 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12PresentationTransform presentation_transform,
         const std::optional<D3D12ExtraSynthetic>& extra_synthetic,
         bool allow_synthetic_camera, unsigned ofr_fresh_mask, bool current_output_unused, bool split_aer_first,
-        bool separate_synthetic_ready) noexcept {
+        bool separate_synthetic_ready, bool allow_queued_fidelity_pair) noexcept {
         ofr_paired = ofr_fresh_mask == 3;
         if(nvidia_options.ofr) {defer_current_copy=false;interpolation_fraction=.5F;}
         rife_pair={}; // no abandoned pre-submission transaction survives a retry
@@ -7688,7 +7688,17 @@ struct D3D12FrameSynthesizer::Impl {
         if (independent_nvidia_pair && pending_copy_slot != kNoPendingCopy) {
             return HRESULT_FROM_WIN32(ERROR_BUSY);
         }
-        if (!independent_nvidia_pair) {
+        const bool independent_fidelity_pair=allow_queued_fidelity_pair &&
+            backend==D3D12OpticalFlowBackend::fidelity_fx && !defer_current_copy &&
+            generation_mode==D3D12FrameGenerationMode::ofxr && !nvidia_options.ofr && !rife && !native_dlss;
+        // 0.2 submits ordered FidelityFX pairs into an available work slot.
+        // The whole-previous-submission CPU gate needlessly serializes those
+        // independent slots. Per-slot, destination and history fences below
+        // still protect every overwrite; all shared GPU work remains ordered
+        // on the same synthesis queue.
+        if (independent_fidelity_pair && pending_copy_slot!=kNoPendingCopy)
+            return HRESULT_FROM_WIN32(ERROR_BUSY);
+        if (!independent_nvidia_pair && !independent_fidelity_pair) {
             static_cast<void>(flush_pending_copy());
             const HRESULT previous_result = submission_available();
             if (FAILED(previous_result)) {
@@ -8494,7 +8504,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
     D3D12PresentationTransform presentation_transform,
     std::optional<D3D12ExtraSynthetic> extra_synthetic,
     bool allow_synthetic_camera, unsigned ofr_fresh_mask, bool current_output_unused, bool split_aer_first,
-    bool separate_synthetic_ready) noexcept {
+    bool separate_synthetic_ready, bool allow_queued_fidelity_pair) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -8519,7 +8529,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             defer_current_copy,
             interpolation_fraction,
             std::move(presentation_transform), extra_synthetic, allow_synthetic_camera, ofr_fresh_mask,current_output_unused,split_aer_first,
-            separate_synthetic_ready);
+            separate_synthetic_ready,allow_queued_fidelity_pair);
     } catch (...) {
         if (ticket != nullptr) {
             *ticket = {};
