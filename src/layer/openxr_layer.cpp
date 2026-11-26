@@ -101,6 +101,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <future>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -951,6 +952,8 @@ struct SessionState {
     BlackBarTiming blackbar_timing;
     std::mutex mutex;
     std::mutex gpu_mutex;
+    // Serialize SDK/pipeline construction independently of live frame work.
+    std::mutex generation_initialization_mutex;
     std::deque<PendingApplicationFrame> pending_frames;
     // Independent Begin owns one immutable source ticket. A subsequent Wait
     // may already be in pending_frames when this frame reaches End.
@@ -2850,6 +2853,14 @@ private:
 #include "real_vr_eye_metadata.inc"
 
 struct SwapchainState {
+    struct GenerationCreation {
+        std::shared_ptr<FrameGenerationSwapchainState> generation;
+        SwapchainEligibilityReason reason{SwapchainEligibilityReason::exception};
+        std::uint64_t detail{};
+    };
+    std::mutex generation_creation_mutex;
+    std::future<GenerationCreation> generation_creation;
+    bool background_generation{}; // unpublished construction snapshot only
     std::shared_ptr<xrfg::VulkanBridgeSwapchain> vulkan_bridge;
     // On a bridged D3D11 session (SessionState::d3d11_bridge): the shared
     // textures the application renders into and the copies into the
@@ -3733,7 +3744,10 @@ void enter_generation_quarantine(
     XrTime time,
     XrDuration duration) noexcept;
 
+bool finish_generation_creation(const std::shared_ptr<SwapchainState>&,bool wait) noexcept;
+
 HRESULT drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept {
+    finish_generation_creation(state,true);
     const auto flight_token = xrfg::bridge_flight_logger().begin(
         xrfg::BridgeFlightOperation::gpu_drain,
         state && state->session ? handle_value(state->session->handle) : 0);
@@ -3952,6 +3966,7 @@ void destroy_composition_capture(
 void destroy_frame_generation_swapchains(
     const std::shared_ptr<SwapchainState>& state) noexcept {
     try {
+        finish_generation_creation(state,true);
         std::shared_ptr<FrameGenerationSwapchainState> generation;
         {
             std::scoped_lock lock(state->mutex);
@@ -4066,9 +4081,12 @@ struct CreatedPrivateSwapchain {
          (state->session->uevr_application && !state->session->luke_afw_enabled &&
           state->session->graphics_binding==SessionGraphicsBinding::d3d12 &&
           !state->session->d3d11_bridge && !state->session->vulkan_bridge));
-    XrResult result = state->session->private_runtime
+    const auto publication_source=((generation_output && state->pooled_publication) || luke_publication || auxiliary_publication)?state->handle:XR_NULL_HANDLE;
+    XrResult result = state->session->private_runtime && state->background_generation
+        ? state->session->private_runtime->create_background_swapchain(&create_info,&handle,image_state,1,publication_source,publication_lane)
+        : state->session->private_runtime
         ? state->session->private_runtime->create_swapchain(&create_info,&handle,image_state,1,
-            ((generation_output && state->pooled_publication) || luke_publication || auxiliary_publication)?state->handle:XR_NULL_HANDLE,
+            publication_source,
             generation_output && state->session->graphics_binding==SessionGraphicsBinding::d3d11
                 ? state->session->d3d12_device.Get():nullptr,publication_lane)
         : dispatch->create_swapchain(state->session->handle,&create_info,&handle);
@@ -4239,6 +4257,7 @@ create_d3d12_frame_generation_swapchains(
     const std::shared_ptr<SwapchainState>& state,
     SwapchainEligibilityReason* failure_reason,
     std::uint64_t* failure_detail) {
+    std::scoped_lock initialization_lock(state->session->generation_initialization_mutex);
     CreatedCurrentRing current;
     CreatedCurrentRing synthetic;
     if (failure_reason != nullptr) {
@@ -5019,8 +5038,56 @@ void log_rife_memory_refusal(const std::shared_ptr<SessionState>& session,HRESUL
 }
 
 // Creates the generation resources a swapchain deferred at enumeration time.
-// Returns false only when the runtime refused a private swapchain, which is
-// the caller's signal to hand the session's whole budget back.
+// Adopt only completed owners on the frame path. Teardown/configuration may
+// join; ordinary frame calls poll and keep submitting their current real image.
+bool finish_generation_creation(const std::shared_ptr<SwapchainState>& state,bool wait) noexcept {
+    try {
+        std::unique_lock creation_lock(state->generation_creation_mutex);
+        if(!state->generation_creation.valid() || (!wait &&
+            state->generation_creation.wait_for(std::chrono::seconds(0))!=std::future_status::ready))return false;
+        auto result=state->generation_creation.get();
+        if(result.generation) {
+            {std::scoped_lock lock(state->mutex);state->frame_generation=std::move(result.generation);}
+            state->generation_eligible_pending=false;
+            state->generation_refusal=SwapchainEligibilityReason::ready;
+            state->generation_refusal_detail=0;
+        } else {
+            state->generation_declined=true;
+            state->generation_refusal=result.reason;
+            state->generation_refusal_detail=result.detail;
+            if(result.reason==SwapchainEligibilityReason::synthesis_initialize_failed)
+                state->session->generation_initialization_result=static_cast<HRESULT>(result.detail);
+        }
+        log_swapchain_eligibility(state,state->generation_refusal,state->generation_refusal_detail,
+            (std::uint64_t(state->enumerated_image_count)<<32)|state->create_info.arraySize);
+        if(state->session->private_runtime)state->session->private_runtime->finish_generation_initialization();
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+            111102,handle_value(state->handle),state->frame_generation?1:0,result.detail);
+        return true;
+    } catch(...) {
+        state->generation_declined=true;
+        state->generation_refusal=SwapchainEligibilityReason::exception;
+        return true;
+    }
+}
+
+bool generation_creation_pending(const std::shared_ptr<SwapchainState>& state,bool unfinished_only=false) {
+    std::scoped_lock lock(state->generation_creation_mutex);
+    return state->generation_creation.valid() && (!unfinished_only ||
+        state->generation_creation.wait_for(std::chrono::seconds(0))!=std::future_status::ready);
+}
+bool generation_creation_pending(const std::shared_ptr<SessionState>& session) {
+    for(const auto& chain:find_swapchains(session))if(generation_creation_pending(chain,true))return true;
+    return false;
+}
+void finish_session_generation_creation(const std::shared_ptr<SessionState>& session) {
+    for(const auto& chain:find_swapchains(session)) {
+        std::scoped_lock call_lock(chain->call_mutex);
+        finish_generation_creation(chain,true);
+    }
+}
+
+// False asks the caller to return the session's refused private output budget.
 [[nodiscard]] bool ensure_frame_generation(
     const std::shared_ptr<SwapchainState>& state) noexcept {
     try {
@@ -5029,6 +5096,9 @@ void log_rife_memory_refusal(const std::shared_ptr<SessionState>& session,HRESUL
         }
         if(state->session->pressure_resources_active.load(std::memory_order_acquire))return true;
         std::scoped_lock call_lock(state->call_mutex);
+        if(finish_generation_creation(state,false) && budget_refusal(state->generation_refusal))return false;
+        if(generation_creation_pending(state))return true;
+        if(state->generation_declined && budget_refusal(state->generation_refusal))return false;
         if(state->session->luke_afw_enabled && state->session->graphics_binding==SessionGraphicsBinding::d3d11 &&
             (state->session->graphics_binding_capabilities&8ULL)==0 &&
             !luke_color_only_ofxr(*state->session))return true;
@@ -5044,6 +5114,33 @@ void log_rife_memory_refusal(const std::shared_ptr<SessionState>& session,HRESUL
         }
         if(state->session->luke_outlaws_preframe&&state->session->luke_outlaws_frame_started)
             return true; // Missing startup preparation remains original real-frame bypass.
+        const auto& session=*state->session;
+        if(session.independent_pacing && session.private_runtime &&
+            session.graphics_binding==SessionGraphicsBinding::d3d12 &&
+            !session.d3d11_bridge && !session.vulkan_bridge && !session.luke_afw_enabled &&
+            !session.nvidia_options.ofr && session.nvidia_options.rife_model<0 && !state->panel_source &&
+            session.frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr) {
+            // The worker owns an unpublished descriptor and the SAME history.
+            // No app call/gpu mutex is retained during allocation/compilation.
+            // Configuration/teardown join before changing these session inputs.
+            auto snapshot=std::make_shared<SwapchainState>(state->session,state->create_info);
+            snapshot->handle=state->handle;snapshot->background_generation=true;
+            snapshot->pooled_publication=state->pooled_publication;
+            snapshot->enumerated_image_count=state->enumerated_image_count;
+            {std::scoped_lock lock(state->mutex);snapshot->d3d12_history=state->d3d12_history;}
+            std::scoped_lock creation_lock(state->generation_creation_mutex);
+            state->generation_creation=std::async(std::launch::async,[snapshot] {
+                SwapchainState::GenerationCreation result;
+                const auto began=xrfg::interface_clock_ns();
+                result.generation=create_d3d12_frame_generation_swapchains(snapshot,&result.reason,&result.detail);
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                    111101,handle_value(snapshot->handle),result.generation?1:0,xrfg::interface_clock_ns()-began);
+                return result;
+            });
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                111100,handle_value(state->handle),0,0);
+            return true;
+        }
         const std::uint64_t auxiliary =
             (static_cast<std::uint64_t>(state->enumerated_image_count) << 32) |
             state->create_info.arraySize;
@@ -5175,6 +5272,13 @@ constexpr auto kProjectionSourceRetention = std::chrono::seconds(2);
                 continue;
             }
             std::scoped_lock call_lock(chain->call_mutex);
+            // A source can disappear from composition while its unpublished
+            // generator is still being built. Keep that history intact; poll
+            // and retire the completed owner on a later frame.
+            if(generation_creation_pending(chain)) {
+                if(generation_creation_pending(chain,true))continue;
+                finish_generation_creation(chain,false);
+            }
             bool unused{},had_generation{};
             { std::scoped_lock lock(chain->mutex);
               had_generation=bool(chain->frame_generation);
@@ -5259,7 +5363,7 @@ void seal_outlaws_initialization(SessionState& state) noexcept {
             std::scoped_lock lock(swapchain->mutex);
             swapchain->last_projection_use = now;
             if (swapchain->generation_eligible_pending &&
-                !swapchain->generation_declined) {
+                (!swapchain->generation_declined || budget_refusal(swapchain->generation_refusal))) {
                 pending = true;
             }
         }
@@ -6670,6 +6774,7 @@ XrResult layer_destroy_instance_impl(XrInstance instance) {
     }
 
     for (const auto& session_state : find_sessions(dispatch)) {
+        finish_session_generation_creation(session_state);
         stop_continuous_presenter(session_state);
         if (session_state->frame_capture) session_state->frame_capture->shutdown();
         session_state->fps_overlay.reset();
@@ -7340,6 +7445,7 @@ XrResult layer_destroy_session_impl(XrSession session) {
         return XR_ERROR_HANDLE_INVALID;
     }
 
+    finish_session_generation_creation(state);
     xrfg::stop_ngx_guide_capture(state->d3d12_queue.Get());
     stop_continuous_presenter(state);
     if(state->private_runtime)state->private_runtime->stop();
@@ -7503,6 +7609,7 @@ XrResult layer_end_session_impl(XrSession session) {
         return XR_ERROR_HANDLE_INVALID;
     }
 
+    finish_session_generation_creation(state);
     stop_continuous_presenter(state);
     if (state->fps_overlay) state->fps_overlay->set_session_focused(false);
     if(state->private_runtime){state->private_runtime->drain();state->private_runtime->stop();}
@@ -18454,6 +18561,12 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     if (!state->generation_outputs_needed) state->generation_outputs_needed=outputs_needed;
     if (recovery!=S_OK && state->control_revision == control.revision && !force_startup_rendezvous && !output_use_changed && !afw_use_changed &&
         hybrid_ready==state->nvidia_options.hybrid) return S_OK;
+    // Native camera discovery can enable Hybrid while the initial generator
+    // is still compiling. Defer that automatic revision without blocking a
+    // fresh real frame; explicit changes/teardown join before mutation.
+    if(state->control_revision==control.revision && !force_startup_rendezvous &&
+        !output_use_changed && !afw_use_changed && generation_creation_pending(state))return S_OK;
+    finish_session_generation_creation(state);
     struct ReconfigurationTrace {
         xrfg::BridgeFlightLogger& logger;xrfg::BridgeFlightToken token;std::uint64_t revision;
         ~ReconfigurationTrace(){logger.end(token,xrfg::BridgeFlightOperation::embedded_configuration,89830,revision,0,0);}
@@ -20320,7 +20433,8 @@ XrResult layer_end_frame_impl(
             xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
                 764,panels.size(),handle_value(state->handle));
         }
-        if(state->private_runtime)state->private_runtime->finish_generation_initialization();
+        if(state->private_runtime && !generation_creation_pending(state))
+            state->private_runtime->finish_generation_initialization();
         return passthrough_result;
     }
     const std::optional<PendingApplicationFrame> application_frame =

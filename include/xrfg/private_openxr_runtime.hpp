@@ -233,6 +233,10 @@ public:
     // Optional UI construction owns a new, unpublished chain. Native creation
     // and texture allocation must not hold the delivery/Wait-result mutex.
     XrResult create_optional_swapchain(const XrSwapchainCreateInfo*,XrSwapchain*);
+    // Unpublished generator construction may allocate outside the delivery
+    // mutex. Existing publication pools remain pinned until commit/cancel.
+    XrResult create_background_swapchain(const XrSwapchainCreateInfo*,XrSwapchain*,
+        D3D12_RESOURCE_STATES,std::uint32_t,XrSwapchain,unsigned publication_lane=0);
     XrResult destroy_swapchain(XrSwapchain);
     // Optional UI retirement: busy readers/consumers leave the chain intact
     // and return XR_ERROR_CALL_ORDER_INVALID for a later frame-thread retry.
@@ -264,7 +268,7 @@ public:
     [[nodiscard]] std::optional<std::vector<SwapchainMapping>> native_swapchain_mapping() const;
 private:
     XrResult create_swapchain_impl(const XrSwapchainCreateInfo*,XrSwapchain*,
-        D3D12_RESOURCE_STATES,std::uint32_t,XrSwapchain,ID3D12Device*,unsigned,bool optional);
+        D3D12_RESOURCE_STATES,std::uint32_t,XrSwapchain,ID3D12Device*,unsigned,bool optional,bool background=false);
     XrResult destroy_swapchain_impl(XrSwapchain,bool blocking);
     XrResult acquire_image_impl(XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t*,bool blocking);
     struct Impl;

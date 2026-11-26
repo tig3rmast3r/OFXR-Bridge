@@ -2470,7 +2470,11 @@ XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* inf
 XrResult PrivateOpenXrRuntime::create_optional_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output) {
     return create_swapchain_impl(info,output,D3D12_RESOURCE_STATE_RENDER_TARGET,3,XR_NULL_HANDLE,nullptr,0,true);
 }
-XrResult PrivateOpenXrRuntime::create_swapchain_impl(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count,XrSwapchain publication_source,ID3D12Device* d11_output_owner,unsigned publication_lane,bool optional) {
+XrResult PrivateOpenXrRuntime::create_background_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output,
+    D3D12_RESOURCE_STATES state,std::uint32_t count,XrSwapchain source,unsigned lane) {
+    return create_swapchain_impl(info,output,state,count,source,nullptr,lane,false,true);
+}
+XrResult PrivateOpenXrRuntime::create_swapchain_impl(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count,XrSwapchain publication_source,ID3D12Device* d11_output_owner,unsigned publication_lane,bool optional,bool background) {
     if(!info || !output || info->type!=XR_TYPE_SWAPCHAIN_CREATE_INFO || image_count<1 || image_count>3)return XR_ERROR_VALIDATION_FAILURE;
     const bool pooled=publication_source!=XR_NULL_HANDLE;
     // A packed stereo image or texture array is still one source domain: its
@@ -2481,10 +2485,11 @@ XrResult PrivateOpenXrRuntime::create_swapchain_impl(const XrSwapchainCreateInfo
         !(info->usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) ||
         (info->usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)))return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::unique_lock lock(s.mutex);
+    const bool off_map=optional || (background && s.options.independent_pacing && s.d12());
     Impl::OptionalWork optional_work(s,optional);
     const bool was_running=s.running;
     const auto stop_epoch=s.stop_epoch;
-    if(optional)*output=XR_NULL_HANDLE;
+    if(off_map)*output=XR_NULL_HANDLE;
     publication_lane=s.options.independent_pacing?std::min(publication_lane,1U):0;
     auto chain=std::make_shared<Impl::Chain>();chain->info=*info;chain->info.next=nullptr;
     chain->optional_ui=optional && s.options.independent_pacing && s.d12();
@@ -2503,10 +2508,26 @@ XrResult PrivateOpenXrRuntime::create_swapchain_impl(const XrSwapchainCreateInfo
     }
     auto& endpoint=Impl::destination(*chain);
     const bool created=endpoint.handle==XR_NULL_HANDLE;
-    // Optional chains cannot alias a pool or any published image. Construct
-    // entirely off-map; publish once complete under the short ownership lock.
-    if(optional)lock.unlock();
-    auto abandon=[&](XrResult r){if(created && endpoint.handle)s.options.real.destroy(endpoint.handle);return r;};
+    // Pin an existing pool before dropping the mutex. Retirement may remove
+    // its last published owner while this new private image is being built.
+    const bool reserved_owner=off_map && pooled && !created;
+    if(reserved_owner)++endpoint.publication_owners;
+    if(off_map)lock.unlock();
+    auto abandon=[&](XrResult r) {
+        bool destroy=created;
+        if(reserved_owner) {
+            if(!lock.owns_lock())lock.lock();
+            destroy=!--endpoint.publication_owners;
+        }
+        if(destroy && endpoint.handle) {
+            if(lock.owns_lock())lock.unlock();
+            s.options.real.destroy(endpoint.handle);
+        }
+        return r;
+    };
+    try {
+    if(background && off_map && s.tracing())
+        s.options.trace(104,xr_handle_bits(publication_source),pooled?1:0,created?1:0);
     if(created) {
         auto result=s.options.real.create(s.options.real.session,info,&endpoint.handle);
         if(XR_FAILED(result)) {
@@ -2515,7 +2536,8 @@ XrResult PrivateOpenXrRuntime::create_swapchain_impl(const XrSwapchainCreateInfo
             // format/state isolation remains mandatory in the shared fallback.
             if(result==XR_ERROR_LIMIT_REACHED && pooled && publication_lane) {
                 if(s.tracing())s.options.trace(88,xr_handle_bits(publication_source),publication_lane,result);
-                lock.unlock();return create_swapchain(info,output,image_state,image_count,publication_source,d11_output_owner,0);
+                if(lock.owns_lock())lock.unlock();
+                return create_swapchain_impl(info,output,image_state,image_count,publication_source,d11_output_owner,0,optional,background);
             }
             return result;
         }
@@ -2567,7 +2589,7 @@ XrResult PrivateOpenXrRuntime::create_swapchain_impl(const XrSwapchainCreateInfo
         }
     }
     if(FAILED(made))return abandon(XR_ERROR_RUNTIME_FAILURE);
-    if(optional) {
+    if(off_map) {
         lock.lock();
         if(stop_epoch!=s.stop_epoch || (was_running && s.stopping)) {
             lock.unlock();return abandon(XR_ERROR_SESSION_NOT_RUNNING);
@@ -2576,7 +2598,7 @@ XrResult PrivateOpenXrRuntime::create_swapchain_impl(const XrSwapchainCreateInfo
     if(pooled) {
         chain->handle=reinterpret_cast<XrSwapchain>(chain.get());
         if(s.chains.contains(chain->handle))return abandon(XR_ERROR_RUNTIME_FAILURE);
-        ++endpoint.publication_owners;
+        if(!reserved_owner)++endpoint.publication_owners;
         if(created)s.publication_pools.push_back(chain->publication);
     }
     s.chains.emplace(chain->handle,chain);*output=chain->handle;
@@ -2585,6 +2607,7 @@ XrResult PrivateOpenXrRuntime::create_swapchain_impl(const XrSwapchainCreateInfo
     if(pooled && s.tracing())s.options.trace(27,xr_handle_bits(publication_source),
         static_cast<std::int64_t>(xr_handle_bits(chain->handle)),static_cast<std::int64_t>(xr_handle_bits(endpoint.handle)));
     return XR_SUCCESS;
+    } catch(...) {return abandon(XR_ERROR_RUNTIME_FAILURE);}
 }
 XrResult PrivateOpenXrRuntime::destroy_swapchain(XrSwapchain handle) {
     return destroy_swapchain_impl(handle,true);

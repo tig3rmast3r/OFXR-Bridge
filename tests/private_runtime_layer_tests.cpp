@@ -669,6 +669,7 @@ static int aer_input_warning_test() {
 
 int main(int argc,char** argv) {
     if(argc>1 && std::string_view(argv[1])=="independent-native-binding-handoff"){for(unsigned runtime=0;runtime<4;++runtime)independent_native_binding_handoff(runtime);independent_native_binding_handoff(1,false);return 0;}
+    if(argc>1 && std::string_view(argv[1])=="independent-async-generation"){independent_async_creation_test(false);independent_async_creation_test(true);return independent_async_creation_test(false,true);}
     if(argc>1 && std::string_view(argv[1])=="independent-midpoint")return independent_midpoint_test();
     if(argc>1 && std::string_view(argv[1])=="independent-stereo-recovery")return independent_stereo_recovery_test();
     if(argc>1 && std::string_view(argv[1])=="aer-stereo-fallback")return aer_stereo_fallback_test();
@@ -2720,6 +2721,9 @@ int main(int argc,char** argv) {
                 check(!ack.pending && !ack.errors && rife_frames(*state)==3,"RIFE3 must finish Applying settings and activate the requested multiplier");
             }
             xr_ok(submitted,"shipping OFXR End handoff");
+            // This oracle starts from warmed generation. Cold construction is
+            // exercised separately with a gated worker and live native frames.
+            finish_session_generation_creation(state);
             if(budget_fallback_test && n==4) {
                 budget_meter=f.make_chain(false,1);
                 // Pooling saves native handles. Fill the actual remaining
