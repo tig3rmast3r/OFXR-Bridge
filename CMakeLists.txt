@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1097.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1098.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1764,6 +1764,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_private_admission_credit COMMAND xrfg_private_runtime_layer_tests admission-credit)
         add_test(NAME xrfg_private_independent_meter COMMAND xrfg_private_runtime_layer_tests meter-native-confirmation)
         add_test(NAME xrfg_private_uevr_camera_loss COMMAND xrfg_private_runtime_layer_tests uevr-camera-loss)
+        add_test(NAME xrfg_private_uevr_turn_stop COMMAND xrfg_private_runtime_layer_tests uevr-turn-stop)
         set_tests_properties(xrfg_private_uevr_camera_loss PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         add_test(NAME xrfg_private_uevr_source_binding COMMAND xrfg_private_runtime_layer_tests uevr-source-binding)
         set_tests_properties(xrfg_private_uevr_source_binding PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")

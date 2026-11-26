@@ -164,6 +164,12 @@ struct UevrEyeCamera {
     std::array<UevrXrPose, 2> xr_eyes{};
     std::int64_t xr_time{};
     bool xr_valid{};
+    // The game camera's current yaw, independently of UEVR's held eye-view
+    // rotation. Optional: unrecognized camera sources retain prediction.
+    double game_yaw{};
+    std::uintptr_t game_camera{};
+    std::uint64_t game_frame{};
+    bool game_yaw_valid{};
 };
 
 // FRotationMatrix axes: X forward, Y right, Z up, in world space.

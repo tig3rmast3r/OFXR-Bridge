@@ -45,6 +45,10 @@ UevrCameraFeed& uevr_camera_feed() {
 thread_local std::array<double, 3> t_uevr_base_location{};
 thread_local std::array<double, 3> t_uevr_base_rotation{};
 thread_local bool t_uevr_base_valid{};
+struct UevrGameYaw { double yaw{}; std::uintptr_t camera{}; std::uint64_t frame{}; ULONGLONG ticks{}; bool valid{}; };
+thread_local UevrGameYaw t_uevr_game_yaw{};
+struct UevrGameFrame { std::uint64_t serial{}; ULONGLONG ticks{}; };
+thread_local UevrGameFrame t_uevr_game_frame{};
 
 const UEVR_PluginInitializeParam* uevr_api() noexcept {
     const auto module = GetModuleHandleW(L"UEVRBackend.dll");
@@ -53,6 +57,75 @@ const UEVR_PluginInitializeParam* uevr_api() noexcept {
         GetProcAddress(module, "g_plugin_initialize_param"));
     if (!api || !api->version || api->version->major != 2) return nullptr;
     return api;
+}
+
+// A const Unreal getter inside the game-thread viewport draw. Reflect and
+// validate the return layout rather than assuming UE4 floats or UE5 doubles.
+// No game/UEVR value is changed and no UObject is retained across callbacks.
+UevrGameYaw uevr_read_game_yaw(const UEVR_PluginInitializeParam* api) noexcept {
+    UevrGameYaw out{};
+    if (!api || !api->sdk) return out;
+    const auto* sdk = api->sdk;
+    if (!sdk->functions || !sdk->functions->get_player_controller || !sdk->uobject ||
+        !sdk->uobject->get_property_data || !sdk->uobject->get_class || !sdk->uobject->process_event ||
+        !sdk->ustruct || !sdk->ustruct->find_function || !sdk->ustruct->find_property ||
+        !sdk->ustruct->get_properties_size || !sdk->fproperty || !sdk->fproperty->get_offset ||
+        !sdk->fproperty->is_return_param) return out;
+    try {
+        const auto player = sdk->functions->get_player_controller(0);
+        if (!player) return out;
+        const auto* property = sdk->uobject->get_property_data(player, L"PlayerCameraManager");
+        if (!property) return out;
+        UEVR_UObjectHandle manager{}; std::memcpy(&manager, property, sizeof(manager));
+        if (!manager) return out;
+        const auto klass = sdk->uobject->get_class(manager);
+        if (!klass) return out;
+        const auto function = sdk->ustruct->find_function(reinterpret_cast<UEVR_UStructHandle>(klass), L"GetCameraRotation");
+        if (!function) return out;
+        const auto function_struct = reinterpret_cast<UEVR_UStructHandle>(function);
+        const auto result = sdk->ustruct->find_property(function_struct, L"ReturnValue");
+        const int bytes = sdk->ustruct->get_properties_size(function_struct);
+        if (!result || !sdk->fproperty->is_return_param(result) || sdk->fproperty->get_offset(result) != 0 ||
+            (bytes != sizeof(UEVR_Rotatorf) && bytes != sizeof(UEVR_Rotatord))) return out;
+        alignas(16) std::array<std::byte, sizeof(UEVR_Rotatord)> parameters{};
+        sdk->uobject->process_event(manager, function, parameters.data());
+        if (bytes == sizeof(UEVR_Rotatord)) {
+            UEVR_Rotatord rotation{}; std::memcpy(&rotation, parameters.data(), sizeof(rotation));
+            out.yaw = rotation.yaw;
+        } else {
+            UEVR_Rotatorf rotation{}; std::memcpy(&rotation, parameters.data(), sizeof(rotation));
+            out.yaw = rotation.yaw;
+        }
+        out.valid = std::isfinite(out.yaw) && std::abs(out.yaw) <= 36'000;
+        out.camera = reinterpret_cast<std::uintptr_t>(manager);
+    } catch (...) { out = {}; }
+    return out;
+}
+
+void uevr_pre_viewport_draw(UEVR_UGameViewportClientHandle, UEVR_FViewportHandle, UEVR_FCanvasHandle) {
+    static std::atomic_uint64_t next_frame{};
+    t_uevr_game_yaw = {};
+    t_uevr_game_frame = {};
+    if (!xrfg::autonomous::uevr_osr_attached.load(std::memory_order_relaxed)) return;
+    const auto control = xrfg::embedded::snapshot();
+    if (!control.desired.enabled || !control.desired.hybrid) return;
+    t_uevr_game_frame = {++next_frame, GetTickCount64()};
+}
+
+void uevr_sample_game_yaw(const UEVR_PluginInitializeParam* api) noexcept {
+    t_uevr_game_yaw = {};
+    const auto now = GetTickCount64();
+    if (!t_uevr_game_frame.serial || now < t_uevr_game_frame.ticks ||
+        now - t_uevr_game_frame.ticks > 200) return;
+    const auto started = std::chrono::steady_clock::now();
+    t_uevr_game_yaw = uevr_read_game_yaw(api);
+    t_uevr_game_yaw.frame = t_uevr_game_frame.serial;
+    t_uevr_game_yaw.ticks = now;
+    // 1423: getter availability, its CPU microseconds and viewport serial.
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+        t_uevr_game_yaw.valid ? 1 : 0, 1423,
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count(),
+        t_uevr_game_yaw.frame);
 }
 
 std::array<double, 3> uevr_location(const UEVR_Vector3f* position, bool is_double) noexcept {
@@ -66,6 +139,10 @@ std::array<double, 3> uevr_location(const UEVR_Vector3f* position, bool is_doubl
 void uevr_pre_view_offset(UEVR_StereoRenderingDeviceHandle, int, float, UEVR_Vector3f* position,
     UEVR_Rotatorf* rotation, bool is_double) {
     if (!position || !rotation) return;
+    // Sample after this frame's viewpoint has been computed, rather than
+    // possibly reading last frame's cache at the start of Draw. The TLS Draw
+    // stamp restricts Unreal object access to the same game thread.
+    uevr_sample_game_yaw(uevr_api());
     t_uevr_base_location = uevr_location(position, is_double);
     if (is_double) {
         const auto* r = reinterpret_cast<const UEVR_Rotatord*>(rotation);
@@ -93,6 +170,13 @@ void uevr_post_view_offset(UEVR_StereoRenderingDeviceHandle, int, float world_to
         }
         camera.world_to_meters = world_to_meters;
         camera.ticks = GetTickCount64();
+        if (t_uevr_game_yaw.valid && camera.ticks >= t_uevr_game_yaw.ticks &&
+            camera.ticks - t_uevr_game_yaw.ticks <= 200) {
+            camera.game_yaw = t_uevr_game_yaw.yaw;
+            camera.game_camera = t_uevr_game_yaw.camera;
+            camera.game_frame = t_uevr_game_yaw.frame;
+            camera.game_yaw_valid = true;
+        }
         for (const double v : camera.location) if (!std::isfinite(v)) return;
         for (const double v : camera.rotation) if (!std::isfinite(v)) return;
         auto& feed = uevr_camera_feed();
@@ -125,8 +209,10 @@ bool uevr_register_camera_feed() noexcept {
     if (!feed.registered.compare_exchange_strong(expected, true)) return true;
     const bool pre = api->sdk->callbacks->on_pre_calculate_stereo_view_offset(&uevr_pre_view_offset);
     const bool post = api->sdk->callbacks->on_post_calculate_stereo_view_offset(&uevr_post_view_offset);
+    const bool game_camera = api->sdk->callbacks->on_pre_viewport_client_draw &&
+        api->sdk->callbacks->on_pre_viewport_client_draw(&uevr_pre_viewport_draw);
     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
-        (pre ? 1 : 0) | (post ? 2 : 0), 1405, api->version->minor, 0);
+        (pre ? 1 : 0) | (post ? 2 : 0) | (game_camera ? 4 : 0), 1405, api->version->minor, 0);
     return pre && post;
 }
 
@@ -260,6 +346,11 @@ struct UevrAfrOsrState {
     bool pair_yaw_valid{};
     double pair_head_yaw{}, pair_added_yaw{};
     bool pair_head_valid{};
+    double pair_game_yaw{}, game_yaw_offset{}, pair_slot_yaw{}, game_yaw_delta{};
+    std::uintptr_t game_camera{};
+    std::uint64_t pair_game_frame{};
+    unsigned game_yaw_matches{}, game_yaw_motion_checks{}, game_yaw_status{};
+    bool pair_game_valid{};
     // The pair's first frame: its camera and the head pose it was rendered
     // for, which the second frame must agree with.
     xrfg::UevrMatrix pair_view{};
@@ -299,6 +390,8 @@ struct UevrAfrSource {
 void uevr_afr_source_gap(UevrAfrOsrState& afr) noexcept {
     afr.reset_pending = true;
     afr.pair_view_valid = afr.pair_yaw_valid = afr.pair_head_valid = false;
+    afr.pair_game_valid = false;
+    afr.game_yaw_matches = afr.game_yaw_motion_checks = 0;
 }
 
 void uevr_afr_reset_sources(UevrAfrOsrState& afr) {
@@ -687,6 +780,68 @@ void uevr_afr_before_release(const std::shared_ptr<SwapchainState>& chain) {
     afr->reconstructed_eye = uevr_afr_reconstruct(session, *afr, captured) ? eye : 2;
 }
 
+// Use verified game-camera movement for the held eye, otherwise retain the
+// half-step that smooths stick turns. HMD motion is relocated separately.
+// Keep this policy separate from GPU reconstruction for regression coverage.
+double uevr_afr_stick_yaw(const SessionState& session, UevrAfrOsrState& afr,
+    const xrfg::UevrEyeCamera& camera, bool relocated, double& carried, double slot_yaw = 0) noexcept {
+    const double base_yaw = camera.base_rotation[1];
+    const bool hybrid = session.menu_enabled && session.hybrid_requested &&
+        session.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr && session.nvidia_options.rife_model < 0;
+    afr.game_yaw_status = camera.game_yaw_valid ? 1 : 0;
+    afr.game_yaw_delta = 0;
+    if (afr.eye_releases == 0) {
+        const double step = afr.pair_yaw_valid ? xrfg::uevr_wrap_degrees(base_yaw - afr.pair_yaw) : 0;
+        // UE yaw turns right; the OpenXR yaw turns left.
+        const double head_yaw = camera.xr_valid ? -xrfg::uevr_xr_yaw_degrees(camera.xr_eyes[0].orientation) : 0;
+        const double added_yaw = xrfg::uevr_wrap_degrees(camera.rotation[1] - base_yaw);
+        double stick = step;
+        if (camera.xr_valid && afr.pair_head_valid) {
+            const double head_step = xrfg::uevr_wrap_degrees(head_yaw - afr.pair_head_yaw);
+            const double added_step = xrfg::uevr_wrap_degrees(added_yaw - afr.pair_added_yaw);
+            stick = xrfg::uevr_stick_yaw_step(step, head_step, added_step);
+            carried = step - stick;
+        }
+        afr.pair_yaw_step = std::abs(stick) < 30 ? stick : 0;
+        afr.pair_yaw = base_yaw;
+        afr.pair_yaw_valid = true;
+        afr.pair_head_yaw = head_yaw;
+        afr.pair_added_yaw = added_yaw;
+        afr.pair_head_valid = camera.xr_valid;
+        afr.pair_game_valid = hybrid && camera.game_yaw_valid && camera.game_camera && camera.game_frame;
+        if (afr.pair_game_valid) {
+            const double offset = xrfg::uevr_wrap_degrees(base_yaw - camera.game_yaw);
+            if (afr.game_camera == camera.game_camera && afr.game_yaw_matches &&
+                std::abs(xrfg::uevr_wrap_degrees(offset - afr.game_yaw_offset)) < .25)
+                afr.game_yaw_matches = std::min(3U, afr.game_yaw_matches + 1);
+            else { afr.game_yaw_matches = 1; afr.game_yaw_motion_checks = 0; }
+            afr.game_yaw_offset = offset; afr.game_camera = camera.game_camera;
+            afr.pair_game_yaw = camera.game_yaw; afr.pair_game_frame = camera.game_frame;
+            afr.pair_slot_yaw = slot_yaw;
+        } else { afr.game_yaw_matches = afr.game_yaw_motion_checks = 0; }
+    } else if (afr.pair_yaw_valid && std::abs(xrfg::uevr_wrap_degrees(base_yaw - afr.pair_yaw)) < 1e-3 && relocated) {
+        const double predicted = afr.pair_yaw_step * .5;
+        if (hybrid && afr.pair_game_valid && camera.game_yaw_valid && afr.game_yaw_matches >= 2 &&
+            camera.game_camera == afr.game_camera && camera.game_frame > afr.pair_game_frame &&
+            std::abs(xrfg::uevr_wrap_degrees(slot_yaw - afr.pair_slot_yaw)) < .05) {
+            const double observed = xrfg::uevr_wrap_degrees(camera.game_yaw - afr.pair_game_yaw);
+            afr.game_yaw_delta = observed; afr.game_yaw_status |= 2;
+            // A stale pair-held cache must never disable smooth turning.
+            // First prove that this source advances on moving second frames.
+            if (std::abs(predicted) > .1 && observed * predicted > 0 &&
+                std::abs(observed - predicted) < .25 + .25 * std::abs(predicted))
+                afr.game_yaw_motion_checks = std::min(2U, afr.game_yaw_motion_checks + 1);
+            if (std::abs(observed) >= 30) afr.game_yaw_motion_checks = 0;
+            if (afr.game_yaw_motion_checks >= 2) {
+                afr.game_yaw_status |= 4;
+                return observed;
+            }
+        }
+        return afr.pair_yaw_step * 0.5;
+    }
+    return 0;
+}
+
 // Reconstructs the other eye from the eye just released and writes it into
 // the other eye's swapchain. Locked by the caller.
 bool uevr_afr_reconstruct(SessionState& session, UevrAfrOsrState& afr, const UevrAfrSource& captured) {
@@ -863,41 +1018,13 @@ bool uevr_afr_reconstruct(SessionState& session, UevrAfrOsrState& afr, const Uev
     frame.destination_view_to_world = xrfg::uevr_multiply(eye_to_eye, frame.source_view_to_world);
     frame.same_view_to_world = xrfg::uevr_multiply(eye_to_same, frame.source_view_to_world);
     frame.relocate_same = relocated && same_image != nullptr;
-    // UEVR holds the engine rotation for the pair (calculate_stereo_view_offset,
-    // m_last_afr_rotation): a stick turn advances only on the pair's first
-    // frame. At a steady turn the second frame lies halfway, so both its eyes
-    // are turned by half the last pair's yaw step, in place, when its engine
-    // yaw is indeed the held one. Yaw only; the engine's pitch and roll are
-    // rare on a stick and the HMD's are per frame already. Only the stick's
-    // share of the step: where the engine camera follows the head (Atomic
-    // Heart), its step is the head's turn, which the slot pose already has;
-    // turned by half of it again, every second frame overshot while the head
-    // turned and the view doubled.
+    // Head relocation and pair-world alignment remain independent of stick prediction.
     double extra_yaw = 0;
     double carried = 0;
     if (camera) {
         const double base_yaw = camera->base_rotation[1];
-        if (afr.eye_releases == 0) {
-            const double step = afr.pair_yaw_valid ? xrfg::uevr_wrap_degrees(base_yaw - afr.pair_yaw) : 0;
-            // UE yaw turns right; the OpenXR yaw turns left.
-            const double head_yaw = camera->xr_valid ? -xrfg::uevr_xr_yaw_degrees(camera->xr_eyes[0].orientation) : 0;
-            const double added_yaw = xrfg::uevr_wrap_degrees(camera->rotation[1] - base_yaw);
-            double stick = step;
-            if (camera->xr_valid && afr.pair_head_valid) {
-                const double head_step = xrfg::uevr_wrap_degrees(head_yaw - afr.pair_head_yaw);
-                const double added_step = xrfg::uevr_wrap_degrees(added_yaw - afr.pair_added_yaw);
-                stick = xrfg::uevr_stick_yaw_step(step, head_step, added_step);
-                carried = step - stick;
-            }
-            afr.pair_yaw_step = std::abs(stick) < 30 ? stick : 0;
-            afr.pair_yaw = base_yaw;
-            afr.pair_yaw_valid = true;
-            afr.pair_head_yaw = head_yaw;
-            afr.pair_added_yaw = added_yaw;
-            afr.pair_head_valid = camera->xr_valid;
-        } else if (afr.pair_yaw_valid && std::abs(xrfg::uevr_wrap_degrees(base_yaw - afr.pair_yaw)) < 1e-3 && relocated) {
-            extra_yaw = afr.pair_yaw_step * 0.5;
-        }
+        extra_yaw = uevr_afr_stick_yaw(session, afr, *camera, relocated, carried,
+            xrfg::uevr_xr_yaw_degrees(uevr_xr_pose(slot[0]).orientation));
         if (extra_yaw != 0) {
             frame.destination_view_to_world = xrfg::uevr_yaw_about_up(frame.destination_view_to_world, extra_yaw);
             frame.same_view_to_world = xrfg::uevr_yaw_about_up(frame.same_view_to_world, extra_yaw);
@@ -946,6 +1073,11 @@ bool uevr_afr_reconstruct(SessionState& session, UevrAfrOsrState& afr, const Uev
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage, source_eye, 1413,
             (bits(static_cast<float>(afr.pair_yaw_step)) << 32) | bits(static_cast<float>(extra_yaw)),
             (bits(static_cast<float>(carried)) << 32) | bits(static_cast<float>(base_yaw)));
+        // 1422: raw game yaw | measured held-frame delta as float bits;
+        // c = frame serial << 8 | valid(1), matched(2), measured yaw used(4).
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage, source_eye, 1422,
+            (bits(static_cast<float>(camera->game_yaw)) << 32) | bits(static_cast<float>(afr.game_yaw_delta)),
+            (camera->game_frame << 8) | afr.game_yaw_status);
     }
     frame.history_motion = settings.ghosting_fix;
     const auto afw = xrfg::embedded::afw_snapshot().desired;

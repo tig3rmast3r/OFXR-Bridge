@@ -435,10 +435,11 @@ struct BridgeFlightLogger::Impl {
         const bool allocation_failure=record.operation==BridgeFlightOperation::swapchain_eligibility && record.result==13;
         const bool hybrid_guide_receipt=record.operation==BridgeFlightOperation::luke_afw_stage &&
             ((record.a==1496 && record.result>=0) || (record.a>=1490 && record.a<=1492));
-        // Preserve rare OSR gap transitions in the non-rolling diagnostic log:
-        // the owner cannot capture a one-frame flash on demand.
+        // Preserve OSR gaps and measured-camera qualification/cost in normal
+        // diagnostic logs without requiring an on-demand capture.
         const bool osr_continuity = record.operation==BridgeFlightOperation::luke_afw_stage &&
-            (record.a==1352 || (record.a==1310 && record.result>=256 && record.result<512));
+            (record.a==1352 || record.a==1422 || record.a==1423 ||
+             (record.a==1310 && record.result>=256 && record.result<512));
         const bool input_gpu=record.operation==BridgeFlightOperation::gpu_history ||
             record.operation==BridgeFlightOperation::synthesis_gpu_span ||
             record.operation==BridgeFlightOperation::nvidia_gpu_stages || record.operation==BridgeFlightOperation::nvidia_gpu_total ||
