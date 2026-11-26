@@ -26,7 +26,13 @@ extern "C" __declspec(dllexport) __declspec(noinline) sl::Result slSetConstants(
 }
 extern "C" __declspec(dllexport) __declspec(noinline) sl::Result slEvaluateFeature(sl::Feature feature,const sl::FrameToken& frame,const sl::BaseStructure** inputs,uint32_t count,sl::CommandBuffer* list){
     uint32_t viewport=UINT32_MAX;
-    if(count&&inputs)viewport=uint32_t(*static_cast<const sl::ViewportHandle*>(inputs[0]));
+    if(inputs)for(uint32_t i=0;i<count&&viewport==UINT32_MAX;++i) {
+        const auto* input=inputs[i];
+        for(unsigned depth=0;input&&depth<16;++depth,input=input->next)
+            if(input->structType==sl::ViewportHandle::s_structType) {
+                viewport=uint32_t(*static_cast<const sl::ViewportHandle*>(input));break;
+            }
+    }
     if(observer)observer(list,feature,uint32_t(frame),viewport,values);return outcome?sl::Result::eOk:sl::Result::eErrorInvalidParameter;
 }
 extern "C" __declspec(dllexport) sl::Result slGetNewFrameToken(sl::FrameToken*& output,const uint32_t* frame){token.value=frame?*frame:0;output=&token;return sl::Result::eOk;}

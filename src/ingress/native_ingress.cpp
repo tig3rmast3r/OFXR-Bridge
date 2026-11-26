@@ -575,7 +575,10 @@ bool apply_camera(DlssMotionVectorPublication& g,ID3D12GraphicsCommandList* list
         g.camera_frame_token=packet.token;g.camera_frame_token_valid=true;
         g.camera_data_valid=g.camera_matrices_valid=true;++camera_accepted;return true;
     }
-    const auto c=streamline_camera::current(is_luke);if(!c.valid){++camera_rejected;return false;}
+    // Ordinary native games need the same exact-packet projection recovery as
+    // Luke: an unset scalar FOV must not discard otherwise validated camera
+    // geometry needed to place foveated periphery guides on the XR eye image.
+    const auto c=streamline_camera::current(true);if(!c.valid){++camera_rejected;return false;}
     g.camera_view_to_clip=c.projection;g.camera_clip_to_view=c.inverse;
     g.camera_position=c.position;g.camera_up=c.up;g.camera_right=c.right;g.camera_forward=c.forward;
     g.camera_near=c.near_z;g.camera_far=c.far_z;g.camera_fov_vertical=c.fov;

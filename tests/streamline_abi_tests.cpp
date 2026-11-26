@@ -17,7 +17,7 @@ int failures{},calls{};bool supported{},nested{},inside{};uint32_t expected_fram
 const void* expected_constants{};bool expect_camera=true;void(*run_nested)();
 uint32_t expected_rejection{};
 bool projection_case{},luke_receipt{};
-bool native_source_case{};
+bool native_source_case{},expect_ambiguous{};
 float rejected_fov=std::numeric_limits<float>::max();
 void check(bool ok,const char* why){if(!ok){++failures;std::cerr<<"FAIL: "<<why<<'\n';}}
 void observe(void* list,uint32_t feature,uint32_t frame,uint32_t viewport,const void* values){
@@ -25,6 +25,7 @@ void observe(void* list,uint32_t feature,uint32_t frame,uint32_t viewport,const 
     check(frame==expected_frame&&viewport==expected_viewport,"original frame and viewport preserved");
     check(values==expected_constants,"original Constants address preserved");
     auto c=camera::current(luke_receipt);check(c.valid==(supported&&expect_camera),"exact camera admission");
+    if(supported&&expect_ambiguous)check(c.ambiguous&&!c.valid&&(c.rejection&1024),"conflicting or unidentifiable chained viewports stay rejected");
     if(supported&&expected_rejection)check(c.observed&&!c.valid&&c.frame==frame&&c.viewport==viewport&&
         c.rejection==expected_rejection&&c.fov==rejected_fov&&c.near_z==.1f&&c.far_z==100,
         "exact rejected camera preserves field mask and original scalar bits");
@@ -137,7 +138,20 @@ int main(int argc,char** argv){
         projection_cases(*v,[&]{get_token(token,&expected_frame);
             check(set2(*v,*token,viewport)==sl::Result::eOk,"projection modern original Set result");
             check(eval2(sl::kFeatureDLSS,*token,inputs,1,nullptr)==sl::Result::eOk,"projection modern original Evaluate result");});
+        initialize(*v);projection_case=luke_receipt=false;expect_camera=true;expected_rejection=0;
+        ++expected_frame;get_token(token,&expected_frame);
+        check(set2(*v,*token,viewport)==sl::Result::eOk,"first eye constants for chained viewport");
+        check(set2(*v,*token,other)==sl::Result::eOk,"second eye constants for chained viewport");
+        sl::Resource wrapper{};wrapper.next=&viewport;const sl::BaseStructure* chained[]={&wrapper};
+        check(eval2(sl::kFeatureDLSS,*token,chained,1,nullptr)==sl::Result::eOk,"chained viewport keeps original evaluate result");
+        sl::ViewportHandle duplicate(expected_viewport);viewport.next=&duplicate;
+        eval2(sl::kFeatureDLSS,*token,chained,1,nullptr);
+        expect_camera=false;expect_ambiguous=true;viewport.next=&other;
+        eval2(sl::kFeatureDLSS,*token,chained,1,nullptr);
+        viewport.next=nullptr;wrapper.next=&wrapper;expected_viewport=UINT32_MAX;
+        eval2(sl::kFeatureDLSS,*token,chained,1,nullptr);
+        expect_ambiguous=false;
     }
-    check(calls==((legacy&&supported)?13:9),"all original, projection and native source evaluations reached");check(!camera::current().valid,"no camera leaks outside evaluate");
+    check(calls==((legacy&&!supported)?9:13),"all original, projection, chained and native source evaluations reached");check(!camera::current().valid,"no camera leaks outside evaluate");
     VirtualFree(page,0,MEM_RELEASE);std::cout<<"Streamline "<<(legacy?1:2)<<" supported="<<supported<<" original_calls="<<calls<<" failures="<<failures<<'\n';return failures?1:0;
 }

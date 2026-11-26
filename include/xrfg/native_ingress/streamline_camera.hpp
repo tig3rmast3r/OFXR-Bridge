@@ -15,9 +15,9 @@ struct Camera {
     float near_z{}, far_z{}, fov{};
     int camera_motion{-1};
 };
-// Luke may reconstruct a missing/invalid FOV only from this exact packet's
-// normalized perspective and mutually inverse matrices. Other callers retain
-// the original SDK scalar and admission decision.
-Camera current(bool luke_projection_receipt=false) noexcept;
+// Guide consumers may reconstruct a missing/invalid FOV only from this exact
+// packet's normalized perspective and mutually inverse matrices. The default
+// receipt retains the original SDK scalar and admission decision for diagnosis.
+Camera current(bool projection_receipt=false) noexcept;
 bool hooked() noexcept;
 }

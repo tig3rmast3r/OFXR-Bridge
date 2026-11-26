@@ -126,11 +126,16 @@ bool evaluate1(sl1::CommandBuffer* list,sl1::Feature feature,uint32_t frame,uint
 sl::Result evaluate(sl::Feature feature,const sl::FrameToken& frame,
     const sl::BaseStructure** inputs,uint32_t count,sl::CommandBuffer* list) {
     Camera selected{};bool has_viewport=false;uint32_t viewport{};
-    if(inputs)for(uint32_t i=0;i<count;++i)if(inputs[i]&&
-        inputs[i]->structType==sl::ViewportHandle::s_structType) {
-        auto next=static_cast<uint32_t>(*static_cast<const sl::ViewportHandle*>(inputs[i]));
-        if(has_viewport&&next!=viewport)selected.ambiguous=true;
-        has_viewport=true;viewport=next;
+    if(inputs)for(uint32_t i=0;i<count;++i) {
+        // A viewport may follow another SDK input in its BaseStructure chain.
+        // Keep exact-frame selection and reject conflicting IDs at any depth.
+        const auto* input=inputs[i];
+        for(unsigned depth=0;input&&depth<16;++depth,input=input->next) {
+            if(input->structType!=sl::ViewportHandle::s_structType)continue;
+            const auto next=static_cast<uint32_t>(*static_cast<const sl::ViewportHandle*>(input));
+            if(has_viewport&&next!=viewport)selected.ambiguous=true;
+            has_viewport=true;viewport=next;
+        }
     }
     selected=select(static_cast<uint32_t>(frame),has_viewport,viewport,selected.ambiguous);
     Restore restore{production};production=selected;
@@ -149,8 +154,8 @@ unsigned major_version(HMODULE module) {
     return HIWORD(info->dwFileVersionMS);
 }
 }
-Camera current(bool luke_projection_receipt) noexcept {
-    auto camera=production;if(luke_projection_receipt)static_cast<void>(projection_fov(camera));return camera;
+Camera current(bool projection_receipt) noexcept {
+    auto camera=production;if(projection_receipt)static_cast<void>(projection_fov(camera));return camera;
 }
 bool hooked() noexcept {auto& s=hooks();std::scoped_lock lock(s.mutex);return bool(s.constants)&&bool(s.evaluate);}
 void poll() noexcept {
