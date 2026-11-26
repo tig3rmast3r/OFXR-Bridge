@@ -1263,7 +1263,7 @@ struct PrivateOpenXrRuntime::Impl {
                 std::scoped_lock lock(mutex);
                 if(entered>independent_pair_head.entered)
                     independent_pair_head={entered,std::max(ready,packet.prepared_at),
-                        packet.recovery.source_queued?0:packet.independent_due};
+                        independent_phase_source_due(packet.independent_due,packet.recovery)};
             }
         };
         std::shared_ptr<Packet> held;

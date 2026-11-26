@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1092.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1093.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1574,6 +1574,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_independent_source_budget COMMAND xrfg_private_runtime_layer_tests independent-source-budget)
         add_test(NAME xrfg_independent_pipelined_admission COMMAND xrfg_private_runtime_layer_tests independent-pipelined-admission)
         add_test(NAME xrfg_independent_credit_lifecycle COMMAND xrfg_private_runtime_layer_tests independent-credit-lifecycle)
+        add_test(NAME xrfg_independent_overlap_recovery COMMAND xrfg_private_runtime_layer_tests independent-overlap-recovery)
         add_test(NAME xrfg_independent_optical_first COMMAND xrfg_private_runtime_layer_tests independent-optical-first)
         add_test(NAME xrfg_independent_stale_guide_worker COMMAND xrfg_private_runtime_layer_tests independent-stale-guide-worker)
         set_tests_properties(xrfg_independent_stale_guide_worker PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")

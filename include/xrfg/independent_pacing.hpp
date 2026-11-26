@@ -66,7 +66,14 @@ struct IndependentRecoveryTiming {
     bool accelerated{};
     bool protect_next_output{};
     bool source_queued{}; // prior generation/descriptor backlog, not a new GPU lateness sample
+    // A previous GPU batch alone is normal overlap under the two-source cap.
+    // It still cannot earn expiry reserve, but a completed native head can
+    // prove excess phase age and authorize latency-reducing phase trimming.
+    bool source_overlap_only{};
 };
+inline std::int64_t independent_phase_source_due(std::int64_t due,const IndependentRecoveryTiming& timing) noexcept {
+    return timing.source_queued && !timing.source_overlap_only?0:due;
+}
 // Acquire phase from distinct, completed source heads, never the smoothed
 // residence of both outputs. Corrections consume only observed ready slack;
 // native submission, prediction and GPU ownership do not wait for acquisition.

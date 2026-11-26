@@ -10376,19 +10376,24 @@ struct SynthesisJob {
     std::shared_ptr<const CompletedAfwFrame> post_afw_frame;
     bool osr_pair_phase{};
     bool stereo_recovery{};
-    bool recovery_source_queued{};
+    bool recovery_source_queued{},recovery_source_overlap_only{};
     bool pair{};
     bool triple{},quad{};
     bool deferred_real{}; // native optical compute precedes output-slot admission
     float fraction{0.5F},extra_fraction{2.0F/3.0F},third_fraction{.75F};
 };
 
-bool independent_source_backlogged(const SynthesisJob& job,std::chrono::steady_clock::time_point started) noexcept {
+bool independent_source_backlogged(const SynthesisJob& job,std::chrono::steady_clock::time_point started,
+    bool* overlap_only=nullptr) noexcept {
+    if(overlap_only)*overlap_only=false;
     if(!job.pair || started-job.current->queued_at>std::chrono::nanoseconds(job.independent_period_ns/8))return true;
     for(const auto& source:job.sources)if(source->generation) {
         const auto& g=*source->generation;
         if(g.recovery_prior_fence && g.recovery_prior_value &&
-            g.recovery_prior_fence->GetCompletedValue()<g.recovery_prior_value)return true;
+            g.recovery_prior_fence->GetCompletedValue()<g.recovery_prior_value) {
+            if(overlap_only)*overlap_only=true;
+            return true;
+        }
     }
     return false;
 }
@@ -10396,7 +10401,7 @@ bool independent_source_backlogged(const SynthesisJob& job,std::chrono::steady_c
 void assign_independent_output_timing(const SynthesisJob& job,GeneratedFrameEndInfo& image,unsigned index) noexcept {
     image.independent_due_ns=job.independent_first_due_ns+index*job.independent_period_ns;
     image.independent_recovery=job.stereo_recovery
-        ?xrfg::IndependentRecoveryTiming{index*job.independent_period_ns,true,true,job.recovery_source_queued}:xrfg::IndependentRecoveryTiming{};
+        ?xrfg::IndependentRecoveryTiming{index*job.independent_period_ns,true,true,job.recovery_source_queued,job.recovery_source_overlap_only}:xrfg::IndependentRecoveryTiming{};
 }
 
 [[nodiscard]] XrResult wait_for_synthesis_handoff(
@@ -15662,7 +15667,11 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             bool preparation_cleanup_failed{};
             if(completion)prepared=std::move(pending->prepared);
             else {
-            if(job->stereo_recovery)job->recovery_source_queued=independent_source_backlogged(*job,work_started);
+            if(job->stereo_recovery)job->recovery_source_queued=independent_source_backlogged(*job,work_started,&job->recovery_source_overlap_only);
+            if(job->stereo_recovery)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                113508,job->current->source_sequence,unsigned(job->recovery_source_queued) |
+                    (unsigned(job->recovery_source_overlap_only)<<1),
+                std::chrono::duration_cast<std::chrono::nanoseconds>(work_started-job->current->queued_at).count());
             if (std::exchange(prime_after_stale, false)) prime_worker_source(*job);
             worker_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_worker_run,
