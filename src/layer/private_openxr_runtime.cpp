@@ -177,6 +177,10 @@ struct PrivateOpenXrRuntime::Impl {
     static Chain& destination(Chain& chain) noexcept {
         return chain.publication?*chain.publication:chain;
     }
+    static D3D12_RESOURCE_STATES native_image_state(const Chain& chain) noexcept {
+        return (chain.info.usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+            ?D3D12_RESOURCE_STATE_DEPTH_WRITE:D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
     static bool compatible(const Chain& chain,const XrSwapchainCreateInfo& info,
                            D3D12_RESOURCE_STATES state,XrSwapchain source,unsigned lane=0) noexcept {
         const auto& a=chain.info;
@@ -592,7 +596,7 @@ struct PrivateOpenXrRuntime::Impl {
                     auto* image=commands && owned_copy && target->index<endpoint.real12.size()?endpoint.real12[target->index].Get():nullptr;
                     if(!commands && context11 && owned_copy && target->index<endpoint.real11.size())
                         two_frame_capture_delivery_view_d3d11(info,delivery_context11.Get(),endpoint.real11[target->index].Get());
-                    else two_frame_capture_delivery_view(info,device12.Get(),commands,image,chain->image_state);
+                    else two_frame_capture_delivery_view(info,device12.Get(),commands,image,native_image_state(endpoint));
                     break;
                 }
             }
@@ -672,10 +676,11 @@ struct PrivateOpenXrRuntime::Impl {
                     auto& chain=*owner;auto& endpoint=destination(chain);auto& image=chain.images[target->source];
                     if(target->index>=endpoint.real12.size()){copied=E_INVALIDARG;break;}
                     const auto state=chain.image_state;
+                    const auto native_state=native_image_state(endpoint);
                     D3D12_RESOURCE_BARRIER barriers[2]{};
                     for(auto& b:barriers){b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;}
                     barriers[0].Transition.pResource=image.d12.Get();barriers[0].Transition.StateBefore=state;barriers[0].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_SOURCE;
-                    barriers[1].Transition.pResource=endpoint.real12[target->index].Get();barriers[1].Transition.StateBefore=state;barriers[1].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
+                    barriers[1].Transition.pResource=endpoint.real12[target->index].Get();barriers[1].Transition.StateBefore=native_state;barriers[1].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
                     commands->ResourceBarrier(2,barriers);commands->CopyResource(endpoint.real12[target->index].Get(),image.d12.Get());
                     for(auto& b:barriers)std::swap(b.Transition.StateBefore,b.Transition.StateAfter);commands->ResourceBarrier(2,barriers);
                 }

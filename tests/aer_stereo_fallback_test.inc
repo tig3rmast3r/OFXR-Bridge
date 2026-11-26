@@ -16,7 +16,7 @@ int aer_stereo_fallback_test() {
     ComPtr<ID3D12Debug> debug;
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     Fixture f(true);f.transport->stop();f.transport.reset();f.throttled=false;
-    f.real_common=true;f.expected_views=2;f.unblock();
+    f.expected_views=2;f.unblock();
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);
     dispatch->steamvr_runtime=true;dispatch->wait_frame=paced_steamvr_fixture_wait;
     dispatch->begin_frame=Fixture::begin;dispatch->end_frame=Fixture::end;
@@ -44,9 +44,7 @@ int aer_stereo_fallback_test() {
     XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};info.width=width;info.height=height;info.arraySize=2;
     info.faceCount=info.mipCount=info.sampleCount=1;info.format=DXGI_FORMAT_R8G8B8A8_UNORM;
     info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-    f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
     XrSwapchain source{};xr_ok(layer_create_swapchain_impl(state->handle,&info,&source),"paired stereo source");
-    f.create_state=[]{return D3D12_RESOURCE_STATE_COMMON;};
     std::array<XrSwapchainImageD3D12KHR,3> images;
     for(auto& image:images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
     unsigned count{};

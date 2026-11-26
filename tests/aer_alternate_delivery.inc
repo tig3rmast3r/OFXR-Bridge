@@ -24,9 +24,8 @@ int aer_alternate_delivery_test(std::string_view route) {
     ComPtr<ID3D12Debug> debug;
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     Fixture f(native12);f.transport->stop();f.transport.reset();f.throttled=false;
-    f.real_common=true;f.expected_views=2;f.unblock();
+    f.expected_views=2;f.unblock();
     f.extra_projection=static_projection;f.scene_projection_layer=static_projection&&static_first?1:0;
-    f.create_state=[]{return D3D12_RESOURCE_STATE_COMMON;};
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);
     dispatch->steamvr_runtime=true;dispatch->wait_frame=paced_steamvr_fixture_wait;
     dispatch->begin_frame=Fixture::begin;dispatch->end_frame=Fixture::end;
@@ -67,9 +66,7 @@ int aer_alternate_delivery_test(std::string_view route) {
     info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
     const auto create_source=[&](const XrSwapchainCreateInfo& desc) {
         XrSwapchain chain{};
-        f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
         xr_ok(layer_create_swapchain_impl(state->handle,&desc,&chain),"AER application chain");
-        f.create_state=[]{return D3D12_RESOURCE_STATE_COMMON;};
         unsigned count{};
         if(native12) {
             std::array<XrSwapchainImageD3D12KHR,3> images;for(auto& image:images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};

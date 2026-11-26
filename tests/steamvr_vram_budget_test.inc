@@ -75,7 +75,7 @@ XrResult XRAPI_CALL create_three(XrSession,const XrSwapchainCreateInfo* info,XrS
     auto& fixture=*current;
     if(fixture.chains.size()>=fixture.native_chain_limit)return XR_ERROR_LIMIT_REACHED;
     *output=reinterpret_cast<XrSwapchain>(++fixture.next_handle);auto& chain=fixture.chains[*output];
-    chain.state=fixture.create_state?fixture.create_state():D3D12_RESOURCE_STATE_COMMON;
+    chain.state=D3D12_RESOURCE_STATE_RENDER_TARGET;
     for(unsigned image=0;image<3;++image)if(fixture.native12) {
         D3D12_RESOURCE_DESC description{};description.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         description.Width=info->width;description.Height=info->height;
@@ -179,7 +179,7 @@ int steamvr_vram_budget_test(int argc,char** argv) {
     std::fprintf(stderr,"VRAM checkpoint: controls applied, create device\n");std::fflush(stderr);
     Fixture fixture(!luke);fixture.transport->stop();fixture.transport.reset();
     std::fprintf(stderr,"VRAM checkpoint: device ready\n");std::fflush(stderr);
-    fixture.real_common=true;fixture.throttled=false;fixture.unblock();
+    fixture.throttled=false;fixture.unblock();
     if(luke) {
         ok(xrfg::create_d3d12_device_for_d3d11(fixture.device11.Get(),
             fixture.device12.GetAddressOf(),fixture.queue.GetAddressOf()),"VRAM D11 canonical interop owner");

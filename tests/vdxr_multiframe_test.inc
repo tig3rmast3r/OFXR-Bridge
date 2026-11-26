@@ -99,10 +99,9 @@ static int vdxr_multiframe_test(std::string route) {
     check(xrfg::autonomous::request(desired),"native VDXR route settings");
     xrfg::autonomous::apply_runtime_settings();
     Fixture f(true);f.transport->stop();f.transport.reset();f.throttled=false;f.unblock();
-    f.real_common=true;f.expected_views=2;f.prediction_horizon_ns=period*4;
+    f.expected_views=2;f.prediction_horizon_ns=period*4;
     if(vram)f.native_image_count=3;
     f.reuse_current_real_image=route.find("reuse")!=std::string::npos;
-    f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);
     dispatch->steamvr_runtime=steamvr;
     dispatch->virtual_desktop_runtime=!steamvr && !pimax && !other;

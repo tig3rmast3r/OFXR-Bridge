@@ -1447,7 +1447,7 @@ int main(int argc,char** argv) {
     }
     ComPtr<ID3D12Debug> debug;
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
-    Fixture f(native12);f.independent_mode=independent;f.transport->stop();if(route!="memory" && route!="scope" && !framework_session_probe)f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
+    Fixture f(native12);f.independent_mode=independent;f.transport->stop();if(route!="memory" && route!="scope" && !framework_session_probe)f.transport.reset();f.throttled=false;f.expected_views=2;f.unblock();
     std::atomic_uint panel_identity_checks{};
     if(panel_publication_test) {
         f.native_image_count=3;
@@ -1467,7 +1467,6 @@ int main(int argc,char** argv) {
     if(rife_latency)f.frame_wait_us=[](unsigned){return 11111;};
     if(rife_factor)f.prediction_horizon_ns=period*3; // cold-model/GPU-load fixture, unchanged physical refresh
 
-    f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=!independent_vdxr && !independent_other && !vdxr_probe && !unknown_session && !pimax_session;dispatch->virtual_desktop_runtime=independent_vdxr || vdxr_probe;
     if(pimax_session){dispatch->runtime_name="Pimax OpenXR";dispatch->inline_unless_pipelined=true;}
     if(measured)dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult{*out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;};
@@ -1940,9 +1939,7 @@ int main(int argc,char** argv) {
     else{std::array<XrSwapchainImageD3D11KHR,3> d11;for(auto& image:d11)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};xr_ok(layer_enumerate_swapchain_images_impl(chain,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(d11.data())),"shipping D11 enumerate/capture setup");}
     XrSwapchain right=chain;std::array<XrSwapchainImageD3D12KHR,3> right_images{};
     if(split_eyes) {
-        auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
         xr_ok(layer_create_swapchain_impl(state->handle,&info,&right),"separate right-eye application chain");
-        f.create_state=std::move(saved);
         for(auto& image:right_images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
         if(native12)xr_ok(layer_enumerate_swapchain_images_impl(right,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(right_images.data())),"right-eye capture setup");
         else {std::array<XrSwapchainImageD3D11KHR,3> ri;for(auto& i:ri)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};
@@ -1951,9 +1948,7 @@ int main(int argc,char** argv) {
     XrSwapchain packed_layout{};
     if(layout_alternation) {
         auto packed_info=info;packed_info.width=image_width*2;packed_info.arraySize=1;
-        auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
         xr_ok(layer_create_swapchain_impl(state->handle,&packed_info,&packed_layout),"packed projection source");
-        f.create_state=std::move(saved);
         if(native12){std::array<XrSwapchainImageD3D12KHR,3> pi;for(auto& i:pi)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
             xr_ok(layer_enumerate_swapchain_images_impl(packed_layout,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(pi.data())),"packed D12 capture setup");}
         else {std::array<XrSwapchainImageD3D11KHR,3> pi;for(auto& i:pi)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};
@@ -1963,17 +1958,13 @@ int main(int argc,char** argv) {
     unsigned independent_panel_checks{},independent_panel_fractional{};
     std::vector<XrSwapchain> extra_budget_meters;
     if(panel_test) {
-        const auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
         auto ci=info;ci.arraySize=1;
         xr_ok(layer_create_swapchain_impl(state->handle,&ci,&panel_chain),"independent panel atlas");
-        f.create_state=saved;
         std::array<XrSwapchainImageD3D12KHR,3> pi;for(auto& i:pi)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
         unsigned pc{};xr_ok(layer_enumerate_swapchain_images_impl(panel_chain,3,&pc,
             reinterpret_cast<XrSwapchainImageBaseHeader*>(pi.data())),"panel atlas capture setup");
         if(panel_budget_test) {
-            const auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
             xr_ok(layer_create_swapchain_impl(state->handle,&ci,&second_panel_chain),"independent second UEVR panel");
-            f.create_state=saved;
             for(auto& i:pi)i={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
             xr_ok(layer_enumerate_swapchain_images_impl(second_panel_chain,3,&pc,
                 reinterpret_cast<XrSwapchainImageBaseHeader*>(pi.data())),"second panel capture setup");

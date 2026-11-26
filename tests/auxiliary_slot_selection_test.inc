@@ -69,9 +69,9 @@ static int auxiliary_slot_selection_test(unsigned mode) {
         return packet;
     };
     // Application/private source images use RENDER_TARGET, while the auxiliary
-    // production allocation's declared state is COMMON. The native mock keeps
-    // the matching state per destination chain.
-    f.real_common=true;
+    // production allocation's declared state is COMMON. Native images retain
+    // the OpenXR RENDER_TARGET state regardless of the private image state.
+
     if(mode==7) {
         std::vector<std::shared_ptr<GeneratedFrameEndInfo>> held;
         for(unsigned color:{40U,80U,120U})held.push_back(publish(color));

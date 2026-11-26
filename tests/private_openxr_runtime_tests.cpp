@@ -9,6 +9,7 @@
 #include "d3d12_reported_device_alias.hpp"
 #include <wrl/client.h>
 #include <dxgi1_4.h>
+#include <d3d12sdklayers.h>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -83,7 +84,7 @@ struct Fixture {
     std::int64_t mock_consumption_deadline{};
     unsigned mock_consumed{},mock_missed{};
     std::vector<std::int64_t> mock_end_deadlines;
-    bool real_common{},reuse_current_real_image{};
+    bool reuse_current_real_image{};
     std::atomic_int slow_image_wait_ms{};
     std::atomic_int slow_frame_wait_ms{};
     std::atomic_uint fail_wait_call{},fail_begin_call{};
@@ -112,7 +113,6 @@ struct Fixture {
     std::function<void(std::uint64_t)> prepared_callback;
     std::function<void(XrSwapchain,unsigned)> image_wait_callback;
     std::function<void(const XrFrameEndInfo*)> inspect_layers;
-    std::function<D3D12_RESOURCE_STATES()> create_state;
     std::vector<unsigned> pixels,overlay_pixels,right_pixels;
     std::vector<std::array<XrSwapchain,2>> stereo_handles;
     std::size_t native_chain_limit{1000};
@@ -353,9 +353,10 @@ struct Fixture {
         auto& f=*current;if(f.chains.size()>=f.native_chain_limit)return XR_ERROR_LIMIT_REACHED;
         *output=reinterpret_cast<XrSwapchain>(f.next_handle++);auto& chain=f.chains[*output];
         chain.static_image=(info->createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT)!=0;
-        chain.state=f.create_state?f.create_state():f.real_common?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_RENDER_TARGET;
+        const bool depth=(info->usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)!=0;
+        chain.state=depth?D3D12_RESOURCE_STATE_DEPTH_WRITE:D3D12_RESOURCE_STATE_RENDER_TARGET;
         for(unsigned i=0;i<f.native_image_count;++i)if(f.native12) {
-            D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;desc.Width=info->width;desc.Height=info->height;desc.DepthOrArraySize=static_cast<UINT16>(info->arraySize);desc.MipLevels=1;desc.Format=static_cast<DXGI_FORMAT>(info->format);desc.SampleDesc.Count=1;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;desc.Width=info->width;desc.Height=info->height;desc.DepthOrArraySize=static_cast<UINT16>(info->arraySize);desc.MipLevels=1;desc.Format=static_cast<DXGI_FORMAT>(info->format);desc.SampleDesc.Count=1;desc.Flags=depth?D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL:D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
             D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;ComPtr<ID3D12Resource> texture;
             ok(f.device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,chain.state,nullptr,IID_PPV_ARGS(&texture)),"fake runtime real D12 image");chain.d12.push_back(std::move(texture));
         } else {
@@ -2336,7 +2337,10 @@ void binding_queue_handoff_test(bool render) {
     independent_fixture_mode=false;
 }
 
+#include "private_native_image_state_tests.inc"
+
 int main(int argc,char** argv){
+if(argc>1 && std::string_view(argv[1])=="native-image-state"){native_image_state_checks();return 0;}
     if(argc>1 && std::string_view(argv[1])=="binding-queue-handoff"){binding_queue_handoff_test(true);binding_queue_handoff_test(false);return 0;}
     if(argc>1 && std::string_view(argv[1])=="legacy-optical-clock"){for(bool directed:{false,true})optical_tagged_clock_checks(directed);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-startup"){independent_startup_session_test(true);independent_startup_session_test(false);return 0;}
