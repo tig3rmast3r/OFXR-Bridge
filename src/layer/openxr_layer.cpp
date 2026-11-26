@@ -13945,7 +13945,20 @@ static_assert(!should_preserve_missing_capture_anchor(
 static_assert(!should_preserve_missing_capture_anchor(
     true, xrfg::D3D12FrameGenerationMode::fsr3, false));
 
+// The first stage has already been submitted. Keep its existing tail alive
+// on every success/failure path, and flush it once after all eyes are queued.
+struct QueuedOpticalTail {
+    std::shared_ptr<xrfg::D3D12FrameSynthesizer> engine;
+    std::once_flag once;HRESULT result{S_OK};
+    HRESULT flush() noexcept {
+        try {std::call_once(once,[&]{result=engine->flush_current_copy();});return result;}
+        catch(...){return E_FAIL;}
+    }
+    ~QueuedOpticalTail(){static_cast<void>(flush());}
+};
+
 struct PreparedGeneration {
+    std::shared_ptr<QueuedOpticalTail> optical_tail;
     std::shared_ptr<FrameGenerationSwapchainState> staging_generation;
     std::shared_ptr<void> independent_current_lease, independent_synthetic_lease;
     std::shared_ptr<DirectSyntheticLease> direct_synthetic_lease, direct_extra_lease, direct_third_lease;
@@ -14607,9 +14620,16 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             // The legacy queue can hand S to the runtime while the producer
             // advances. Submit B now as well, so its queue dependency precedes
             // that next application frame rather than being inserted after S.
-            const bool defer_current_copy = !state->session->nvidia_options.ofr && !generation->staged_outputs && !worker_submission &&
-                generation->d3d11_interop == nullptr &&
-                !state->session->queued_nvidia_presenter;
+            const bool stream_optical=worker_submission && request_pair && (!panel_input || panel_input->projection) &&
+                independent_stereo_recovery(*state->session) &&
+                state->session->nvidia_options.hybrid && native_frame_multiplier(*state->session)<=3 &&
+                state->session->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::fidelity_fx &&
+                !generation->staged_outputs && !generation->d3d11_interop;
+            const bool defer_current_copy = stream_optical || (!state->session->nvidia_options.ofr && !generation->staged_outputs && !worker_submission &&
+                generation->d3d11_interop == nullptr && !state->session->queued_nvidia_presenter);
+            if(stream_optical && !output.optical_tail) {
+                output.optical_tail=std::make_shared<QueuedOpticalTail>();output.optical_tail->engine=synthesizer;
+            }
             if (!generation->d3d11_interop || SUCCEEDED(submit_result)) {
                 if (afw_source || real_copy) {
                     // Transport the frozen colour without temporal guide validation.
@@ -14644,7 +14664,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                                               !state->session->luke_afw_enabled &&
                                               !xrfg::embedded::snapshot().desired.independent_aer_double,
                                           worker_submission && independent_stereo_recovery(*state->session) &&
-                                              native_frame_multiplier(*state->session)==2,
+                                              native_frame_multiplier(*state->session)<=3,
                                           worker_submission && independent_stereo_recovery(*state->session) &&
                                               state->session->nvidia_options.hybrid && native_frame_multiplier(*state->session)<=3);
                 } else {
@@ -15105,6 +15125,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     bool defer_gpu_completion=false, bool discard_stale=false) noexcept {
     const bool publish = prepared.kind != PreparedGenerationKind::none;
     bool success = publish || discard_stale;
+    for(auto& resource:prepared.resources)if(resource.generation.optical_tail &&
+        FAILED(resource.generation.optical_tail->flush()))return false;
     if (discard_stale && state->d3d12_device && FAILED(state->d3d12_device->GetDeviceRemovedReason()))
         return false;
     std::uint64_t total_completion_us{preparation_us};
@@ -15550,12 +15572,13 @@ HRESULT publish_independent_aer_first(const std::shared_ptr<SessionState>& state
     state->presenter_condition.notify_all();return S_OK;
 }
 
-// Ordinary stereo 2X: S has its own receipt, while B's copy is already queued.
+// Ordinary stereo 2X/3X: S1 has its own receipt; the remaining work is already queued.
 // Keep auxiliary-image transactions on their existing complete-batch path.
 HRESULT publish_independent_optical_first(const std::shared_ptr<SessionState>& state,
     PreparedProjectionFrame& prepared,const std::shared_ptr<SynthesisJob>& job,bool& delayed) {
-    if(!independent_stereo_recovery(*state) || native_frame_multiplier(*state)!=2 ||
-       !job->pair || job->triple || job->quad || job->first_published || !job->metadata ||
+    const auto multiplier=native_frame_multiplier(*state);
+    if(!independent_stereo_recovery(*state) || (multiplier!=2 && multiplier!=3) ||
+       job->triple!=(multiplier==3) || !job->pair || job->quad || job->first_published || !job->metadata ||
        !job->metadata->composition_images.empty() || prepared.kind!=PreparedGenerationKind::pair ||
        prepared.resources.empty() || prepared.resources.size()!=job->mappings.size() ||
        !std::all_of(prepared.resources.begin(),prepared.resources.end(),[](const auto& r){const auto& g=r.generation;
@@ -15592,6 +15615,9 @@ HRESULT publish_independent_optical_first(const std::shared_ptr<SessionState>& s
             g.worker_generation->synthetic_runtime_images[index].Get(),g.worker_fence.Get(),g.worker_synthetic_fence_value))return E_FAIL;
         g.synthetic_released=true;
         if(g.independent_synthetic_lease)first.independent_output_leases.push_back(g.independent_synthetic_lease);
+        // The early frame can outlive full-batch completion. Retain the same
+        // descriptor lease the complete-batch publisher would have attached.
+        if(g.direct_synthetic_lease)first.direct_synthetic_leases.push_back(g.direct_synthetic_lease);
     }
     first.synthetic=true;
     auto frame=make_presenter_owned_frame(std::move(first));if(!frame)return E_OUTOFMEMORY;
@@ -15689,6 +15715,13 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                     job->extra_camera ? &*job->extra_camera : nullptr,job->third_fraction,job->third_camera?&*job->third_camera:nullptr,job->sources);
             };
             prepared = prepare_source();
+            unsigned streamed_eyes{};
+            for(auto& resource:prepared.resources)if(resource.generation.optical_tail) {
+                ++streamed_eyes;
+                if(FAILED(resource.generation.optical_tail->flush()))preparation_cleanup_failed=true;
+            }
+            if(streamed_eyes)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                113509,job->current->source_sequence,streamed_eyes,preparation_cleanup_failed?1:0);
             if(job->stereo_recovery)for(const auto& resource:prepared.resources) {
                 const auto& g=resource.generation;
                 if(g.worker_generation && g.worker_fence && g.worker_fence_value) {

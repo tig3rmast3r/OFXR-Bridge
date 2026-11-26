@@ -332,6 +332,10 @@ public:
         bool split_aer_first = false,
         // Signal S on the existing fence before the immediately queued B copy.
         // Ordinary Independent optical 2X only; all reuse still waits for B.
+        // Guided 3X may also defer later synthetic draws into the existing
+        // B-copy list. In that opt-in case synthetic_fence_value is S1 only;
+        // fence_value still owns S2/B, input retirement and work-slot reuse.
+        // Flush each eye's tail after every S1 stage of the source is queued.
         bool separate_synthetic_ready = false,
         // Same-queue FidelityFX overlap uses only existing, retired work slots
         // and free destinations, as in 0.2. No additional frame is admitted.

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1094.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1095.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -2109,6 +2109,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_dependencies(xrfg_luke_depth_gpu_tests xrfg_implicit_layer xrfg_d3d12_history)
         add_test(NAME xrfg_luke_depth_gpu COMMAND xrfg_luke_depth_gpu_tests)
         add_executable(xrfg_d3d12_history_tests tests/d3d12_history_tests.cpp)
+        add_test(NAME xrfg_independent_streamed_optical_gpu COMMAND xrfg_d3d12_history_tests independent-streamed-optical)
         add_test(NAME xrfg_independent_fidelity_overlap_gpu COMMAND xrfg_d3d12_history_tests independent-fidelity-overlap)
         add_test(NAME xrfg_independent_optical_ready_gpu COMMAND xrfg_d3d12_history_tests independent-optical-ready)
         add_test(NAME xrfg_array_stereo_guides COMMAND xrfg_d3d12_history_tests array-stereo-guides)

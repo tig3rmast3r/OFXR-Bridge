@@ -1261,7 +1261,7 @@ template <typename MotionForPixel>
 [[nodiscard]] StereoPattern readback_pattern(
     D3D12WarpFixture& fixture,
     ID3D12Resource* texture,
-    D3D12_RESOURCE_STATES initial_state) {
+    D3D12_RESOURCE_STATES initial_state,ID3D12CommandQueue* copy_queue=nullptr) {
     require(texture != nullptr, "readback source is null");
     const D3D12_RESOURCE_DESC description = texture->GetDesc();
     require(
@@ -1310,7 +1310,7 @@ template <typename MotionForPixel>
             D3D12_RESOURCE_STATE_COPY_SOURCE,
             initial_state);
         command_list->ResourceBarrier(1, &restore_state);
-    });
+    },copy_queue==nullptr,copy_queue);
 
     StereoPattern result;
     void* mapped_memory = nullptr;
@@ -6636,8 +6636,13 @@ void test_native_private_context(bool hardware) {
 
 #include "independent_optical_ready_gpu.inc"
 #include "independent_fidelity_overlap_gpu.inc"
+#include "independent_streamed_optical_gpu.inc"
 
 int main(int argc, char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="independent-streamed-optical") {
+        try{D3D12WarpFixture fixture;test_independent_streamed_optical(fixture);return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="independent-fidelity-overlap") {
         try{D3D12WarpFixture fixture;test_independent_fidelity_overlap(fixture);return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

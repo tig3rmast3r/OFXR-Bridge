@@ -1,16 +1,16 @@
 static int independent_optical_first_test() {
     xrfg_fixture::ControlProfile profile;
     independent_fixture_mode=true;
-    for(const char* runtime:{"Pimax OpenXR","SteamVR/OpenXR","VirtualDesktopXR","Other OpenXR"}) {
+    for(const char* runtime:{"Pimax OpenXR","SteamVR/OpenXR","VirtualDesktopXR","Other OpenXR"})for(unsigned factor:{2U,3U}) {
         Fixture f(true);f.throttled=false;f.unblock();
         auto dispatch=std::make_shared<Dispatch>();dispatch->runtime_name=runtime;
         dispatch->wait_swapchain_image=+[](XrSwapchain h,const XrSwapchainImageWaitInfo* i){return current->transport->wait_image(h,i);};
         dispatch->release_swapchain_image=+[](XrSwapchain h,const XrSwapchainImageReleaseInfo* i){return current->transport->release_image(h,i);};
         auto state=std::make_shared<SessionState>(dispatch);state->handle=reinterpret_cast<XrSession>(2);
         state->private_runtime=f.transport;state->graphics_binding=SessionGraphicsBinding::d3d12;
-        state->independent_pacing=state->menu_enabled=true;state->nvidia_options.rife_multiplier=2;
+        state->independent_pacing=state->menu_enabled=true;state->nvidia_options.rife_multiplier=factor;
         state->nvidia_options.rife_model=-1;state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::ofxr;
-        auto job=std::make_shared<SynthesisJob>();job->pair=true;job->fraction=.5f;
+        auto job=std::make_shared<SynthesisJob>();job->pair=true;job->triple=factor==3;job->fraction=1.f/factor;
         job->current=std::make_shared<ThreeSlotFrame>();job->current->source_sequence=50;job->current->previous_sequence=49;
         job->current->queued_at=std::chrono::steady_clock::now();job->independent_period_ns=period;
         job->independent_first_due_ns=xrfg::interface_clock_ns()+period;
@@ -32,10 +32,13 @@ static int independent_optical_first_test() {
             const auto source=reinterpret_cast<XrSwapchain>(UINT_PTR(0x1000+eye));
             auto generation=std::make_shared<FrameGenerationSwapchainState>();
             acquired(generation->synthetic[0],generation->synthetic_runtime_images,100+eye);
+            if(factor==3)acquired(generation->synthetic[1],generation->synthetic_runtime_images,150+eye);
             acquired(generation->current[0],generation->current_runtime_images,200+eye);
             generation->synthetic_runtime_images_per_ring=generation->current_runtime_images_per_ring=3;
             PreparedGeneration g;g.kind=PreparedGenerationKind::pair;g.worker_generation=generation;
-            g.synthetic_handle=generation->synthetic[0].handle;g.current_handle=generation->current[0].handle;
+            g.direct_synthetic_lease=std::make_shared<DirectSyntheticLease>();
+            g.independent_synthetic_lease=std::make_shared<unsigned>(eye);
+            g.synthetic_handle=generation->synthetic[0].handle;if(factor==3)g.extra_handle=generation->synthetic[1].handle;g.current_handle=generation->current[0].handle;
             g.synthetics_in_target_camera=true;
             ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&eye_gate[eye])),"eye readiness gate");
             ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&ready[eye])),"same eye S/B fence");
@@ -65,13 +68,13 @@ static int independent_optical_first_test() {
         job->synthetic_camera=job->snapshot;
         for(unsigned eye=0;eye<2;++eye)job->synthetic_camera->layers[0].views[eye].pose.position.x=5.f+eye;
         bool delayed{};
-        // Menu/auxiliary transactions, 3X/4X and interop must keep their old path.
+        // Auxiliary transactions, mismatched multipliers and interop keep their old path.
         job->metadata->composition_images.push_back(std::make_shared<CompositionImageSlot>());
         check(publish_independent_optical_first(state,prepared,job,delayed)==S_FALSE,"auxiliary image readiness cannot be bypassed");
         job->metadata->composition_images.clear();
-        for(unsigned multiplier:{3U,4U}) {state->nvidia_options.rife_multiplier=multiplier;
-            check(publish_independent_optical_first(state,prepared,job,delayed)==S_FALSE,"2X publication must not change multi-output batches");}
-        state->nvidia_options.rife_multiplier=2;state->graphics_binding=SessionGraphicsBinding::d3d11;
+        for(unsigned multiplier:{2U,3U,4U}) {if(multiplier==factor)continue;state->nvidia_options.rife_multiplier=multiplier;
+            check(publish_independent_optical_first(state,prepared,job,delayed)==S_FALSE,"mismatched multiplier must not publish an old job");}
+        state->nvidia_options.rife_multiplier=factor;state->graphics_binding=SessionGraphicsBinding::d3d11;
         check(publish_independent_optical_first(state,prepared,job,delayed)==S_FALSE,"D11 keeps its publication contract");state->graphics_binding=SessionGraphicsBinding::d3d12;
         auto publish=std::async(std::launch::async,[&]{return publish_independent_optical_first(state,prepared,job,delayed);});
         ok(eye_gate[0]->Signal(1),"only left S completes");
@@ -86,13 +89,15 @@ static int independent_optical_first_test() {
             "coherent S must publish while both real copies are still pending");
         check(job->first_published && state->independent_outputs.size()==1,"exactly one early S endpoint");
         const auto& first=*state->independent_outputs.front()->frame;
+        check(first.direct_synthetic_leases.size()==2 && first.independent_output_leases.size()==2,
+            "early endpoint must retain both eyes' descriptor and publication ownership");
         check(first.independent_due_ns==job->independent_first_due_ns,"early S preserves the frozen expiry slot");
         for(unsigned eye=0;eye<2;++eye) {
             const auto& g=prepared.resources[eye].generation;
             check(first.projections[0].views[eye].pose.position.x==5.f+eye &&
                 first.projections[0].views[eye].subImage.swapchain==g.synthetic_handle,
                 "early S uses its own exact eye image and synthetic camera");
-            check(g.synthetic_released && g.worker_generation->current[0].phase==PrivateOwnershipPhase::waited,
+            check(g.synthetic_released && (factor!=3 || g.worker_generation->synthetic[1].phase==PrivateOwnershipPhase::waited) && g.worker_generation->current[0].phase==PrivateOwnershipPhase::waited,
                 "early S cannot release an unfinished real image");
         }
         check(publish_independent_optical_first(state,prepared,job,delayed)==S_FALSE,"S cannot publish twice");
@@ -102,6 +107,12 @@ static int independent_optical_first_test() {
         check(full.get() && real_held,"full completion still owns real output lifetime");
         for(auto& r:prepared.resources)check(r.generation.worker_generation->current[0].phase==PrivateOwnershipPhase::idle,
             "real release follows its own full completion");
+        std::array<std::weak_ptr<DirectSyntheticLease>,2> descriptor_owners;
+        for(unsigned eye=0;eye<2;++eye) {
+            auto& g=prepared.resources[eye].generation;descriptor_owners[eye]=g.direct_synthetic_lease;
+            g.direct_synthetic_lease.reset();g.independent_synthetic_lease.reset();
+            check(!descriptor_owners[eye].expired(),"retiring the batch must not retire the queued first frame's descriptor");
+        }
         // A completed but late midpoint must retain the existing real-only
         // recovery decision, even though its smaller fence is now ready.
         job->first_published=false;
@@ -112,8 +123,9 @@ static int independent_optical_first_test() {
             "late S must not bypass real-only recovery or publish twice");
         for(auto& r:prepared.resources)r.generation.synthetic_released=true;
         state->independent_outputs.clear();
-        for(auto& r:prepared.resources) {xr_ok(f.transport->destroy_swapchain(r.generation.synthetic_handle),"S cleanup");xr_ok(f.transport->destroy_swapchain(r.generation.current_handle),"B cleanup");}
-        std::printf("OPTICAL_FIRST %s coherent two-eye S before pending B; exact pose/deadline, aux/multiplier/interop guards PASS\n",runtime);
+        for(const auto& owner:descriptor_owners)check(owner.expired(),"first-frame descriptor must retire after its last consumer");
+        for(auto& r:prepared.resources) {xr_ok(f.transport->destroy_swapchain(r.generation.synthetic_handle),"S cleanup");xr_ok(f.transport->destroy_swapchain(r.generation.current_handle),"B cleanup");if(factor==3)xr_ok(f.transport->destroy_swapchain(r.generation.extra_handle),"S2 cleanup");}
+        std::printf("OPTICAL_FIRST %s %uX coherent two-eye S before pending B; exact pose/deadline, aux/multiplier/interop guards PASS\n",runtime,factor);
     }
     independent_fixture_mode=false;return 0;
 }
