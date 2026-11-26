@@ -217,6 +217,20 @@ inline std::int64_t independent_first_deadline(std::int64_t source,std::int64_t 
     const auto slots=delta>=0?(delta+period-1)/period:delta/period;
     return cycle+slots*period;
 }
+// Independent rounding can assign a new head the preceding batch's tail slot.
+// These are expiry slots only: the native consumer never waits on them.
+class IndependentBatchDeadlines {
+    std::int64_t period_{},next_{};
+public:
+    std::int64_t claim(std::int64_t candidate,std::int64_t period,unsigned outputs) noexcept {
+        if(candidate<=0 || period<=0){reset();return candidate;}
+        if(period_!=period){reset();period_=period;}
+        const auto first=std::max(candidate,next_);
+        next_=first+std::clamp(outputs,1U,4U)*period;
+        return first;
+    }
+    void reset() noexcept {*this={};}
+};
 // Final-consumer clock only. Native period + one seeded phase form an absolute
 // grid. Native entry work never changes the next appointment. A blocking Wait
 // already supplies pacing; an immediately returning Wait uses this grid.

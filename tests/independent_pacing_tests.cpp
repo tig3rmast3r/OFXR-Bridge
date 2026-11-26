@@ -9,6 +9,7 @@ void automatic_buffer_tests();
 void source_phase_tests();
 void aer_copy_overlap_tests();
 void stereo_recovery_tests();
+void batch_deadline_tests();
 static void osr_pair_phase_tests() {
  for(const std::int64_t period:{8'333'333LL,11'111'111LL,13'888'889LL}) {
   xrfg::IndependentSourcePhase phase;
@@ -70,6 +71,7 @@ int main(){
  source_phase_tests();
  aer_copy_overlap_tests();
  stereo_recovery_tests();
+ batch_deadline_tests();
  osr_pair_phase_tests();
  // Captured-shaped startup backlog: older work completes in19ms and the
  // current job in44ms, followed by25ms/source. Keep exactly the same GPU
@@ -314,6 +316,39 @@ void source_phase_tests() {
   for(unsigned n=0;n<1200;++n)check(!phase.observe(base+n*2*p,p,2,2,p/2+2'000'000,2*n,0,0));
  }
  std::puts("SOURCE_PHASE_RECOVERY 72/90/120Hz:repeated transient queues drain with no extra native misses or lost IDs;500ms evidence,8ms/s,200us steps,two-ready/current-loss/pause/overload veto PASS (model,not game)");
+}
+void batch_deadline_tests() {
+ for(const long long p:{8'333'333LL,11'111'111LL,13'888'889LL})for(unsigned factor:{2U,3U,4U}) {
+  constexpr long long base=1'000'000'000;
+  xrfg::IndependentBatchDeadlines slots;
+  long long tail=0;
+  for(unsigned n=0;n<500;++n) {
+   // Source jitter either side of the native rounding boundary produces
+   // factor-1/factor+1 jumps despite a constant average source cadence.
+   const auto candidate=base+n*factor*p+(n%2?0:p);
+   const auto first=slots.claim(candidate,p,factor);
+   check(!tail || first>=tail+p);
+   check(first==base+n*factor*p+p); // no accumulated artificial slot drift
+   tail=first+(factor-1)*p;
+  }
+  const auto after_loading=tail+100*p;
+  check(slots.claim(after_loading,p,1)==after_loading);
+  check(slots.claim(after_loading+p,p,factor)==after_loading+p); // prime reserves one output
+  slots.reset();check(slots.claim(base,p,factor)==base);
+ }
+ // PID47564: previous real and next synthetic both had this same due time.
+ // The synthetic completed0.605ms late, within the5.556ms tolerance, but its
+ // first available native cycle was11.186ms late. It was falsely discarded.
+ constexpr long long p=11'111'128,prior_first=260272992257280;
+ const auto collision=prior_first+p,first_native=260273014554400;
+ xrfg::IndependentBatchDeadlines slots;
+ check(slots.claim(prior_first,p,2)==prior_first);
+ const auto corrected=slots.claim(collision,p,2);
+ check(corrected==collision+p);
+ check(xrfg::independent_expired(collision,first_native,0,p));
+ check(!xrfg::independent_expired(corrected,first_native,0,p));
+ check(slots.claim(260273036701792,p,2)==260273036701792);
+ std::puts("BATCH_DEADLINES PID47564 collision negative/recovery;2X/3X/4X jitter,prime,pause,reset;distinct expiry slots without handoff waits PASS");
 }
 void stereo_recovery_tests() {
  for(const long long p:{8'333'333LL,11'111'111LL,13'888'889LL}) {

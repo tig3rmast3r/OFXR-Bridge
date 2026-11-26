@@ -1151,6 +1151,7 @@ struct SessionState {
     bool independent_pacing{}; // session startup latch
     xrfg::IndependentSourceClock independent_source_clock;
     xrfg::IndependentSourcePhase independent_source_phase;
+    xrfg::IndependentBatchDeadlines independent_batch_deadlines; // presenter_mutex
     std::atomic_uint independent_streamed_first{};
     std::deque<std::shared_ptr<SynthesisJob>> independent_sources;
     std::deque<std::shared_ptr<ThreeSlotFrame>> independent_outputs;
@@ -16714,12 +16715,17 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
          job->pair=metadata_pairable && state->director_anchor_sequence!=0;
          job->triple=job->pair && native_frame_multiplier(*state)>=3;
          job->quad=job->pair && native_frame_multiplier(*state)>=4;
+         if(job->stereo_recovery)job->independent_first_due_ns=state->independent_batch_deadlines.claim(
+             job->independent_first_due_ns,job->independent_period_ns,job->pair?native_frame_multiplier(*state):1U);
          job->current->source_sequence=state->next_source_sequence++;
          job->current->previous_sequence=job->pair?state->director_anchor_sequence:0;
          state->director_anchor_sequence=job->current->source_sequence;
          state->independent_sources.push_back(job);}
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
             98610,job->current->source_sequence,job->current->previous_sequence,job->sources.size());
+        if(job->stereo_recovery)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+            113503,job->current->source_sequence,
+            xrfg::independent_first_deadline(job->independent_source_ns,timing.period,timing.cycle_ns),job->independent_first_due_ns);
         state->presenter_condition.notify_all();return XR_SUCCESS;
     }
     const auto token = xrfg::bridge_flight_logger().begin(
