@@ -121,7 +121,10 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         options.device12=state->d3d12_device.Get();
         options.producer_queue12=runtime_queue(*state);
         options.queue12=state->private_delivery_queue?state->private_delivery_queue.Get():options.producer_queue12;
-        options.release_on_binding_queue_submit=state->independent_pacing && original->steamvr_runtime &&
+        // Session creation binds every private D12 endpoint to this exact
+        // queue. Queue ordering proves runtime reads follow our final copies;
+        // a runtime name must not add a CPU fence round trip to that contract.
+        options.release_on_binding_queue_submit=state->independent_pacing &&
             state->private_delivery_queue.Get()!=nullptr;
     } else {options.device11=state->d3d11_device.Get();options.context11=state->d3d11_context.Get();}
     options.delivery_device11=state->private_delivery_device11.Get();

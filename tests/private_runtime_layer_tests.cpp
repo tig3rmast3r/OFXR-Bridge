@@ -22,6 +22,7 @@
 #include "independent_source_queue_test.inc"
 #include "independent_stereo_recovery_test.inc"
 #include "independent_midpoint_test.inc"
+#include "independent_async_creation_test.inc"
 
 // Model the native timing owner used by the shipping SteamVR endpoint. The old
 // fixture's instantaneous Wait only tested a consumer that imposed its own CPU
@@ -667,6 +668,7 @@ static int aer_input_warning_test() {
 }
 
 int main(int argc,char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="independent-native-binding-handoff"){for(unsigned runtime=0;runtime<4;++runtime)independent_native_binding_handoff(runtime);independent_native_binding_handoff(1,false);return 0;}
     if(argc>1 && std::string_view(argv[1])=="independent-midpoint")return independent_midpoint_test();
     if(argc>1 && std::string_view(argv[1])=="independent-stereo-recovery")return independent_stereo_recovery_test();
     if(argc>1 && std::string_view(argv[1])=="aer-stereo-fallback")return aer_stereo_fallback_test();
