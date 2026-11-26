@@ -1039,6 +1039,9 @@ struct D3D12FrameSynthesizer::Impl {
         bool aer_streamed{},aer_early_copy{};
         bool separate_synthetic_ready{};
         bool optical_first_split{}; // later draws share the existing B-copy list
+        // Existing captured images are already retained through the full fence.
+        // Keep explicit CPU references for exceptional deferred-tail cleanup.
+        std::array<ComPtr<ID3D12Resource>,2> cancel_history;
         std::uint64_t aer_first_fence{};
         bool omit_current_write{}; // per-recorded transaction, including RIFE fallback
     };
@@ -5237,6 +5240,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.rife_result.reset();
         slot.omit_current_write=false;slot.aer_streamed=slot.aer_early_copy=false;slot.aer_first_fence=0;
         slot.separate_synthetic_ready=slot.optical_first_split=false;
+        slot.cancel_history={};
         result = slot.current_copy_allocator->Reset();
         if (FAILED(result)) {
             synthesis_enabled = false;
@@ -7019,7 +7023,39 @@ struct D3D12FrameSynthesizer::Impl {
         const HRESULT result = queue->Signal(fence.Get(), value);
         if (FAILED(result)) {
             synthesis_enabled = false;
-        }
+        } else slot.cancel_history={};
+        return result;
+    }
+
+    // Abandon only an unsubmitted tail. Advance its retirement fence after S1
+    // on the same queue, and disable this engine so unwritten outputs cannot
+    // be reused as valid history or published. Allocator/source ownership still
+    // retires through the existing full fence; no CPU or GPU idle wait is added.
+    [[nodiscard]] HRESULT discard_pending_copy() noexcept {
+        if(pending_copy_slot==kNoPendingCopy)return S_OK;
+        const auto index=pending_copy_slot;
+        const auto value=pending_copy_fence_value;
+        pending_copy_slot=kNoPendingCopy;
+        synthesis_enabled=false;
+        if(index>=work_slots.size())return E_UNEXPECTED;
+        auto& slot=work_slots[index];
+        slot.timing_pending=false;
+        if(!slot.optical_first_split || !slot.cancel_history[0] || !slot.cancel_history[1])return E_UNEXPECTED;
+        // The discarded tail normally restores both history images. Record
+        // only those barriers into its unused allocator/list; never touch S2/B.
+        HRESULT result=slot.current_copy_allocator->Reset();
+        if(SUCCEEDED(result))result=slot.current_copy_command_list->Reset(slot.current_copy_allocator.Get(),nullptr);
+        if(FAILED(result))return result;
+        std::array<D3D12_RESOURCE_BARRIER,2> restore;
+        for(unsigned i=0;i<restore.size();++i)restore[i]=transition_barrier(
+            slot.cancel_history[i].Get(),kShaderReadState,D3D12_RESOURCE_STATE_COMMON);
+        slot.current_copy_command_list->ResourceBarrier(static_cast<UINT>(restore.size()),restore.data());
+        result=slot.current_copy_command_list->Close();
+        if(FAILED(result))return result;
+        ID3D12CommandList* cleanup[]={slot.current_copy_command_list.Get()};
+        queue->ExecuteCommandLists(1,cleanup);
+        result=queue->Signal(fence.Get(),value);
+        if(SUCCEEDED(result))slot.cancel_history={};
         return result;
     }
 
@@ -7534,7 +7570,7 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12PresentationTransform presentation_transform,
         const std::optional<D3D12ExtraSynthetic>& extra_synthetic,
         bool allow_synthetic_camera, unsigned ofr_fresh_mask, bool current_output_unused, bool split_aer_first,
-        bool separate_synthetic_ready, bool allow_queued_fidelity_pair) noexcept {
+        bool separate_synthetic_ready, bool allow_queued_fidelity_pair, bool defer_extra_reuse) noexcept {
         ofr_paired = ofr_fresh_mask == 3;
         if(nvidia_options.ofr) {defer_current_copy=false;interpolation_fraction=.5F;}
         rife_pair={}; // no abandoned pre-submission transaction survives a retry
@@ -7750,7 +7786,14 @@ struct D3D12FrameSynthesizer::Impl {
         }
         ID3D12Resource* const extra_destination = extra_output
             ? synthetic_destinations[extra_output->destination_index].resource.Get() : nullptr;
+        // Only S1 is written by the first list. S2 remains on this queue's
+        // deferred tail, whose owner acquires S2 before submitting its writes.
+        const bool per_output_reuse=defer_extra_reuse && independent_fidelity_pair &&
+            nvidia_options.hybrid && separate_synthetic_ready && defer_current_copy &&
+            extra_output && extra_output->third_destination_index==UINT32_MAX;
+        if(defer_extra_reuse && !per_output_reuse)return E_INVALIDARG;
         for(UINT out=1;out<synthetic_output_count();++out) {
+            if(per_output_reuse)continue;
             result = destination_available(synthetic_destinations[synthetic_output_destination(out,synthetic_destination_index)]);
             if (FAILED(result)) return result;
         }
@@ -8086,6 +8129,7 @@ struct D3D12FrameSynthesizer::Impl {
         }
 
         std::uint64_t fence_value = 0;
+        if(per_output_reuse)slot.cancel_history={previous.resource,next.resource};
         result = backend == D3D12OpticalFlowBackend::nvidia && !used_game_motion
                      ? execute_nvidia_and_signal(
                            slot, work_slot_index, &next, &fence_value,
@@ -8132,7 +8176,8 @@ struct D3D12FrameSynthesizer::Impl {
         previous = std::move(next);
         fsr_stale_guide_gap = false;
         current_destinations[current_destination_index].fence_value = fence_value;
-        synthetic_destinations[synthetic_destination_index].fence_value = fence_value;
+        synthetic_destinations[synthetic_destination_index].fence_value =
+            per_output_reuse?last_synthetic_fence_value:fence_value;
             for(UINT out=1;out<synthetic_output_count();++out)synthetic_destinations[synthetic_output_destination(out,synthetic_destination_index)].fence_value=fence_value;
         next_work_slot = (work_slot_index + 1U) %
             static_cast<std::uint32_t>(work_slots.size());
@@ -8540,7 +8585,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
     D3D12PresentationTransform presentation_transform,
     std::optional<D3D12ExtraSynthetic> extra_synthetic,
     bool allow_synthetic_camera, unsigned ofr_fresh_mask, bool current_output_unused, bool split_aer_first,
-    bool separate_synthetic_ready, bool allow_queued_fidelity_pair) noexcept {
+    bool separate_synthetic_ready, bool allow_queued_fidelity_pair, bool defer_extra_reuse) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -8565,7 +8610,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             defer_current_copy,
             interpolation_fraction,
             std::move(presentation_transform), extra_synthetic, allow_synthetic_camera, ofr_fresh_mask,current_output_unused,split_aer_first,
-            separate_synthetic_ready,allow_queued_fidelity_pair);
+            separate_synthetic_ready,allow_queued_fidelity_pair,defer_extra_reuse);
     } catch (...) {
         if (ticket != nullptr) {
             *ticket = {};
@@ -8601,6 +8646,13 @@ HRESULT D3D12FrameSynthesizer::flush_current_copy(
     } catch (...) {
         return E_FAIL;
     }
+}
+
+HRESULT D3D12FrameSynthesizer::discard_current_copy() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_?impl_->discard_pending_copy():S_OK;
+    } catch(...) { return E_FAIL; }
 }
 
 HRESULT D3D12FrameSynthesizer::retire_previous() noexcept {

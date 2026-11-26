@@ -35,7 +35,7 @@ static int independent_optical_first_test() {
             if(factor==3)acquired(generation->synthetic[1],generation->synthetic_runtime_images,150+eye);
             acquired(generation->current[0],generation->current_runtime_images,200+eye);
             generation->synthetic_runtime_images_per_ring=generation->current_runtime_images_per_ring=3;
-            PreparedGeneration g;g.kind=PreparedGenerationKind::pair;g.worker_generation=generation;
+            PreparedGeneration g;g.kind=PreparedGenerationKind::pair;g.worker_generation=generation;g.deferred_synthetic_reuse=factor==3;
             g.direct_synthetic_lease=std::make_shared<DirectSyntheticLease>();
             g.independent_synthetic_lease=std::make_shared<unsigned>(eye);
             g.synthetic_handle=generation->synthetic[0].handle;if(factor==3)g.extra_handle=generation->synthetic[1].handle;g.current_handle=generation->current[0].handle;
@@ -109,7 +109,8 @@ static int independent_optical_first_test() {
             "real release follows its own full completion");
         std::array<std::weak_ptr<DirectSyntheticLease>,2> descriptor_owners;
         for(unsigned eye=0;eye<2;++eye) {
-            auto& g=prepared.resources[eye].generation;descriptor_owners[eye]=g.direct_synthetic_lease;
+            auto& g=prepared.resources[eye].generation;descriptor_owners[eye]=first.direct_synthetic_leases[eye];
+            check(factor!=3 || (!g.direct_synthetic_lease && !g.independent_synthetic_lease),"S1 ownership must transfer out of a deferred batch");
             g.direct_synthetic_lease.reset();g.independent_synthetic_lease.reset();
             check(!descriptor_owners[eye].expired(),"retiring the batch must not retire the queued first frame's descriptor");
         }
@@ -126,6 +127,52 @@ static int independent_optical_first_test() {
         for(const auto& owner:descriptor_owners)check(owner.expired(),"first-frame descriptor must retire after its last consumer");
         for(auto& r:prepared.resources) {xr_ok(f.transport->destroy_swapchain(r.generation.synthetic_handle),"S cleanup");xr_ok(f.transport->destroy_swapchain(r.generation.current_handle),"B cleanup");if(factor==3)xr_ok(f.transport->destroy_swapchain(r.generation.extra_handle),"S2 cleanup");}
         std::printf("OPTICAL_FIRST %s %uX coherent two-eye S before pending B; exact pose/deadline, aux/multiplier/interop guards PASS\n",runtime,factor);
+    }
+    // Retry/destructor paths must not repeat a late acquire after failure.
+    for(unsigned mode=0;mode<3;++mode) {
+        unsigned calls{};
+        {
+            QueuedOpticalTail tail;
+            tail.engine=std::make_shared<xrfg::D3D12FrameSynthesizer>();
+            tail.submitted=mode!=2;
+            tail.before_flush=[&]() -> HRESULT {++calls;if(mode==1)throw std::runtime_error("late acquire");return E_ABORT;};
+            check(FAILED(tail.flush()) && FAILED(tail.flush()),"failed acquire must remain a failed transaction");
+        }
+        check(calls==(mode==2?0U:1U),"failure, exception and unsubmitted teardown must cancel once");
+    }
+    // Exercise the production S2 wait/acquire boundary under shutdown, an XR
+    // acquire refusal and an XR wait failure, without submitting any writes.
+    for(bool stop:{false,true}) {
+        auto owner=std::make_shared<SessionState>(std::make_shared<Dispatch>());
+        auto bank=std::make_shared<FrameGenerationSwapchainState>();
+        bank->direct_synthetic_leases[1]=std::make_shared<DirectSyntheticLease>();
+        auto previous=bank->direct_synthetic_leases[1];
+        std::shared_ptr<DirectSyntheticLease> retained;
+        auto pending=std::async(std::launch::async,[&]{return acquire_optical_tail_image(owner,bank,1,retained);});
+        check(pending.wait_for(20ms)==std::future_status::timeout,"S2 must retain its previous reader's descriptor");
+        {std::scoped_lock lock(owner->presenter_mutex);if(stop)owner->presenter_stop_requested=true;else owner->presenter_failure=XR_ERROR_RUNTIME_FAILURE;}
+        owner->presenter_condition.notify_all();
+        const bool interrupted=pending.wait_for(1000ms)==std::future_status::ready;
+        if(!interrupted){previous.reset();owner->presenter_condition.notify_all();}
+        check(pending.get()==E_ABORT && interrupted && !retained,"stop/failure must interrupt S2 before private acquisition");
+    }
+    for(unsigned mode=0;mode<3;++mode) {
+        static unsigned acquire_calls{},wait_calls{},release_calls{},failure_mode{};
+        acquire_calls=wait_calls=release_calls=0;failure_mode=mode;
+        auto dispatch=std::make_shared<Dispatch>();
+        dispatch->acquire_swapchain_image=+[](XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t* index){++acquire_calls;*index=0;return failure_mode==0?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;};
+        dispatch->wait_swapchain_image=+[](XrSwapchain,const XrSwapchainImageWaitInfo*){++wait_calls;return failure_mode==1?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;};
+        dispatch->release_swapchain_image=+[](XrSwapchain,const XrSwapchainImageReleaseInfo*){++release_calls;return XR_SUCCESS;};
+        auto owner=std::make_shared<SessionState>(dispatch);
+        auto bank=std::make_shared<FrameGenerationSwapchainState>();
+        bank->direct_synthetic_leases[1]=std::make_shared<DirectSyntheticLease>();
+        auto& image=bank->synthetic[1];image.handle=reinterpret_cast<XrSwapchain>(9999);image.first_use_logged=true;
+        std::shared_ptr<DirectSyntheticLease> retained;
+        const auto result=acquire_optical_tail_image(owner,bank,1,retained);
+        check((mode==2?SUCCEEDED(result):FAILED(result)) && retained && acquire_calls==1 && wait_calls==(mode==0?0U:1U) && release_calls==0,
+            "S2 failure must not flush writes or release an image that has not completed");
+        check(image.phase==(mode==0?PrivateOwnershipPhase::idle:mode==1?PrivateOwnershipPhase::acquired:PrivateOwnershipPhase::waited),
+            "partial S2 acquisition must retain its exact teardown ownership state");
     }
     independent_fixture_mode=false;return 0;
 }

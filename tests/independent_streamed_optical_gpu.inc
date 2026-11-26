@@ -90,5 +90,49 @@ static void test_independent_streamed_optical(D3D12WarpFixture& f) {
         }
         f.require_no_debug_errors();
     }
+    // A failed late S2 acquire must never execute that image's recorded
+    // writes, nor strand the already-issued full retirement fence.
+    {
+        auto h=std::make_shared<xrfg::D3D12SwapchainHistory>();
+        require_hresult(h->initialize(f.device(),f.queue(),sp,D3D12_RESOURCE_STATE_RENDER_TARGET),"cancel history");
+        xrfg::D3D12HistoryCaptureTicket a{},b{};
+        require_hresult(h->capture(0,&a),"cancel A");require_hresult(h->commit(a),"commit cancel A");
+        require_hresult(h->capture(1,&b),"cancel B");require_hresult(h->commit(b),"commit cancel B");
+        auto real=create_source_texture(f);
+        std::array<ComPtr<ID3D12Resource>,2> outputs;
+        std::array<ID3D12Resource*,2> targets{};
+        for(unsigned i=0;i<2;++i){outputs[i]=create_source_texture(f);targets[i]=outputs[i].Get();upload_pattern(f,targets[i],make_pattern(203));}
+        ID3D12Resource* rp[]={real.Get()};
+        xrfg::D3D12FrameSynthesizer engine;
+        require_hresult(engine.initialize(f.device(),f.queue(),h,rp,targets,kFormat,D3D12_RESOURCE_STATE_RENDER_TARGET,
+            xrfg::D3D12OpticalFlowBackend::fidelity_fx,options),"cancel engine");
+        xrfg::D3D12FrameSynthesisTicket initial,split;
+        require_hresult(engine.submit_prime(a,views,0,&initial,guides(1)),"cancel prime");
+        require_hresult(engine.wait_for_previous_submission(3000),"cancel prime drain");
+        upload_pattern(f,real.Get(),make_pattern(203));
+        require_hresult(engine.submit_pair(b,moved,moved,0,0,&split,std::nullopt,guides(2),true,1.f/3.f,{},extra,
+            false,3,false,false,true,true,true),"per-output split before acquire failure");
+        auto done=engine.submission_fence(split);
+        f.wait_for_fence(done.Get(),split.synthetic_fence_value);
+        require(done->GetCompletedValue()<split.fence_value,"full fence must remain pending before cancellation");
+        require(readback_pattern(f,targets[0],D3D12_RESOURCE_STATE_RENDER_TARGET)==control[0],"cancelled S1 pixels differ");
+        require_hresult(engine.discard_current_copy(),"discard unacquired tail");
+        require_hresult(engine.discard_current_copy(),"discard is idempotent");
+        require_hresult(engine.flush_current_copy(),"later flush cannot execute a discarded list");
+        require_hresult(engine.wait_for_previous_submission(3000),"cancelled full retirement must drain");
+        require(done->GetCompletedValue()>=split.fence_value,"cancelled full fence never signalled");
+        require(readback_pattern(f,targets[1],D3D12_RESOURCE_STATE_RENDER_TARGET)==make_pattern(203) &&
+            readback_pattern(f,real.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==make_pattern(203),"discarded tail wrote unacquired images");
+        xrfg::D3D12FrameSynthesisTicket invalid;
+        require(FAILED(engine.submit_prime(a,views,0,&invalid,guides(1))),"cancelled engine cannot publish unwritten history");
+        require_hresult(engine.wait_for_idle(),"cancelled source and allocator teardown");
+        for(unsigned i=0;i<3;++i) {
+            xrfg::D3D12HistoryCaptureTicket reused;
+            require_hresult(h->capture(i%2,&reused),"reuse history after cancelled tail");
+            require_hresult(h->commit(reused),"commit history after cancelled tail");
+            require_hresult(h->wait_for_idle(),"drain recaptured history");
+        }
+        f.require_no_debug_errors();
+    }
     std::puts("STREAMED_OPTICAL_3X both S1 eyes pixel-complete before GPU-held S2/B, immediate tail submission, exact moving-camera control and full-fence reuse PASS");
 }

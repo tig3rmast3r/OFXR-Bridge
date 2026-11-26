@@ -339,7 +339,10 @@ public:
         bool separate_synthetic_ready = false,
         // Same-queue FidelityFX overlap uses only existing, retired work slots
         // and free destinations, as in 0.2. No additional frame is admitted.
-        bool allow_queued_fidelity_pair = false) noexcept;
+        bool allow_queued_fidelity_pair = false,
+        // Hybrid 3X only: acquire S2 before flushing its deferred writes,
+        // not before submitting S1. S1 reuse tracks its exact fence.
+        bool defer_extra_reuse = false) noexcept;
 
     // Executes the current output's copy, which submit_pair records but
     // deliberately leaves unsubmitted. The synthetic frame is handed to the
@@ -359,6 +362,10 @@ public:
     // so the wait would park the consumer for a whole display period.
     [[nodiscard]] HRESULT flush_current_copy(
         ID3D12CommandQueue* consumer_queue = nullptr) noexcept;
+    // Discard unsubmitted writes after a deferred acquisition failure, signal
+    // retirement after S1, and disable this engine. Never publish its S2/B.
+    [[nodiscard]] HRESULT discard_current_copy() noexcept;
+
 
     // Relinquishes the retained rolling source against its last GPU-use fence.
     // This is nonblocking and is required before history invalidation.
