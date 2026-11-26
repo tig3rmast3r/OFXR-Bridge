@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1079.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1080.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1529,6 +1529,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_executable(xrfg_three_slot_d3d12_tests tests/three_slot_d3d12_tests.cpp
             src/common/embedded_control.cpp)
         add_executable(xrfg_private_runtime_layer_tests tests/private_runtime_layer_tests.cpp src/common/embedded_control.cpp)
+        add_test(NAME xrfg_independent_midpoint COMMAND xrfg_private_runtime_layer_tests independent-midpoint)
+        set_tests_properties(xrfg_independent_midpoint PROPERTIES TIMEOUT 15)
         add_test(NAME xrfg_independent_stereo_recovery COMMAND xrfg_private_runtime_layer_tests independent-stereo-recovery)
         set_tests_properties(xrfg_independent_stereo_recovery PROPERTIES TIMEOUT 15)
         add_test(NAME xrfg_independent_aux_d12 COMMAND xrfg_private_runtime_layer_tests independent-aux-d12)

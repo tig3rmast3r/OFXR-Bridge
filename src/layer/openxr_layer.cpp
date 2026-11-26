@@ -14712,6 +14712,11 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     const ProjectionSnapshot& current_snapshot, unsigned index=0) noexcept {
     const unsigned frames=state?native_frame_multiplier(*state):2;
     const float kFixedMidpoint=float(index+1)/float(frames);
+    // Ordinary Independent optical pairs occupy fixed physical output slots
+    // across runtimes. Prediction jitter must not move their content midpoint;
+    // the image and synthetic camera share this same interpolation fraction.
+    if(state && frames==2 && independent_stereo_recovery(*state))
+        return kFixedMidpoint;
     // RIFE multi-output batches sample fixed model times. A short irregular
     // XR interval can place S1 below0.05; the provider sanitizes it to0.5,
     // crossing S2 in4X and correctly rejecting the now-unordered request.
@@ -16726,6 +16731,9 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         if(job->stereo_recovery)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
             113503,job->current->source_sequence,
             xrfg::independent_first_deadline(job->independent_source_ns,timing.period,timing.cycle_ns),job->independent_first_due_ns);
+        if(job->stereo_recovery)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+            113504,job->current->source_sequence,std::uint64_t(job->fraction*1'000'000.F),
+            previous?job->snapshot.display_time-previous->display_time:0);
         state->presenter_condition.notify_all();return XR_SUCCESS;
     }
     const auto token = xrfg::bridge_flight_logger().begin(
