@@ -133,6 +133,13 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     // Common private admission, independent of pacing. Image storage is
     // unchanged; Legacy/AFW-only bypass installation of this endpoint.
     const std::weak_ptr<SessionState> weak=state;
+    options.late_guided_readiness=[weak] {
+        const auto owner=weak.lock();if(!owner)return false;
+        const auto desired=xrfg::embedded::snapshot().desired;
+        return owner->independent_pacing && owner->graphics_binding==SessionGraphicsBinding::d3d12 &&
+            !owner->luke_afw_enabled && !desired.ofr && desired.rife_model<0 &&
+            desired.frame_generation>=1 && desired.frame_generation<=3;
+    };
     options.physical_period=[weak]() -> std::int64_t {
         if(auto s=weak.lock())if(s->steamvr_delivery)if(auto p=s->steamvr_delivery->cached_display_period())return p->count();
         return 0;

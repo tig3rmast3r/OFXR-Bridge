@@ -124,6 +124,9 @@ public:
         std::function<unsigned()> independent_buffer; // optional fixture override; production uses automatic 4-refresh ceiling
         bool independent_pacing{}; // dedicated common consumer; ignores legacy clocks/reserves
         bool release_on_binding_queue_submit{}; // queue12 is the actual native D3D12 binding
+        // Guided generators may become ready late inside an already granted
+        // native window. Its final EndFrame guard and deadline stay unchanged.
+        std::function<bool()> late_guided_readiness;
         bool director_enabled{true}; // false: ordered native-runtime paced bypass
         // SteamVR only. Framework capacity3 enables its adaptive timing reserve.
         // Native Director: Normal3, Buffer4, with the same near-refresh reserve learner.

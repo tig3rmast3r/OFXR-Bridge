@@ -37,6 +37,7 @@ bool native_director_only_fixture_mode{};
 bool independent_fixture_mode{};
 bool independent_fixture_d11_delivery{};
 bool independent_fixture_binding_queue_handoff{};
+bool independent_fixture_late_readiness{};
 std::atomic_uint independent_fixture_buffer{};
 std::atomic_bool independent_fixture_auto{};
 std::atomic<std::int64_t> independent_fixture_begin_work{};
@@ -174,6 +175,7 @@ struct Fixture {
         options.physical_period=[]{return independent_fixture_mode?0:period;};options.capacity=capacity;
         options.independent_pacing=independent_fixture_mode;
         options.release_on_binding_queue_submit=independent_fixture_binding_queue_handoff;
+        options.late_guided_readiness=[]{return independent_fixture_late_readiness;};
         if(!independent_fixture_auto)options.independent_buffer=[]{return independent_fixture_buffer.load();};
         options.adaptive_buffer=adaptive_buffer;
         options.native_frame_contract=native_contract_fixture_mode;
@@ -1889,6 +1891,52 @@ void independent_window_test(bool d12,bool early_due=false) {
     f.transport->stop();independent_fixture_mode=false;period=saved_period;
     std::printf("Independent %s: mid-window arrival/early_due=%d/None0/exact heartbeat/owner destruction PASS\n",d12?"D12":"D11",early_due);
 }
+// Match r19's lost packet 4070: the native copy is already submitted,
+// but its CPU descriptor becomes available inside the final 1ms of the window.
+// The old empty-queue cutoff consumes a later cycle and expires the midpoint.
+void independent_late_guided_window_test() {
+    const auto saved_period=period;period=50'000'000;
+    independent_fixture_mode=independent_fixture_late_readiness=true;
+    independent_fixture_buffer=0;
+    for(unsigned factor:{2U,3U})for(unsigned output=0;output<factor-1;++output) {
+        Fixture f(true,true,[](unsigned){return int(period/10/1000);},false,true,false,8,false);
+        f.throttled=false;f.prediction_horizon_ns=period;
+        auto chain=f.make_chain();f.unblock();
+        std::promise<std::int64_t> owned_window;auto acquired_window=owned_window.get_future();
+        std::atomic_bool window_claimed{},continue_begin{};
+        f.begin_callback=[&](unsigned) {
+            if(!f.real_ends || window_claimed)return;
+            std::int64_t granted{};
+            {std::scoped_lock protocol(f.protocol);granted=std::min(f.begun_prediction-epoch,f.begun_wait_return+period);}
+            if(granted<=ns()+2'500'000)return;
+            window_claimed=true;owned_window.set_value(granted);
+            while(!continue_begin)YieldProcessor();
+        };
+        // Pimax-style fast Wait (<P/2), after a real native handoff seeds
+        // the established delivery grid. The first-window bypass would hide
+        // the early-cutoff defect by entering another native cycle at once.
+        f.write(chain,40);f.begin_virtual();xr_ok(f.submit(chain,16),"seed guided native cadence");
+        xr_ok(f.transport->drain(),"seed guided cadence retirement");
+        f.write(chain,93);
+        check(acquired_window.wait_for(1s)==std::future_status::ready,"late guide test owns the native window");
+        const auto window=acquired_window.get();continue_begin=true;
+        const auto ready_at=window-900'000;
+        f.diagnostic_work=[&](int stage,std::uint64_t,std::int64_t){if(stage==13)while(ns()<ready_at)YieldProcessor();};
+        f.begin_virtual();
+        f.transport->set_next_independent_deadline(window-period/3,false,{output*period,true,true,false});
+        auto receipt=std::make_shared<xrfg::InterfaceDeliveryReceipt>(true);
+        xr_ok(f.submit(chain,17,XR_NULL_HANDLE,receipt),"late guided source");
+        xr_ok(f.transport->drain(),"late guided drain");
+        check(receipt->outcome==1 && receipt->entered_ns>=ready_at && receipt->entered_ns<window-250'000,
+            "late guided ready image missed its already-granted native window");
+        check(f.pixels==std::vector<unsigned>({40,93}) && f.positions==std::vector<float>({16,17}),"late guided image/pose changed");
+        check(f.transport->independent_load().reserve==0,"late guided handoff added expiry allowance");
+        f.transport->stop();f.diagnostic_work={};f.begin_callback={};
+        xr_ok(f.transport->destroy_swapchain(chain),"late guided chain cleanup");
+        std::printf("LATE_GUIDED_WINDOW factor=%u output=%u same-window pixels/pose; original final guard; zero reserve PASS\n",factor,output);
+    }
+    independent_fixture_mode=independent_fixture_late_readiness=false;period=saved_period;
+}
 void independent_clean_source_test(bool d12) {
     const auto saved_period=period;
     period=11'111'111;
@@ -2386,6 +2434,7 @@ void binding_queue_handoff_test(bool render) {
 #include "private_background_creation_tests.inc"
 
 int main(int argc,char** argv){
+if(argc>1 && std::string_view(argv[1])=="independent-late-guided-window") {independent_late_guided_window_test();return 0;}
 if(argc>1 && std::string_view(argv[1])=="generation-create") {for(unsigned transition=0;transition<3;++transition)background_pool_creation(transition);return 0;}
 if(argc>1 && std::string_view(argv[1])=="ui-ready") {optional_ui_ready_image(true,true);optional_ui_ready_image(false,true);optional_ui_ready_image(true,false);return 0;}
 if(argc>1 && std::string_view(argv[1])=="startup-learning") {independent_copy_queue_learning();independent_initialization_learning();return 0;}

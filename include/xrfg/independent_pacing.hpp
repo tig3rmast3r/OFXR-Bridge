@@ -273,6 +273,12 @@ inline bool independent_expired(std::int64_t due,std::int64_t now,std::int64_t a
     // never a future window end: that could reject an image before it is due.
     return due>0 && now>due+std::max(std::int64_t{},allowance)+period/2;
 }
+// An empty-queue replay cutoff is not the latest safe fresh-image handoff.
+// Guided images already copied/queued inside the same native window remain
+// eligible until 300us before its end; the existing End guard stays at 250us.
+inline std::int64_t independent_readiness_deadline(std::int64_t window,bool guided) noexcept {
+    return window-(guided?300'000:1'250'000);
+}
 inline std::int64_t independent_window_end(std::int64_t returned,std::int64_t predicted,std::int64_t period) noexcept {
     // Some runtimes predict several periods ahead. Never turn that pose
     // horizon into additional buffering; use at most the current refresh.

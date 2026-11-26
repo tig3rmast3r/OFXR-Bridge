@@ -1331,6 +1331,8 @@ struct PrivateOpenXrRuntime::Impl {
                 independent_cycle_at=cadence.target();
                 const auto cutoff=window-1'250'000; // wake before the final native-entry guard
                 const auto entry_deadline=window-250'000;
+                const auto readiness_deadline=independent_readiness_deadline(window,
+                    options.late_guided_readiness && options.late_guided_readiness());
                 // Blocking Wait supplies runtime pacing, but a prefetched
                 // prediction does not guarantee spacing after a late End.
                 // Protected optical outputs retain that actual-handoff floor.
@@ -1386,10 +1388,18 @@ struct PrivateOpenXrRuntime::Impl {
                 while(!stopping) {
                     for(;;) {
                         {std::scoped_lock lock(mutex);
-                         if(stopping || !prepared.empty() || clock_ns()>=cutoff)break;
+                         if(stopping || !prepared.empty() || clock_ns()>=readiness_deadline)break;
                          ResetEvent(independent_ready);}
-                        const auto left=cutoff-clock_ns();if(left<=0)break;
-                        LARGE_INTEGER due{};due.QuadPart=-std::max<std::int64_t>(1,(left+99)/100);
+                        const auto left=readiness_deadline-clock_ns();if(left<=0)break;
+                        // Finish within the existing native window. A coarse
+                        // timer must not hide a ready image in its last 1ms.
+                        const auto fine_window=readiness_deadline>cutoff?1'000'000:0;
+                        if(left<=fine_window) {
+                            while(!stopping && clock_ns()<readiness_deadline &&
+                                  WaitForSingleObject(independent_ready,0)!=WAIT_OBJECT_0)YieldProcessor();
+                            continue;
+                        }
+                        LARGE_INTEGER due{};due.QuadPart=-std::max<std::int64_t>(1,(left-fine_window+99)/100);
                         if(!SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE)) {fail(XR_ERROR_RUNTIME_FAILURE);break;}
                         HANDLE wake[]={independent_ready,timer};
                         if(WaitForMultipleObjects(2,wake,FALSE,INFINITE)==WAIT_FAILED) {fail(XR_ERROR_RUNTIME_FAILURE);break;}
@@ -1397,6 +1407,8 @@ struct PrivateOpenXrRuntime::Impl {
                     {std::scoped_lock lock(mutex);
                      if(stopping || prepared.empty() || clock_ns()>=entry_deadline)break;
                      packet=std::move(prepared.front());prepared.pop_front();}
+                    if(readiness_deadline>cutoff && packet->prepared_at>=cutoff && tracing())
+                        options.trace(106,packet->sequence,packet->prepared_at,window);
                     if(packet->copy_owns_sources)pending_samples.push_back({packet});
                     if(!pending_samples.empty()) {
                         // An immutable repeat behind an outstanding write has
@@ -1425,7 +1437,10 @@ struct PrivateOpenXrRuntime::Impl {
                     // image. Reuse only the exact last released pixels/poses;
                     // any pending copy, new release or destroyed owner vetoes
                     // replay. Pins prevent concurrent overwrite/destruction.
-                    if(prediction.shouldRender && clock_ns()<entry_deadline && pin_held()) {
+                    // The extended guided window is for a fresh image only.
+                    // A heartbeat must retain its original setup budget.
+                    const bool replay_budget=readiness_deadline==cutoff || clock_ns()<cutoff;
+                    if(replay_budget && prediction.shouldRender && clock_ns()<entry_deadline && pin_held()) {
                         auto end=held->info;end.displayTime=prediction.predictedDisplayTime;
                         const auto entered=clock_ns();
                         result=options.real.end(options.real.session,&end);begun=false;
