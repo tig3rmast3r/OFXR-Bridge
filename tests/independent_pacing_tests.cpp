@@ -5,6 +5,7 @@
 #include <deque>
 #include <vector>
 #define check(condition) do {if(!(condition)){std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#condition);std::abort();}}while(false)
+#include "independent_spacing_replay.inc"
 void automatic_buffer_tests();
 void source_phase_tests();
 void aer_copy_overlap_tests();
@@ -42,6 +43,7 @@ static void osr_pair_phase_tests() {
     check(target==base+2*period);
     const auto real=grid.entry(late+2);
     check(real==late+period/2 && grid.entry(late+2,false)==real);
+    check(grid.entry_in_window(late+2,false,real-1)==real); // preserve OSR guard
     grid.finish(real);
     check(grid.claim(real+1,period)==base+3*period);
    } else check(target==base+3*period);
@@ -68,6 +70,7 @@ static void osr_pair_phase_tests() {
  }
 }
 int main(){
+ spacing_replay_tests();
  source_phase_tests();
  aer_copy_overlap_tests();
  stereo_recovery_tests();

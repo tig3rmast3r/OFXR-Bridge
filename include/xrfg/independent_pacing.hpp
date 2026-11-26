@@ -58,10 +58,12 @@ struct IndependentPairHead {
     std::int64_t entered{},ready{};
 };
 // Explicit within-batch scheduling, carried with the source's End reservation.
-// This changes recovery accounting only, never native output deadlines.
+// Offsets change accounting only; spacing protection retains the current
+// native prediction while bounding compressed CPU handoffs.
 struct IndependentRecoveryTiming {
     std::int64_t scheduled_offset{};
     bool accelerated{};
+    bool protect_next_output{};
 };
 // Consume surplus output ownership by postponing future source appointments,
 // never by accelerating native End or discarding rendered images. Qualification
@@ -237,24 +239,33 @@ public:
 class IndependentDeliveryClock {
     std::int64_t period_{},target_{},last_handoff_{};
     std::int64_t paired_earliest_{};
+    std::int64_t minimum_next_{};
     bool delivered_{};
 public:
     std::int64_t claim(std::int64_t now,std::int64_t period,bool distinct_prediction=true) noexcept {
         period=std::clamp<std::int64_t>(period,2'000'000,50'000'000);
-        if(period_!=period || !target_){period_=period;target_=now;last_handoff_=paired_earliest_=0;delivered_=false;}
+        if(period_!=period || !target_){period_=period;target_=now;last_handoff_=paired_earliest_=minimum_next_=0;delivered_=false;}
         if(!distinct_prediction)paired_earliest_=0;
         // Skip whole missed appointments, never manufacture a catch-up burst.
         if(now>target_+period_/2)target_+=((now-target_+period_/2)/period_)*period_;
-        if(last_handoff_ && !paired_earliest_ && target_<last_handoff_+period_/2+lead())target_+=period_;
+        if(last_handoff_ && !paired_earliest_ && !minimum_next_ && target_<last_handoff_+period_/2+lead())target_+=period_;
         return target_;
     }
     std::int64_t target() const noexcept {return target_;}
     std::int64_t lead() const noexcept {return std::min<std::int64_t>(300'000,period_/8);}
-    std::int64_t entry(std::int64_t now,bool use_grid=true) const noexcept {
-        return std::max(paired_earliest_,use_grid?std::max(now,target_-lead()):now);
+    std::int64_t entry(std::int64_t now,bool use_grid=true,bool optical_spacing=true) const noexcept {
+        return std::max({paired_earliest_,optical_spacing?minimum_next_:0,
+            use_grid?std::max(now,target_-lead()):now});
+    }
+    std::int64_t entry_in_window(std::int64_t now,bool use_grid,std::int64_t cutoff) const noexcept {
+        const auto spaced=entry(now,use_grid);
+        const auto original=entry(now,use_grid,false);
+        // Spacing alone must never buy another native refresh. Retain the
+        // original eligible handoff when its current window is too short.
+        return spaced>=cutoff && original<cutoff?original:spaced;
     }
     bool delivered() const noexcept {return delivered_;}
-    void finish(std::int64_t handoff=0,bool pair_head=false) noexcept {
+    void finish(std::int64_t handoff=0,bool pair_head=false,bool protect_spacing=false) noexcept {
         // The first real handoff seeds phase once, including after loading.
         if(handoff) {
             if(!delivered_)target_=handoff;
@@ -266,6 +277,10 @@ public:
         // The following appointment stays on the physical grid.
         paired_earliest_=pair_head && handoff && target_-lead()<handoff+period_/2
             ? handoff+period_/2 : 0;
+        // A prefetched blocking Wait may complete before the preceding End.
+        // Optical output spacing must follow that actual End, independent of
+        // whether our absolute grid predicts a short interval.
+        minimum_next_=protect_spacing && handoff?handoff+period_/2:0;
     }
 };
 // At a source appointment, allow one outstanding batch plus earned reserve.

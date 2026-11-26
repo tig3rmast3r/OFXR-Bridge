@@ -10198,7 +10198,7 @@ struct SynthesisJob {
 void assign_independent_output_timing(const SynthesisJob& job,GeneratedFrameEndInfo& image,unsigned index) noexcept {
     image.independent_due_ns=job.independent_first_due_ns+index*job.independent_period_ns;
     image.independent_recovery=job.stereo_recovery
-        ?xrfg::IndependentRecoveryTiming{index*job.independent_period_ns,true}:xrfg::IndependentRecoveryTiming{};
+        ?xrfg::IndependentRecoveryTiming{index*job.independent_period_ns,true,true}:xrfg::IndependentRecoveryTiming{};
 }
 
 [[nodiscard]] XrResult wait_for_synthesis_handoff(

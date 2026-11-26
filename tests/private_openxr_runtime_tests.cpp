@@ -134,6 +134,7 @@ struct Fixture {
     std::vector<std::int64_t> native_margins;
     std::vector<std::array<std::int64_t,3>> residence_samples;
     std::atomic_uint residence_sample_count{};
+    std::vector<std::array<std::int64_t,3>> spacing_samples;
     std::vector<std::int64_t> work_margins;
     std::atomic_uint source_ready_events{},pending_source_events{};
     std::int64_t physical_origin{};
@@ -197,6 +198,7 @@ struct Fixture {
                 residence_samples.push_back({std::int64_t(seq),at,margin});
                 residence_sample_count.store(unsigned(residence_samples.size()),std::memory_order_release);
             }
+            if(stage==97)spacing_samples.push_back({std::int64_t(seq),at,margin});
         };
         if(!diagnostics)options.trace_enabled=[]{return false;};
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
@@ -1823,7 +1825,7 @@ void independent_residence_accounting_test(bool handoff) {
     const auto chain=f.make_chain();std::int64_t smooth=0;
     for(unsigned n=0;n<5;++n) {
         f.write(chain,80+n);f.begin_virtual();
-        if(n<4)f.transport->set_next_independent_deadline(ns()+period*4,false,{n*period,true});
+        if(n<4)f.transport->set_next_independent_deadline(ns()+period*4,false,{n*period,true,true});
         else f.transport->set_next_independent_deadline(ns()+period*4);
         auto receipt=std::make_shared<xrfg::InterfaceDeliveryReceipt>(false);
         xr_ok(f.submit(chain,float(n+1),XR_NULL_HANDLE,receipt),"scoped accounting packet admission");
@@ -1833,12 +1835,15 @@ void independent_residence_accounting_test(bool handoff) {
             for(unsigned retry=0;retry<200 && f.residence_sample_count.load(std::memory_order_acquire)<n+1;++retry)
                 std::this_thread::sleep_for(1ms);
             check(f.residence_samples.size()==n+1,"scoped accounting diagnostic missing");
+            check(f.spacing_samples.size()==n+1 && f.spacing_samples.back()[1]>=0,
+                "source-owned output spacing protection lost at native admission");
             const auto sample=f.residence_samples.back();
             check(sample[2]==(n*period),"explicit scheduled batch offset lost at private admission");
             const auto age=xrfg::independent_queue_residence(sample[1],0,period,sample[2]);
             smooth=smooth?smooth+(age-smooth)/16:age;
             check(f.transport->independent_load().ready_residence==smooth,"presenter used raw batch waiting as excess queue residence");
-        } else check(f.residence_samples.size()==4,"default packet inherited previous scoped recovery metadata");
+        } else check(f.residence_samples.size()==4 && f.spacing_samples.size()==4,
+            "default packet inherited previous scoped recovery/spacing metadata");
     }
     check(f.pixels==std::vector<unsigned>({80,81,82,83,84}) && f.positions==std::vector<float>({1,2,3,4,5}),
         "accounting changed ordered native pixels or projection poses");

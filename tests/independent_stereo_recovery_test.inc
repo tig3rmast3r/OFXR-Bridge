@@ -21,12 +21,14 @@ static int independent_stereo_recovery_test() {
             GeneratedFrameEndInfo frame;assign_independent_output_timing(job,frame,index);
             check(frame.independent_due_ns==job.independent_first_due_ns+index*job.independent_period_ns,
                 "recovery accounting changed actual native slot");
-            check(frame.independent_recovery.accelerated && frame.independent_recovery.scheduled_offset==index*job.independent_period_ns,
+            check(frame.independent_recovery.accelerated && frame.independent_recovery.protect_next_output &&
+                frame.independent_recovery.scheduled_offset==index*job.independent_period_ns,
                 "streamed first output/unpaired prime/later output accounting lost");
         }
         job.stereo_recovery=false;
         GeneratedFrameEndInfo cleared;assign_independent_output_timing(job,cleared,1);
-        check(!cleared.independent_recovery.accelerated && !cleared.independent_recovery.scheduled_offset,
+        check(!cleared.independent_recovery.accelerated && !cleared.independent_recovery.scheduled_offset &&
+            !cleared.independent_recovery.protect_next_output,
             "default batch inherited recovery metadata");
     }
     {auto s=make_state();s->independent_pacing=false;check(!independent_stereo_recovery(*s),"Framework policy changed");}

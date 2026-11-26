@@ -1171,7 +1171,8 @@ struct PrivateOpenXrRuntime::Impl {
             std::int64_t handed{};
             bool advance{true};
             bool pair_head{};
-            ~FinishCycle(){if(advance)clock.finish(handed,pair_head);}
+            bool protect_next{};
+            ~FinishCycle(){if(advance)clock.finish(handed,pair_head,protect_next);}
         };
         std::int64_t last_wait_cost{},last_period{11'111'111};
         struct DeliverySample {std::shared_ptr<Packet> packet;std::int64_t entered{};};
@@ -1229,7 +1230,9 @@ struct PrivateOpenXrRuntime::Impl {
                 // A Wait grants a delivery window. Prepared images wake this
                 // consumer immediately within it; Wait return is not a cutoff.
                 cadence.claim(clock_ns(),last_period);
-                const auto boundary=last_wait_cost<last_period/2?cadence.entry(clock_ns()):clock_ns();
+                // Release preparation keeps its original boundary. Apply the
+                // optical spacing floor only after the native window is known.
+                const auto boundary=last_wait_cost<last_period/2?cadence.entry(clock_ns(),true,false):clock_ns();
                 if(!release_independent_head_before(boundary))break;
                 auto clock=take_wait();if(!clock)break;
                 prediction=clock->prediction;
@@ -1255,14 +1258,21 @@ struct PrivateOpenXrRuntime::Impl {
                 independent_cycle_at=cadence.target();
                 const auto cutoff=window-1'250'000; // wake before the final native-entry guard
                 const auto entry_deadline=window-250'000;
-                // A fresh blocking native Wait already grants a paced cycle.
-                // Fast Waits enter a little BEFORE the absolute appointment;
-                // Wait/Begin/Release cost is not added to every new period.
-                const auto granted=cadence.entry(clock_ns(),cadence.delivered() && last_wait_cost<physical/2);
+                // Blocking Wait supplies runtime pacing, but a prefetched
+                // prediction does not guarantee spacing after a late End.
+                // Protected optical outputs retain that actual-handoff floor.
+                // Fast Waits additionally use the absolute appointment.
+                const bool use_grid=cadence.delivered() && last_wait_cost<physical/2;
+                const auto entry_checked=clock_ns();
+                const auto spaced=cadence.entry(entry_checked,use_grid);
+                const auto granted=cadence.entry_in_window(entry_checked,use_grid,cutoff);
                 // A prefetched prediction may be too old for this appointment.
                 // Consume a fresh native cycle without advancing the output
                 // grid or discarding the prepared FIFO head.
-                if(granted>=cutoff){cycle.advance=false;continue;}
+                if(granted>=cutoff){
+                    if(tracing())options.trace(98,0,granted,cutoff);
+                    cycle.advance=false;continue;
+                }
                 if(!sleep_until(granted,500'000))break;
                 const auto cap=options.independent_buffer?std::min(kIndependentMaximumReserveFrames,options.independent_buffer()):kIndependentMaximumReserveFrames;
                 reserve.set_limit(physical*cap);independent_reserve=reserve.reserve();
@@ -1364,7 +1374,11 @@ struct PrivateOpenXrRuntime::Impl {
                 end.displayTime=packet->content_time?packet->content_time:prediction.predictedDisplayTime;
                 if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
                 const auto entered=clock_ns();result=options.real.end(options.real.session,&end);
-                if(result==XR_SUCCESS && end.layerCount){cycle.handed=entered;cycle.pair_head=packet->phase_head;}
+                if(result==XR_SUCCESS && end.layerCount){
+                    cycle.handed=entered;
+                    cycle.pair_head=packet->phase_head;
+                    cycle.protect_next=packet->recovery.protect_next_output;
+                }
                 const auto returned=clock_ns();begun=false;
                 if(pending_samples.empty() && result==XR_SUCCESS && end.layerCount && packet->independent_due) {
                     // GPU readiness alone does not prove that native queue age
@@ -1398,6 +1412,9 @@ struct PrivateOpenXrRuntime::Impl {
                     options.trace(67,packet->sequence,packet->independent_due+reserve.reserve(),entered);
                     options.trace(71,packet->sequence,cadence.target(),cadence.lead());
                     options.trace(72,packet->sequence,window,entered);
+                    if(packet->recovery.protect_next_output)
+                        options.trace(97,packet->sequence,std::max(std::int64_t{},granted-entry_checked),use_grid?1:0);
+                    if(granted<spaced)options.trace(98,packet->sequence,spaced,cutoff);
                 }
                 last_end_prediction=prediction.predictedDisplayTime;
                 if(XR_SUCCEEDED(result)){last_end_display=end.displayTime;trace(2,packet->sequence);}
