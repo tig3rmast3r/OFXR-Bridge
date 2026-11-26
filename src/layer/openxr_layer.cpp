@@ -7782,7 +7782,7 @@ XrResult layer_wait_frame_impl(
                 // chasing normal copy/physical-slot jitter after settling.
                 xrfg::independent_phase_ready_count(recover_aer || stereo,load.pending,load.prepared),
                 load.ready_residence,load.delivered,load.expired,load.idle,recover_aer,
-                paired?&load.pair_head:nullptr,stereo);
+                (paired || stereo)?&load.pair_head:nullptr,stereo);
             if(stereo)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
                 113502,(std::uint64_t(load.pending)<<32)|std::uint64_t(load.prepared),load.ready_residence,step);
             if(step>0) {

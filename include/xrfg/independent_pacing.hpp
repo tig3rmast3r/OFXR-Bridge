@@ -56,6 +56,7 @@ inline std::size_t independent_phase_ready_count(bool split_aer,
 // A queued GPU publication supplies its completed copy time.
 struct IndependentPairHead {
     std::int64_t entered{},ready{};
+    std::int64_t source_due{};
 };
 // Explicit within-batch scheduling, carried with the source's End reservation.
 // Offsets change accounting only; spacing protection retains the current
@@ -66,6 +67,39 @@ struct IndependentRecoveryTiming {
     bool protect_next_output{};
     bool source_queued{}; // prior generation/descriptor backlog, not a new GPU lateness sample
 };
+// Acquire phase from distinct, completed source heads, never the smoothed
+// residence of both outputs. Corrections consume only observed ready slack;
+// native submission, prediction and GPU ownership do not wait for acquisition.
+class IndependentPhaseAcquisition {
+    std::int64_t receipt_{},first_{},minimum_{},last_{},cooldown_due_{};
+    std::uint64_t progress_{};
+    unsigned heads_{};
+    void clear() noexcept {first_=minimum_=last_=0;progress_=0;heads_=0;}
+public:
+    std::int64_t observe(std::int64_t now,std::int64_t p,unsigned divisor,
+        const IndependentPairHead& head,std::uint64_t fresh,bool missed) noexcept {
+        if(missed){clear();receipt_=std::max(receipt_,head.entered);return 0;}
+        if(first_)progress_+=fresh;
+        if(head.entered<=receipt_)return 0;
+        receipt_=head.entered;
+        const auto target=p/2+2'000'000;
+        const auto age=head.entered-head.ready;
+        if(!head.source_due || head.source_due<=cooldown_due_ || !head.ready ||
+            head.ready>head.entered || head.entered>now || now-head.entered>3*p ||
+            age>4*p || age<=target+p/4 || !fresh) {clear();return 0;}
+        if(!first_ || head.entered-last_>std::int64_t(divisor)*p*2) {
+            clear();first_=head.entered;minimum_=age;
+        }
+        minimum_=std::min(minimum_,age);last_=head.entered;
+        if(++heads_<3)return 0;
+        const auto elapsed=head.entered-first_;
+        const bool full_rate=elapsed>0 && progress_*std::uint64_t(p)*100>=std::uint64_t(elapsed)*90;
+        const auto step=full_rate?std::min(p,minimum_-target):0;
+        clear();
+        if(step>0)cooldown_due_=head.source_due+2*std::int64_t(divisor)*p;
+        return std::max(std::int64_t{},step);
+    }
+};
 // Consume surplus output ownership by postponing future source appointments,
 // never by accelerating native End or discarding rendered images. Qualification
 // survives isolated empty-ready/idle samples. Split AER and optical batches may
@@ -75,6 +109,7 @@ class IndependentSourcePhase {
     std::int64_t period_{},last_{},trimmed_{};
     std::uint64_t delivered_{},expired_{},idle_{};
     IndependentRecoveryWindow recovery_;
+    IndependentPhaseAcquisition acquisition_;
     bool split_aer_{},one_recovering_{},stereo_mode_{};
     bool paired_head_mode_{};
     unsigned stereo_divisor_{};
@@ -87,7 +122,7 @@ public:
         std::uint64_t expired,std::uint64_t idle,bool split_aer=false,
         const IndependentPairHead* head=nullptr,bool stereo_recovery=false) noexcept {
         if((divisor<1 || divisor>4) || physical<2'000'000 || physical>50'000'000 || now<=0){reset();return 0;}
-        const bool paired=head && divisor==2 && !split_aer;
+        const bool paired=head && divisor==2 && !split_aer && !stereo_recovery;
         const bool stereo=stereo_recovery && divisor>=2 && !split_aer && !paired;
         const bool one_ready=split_aer || stereo;
         if(period_!=physical || split_aer_!=split_aer || paired_head_mode_!=paired || stereo_mode_!=stereo ||
@@ -103,6 +138,10 @@ public:
         const auto lost=expired-expired_;
         const bool missed=lost || idle!=idle_;
         delivered_=delivered;expired_=expired;idle_=idle;
+        if(stereo && head) {
+            const auto step=acquisition_.observe(now,physical,divisor,*head,fresh,missed);
+            trimmed_+=step;return step;
+        }
         const bool healthy=recovery_.observe(now,physical,fresh-std::min(fresh,lost),
             stereo?125'000'000:500'000'000);
         auto target=physical/2+2'000'000;

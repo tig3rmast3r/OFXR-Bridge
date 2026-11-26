@@ -1259,10 +1259,11 @@ struct PrivateOpenXrRuntime::Impl {
             independent_ready_residence=prior?prior+(age-prior)/16:age;
             if(packet.recovery.accelerated && tracing())
                 options.trace(96,packet.sequence,std::max(std::int64_t{},entered-ready),packet.recovery.scheduled_offset);
-            if(packet.phase_head) {
+            if(packet.phase_head || (packet.recovery.accelerated && !packet.recovery.scheduled_offset)) {
                 std::scoped_lock lock(mutex);
                 if(entered>independent_pair_head.entered)
-                    independent_pair_head={entered,std::max(ready,packet.prepared_at)};
+                    independent_pair_head={entered,std::max(ready,packet.prepared_at),
+                        packet.recovery.source_queued?0:packet.independent_due};
             }
         };
         std::shared_ptr<Packet> held;

@@ -1,0 +1,22 @@
+{
+  "log": "ofxr-bridge-flight-20261126-005931-010-pid60428-0.log",
+  "log_sha256": "4363bd12022a5f12a26a06990f063b24783bd8bfabf8975ccf0db04fbccf89cf",
+  "period_ns": 11111128,
+  "rows": 3754,
+  "columns": [
+    "kind(1=readiness,2=completed head,3=source appointment,4=batch birth,5=captured reserve)",
+    "session",
+    "observed_qpc_ns",
+    "first_due",
+    "ready_or_entered",
+    "offset_or_completed",
+    "queued_or_prepared",
+    "smoothed_age",
+    "delivered",
+    "expired",
+    "idle",
+    "captured_phase_step"
+  ],
+  "scope": "Both actual VR entries. Packet IDs are session scoped. Backlog derives from the recorded prior-generation frame-start fence waits; counters reconstruct normal native receipts in timestamp order. No GPU execution duration is inferred from CPU waits.",
+  "fixture_sha256": "4d8fcb42402adc8b0b6e5062055c66bd9ce028d6bfd0e633d357fdaf81a80b74"
+}

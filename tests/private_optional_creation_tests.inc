@@ -273,6 +273,17 @@ static void independent_source_recovery() {
         const auto fresh_due=ns()+2*period;
         check(send(fresh_due,0,false,10)->outcome==1,"fresh source failed to recover");
         check(f.positions.back()==10 && f.pixels.back()==80,"recovery changed submitted scene pose or pixels");
+        for(unsigned n=0;n<200 && f.transport->independent_load().pair_head.source_due!=fresh_due;++n)
+            std::this_thread::sleep_for(1ms);
+        const auto completed=f.transport->independent_load().pair_head;
+        check(completed.source_due==fresh_due && completed.ready>0 && completed.entered>0,
+            "completed source head did not reach phase acquisition");
+        check(send(fresh_due+2*period,0,true,10)->outcome==1,"ready queued source failed to deliver");
+        for(unsigned n=0;n<200 && f.transport->independent_load().pair_head.entered<=completed.entered;++n)
+            std::this_thread::sleep_for(1ms);
+        const auto queued=f.transport->independent_load().pair_head;
+        check(queued.entered>completed.entered && !queued.source_due,
+            "queued source head authorized a future phase correction");
         std::this_thread::sleep_for(std::chrono::nanoseconds(6*period));
         for(unsigned n=0;n<4 && !f.transport->independent_load().reserve;++n) {
             std::this_thread::sleep_for(std::chrono::nanoseconds(2*period));
