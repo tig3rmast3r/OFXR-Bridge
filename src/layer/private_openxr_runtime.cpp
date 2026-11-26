@@ -120,6 +120,7 @@ struct PrivateOpenXrRuntime::Impl {
     struct Packet {
         bool batch_credit{};
         bool phase_head{};
+        IndependentRecoveryTiming recovery;
         std::uint64_t accepted_ordinal{};
         std::int64_t first_output_target{},spare_ns{},copy_ns{};
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
@@ -219,7 +220,7 @@ struct PrivateOpenXrRuntime::Impl {
     unsigned refused_frames{};
     std::atomic_bool pair_next{};
     std::atomic<XrTime> next_content_time{};
-    struct EndTiming {std::int64_t due{};bool phase_head{};DWORD thread{};};
+    struct EndTiming {std::int64_t due{};bool phase_head{};DWORD thread{};IndependentRecoveryTiming recovery;};
     EndTiming next_independent_end; // passed to the submitting thread's reservation under mutex
     std::atomic<XrTime> last_end_display{}; // written by the consumer thread: the slot time of the last native End
     std::atomic<XrTime> last_end_prediction{}; // native cycle, independent of an OSR content timestamp
@@ -1175,10 +1176,16 @@ struct PrivateOpenXrRuntime::Impl {
         std::int64_t last_wait_cost{},last_period{11'111'111};
         struct DeliverySample {std::shared_ptr<Packet> packet;std::int64_t entered{};};
         std::deque<DeliverySample> pending_samples;
+        bool accelerated_residence{};
         const auto record_residence=[&](const Packet& packet,std::int64_t entered,std::int64_t ready,std::int64_t physical) {
-            const auto age=std::clamp(entered-ready,std::int64_t{},physical*4);
+            if(accelerated_residence!=packet.recovery.accelerated) {
+                independent_ready_residence=0;accelerated_residence=packet.recovery.accelerated;
+            }
+            const auto age=independent_queue_residence(entered,ready,physical,packet.recovery.scheduled_offset);
             const auto prior=independent_ready_residence.load();
             independent_ready_residence=prior?prior+(age-prior)/16:age;
+            if(packet.recovery.accelerated && tracing())
+                options.trace(96,packet.sequence,std::max(std::int64_t{},entered-ready),packet.recovery.scheduled_offset);
             if(packet.phase_head) {
                 std::scoped_lock lock(mutex);
                 if(entered>independent_pair_head.entered)
@@ -1273,7 +1280,7 @@ struct PrivateOpenXrRuntime::Impl {
                     if(sample->independent_due) {
                         reserve.observe(available,sample->independent_due+reserve.reserve(),physical);
                         if(entered && independent_ready_residence.load()<=physical/2+2'000'000)
-                            reserve.delivered(available,sample->independent_due+reserve.reserve(),entered,physical);
+                            reserve.delivered(available,sample->independent_due+reserve.reserve(),entered,physical,sample->recovery.accelerated);
                     }
                     if(entered)record_residence(*sample,entered,ready,physical);
                     if(tracing())options.trace(63,sample->sequence,available,sample->independent_due);
@@ -1364,7 +1371,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // has drained. Preserve expiry allowance while source-phase
                     // recovery consumes that age, using its same residence goal.
                     if(independent_ready_residence.load()<=physical/2+2'000'000)
-                        reserve.delivered(packet->independent_available_at,packet->independent_due+reserve.reserve(),entered,physical);
+                        reserve.delivered(packet->independent_available_at,packet->independent_due+reserve.reserve(),entered,physical,packet->recovery.accelerated);
                     independent_reserve=reserve.reserve();
                 }
                 if(result==XR_SUCCESS && end.layerCount) {
@@ -2267,9 +2274,9 @@ XrTime PrivateOpenXrRuntime::last_native_display_time() const noexcept {
     return impl_->options.independent_pacing?impl_->last_end_prediction.load():impl_->last_end_display.load();
 }
 void PrivateOpenXrRuntime::set_next_end_content_time(XrTime time) noexcept {impl_->next_content_time.store(time);}
-void PrivateOpenXrRuntime::set_next_independent_deadline(std::int64_t due,bool phase_head) noexcept {
+void PrivateOpenXrRuntime::set_next_independent_deadline(std::int64_t due,bool phase_head,IndependentRecoveryTiming recovery) noexcept {
     std::scoped_lock lock(impl_->mutex);
-    impl_->next_independent_end={due,phase_head,GetCurrentThreadId()};
+    impl_->next_independent_end={due,phase_head,GetCurrentThreadId(),due>0?recovery:IndependentRecoveryTiming{}};
 }
 XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::shared_ptr<InterfaceDeliveryReceipt>& delivery) {
     if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
@@ -2322,6 +2329,7 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
     packet=std::make_shared<Impl::Packet>();packet->delivery=delivery;
     packet->independent_due=reservation->independent_end.due;
     packet->phase_head=reservation->independent_end.phase_head;
+    packet->recovery=reservation->independent_end.recovery;
     packet->clean_bypass=s.clean_bypass.load();
     packet->director=!packet->clean_bypass && s.director_enabled.load();
     packet->rife_handoff=!packet->clean_bypass && s.rife_handoff.load();

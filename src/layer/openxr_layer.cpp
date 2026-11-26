@@ -2148,6 +2148,16 @@ bool independent_osr_optical_pair(const SessionState& state) {
     const auto reconstruction=xrfg::embedded::afw_snapshot().desired;
     return reconstruction.mode!=0 && reconstruction.osr==static_cast<int>(xrfg::OsrReconstruction::full);
 }
+// Runtime-independent policy for the ordinary native D12 optical stereo path.
+// Luke/OSR pairs keep their separately measured native-head recovery policy.
+bool independent_stereo_recovery(const SessionState& state) noexcept {
+    return state.independent_pacing && state.menu_enabled &&
+        state.graphics_binding==SessionGraphicsBinding::d3d12 &&
+        !state.d3d11_bridge && !state.vulkan_bridge && !state.djules_route &&
+        !state.luke_afw_enabled && !state.nvidia_options.ofr && state.nvidia_options.rife_model<0 &&
+        state.frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr &&
+        native_frame_multiplier(state)>=2 && native_frame_multiplier(state)<=4;
+}
 [[nodiscard]] bool djules_triple_director(const SessionState& state) noexcept {
     return state.three_slot_director && djules_triple_active(state);
 }
@@ -7651,18 +7661,21 @@ XrResult layer_wait_frame_impl(
             divisor>=1 && divisor<=4 && temporal_generation_requested()) {
             const auto observed=xrfg::interface_clock_ns();
             const bool paired=independent_osr_optical_pair(*state);
+            const bool stereo=independent_stereo_recovery(*state);
             const auto step=state->independent_source_phase.observe(observed,physical,divisor,
                 // Split AER counts only completed FIFO entries. Its native
                 // consumer may already own the peer: one remaining ready head
                 // can recover clear excess age, then a hysteresis band stops
                 // chasing normal copy/physical-slot jitter after settling.
-                xrfg::independent_phase_ready_count(recover_aer,load.pending,load.prepared),
+                xrfg::independent_phase_ready_count(recover_aer || stereo,load.pending,load.prepared),
                 load.ready_residence,load.delivered,load.expired,load.idle,recover_aer,
-                paired?&load.pair_head:nullptr);
+                paired?&load.pair_head:nullptr,stereo);
+            if(stereo)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                113502,(std::uint64_t(load.pending)<<32)|std::uint64_t(load.prepared),load.ready_residence,step);
             if(step>0) {
                 // Admission can finish after the planned appointment. Apply
                 // only the earned correction here and to the next appointment.
-                if(paired)target=std::max(target,observed);
+                if(paired || stereo)target=std::max(target,observed);
                 state->independent_source_clock.postpone(step);target+=step;
                 auto& logger=xrfg::bridge_flight_logger();
                 if(paired)logger.event(xrfg::BridgeFlightOperation::presenter_transition,
@@ -9952,6 +9965,7 @@ struct GeneratedFrameEndInfo {
     xrfg::InterfaceFrameStamp interface_stamp{};
     std::int64_t independent_due_ns{}; // frozen before generation; final consumer alone expires it
     bool independent_phase_head{};
+    xrfg::IndependentRecoveryTiming independent_recovery;
     std::vector<std::shared_ptr<xrfg::D3D12NativeFrameResult>> native_results;
     unsigned native_output{};
     struct Readiness {
@@ -10173,11 +10187,18 @@ struct SynthesisJob {
     std::shared_ptr<ThreeSlotFrame> current;
     std::shared_ptr<const CompletedAfwFrame> post_afw_frame;
     bool osr_pair_phase{};
+    bool stereo_recovery{};
     bool pair{};
     bool triple{},quad{};
     bool deferred_real{}; // native optical compute precedes output-slot admission
     float fraction{0.5F},extra_fraction{2.0F/3.0F},third_fraction{.75F};
 };
+
+void assign_independent_output_timing(const SynthesisJob& job,GeneratedFrameEndInfo& image,unsigned index) noexcept {
+    image.independent_due_ns=job.independent_first_due_ns+index*job.independent_period_ns;
+    image.independent_recovery=job.stereo_recovery
+        ?xrfg::IndependentRecoveryTiming{index*job.independent_period_ns,true}:xrfg::IndependentRecoveryTiming{};
+}
 
 [[nodiscard]] XrResult wait_for_synthesis_handoff(
     const std::shared_ptr<SessionState>& state, SwapchainState* capture_source) noexcept {
@@ -11697,7 +11718,8 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                         selected ? selected->source_sequence : borrowed->pair_sequence);
                     if(state->independent_pacing && state->private_runtime)
                         state->private_runtime->set_next_independent_deadline(owned?owned->independent_due_ns:0,
-                            owned && owned->independent_phase_head && synthetic && !repeat_held);
+                            owned && owned->independent_phase_head && synthetic && !repeat_held,
+                            owned?owned->independent_recovery:xrfg::IndependentRecoveryTiming{});
                     if(!repeat_held) report_native_frame_content(state.get(),owned);
                     if(optical_source_admission(*state))native_handover_ready=std::chrono::steady_clock::now();
                     if(!state->private_runtime && !repeat_held && owned && owned->batch_admission_credit) {
@@ -15304,7 +15326,7 @@ HRESULT publish_independent_aer_first(const std::shared_ptr<SessionState>& state
         if(g.independent_synthetic_lease)first.independent_output_leases.push_back(g.independent_synthetic_lease);
     }
     auto frame=make_presenter_owned_frame(std::move(first));if(!frame)return E_OUTOFMEMORY;
-    frame->independent_due_ns=job->independent_first_due_ns;
+    assign_independent_output_timing(*job,*frame,0);
     auto output=std::make_shared<ThreeSlotFrame>();output->queued_at=job->current->queued_at;
     output->source_sequence=job->current->source_sequence;output->previous_sequence=job->current->previous_sequence;
     output->frame=std::move(frame);
@@ -15693,7 +15715,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                 // across the entire source, skipping absent midpoints.
                 const auto append=[&](std::shared_ptr<GeneratedFrameEndInfo> image) {
                     if(!image)return;
-                    image->independent_due_ns=job->independent_first_due_ns+(output_index++)*job->independent_period_ns;
+                    assign_independent_output_timing(*job,*image,output_index++);
                     auto output=std::make_shared<ThreeSlotFrame>();output->queued_at=job->current->queued_at;
                     output->source_sequence=job->current->source_sequence;
                     output->previous_sequence=job->current->previous_sequence;output->frame=std::move(image);
@@ -16652,6 +16674,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     job->mappings.assign(mappings.begin(), mappings.end());
     job->post_afw_frame = std::move(post_afw_frame);
     job->osr_pair_phase=job->post_afw_frame && independent_osr_optical_pair(*state);
+    job->stereo_recovery=independent_stereo_recovery(*state);
     job->current = std::make_shared<ThreeSlotFrame>();
     job->current->queued_at=std::chrono::steady_clock::now();
     if(state->independent_pacing) {

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1077.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1078.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -915,6 +915,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_compile_features(xrfg_private_openxr_runtime_tests PRIVATE cxx_std_20)
         add_test(NAME xrfg_private_native_image_state_gpu COMMAND xrfg_private_openxr_runtime_tests native-image-state)
         set_tests_properties(xrfg_private_native_image_state_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
+        add_test(NAME xrfg_independent_batch_accounting COMMAND xrfg_private_openxr_runtime_tests independent-batch-accounting)
+        set_tests_properties(xrfg_independent_batch_accounting PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         add_test(NAME xrfg_private_openxr_runtime_gpu COMMAND xrfg_private_openxr_runtime_tests)
         add_test(NAME xrfg_private_optional_ui_retirement_gpu COMMAND xrfg_private_openxr_runtime_tests ui-destroy)
         set_tests_properties(xrfg_private_optional_ui_retirement_gpu PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
@@ -1527,6 +1529,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_executable(xrfg_three_slot_d3d12_tests tests/three_slot_d3d12_tests.cpp
             src/common/embedded_control.cpp)
         add_executable(xrfg_private_runtime_layer_tests tests/private_runtime_layer_tests.cpp src/common/embedded_control.cpp)
+        add_test(NAME xrfg_independent_stereo_recovery COMMAND xrfg_private_runtime_layer_tests independent-stereo-recovery)
+        set_tests_properties(xrfg_independent_stereo_recovery PROPERTIES TIMEOUT 15)
         add_test(NAME xrfg_independent_aux_d12 COMMAND xrfg_private_runtime_layer_tests independent-aux-d12)
         add_test(NAME xrfg_independent_aux_d11 COMMAND xrfg_private_runtime_layer_tests independent-aux-d11)
         add_test(NAME xrfg_independent_luke_aux_d11 COMMAND xrfg_private_runtime_layer_tests independent-luke-aux-d11)

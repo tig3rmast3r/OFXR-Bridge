@@ -208,7 +208,8 @@ public:
     // runtime reprojects the frame from the pose it was made for even when it
     // reaches a later slot than planned. Native-paced and Independent delivery.
     void set_next_end_content_time(XrTime time) noexcept;
-    void set_next_independent_deadline(std::int64_t,bool phase_head=false) noexcept;
+    void set_next_independent_deadline(std::int64_t,bool phase_head=false,
+        IndependentRecoveryTiming recovery={}) noexcept;
     // The last native delivery slot (0 before the first). Independent delivery
     // exposes its actual native prediction here, separately from the OSR
     // content timestamp carried by End, so OSR's grid stays tied to the runtime.

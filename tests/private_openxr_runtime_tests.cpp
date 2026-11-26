@@ -132,6 +132,8 @@ struct Fixture {
     std::vector<std::int64_t> prediction_ages;
     std::vector<std::int64_t> refill_margins;
     std::vector<std::int64_t> native_margins;
+    std::vector<std::array<std::int64_t,3>> residence_samples;
+    std::atomic_uint residence_sample_count{};
     std::vector<std::int64_t> work_margins;
     std::atomic_uint source_ready_events{},pending_source_events{};
     std::int64_t physical_origin{};
@@ -191,6 +193,10 @@ struct Fixture {
             if(stage==32){check(at>0 && margin>=at,"GPU copy timestamps calibrated and ordered");++copy_clock_receipts;}
             if(stage==29)buffer_reserves.push_back(at);
             if(stage==30)buffer_refills.push_back(margin);
+            if(stage==96) {
+                residence_samples.push_back({std::int64_t(seq),at,margin});
+                residence_sample_count.store(unsigned(residence_samples.size()),std::memory_order_release);
+            }
         };
         if(!diagnostics)options.trace_enabled=[]{return false;};
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
@@ -1810,6 +1816,35 @@ static int rife_aer_handoff_test(int argc,char** argv) {
     if(argc>1 && std::string_view(argv[1])=="rife-aer-handoff") {rife_handoff_matrix(true);return 0;}
     return -1;
 }
+void independent_residence_accounting_test(bool handoff) {
+    independent_fixture_mode=true;independent_fixture_buffer=0;
+    independent_fixture_binding_queue_handoff=handoff;
+    Fixture f(true,true,{},false,true,false,8);f.unblock();
+    const auto chain=f.make_chain();std::int64_t smooth=0;
+    for(unsigned n=0;n<5;++n) {
+        f.write(chain,80+n);f.begin_virtual();
+        if(n<4)f.transport->set_next_independent_deadline(ns()+period*4,false,{n*period,true});
+        else f.transport->set_next_independent_deadline(ns()+period*4);
+        auto receipt=std::make_shared<xrfg::InterfaceDeliveryReceipt>(false);
+        xr_ok(f.submit(chain,float(n+1),XR_NULL_HANDLE,receipt),"scoped accounting packet admission");
+        xr_ok(f.transport->drain(),"scoped accounting packet drain");
+        check(receipt->outcome==1,"accounting change expired fresh pixels");
+        if(n<4) {
+            for(unsigned retry=0;retry<200 && f.residence_sample_count.load(std::memory_order_acquire)<n+1;++retry)
+                std::this_thread::sleep_for(1ms);
+            check(f.residence_samples.size()==n+1,"scoped accounting diagnostic missing");
+            const auto sample=f.residence_samples.back();
+            check(sample[2]==(n*period),"explicit scheduled batch offset lost at private admission");
+            const auto age=xrfg::independent_queue_residence(sample[1],0,period,sample[2]);
+            smooth=smooth?smooth+(age-smooth)/16:age;
+            check(f.transport->independent_load().ready_residence==smooth,"presenter used raw batch waiting as excess queue residence");
+        } else check(f.residence_samples.size()==4,"default packet inherited previous scoped recovery metadata");
+    }
+    check(f.pixels==std::vector<unsigned>({80,81,82,83,84}) && f.positions==std::vector<float>({1,2,3,4,5}),
+        "accounting changed ordered native pixels or projection poses");
+    xr_ok(f.transport->destroy_swapchain(chain),"accounting chain cleanup");
+    std::puts("INDEPENDENT_BATCH_ACCOUNTING actual D12 endpoint: explicit first/later slot offsets, exact normalized EWMA, default metadata clears; native pixels/poses unchanged PASS");
+}
 void independent_window_test(bool d12,bool early_due=false) {
     const auto saved_period=period;period=50'000'000;
     independent_fixture_mode=true;independent_fixture_buffer=0;
@@ -2340,6 +2375,7 @@ void binding_queue_handoff_test(bool render) {
 #include "private_native_image_state_tests.inc"
 
 int main(int argc,char** argv){
+if(argc>1 && std::string_view(argv[1])=="independent-batch-accounting"){for(bool handoff:{false,true})independent_residence_accounting_test(handoff);return 0;}
 if(argc>1 && std::string_view(argv[1])=="native-image-state"){native_image_state_checks();return 0;}
     if(argc>1 && std::string_view(argv[1])=="binding-queue-handoff"){binding_queue_handoff_test(true);binding_queue_handoff_test(false);return 0;}
     if(argc>1 && std::string_view(argv[1])=="legacy-optical-clock"){for(bool directed:{false,true})optical_tagged_clock_checks(directed);return 0;}

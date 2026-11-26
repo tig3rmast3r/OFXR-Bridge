@@ -8,6 +8,7 @@
 void automatic_buffer_tests();
 void source_phase_tests();
 void aer_copy_overlap_tests();
+void stereo_recovery_tests();
 static void osr_pair_phase_tests() {
  for(const std::int64_t period:{8'333'333LL,11'111'111LL,13'888'889LL}) {
   xrfg::IndependentSourcePhase phase;
@@ -68,6 +69,7 @@ static void osr_pair_phase_tests() {
 int main(){
  source_phase_tests();
  aer_copy_overlap_tests();
+ stereo_recovery_tests();
  osr_pair_phase_tests();
  // Captured-shaped startup backlog: older work completes in19ms and the
  // current job in44ms, followed by25ms/source. Keep exactly the same GPU
@@ -207,8 +209,8 @@ int main(){
  std::puts("Independent source clock:72/90/120Hz,1X..4X,late return/no rounding skip/no burst/reset PASS");
 }
 struct RecoverySample {long long at{},age{};};
-std::vector<RecoverySample> transient_queue_model(long long p,bool recover,unsigned factor=2,bool split_aer=false) {
- struct Frame {long long ready{},origin{};unsigned id{};};
+std::vector<RecoverySample> transient_queue_model(long long p,bool recover,unsigned factor=2,bool split_aer=false,bool optical_stereo=false) {
+ struct Frame {long long ready{},origin{};unsigned id{};long long offset{};};
  constexpr long long base=1'000'000'000;
  std::deque<Frame> queue;
  for(unsigned n=0;n<4;++n)queue.push_back({base-p/2,base-p,n});
@@ -225,7 +227,7 @@ std::vector<RecoverySample> transient_queue_model(long long p,bool recover,unsig
    ++idle;++pauses;
   } else if(!queue.empty() && queue.front().ready<=native) {
    auto frame=queue.front();queue.pop_front();check(frame.id==delivered++);
-   const auto age=native-frame.ready;
+   const auto age=xrfg::independent_queue_residence(native,frame.ready,p,frame.offset);
    residence=residence?residence+(age-residence)/16:age;
    out.push_back({native-base,native-frame.origin});
   } else ++idle;
@@ -234,13 +236,14 @@ std::vector<RecoverySample> transient_queue_model(long long p,bool recover,unsig
  while(native<base+12'000'000'000LL) {
   if(source<=native) {
    unsigned ready=0;for(const auto& frame:queue)if(frame.ready<=source)++ready;
-   const auto step=recover?phase.observe(source,p,factor,ready,residence,delivered,0,idle,split_aer):0;
-   check(step>=0 && step<=200'000 && step<=factor*p*8/1000+2000);
+   const auto step=recover?phase.observe(source,p,factor,ready,residence,delivered,0,idle,split_aer,nullptr,optical_stereo):0;
+   check(step>=0 && step<=(optical_stereo?500'000:200'000) &&
+       step<=factor*p*(optical_stereo?24:8)/1000+(optical_stereo?14'000:2'000));
    clock.postpone(step);const auto actual=source+step;
    if(previous_source)check(actual-previous_source>=factor*p); // never a producer catch-up
    previous_source=actual;
    while(native<actual)consume();
-   for(unsigned n=0;n<factor;++n)queue.push_back({actual+p/2,actual,produced++});
+   for(unsigned n=0;n<factor;++n)queue.push_back({actual+p/2,actual,produced++,optical_stereo?n*p:0});
    source=clock.claim(actual+100,p,factor);
   }else consume();
  }
@@ -261,6 +264,11 @@ void source_phase_tests() {
   std::printf("TRANSIENT_QUEUE Hz=%.1f old=%.3fms recovered=%.3fms improvement=%.3fms;every output ID/native appointment retained\n",1e9/p,old_late/1e6,recovered_late/1e6,(old_late-recovered_late)/1e6);
   check(old_late-recovered_late>=2*p);
   check(recovered_late<3*p);
+  for(unsigned factor:{2U,3U,4U}) {
+   const auto fast_stereo=transient_queue_model(p,true,factor,false,true);
+   check(age(fast_stereo,10'000'000'000LL,11'000'000'000LL)<(factor+1)*p);
+  }
+  std::printf("FAST_STEREO_FIFO Hz=%.1f: normalized batch slots,125ms qualification,500us/24ms-per-second bounded steps; repeated transients; every output ID/native appointment retained PASS (model)\n",1e9/p);
   for(unsigned factor:{1U,3U,4U}) {
    const auto baseline=transient_queue_model(p,false,factor);
    const auto multiframe=transient_queue_model(p,true,factor);
@@ -306,6 +314,131 @@ void source_phase_tests() {
   for(unsigned n=0;n<1200;++n)check(!phase.observe(base+n*2*p,p,2,2,p/2+2'000'000,2*n,0,0));
  }
  std::puts("SOURCE_PHASE_RECOVERY 72/90/120Hz:repeated transient queues drain with no extra native misses or lost IDs;500ms evidence,8ms/s,200us steps,two-ready/current-loss/pause/overload veto PASS (model,not game)");
+}
+void stereo_recovery_tests() {
+ for(const long long p:{8'333'333LL,11'111'111LL,13'888'889LL}) {
+  constexpr long long base=1'000'000'000;
+  const auto target=p/2+2'000'000;
+  // One completed FIFO head, peer in native End. Full physical progress
+  // continues after a transient, but the old two-pending rule cannot recover.
+  const auto run=[&](bool enable) {
+   xrfg::IndependentSourcePhase phase;
+   xrfg::IndependentDeliveryReserve reserve;reserve.set_limit(4*p);
+   reserve.observe(base+2*p,base,p);reserve.observe(base+2*p,base,p);
+   check(reserve.reserve()==2*p);
+   long long at=base,removed=0,first_zero=0;
+   for(unsigned n=0;n<800;++n) {
+    at+=2*p;
+    const auto age=std::max(target,target+p-removed);
+    const auto step=phase.observe(at,p,2,1,age,2*n,0,0,false,nullptr,enable);
+    check(step>=0 && step<=(enable?500'000:200'000));
+    removed+=step;
+    // Apply the production age guard; two delivered physical outputs per
+    // source keep the reserve learner's real-rate evidence independent.
+    for(unsigned i=0;i<2;++i)if(age<=target) {
+     const auto entered=at+i*p;
+     const auto due=entered+p/2;
+     reserve.delivered(entered-age,due+reserve.reserve(),entered,p,enable);
+     if(!reserve.reserve() && !first_zero)first_zero=entered-base;
+    }
+   }
+   if(enable)check(removed>=p && reserve.reserve()==0 && first_zero<2'500'000'000);
+   else check(removed==0 && reserve.reserve()==2*p);
+   return removed;
+  };
+  run(false);run(true);
+  // R7-shaped stable S/R pair: ~6-7ms followed by that plus one refresh.
+  // Counting the deliberate second slot keeps the old age above its guard
+  // and drives needless phase corrections. Correct accounting must settle
+  // without source cuts, and return2P allowance in under1.5 seconds.
+  for(bool corrected:{false,true}) {
+   xrfg::IndependentSourcePhase phase;
+   xrfg::IndependentDeliveryReserve allowance;allowance.set_limit(4*p);
+   allowance.observe(base+2*p,base,p);allowance.observe(base+2*p,base,p);
+   long long smooth=0,first_zero=0;
+   for(unsigned n=0;n<240;++n) {
+    const auto entered=base+(n+1)*p;
+    const auto baseline=p/2+700'000+std::int64_t(n%5)*20'000;
+    const auto offset=n%2?p:0;
+    const auto raw=baseline+offset;
+    const auto age=xrfg::independent_queue_residence(entered,entered-raw,p,corrected?offset:0);
+    smooth=smooth?smooth+(age-smooth)/16:age;
+    if(smooth<=target)allowance.delivered(entered-raw,entered+150'000+allowance.reserve(),entered,p,corrected);
+    if(!allowance.reserve() && !first_zero)first_zero=entered-base;
+    if(n%2) {
+     const auto step=phase.observe(entered,p,2,1,smooth,n+1,0,0,false,nullptr,true);
+     if(corrected)check(!step);
+    }
+   }
+   if(corrected) {
+    check(allowance.reserve()==0 && first_zero<1'500'000'000 && !phase.trimmed());
+    std::printf("STABLE_BATCH_ACCOUNTING Hz=%.1f allowance reaches zero in %.3fms; no needless phase cuts PASS (model)\n",1e9/p,first_zero/1e6);
+   }
+   else check(allowance.reserve()>0 && phase.trimmed()>0);
+  }
+  check(xrfg::independent_queue_residence(base,base+p,p,p)==0);
+  check(xrfg::independent_queue_residence(base+3*p,base,p,p)==2*p);
+  check(xrfg::independent_queue_residence(base+3*p,base,p)==3*p);
+  // Preserve current-frame safety even at the faster slope: a queued late
+  // frame must remain eligible, and half-rate delivery cannot qualify cuts.
+  for(bool half_rate:{false,true}) {
+   xrfg::IndependentDeliveryReserve allowance;allowance.set_limit(4*p);
+   allowance.observe(base+3*p,base,p);allowance.observe(base+3*p,base,p);
+   long long entered=base;
+   for(unsigned n=0;n<1000;++n) {
+    entered+=(half_rate?2:1)*p;
+    const auto due=half_rate?entered+p:entered-3*p;
+    allowance.delivered(entered-p,due+allowance.reserve(),entered,p,true);
+    check(!xrfg::independent_expired(due,entered,allowance.reserve(),p));
+   }
+   check(half_rate?allowance.reserve()==3*p:allowance.reserve()>3*p-p/2);
+  }
+  // Disabled/invalid multipliers retain the existing policy.
+  for(unsigned factor:{1U,5U}) {
+   xrfg::IndependentSourcePhase old_policy,opted;
+   for(unsigned n=0;n<500;++n) {
+    const auto at=base+n*factor*p;
+    check(old_policy.observe(at,p,factor,1,3*p,n*factor,0,0)==
+          opted.observe(at,p,factor,1,3*p,n*factor,0,0,false,nullptr,true));
+   }
+  }
+  // No chase inside ordinary copy/refresh jitter, even with many pending
+  // copies. Only completed heads count; empty and losing cadence veto cuts.
+  for(unsigned count:{0U,1U}) {
+   xrfg::IndependentSourcePhase phase;
+   for(unsigned n=0;n<500;++n)
+    check(!phase.observe(base+n*2*p,p,2,count,target+p/8,2*n,0,0,false,nullptr,true));
+  }
+  for(bool idle:{false,true}) {
+   xrfg::IndependentSourcePhase phase;
+   for(unsigned n=0;n<500;++n)
+    check(!phase.observe(base+n*2*p,p,2,1,3*p,2*n,idle?0:n,idle?n:0,false,nullptr,true));
+  }
+  // Disarm on a new loss or mode change; do not reuse old qualification.
+  xrfg::IndependentSourcePhase phase;
+  for(unsigned n=0;n<100;++n)phase.observe(base+n*2*p,p,2,1,3*p,2*n,0,0,false,nullptr,true);
+  check(phase.trimmed()>0);
+  check(!phase.observe(base+200*p,p,2,1,3*p,200,1,0,false,nullptr,true));
+  check(!phase.observe(base+202*p,p,2,1,3*p,202,1,0));
+  check(phase.trimmed()==0);
+  // Fast native stereo and AER both permit one ready head, but must not
+  // share qualification when switching between their different policies.
+  for(unsigned n=0;n<100;++n)phase.observe(base+(300+n*2)*p,p,2,1,3*p,300+2*n,1,0,false,nullptr,true);
+  check(phase.trimmed()>0);
+  check(!phase.observe(base+500*p,p,2,1,3*p,500,1,0,true,nullptr,false));
+  check(phase.trimmed()==0);
+  std::printf("STEREO_RECOVERY Hz=%.1f: old single-head age/allowance remain; opted-in age recovers and allowance reaches zero; jitter/loss/mode controls PASS (model)\n",1e9/p);
+  xrfg::IndependentDeliveryReserve switched;switched.set_limit(4*p);
+  switched.observe(base+3*p,base,p);switched.observe(base+3*p,base,p);
+  for(unsigned n=1;n<=24;++n) {
+   const auto at=base+n*p;switched.delivered(at-p,at+p+switched.reserve(),at,p,true);
+  }
+  const auto held=switched.reserve();check(held>0 && held<3*p);
+  for(unsigned n=25;n<=32;++n) {
+   const auto at=base+n*p;switched.delivered(at-p,at+p+switched.reserve(),at,p);
+   check(switched.reserve()==held); // default needs its own500ms evidence
+  }
+ }
 }
 void automatic_buffer_tests() {
  check(xrfg::kIndependentMaximumReserveFrames==4);

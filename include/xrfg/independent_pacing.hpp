@@ -22,7 +22,7 @@ public:
 };
 // Recovery uses a short evidence window, not an unbroken multi-second streak.
 // A single observation with no ready image is not proof of lost native cadence.
-// Real progress must cover99% of physical slots over each half-second window;
+// Real progress must cover99% of physical slots over the evidence window;
 // no progress, a long pause or a changed period invalidates qualification.
 class IndependentRecoveryWindow {
     std::int64_t period_{},started_{},last_{};
@@ -30,14 +30,15 @@ class IndependentRecoveryWindow {
     bool qualified_{};
 public:
     void reset() noexcept {*this={};}
-    bool observe(std::int64_t now,std::int64_t period,std::uint64_t good) noexcept {
+    bool observe(std::int64_t now,std::int64_t period,std::uint64_t good,
+                 std::int64_t window=500'000'000) noexcept {
         if(period<=0 || now<=0){reset();return false;}
         if(period_!=period || !last_ || now<=last_ || now-last_>period*8) {
             reset();period_=period;started_=last_=now;return false;
         }
         last_=now;good_+=good;
         const auto elapsed=now-started_;
-        if(elapsed>=500'000'000) {
+        if(elapsed>=window) {
             qualified_=good_*static_cast<std::uint64_t>(period)*100>=static_cast<std::uint64_t>(elapsed)*99;
             started_=now;good_=0;
         }
@@ -56,17 +57,24 @@ inline std::size_t independent_phase_ready_count(bool split_aer,
 struct IndependentPairHead {
     std::int64_t entered{},ready{};
 };
+// Explicit within-batch scheduling, carried with the source's End reservation.
+// This changes recovery accounting only, never native output deadlines.
+struct IndependentRecoveryTiming {
+    std::int64_t scheduled_offset{};
+    bool accelerated{};
+};
 // Consume surplus output ownership by postponing future source appointments,
 // never by accelerating native End or discarding rendered images. Qualification
-// survives isolated empty-ready/idle samples. Stereo still needs two ready
-// outputs. Split AER may have one FIFO head while its peer is in native End:
+// survives isolated empty-ready/idle samples. Split AER and optical batches may
+// have one completed FIFO head while their peer is in native End:
 // a quarter-refresh hysteresis band distinguishes extra age from steady jitter.
 class IndependentSourcePhase {
     std::int64_t period_{},last_{},trimmed_{};
     std::uint64_t delivered_{},expired_{},idle_{};
     IndependentRecoveryWindow recovery_;
-    bool split_aer_{},aer_recovering_{};
+    bool split_aer_{},one_recovering_{},stereo_mode_{};
     bool paired_head_mode_{};
+    unsigned stereo_divisor_{};
     std::int64_t last_head_{};
 public:
     void reset() noexcept {*this={};}
@@ -74,13 +82,16 @@ public:
     std::int64_t observe(std::int64_t now,std::int64_t physical,unsigned divisor,
         std::size_t ready,std::int64_t residence,std::uint64_t delivered,
         std::uint64_t expired,std::uint64_t idle,bool split_aer=false,
-        const IndependentPairHead* head=nullptr) noexcept {
+        const IndependentPairHead* head=nullptr,bool stereo_recovery=false) noexcept {
         if((divisor<1 || divisor>4) || physical<2'000'000 || physical>50'000'000 || now<=0){reset();return 0;}
         const bool paired=head && divisor==2 && !split_aer;
-        if(period_!=physical || split_aer_!=split_aer || paired_head_mode_!=paired ||
+        const bool stereo=stereo_recovery && divisor>=2 && !split_aer && !paired;
+        const bool one_ready=split_aer || stereo;
+        if(period_!=physical || split_aer_!=split_aer || paired_head_mode_!=paired || stereo_mode_!=stereo ||
+            (stereo && stereo_divisor_!=divisor) ||
             delivered<delivered_ || expired<expired_ || idle<idle_) {
             reset();period_=physical;split_aer_=split_aer;
-            paired_head_mode_=paired;
+            paired_head_mode_=paired;stereo_mode_=stereo;stereo_divisor_=stereo?divisor:0;
             if(paired)last_head_=head->entered;
         }
         if(last_ && now<=last_)return 0;
@@ -89,7 +100,8 @@ public:
         const auto lost=expired-expired_;
         const bool missed=lost || idle!=idle_;
         delivered_=delivered;expired_=expired;idle_=idle;
-        const bool healthy=recovery_.observe(now,physical,fresh-std::min(fresh,lost));
+        const bool healthy=recovery_.observe(now,physical,fresh-std::min(fresh,lost),
+            stereo?125'000'000:500'000'000);
         auto target=physical/2+2'000'000;
         if(paired) {
             // Sampling the queue from the next app Wait misses a head that
@@ -101,21 +113,23 @@ public:
             residence=head->entered-head->ready;
             target=std::min<std::int64_t>(1'000'000,physical/8);
         }
-        if(split_aer) {
+        if(one_ready) {
             // A real native output can already own the other prepared image;
             // requiring two remaining FIFO entries then preserves an extra
             // physical slot. Arm only above clear excess age, finish at the
             // old target, and stay idle inside the band after settling.
-            if(missed || elapsed>physical*8 || residence<=target)aer_recovering_=false;
+            if(missed || elapsed>physical*8 || residence<=target)one_recovering_=false;
             if(healthy && fresh && !missed && elapsed && elapsed<=physical*8 &&
-                ready && residence>target+physical/4)aer_recovering_=true;
+                ready && residence>target+physical/4)one_recovering_=true;
         }
         if(!healthy || !fresh || missed || !elapsed || elapsed>physical*8 ||
-            (!paired && ready<(split_aer?1U:2U)) || residence<=target || (split_aer&&!aer_recovering_))return 0;
-        // At most8ms/second and200us per source. Closed-loop ready ownership
+            (!paired && ready<(one_ready?1U:2U)) || residence<=target || (one_ready&&!one_recovering_))return 0;
+        // Optical stereo:24ms/second,500us per source after125ms of progress.
+        // Other paths retain8ms/second,200us and500ms. Closed-loop ownership
         // and residence end recovery; a lifetime one-P cap cannot recover a
         // second menu transient. No accumulated catch-up step after a veto.
-        const auto step=std::min({elapsed*8/1000,std::int64_t{200'000},residence-target});
+        const auto step=std::min({elapsed*(stereo?24:8)/1000,
+            std::int64_t{stereo?500'000:200'000},residence-target});
         trimmed_+=step;return step;
     }
 };
@@ -129,6 +143,7 @@ class IndependentDeliveryReserve {
     std::int64_t last_delivery_{};
     IndependentRecoveryWindow recovery_;
     unsigned late_{},window_{};
+    bool accelerated_{};
     void unstable() noexcept {last_delivery_=0;recovery_.reset();}
 public:
     void set_limit(std::int64_t limit) noexcept {
@@ -160,22 +175,29 @@ public:
         if(++window_>=32){late_=window_=0;peak_=0;}
     }
     void delivered(std::int64_t ready,std::int64_t expected,
-                   std::int64_t entered,std::int64_t period) noexcept {
+                   std::int64_t entered,std::int64_t period,bool accelerated=false) noexcept {
         if(!limit_ || period<=0 || !ready || !expected || !entered)return;
+        if(accelerated_!=accelerated){unstable();accelerated_=accelerated;}
         const auto slack=expected-ready;
         const bool spare=slack>=period/2 && entered<=expected+period/4;
         const auto previous=last_delivery_;last_delivery_=entered;
-        const bool healthy=recovery_.observe(entered,period,spare?1:0);
+        const bool healthy=recovery_.observe(entered,period,spare?1:0,accelerated?125'000'000:500'000'000);
         if(!healthy || !spare || !previous || entered<=previous || entered-previous>period*8)return;
         // Retire margin promptly once actual native deliveries prove spare
         // readiness. The current frame still vetoes unsafe cuts. In particular
         // this stops before shrinking tolerance underneath a queued late frame;
         // source-phase recovery must remove that age first.
-        const auto step=std::min({(entered-previous)*8/1000,
-            std::int64_t{200'000},slack-period/2});
+        const auto step=std::min({(entered-previous)*(accelerated?24:8)/1000,
+            std::int64_t{accelerated?500'000:200'000},slack-period/2});
         reserve_=std::max(std::int64_t{},reserve_-std::max(std::int64_t{},step));
     }
 };
+inline std::int64_t independent_queue_residence(std::int64_t entered,std::int64_t ready,
+    std::int64_t period,std::int64_t scheduled_offset=0) noexcept {
+    const auto age=std::max(std::int64_t{},entered-ready);
+    return std::clamp(age-std::clamp(scheduled_offset,std::int64_t{},period*3),
+        std::int64_t{},period*4);
+}
 inline bool independent_expired(std::int64_t due,std::int64_t now,std::int64_t allowance,std::int64_t period) noexcept {
     // Due identifies a nominal physical slot. Test the current decision time,
     // never a future window end: that could reject an image before it is due.

@@ -23,7 +23,7 @@ static int status_json_tests() {
     {
         StatusInputs idle;
         idle.armed = true;
-        idle.build = 1077;
+        idle.build = 1078;
         idle.updated = "2026-10-28T09:12:03.512Z";
         const std::string without = build_status_json(idle);
         StatusInputs running = idle;
@@ -52,7 +52,7 @@ static int status_json_tests() {
             !contains(without, "\"rife_backend\": null,") ||
             !contains(without, "\"output_fps\": null,") ||
             !contains(without, "\"latency_ms\": null,") ||
-            !contains(without, "\"build\": 1077") ||
+            !contains(without, "\"build\": 1078") ||
             !contains(without, "\"updated\": \"2026-10-28T09:12:03.512Z\"") ||
             !contains(with, "\"paused\": true,") || !contains(with, "\"multiplier\": 3,") ||
             !contains(with, "\"generating\": true,") ||
