@@ -8,8 +8,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -24,7 +26,8 @@ bool refuse_menu_create{};
 unsigned chain_limit=~0u,menu_releases{};
 unsigned max_image_height=4096;bool policy_fixture{};
 unsigned acquire_timeouts{};
-void check(bool pass,const char* message) { ++checks; if (!pass) throw std::runtime_error(message); }
+HANDLE creation_entered{},creation_release{},creation_finished{};
+void check(bool pass,const char* message) { ++checks; if (!pass) {std::cerr<<"FAIL: "<<message<<'\n';throw std::runtime_error(message);} }
 template<class T> T handle(std::uintptr_t v) { return reinterpret_cast<T>(v); }
 ComPtr<ID3D12Device> device; ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D11Device> device11;
 struct Chain {
@@ -52,6 +55,12 @@ XrResult XRAPI_CALL formats(XrSession,std::uint32_t capacity,std::uint32_t* coun
     *count=1;if(capacity)out[0]=DXGI_FORMAT_R8G8B8A8_UNORM;return XR_SUCCESS;
 }
 XrResult XRAPI_CALL create_chain(XrSession,const XrSwapchainCreateInfo* i,XrSwapchain* out) {
+    const auto finished=creation_finished;
+    struct Finish {HANDLE event;~Finish(){if(event)SetEvent(event);}} done{finished};
+    if(creation_entered) {
+        SetEvent(creation_entered);
+        if(WaitForSingleObject(creation_release,3000)!=WAIT_OBJECT_0)return XR_ERROR_RUNTIME_FAILURE;
+    }
     if(chains.size()>=chain_limit || (i->width==1024 && (i->height==768||i->height==1280) && refuse_menu_create)) {
         refuse_menu_create=false;*out=XR_NULL_HANDLE;return XR_ERROR_LIMIT_REACHED;
     }
@@ -174,6 +183,7 @@ void preview11(const Chain& chain,const std::filesystem::path& output) {
 }
 }
 #include "overlay_atlas_policy_fixture.inc"
+#include "overlay_async_surface_fixture.inc"
 int main(int argc,char** argv) {
     auto fixture=std::filesystem::temp_directory_path()/(L"ofxr-menu-xr-"+std::to_wstring(GetCurrentProcessId()));
     try {
@@ -194,6 +204,9 @@ int main(int argc,char** argv) {
         app=reinterpret_cast<XrCompositionLayerBaseHeader*>(&p);std::array<const XrCompositionLayerBaseHeader*,2> layers{app,app};
         XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.layerCount=1;frame.layers=layers.data();
         XrBaseInStructure extension{XR_TYPE_UNKNOWN};next=frame.next=&extension;
+        if(argc>2 && std::string_view(argv[2])=="async-surface") {
+            async_surface_fixture(ini,frame);std::filesystem::remove_all(fixture);return 0;
+        }
         if(argc>2 && std::string_view(argv[2])=="policy") {
             atlas_policy_fixture(ini,frame);std::filesystem::remove_all(fixture);return 0;
         }

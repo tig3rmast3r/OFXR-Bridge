@@ -210,7 +210,27 @@ struct PrivateOpenXrRuntime::Impl {
     std::atomic<std::int64_t> independent_ready_residence{};
     IndependentPairHead independent_pair_head; // guarded by mutex
     std::atomic<std::int64_t> independent_cycle_at{};
-    std::deque<std::pair<std::int64_t,std::int64_t>> independent_misses; // due, queue-free availability; mutex guarded
+    std::atomic_uint optional_work_active{};
+    std::atomic<std::int64_t> optional_work_finished{};
+    struct OptionalWork {
+        Impl& owner;bool enabled;std::int64_t started{};
+        OptionalWork(Impl& owner,bool enabled):owner(owner),enabled(enabled&&owner.options.independent_pacing) {
+            if(this->enabled) {
+                owner.optional_work_active.fetch_add(1);started=clock_ns();
+                if(owner.tracing())owner.options.trace(99,0,started,0);
+            }
+        }
+        ~OptionalWork() {
+            if(!enabled)return;
+            const auto finished=clock_ns();
+            auto previous=owner.optional_work_finished.load();
+            while(previous<finished && !owner.optional_work_finished.compare_exchange_weak(previous,finished)){}
+            owner.optional_work_active.fetch_sub(1);
+            if(owner.tracing())owner.options.trace(100,0,started,finished);
+        }
+    };
+    struct IndependentMiss {std::int64_t due{},available{},offset{};};
+    std::deque<IndependentMiss> independent_misses; // mutex guarded
     bool expired_independent(const Packet& packet) const noexcept {
         const auto physical=independent_period.load();
         return independent_expired(packet.independent_due,clock_ns(),
@@ -239,6 +259,7 @@ struct PrivateOpenXrRuntime::Impl {
     unsigned stalled_renewals{};
     std::int64_t last_stalled_renewal{};
     bool seeded{},running{};
+    std::uint64_t stop_epoch{}; // mutex; unpublished optional owners cannot cross stop/start
     std::uint64_t sequence{},ready_serial{},copy_serial{};
     std::size_t pending{},outstanding_reservations{};
     ComPtr<ID3D12Device> device12;
@@ -763,7 +784,7 @@ struct PrivateOpenXrRuntime::Impl {
             // native target ownership must not purchase more expiry allowance.
             const auto available=packet->independent_available_at
                 ? packet->independent_available_at : packet->source_ready_at;
-            if(available)independent_misses.emplace_back(packet->independent_due,available);
+            if(available)independent_misses.push_back({packet->independent_due,available,packet->recovery.scheduled_offset});
         }
         if(packet->delivery)packet->delivery->discarded();
         ++independent_expired_count;
@@ -1166,6 +1187,16 @@ struct PrivateOpenXrRuntime::Impl {
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
         IndependentDeliveryReserve reserve;
         IndependentDeliveryClock cadence;
+        const auto observe_lateness=[&](std::int64_t available,std::int64_t due,std::int64_t physical,std::int64_t offset) {
+            // An optional surface's known CPU setup/retirement pause is not
+            // recurring synthesis lateness. Keep stale-image expiry intact;
+            // do not purchase persistent tolerance for deadlines it crossed.
+            const auto first_due=due-std::clamp(offset,std::int64_t{},physical*3);
+            if(!optional_work_active.load() && first_due>optional_work_finished.load())
+                reserve.observe(available,due+reserve.reserve(),physical);
+            else if(tracing() && available>due+reserve.reserve()+physical/2)
+                options.trace(101,0,due,available);
+        };
         struct FinishCycle {
             IndependentDeliveryClock& clock;
             std::int64_t handed{};
@@ -1276,9 +1307,9 @@ struct PrivateOpenXrRuntime::Impl {
                 if(!sleep_until(granted,500'000))break;
                 const auto cap=options.independent_buffer?std::min(kIndependentMaximumReserveFrames,options.independent_buffer()):kIndependentMaximumReserveFrames;
                 reserve.set_limit(physical*cap);independent_reserve=reserve.reserve();
-                std::deque<std::pair<std::int64_t,std::int64_t>> misses;
+                std::deque<IndependentMiss> misses;
                 {std::scoped_lock lock(mutex);misses.swap(independent_misses);}
-                for(const auto& [due,at]:misses)reserve.observe(at,due+reserve.reserve(),physical);
+                for(const auto& [due,at,offset]:misses)observe_lateness(at,due,physical,offset);
                 // Retire measurements in presentation order. The presenter
                 // never waits here. Only measured GPU completion can train
                 // the buffer or shorten its allowance on a queued handoff.
@@ -1288,7 +1319,7 @@ struct PrivateOpenXrRuntime::Impl {
                     if(!ready)break;
                     const auto available=sample->source_ready_at+ready-sample->reserved_at;
                     if(sample->independent_due) {
-                        reserve.observe(available,sample->independent_due+reserve.reserve(),physical);
+                        observe_lateness(available,sample->independent_due,physical,sample->recovery.scheduled_offset);
                         if(entered && independent_ready_residence.load()<=physical/2+2'000'000)
                             reserve.delivered(available,sample->independent_due+reserve.reserve(),entered,physical,sample->recovery.accelerated);
                     }
@@ -1330,7 +1361,7 @@ struct PrivateOpenXrRuntime::Impl {
                         // no independent GPU sample to add to the learner.
                         packet->deadline_observed=true;
                     } else if(packet->independent_due && !packet->deadline_observed.exchange(true)) {
-                        reserve.observe(packet->independent_available_at,packet->independent_due+reserve.reserve(),physical);
+                        observe_lateness(packet->independent_available_at,packet->independent_due,physical,packet->recovery.scheduled_offset);
                         independent_reserve=reserve.reserve();
                         packet->deadline_observed=true;
                     }
@@ -2078,7 +2109,7 @@ XrResult PrivateOpenXrRuntime::start() {
 void PrivateOpenXrRuntime::stop() {
     auto& s=*impl_;
     std::scoped_lock serial_stop(s.stop_mutex);
-    {std::scoped_lock lock(s.mutex);s.stopping=true;if(s.fifo)s.fifo->stop();}
+    {std::scoped_lock lock(s.mutex);++s.stop_epoch;s.stopping=true;if(s.fifo)s.fifo->stop();}
     s.changed.notify_all();SetEvent(s.independent_ready);if(s.consumer.joinable())s.consumer.join();if(s.preparer.joinable())s.preparer.join();if(s.copy_completer.joinable())s.copy_completer.join();
     std::scoped_lock accept(s.accept_mutex);
     // An interrupted GPU wait never authorizes reuse/free. Drain submitted
@@ -2389,6 +2420,12 @@ XrResult PrivateOpenXrRuntime::end_frame_reserved(const XrFrameEndInfo* info,
     s.trace(1,packet->sequence);return XR_SUCCESS;
 }
 XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count,XrSwapchain publication_source,ID3D12Device* d11_output_owner,unsigned publication_lane) {
+    return create_swapchain_impl(info,output,image_state,image_count,publication_source,d11_output_owner,publication_lane,false);
+}
+XrResult PrivateOpenXrRuntime::create_optional_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output) {
+    return create_swapchain_impl(info,output,D3D12_RESOURCE_STATE_RENDER_TARGET,3,XR_NULL_HANDLE,nullptr,0,true);
+}
+XrResult PrivateOpenXrRuntime::create_swapchain_impl(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count,XrSwapchain publication_source,ID3D12Device* d11_output_owner,unsigned publication_lane,bool optional) {
     if(!info || !output || info->type!=XR_TYPE_SWAPCHAIN_CREATE_INFO || image_count<1 || image_count>3)return XR_ERROR_VALIDATION_FAILURE;
     const bool pooled=publication_source!=XR_NULL_HANDLE;
     // A packed stereo image or texture array is still one source domain: its
@@ -2399,6 +2436,10 @@ XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* inf
         !(info->usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) ||
         (info->usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)))return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::unique_lock lock(s.mutex);
+    Impl::OptionalWork optional_work(s,optional);
+    const bool was_running=s.running;
+    const auto stop_epoch=s.stop_epoch;
+    if(optional)*output=XR_NULL_HANDLE;
     publication_lane=s.options.independent_pacing?std::min(publication_lane,1U):0;
     auto chain=std::make_shared<Impl::Chain>();chain->info=*info;chain->info.next=nullptr;
     chain->d11_output_owner=d11_output_owner;
@@ -2416,6 +2457,9 @@ XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* inf
     }
     auto& endpoint=Impl::destination(*chain);
     const bool created=endpoint.handle==XR_NULL_HANDLE;
+    // Optional chains cannot alias a pool or any published image. Construct
+    // entirely off-map; publish once complete under the short ownership lock.
+    if(optional)lock.unlock();
     auto abandon=[&](XrResult r){if(created && endpoint.handle)s.options.real.destroy(endpoint.handle);return r;};
     if(created) {
         auto result=s.options.real.create(s.options.real.session,info,&endpoint.handle);
@@ -2477,6 +2521,12 @@ XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* inf
         }
     }
     if(FAILED(made))return abandon(XR_ERROR_RUNTIME_FAILURE);
+    if(optional) {
+        lock.lock();
+        if(stop_epoch!=s.stop_epoch || (was_running && s.stopping)) {
+            lock.unlock();return abandon(XR_ERROR_SESSION_NOT_RUNNING);
+        }
+    }
     if(pooled) {
         chain->handle=reinterpret_cast<XrSwapchain>(chain.get());
         if(s.chains.contains(chain->handle))return abandon(XR_ERROR_RUNTIME_FAILURE);
@@ -2509,6 +2559,7 @@ XrResult PrivateOpenXrRuntime::destroy_swapchain_impl(XrSwapchain handle,bool bl
     auto publication=chain->publication;
     if(publication && --publication->publication_owners)return XR_SUCCESS;
     const auto native=publication?publication->handle:handle;
+    Impl::OptionalWork optional_work(s,!blocking);
     lock.unlock();return s.options.real.destroy(native);
 }
 XrResult PrivateOpenXrRuntime::enumerate_images(XrSwapchain handle,std::uint32_t capacity,std::uint32_t* count,XrSwapchainImageBaseHeader* output) {

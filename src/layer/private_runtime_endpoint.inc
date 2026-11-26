@@ -23,6 +23,11 @@ XrResult XRAPI_CALL private_runtime_create(XrSession session,const XrSwapchainCr
     const auto state=find_session(session);if(!state)return XR_ERROR_HANDLE_INVALID;
     return state->private_runtime?state->private_runtime->create_swapchain(info,handle):state->dispatch->create_swapchain(session,info,handle);
 }
+XrResult XRAPI_CALL private_overlay_create(XrSession session,const XrSwapchainCreateInfo* info,XrSwapchain* handle) {
+    const auto state=find_session(session);if(!state)return XR_ERROR_HANDLE_INVALID;
+    return state->private_runtime?state->private_runtime->create_optional_swapchain(info,handle):
+        state->dispatch->create_swapchain(session,info,handle);
+}
 XrResult XRAPI_CALL private_runtime_destroy(XrSwapchain handle) {
     const auto state=private_chain_owner(handle);return state?state->private_runtime->destroy_swapchain(handle):XR_ERROR_HANDLE_INVALID;
 }
@@ -64,6 +69,9 @@ XrResult XRAPI_CALL private_runtime_get_proc(XrInstance instance,const char* nam
 // Optional UI must not wait for image readers while holding the UI/game GPU
 // locks. Keep the application's public acquire contract unchanged.
 XrResult XRAPI_CALL private_overlay_get_proc(XrInstance instance,const char* name,PFN_xrVoidFunction* function) {
+    if(name && function && std::strcmp(name,"xrCreateSwapchain")==0){
+        *function=reinterpret_cast<PFN_xrVoidFunction>(private_overlay_create);return XR_SUCCESS;
+    }
     if(name && function && std::strcmp(name,"xrDestroySwapchain")==0){
         *function=reinterpret_cast<PFN_xrVoidFunction>(private_overlay_destroy);return XR_SUCCESS;
     }

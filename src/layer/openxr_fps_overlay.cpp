@@ -20,10 +20,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace xrfg {
 using Microsoft::WRL::ComPtr;
@@ -324,7 +326,70 @@ struct OpenXrFpsOverlay::Impl {
         ImGui::End();
     }
 
+    bool async_surfaces{},surface_builder{};
+    enum class Surface {none,fps,menu,meter};
+    Surface building{Surface::none};
+    std::future<std::unique_ptr<Impl>> surface_future;
+    bool surface_pending() const noexcept {return surface_future.valid();}
+    void finish_surface_creation(bool wait=false) {
+        if(!surface_future.valid() || (!wait && surface_future.wait_for(std::chrono::seconds(0))!=std::future_status::ready))return;
+        const auto kind=std::exchange(building,Surface::none);
+        auto ready=surface_future.get();
+        if(kind==Surface::menu) {
+            menu_swapchain=std::exchange(ready->menu_swapchain,{});
+            menu_images=std::move(ready->menu_images);menu_quad=ready->menu_quad;
+            menu_renderer.swap(ready->menu_renderer);
+            menu_attempted=ready->menu_attempted;menu_initialized=ready->menu_initialized;
+            if(!menu_initialized)close_menu();
+        } else if(kind==Surface::fps) {
+            swapchain=std::exchange(ready->swapchain,{});images=std::move(ready->images);
+            width=ready->width;height=ready->height;
+            const auto placement=quad.pose.position;quad=ready->quad;quad.pose.position=placement;
+            fps_attempted=ready->fps_attempted;fps_initialized=ready->fps_initialized;
+        } else {
+            meter=std::move(ready->meter);ready->meter.swapchain={};
+        }
+        bridge_flight_logger().event(BridgeFlightOperation::menu_status,89809,
+            unsigned(kind),xr_handle_bits(kind==Surface::menu?menu_swapchain:kind==Surface::fps?swapchain:meter.swapchain),0);
+        next_refresh=0;
+    }
+    bool start_surface_creation(Surface kind,std::uint32_t eye_width=0) {
+        if(surface_pending())return false;
+        // The worker mutates only its unpublished owner. Atlas conversion and
+        // D11 context work retain their existing application-thread contract.
+        auto candidate=std::make_unique<Impl>();candidate->surface_builder=true;
+        candidate->instance=instance;candidate->session=session;candidate->system=system;
+        candidate->space=space; // borrowed; candidate has no destroy_space callback
+        candidate->device12=device12;candidate->queue12=queue12;candidate->format=format;
+        candidate->system_properties=system_properties;
+        candidate->runtime_create_swapchain=runtime_create_swapchain;
+        candidate->runtime_destroy_swapchain=runtime_destroy_swapchain;
+        candidate->runtime_enumerate_images=runtime_enumerate_images;
+        candidate->meter.width=meter.width;candidate->meter.height=meter.height;
+        building=kind;
+        const auto started=now_ns();
+        bridge_flight_logger().event(BridgeFlightOperation::menu_status,89807,unsigned(kind),started,0);
+        try {
+            surface_future=std::async(std::launch::async,[owner=std::move(candidate),kind,eye_width,started]() mutable {
+                try {
+                    if(kind==Surface::menu) {
+                        if(owner->create_menu() && FAILED(owner->menu_renderer.prepare_d3d12_pipeline()))owner->menu_initialized=false;
+                    } else if(kind==Surface::fps)owner->create_fps(eye_width);
+                    else owner->create_meter();
+                } catch(...) {owner->menu_initialized=owner->fps_initialized=owner->meter.initialized=false;}
+                bridge_flight_logger().event(BridgeFlightOperation::menu_status,89808,unsigned(kind),
+                    kind==Surface::menu?owner->menu_initialized:kind==Surface::fps?owner->fps_initialized:owner->meter.initialized,now_ns()-started);
+                return std::move(owner);
+            });
+        } catch(...) {building=Surface::none;}
+        return false;
+    }
     bool initialize_menu() {
+        if(menu_attempted)return menu_initialized;
+        if(async_surfaces && device12 && !ui_native_count)return start_surface_creation(Surface::menu);
+        return create_menu();
+    }
+    bool create_menu() {
         if (menu_attempted) return menu_initialized;
         menu_attempted = true;
         XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
@@ -510,6 +575,7 @@ struct OpenXrFpsOverlay::Impl {
     }
 
     bool retire() noexcept {
+        finish_surface_creation(true);
         close_menu();
         if ((last_fence || menu_unfenced_submission || fps_unfenced_submission) && event) {
             if ((device12 && FAILED(device12->GetDeviceRemovedReason())) ||
@@ -540,7 +606,8 @@ struct OpenXrFpsOverlay::Impl {
     }
 
     ~Impl() {
-        autonomous::set_interface_visible(autonomous::InterfaceSurface::meter,false);
+        finish_surface_creation(true);
+        if(!surface_builder)autonomous::set_interface_visible(autonomous::InterfaceSurface::meter,false);
         menu_renderer.shutdown();
         if (meter.swapchain && runtime_destroy_swapchain) destroy_swapchain(meter.swapchain);
         if (local && destroy_space) destroy_space(local);
@@ -597,6 +664,11 @@ struct OpenXrFpsOverlay::Impl {
     }
 
     bool initialize_fps(std::uint32_t eye_width) {
+        if(swapchain || fps_attempted)return fps_initialized;
+        if(async_surfaces && device12 && !ui_native_count)return start_surface_creation(Surface::fps,eye_width);
+        return create_fps(eye_width);
+    }
+    bool create_fps(std::uint32_t eye_width) {
         if(swapchain)return fps_initialized;
         if(fps_attempted)return false;
         fps_attempted=true;
@@ -751,6 +823,11 @@ struct OpenXrFpsOverlay::Impl {
 
 
     bool initialize_meter() {
+        if(meter.attempted)return meter.initialized;
+        if(async_surfaces && device12 && !ui_native_count)return start_surface_creation(Surface::meter);
+        return create_meter();
+    }
+    bool create_meter() {
         if(meter.attempted)return meter.initialized;
         meter.attempted=true;
         XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
@@ -1020,6 +1097,7 @@ struct OpenXrFpsOverlay::Impl {
     }
 
     void application_frame(const XrFrameEndInfo* info) {
+        finish_surface_creation();
         const auto now = now_ns();
         if (!info || info->type != XR_TYPE_FRAME_END_INFO) return;
         bool refresh_fps = now >= next_refresh || ui_policy_warming;
@@ -1096,7 +1174,7 @@ struct OpenXrFpsOverlay::Impl {
         // between corner counter and meter while the old GPU image retires.
         if(!ui_atlas_enabled && ((elliott_mode() && swapchain) || (!elliott_mode() && meter.swapchain)))return;
         if (menu_open) {
-            if (!initialize_menu()) { close_menu(); }
+            if (!initialize_menu()) { if(!surface_pending())close_menu(); }
             else {
                 autonomous::synchronize_settings_widgets(menu_widgets, autonomous::snapshot());
                 menu_fov = {left, right, down, up};
@@ -1304,6 +1382,9 @@ void OpenXrFpsOverlay::set_private_delivery_end(ObservedEndFrame end,PrepareEndF
     auto admission=prepare?std::make_shared<PrepareEndFrame>(std::move(prepare)):nullptr;
     std::scoped_lock lock(impl_->mutex);impl_->private_delivery_end=std::move(end);
     impl_->private_delivery_prepare.store(std::move(admission),std::memory_order_release);
+}
+void OpenXrFpsOverlay::set_async_surface_creation(bool enabled) noexcept {
+    std::scoped_lock lock(impl_->mutex);impl_->async_surfaces=enabled;
 }
 
 XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic, bool new_content,

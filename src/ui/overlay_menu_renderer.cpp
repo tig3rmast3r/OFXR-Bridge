@@ -195,6 +195,7 @@ float4 PS(P p):SV_Target { return p.color*atlas.Sample(sampleAtlas,p.uv); }
     }
 public:
     explicit ImmutableMenuDraw12(ID3D12Device* device) : device_(device) {}
+    bool PreparePipeline(DXGI_FORMAT format) {Draw draw;return Pipeline(format,draw);}
     bool Init()
     {
         if (initialized_) return true;
@@ -441,6 +442,13 @@ OverlayMenuRenderer::~OverlayMenuRenderer() {
         // A failed owner stays bounded to this overlay's <=64 immutable images.
         (void)impl_.release();
     }
+}
+void OverlayMenuRenderer::swap(OverlayMenuRenderer& other) noexcept {impl_.swap(other.impl_);}
+HRESULT OverlayMenuRenderer::prepare_d3d12_pipeline() noexcept {
+    if(!impl_ || !impl_->renderer12)return E_INVALIDARG;
+    std::scoped_lock lock(impl_->mutex);
+    try {return impl_->renderer12->PreparePipeline(impl_->format)?S_OK:E_FAIL;}
+    catch(...) {return E_OUTOFMEMORY;}
 }
 HRESULT OverlayMenuRenderer::initialize(ID3D12Device* device12,ID3D12CommandQueue* queue12,
     ID3D11Device* device11,DXGI_FORMAT format,std::uint32_t image_count,std::uint32_t width,std::uint32_t height) noexcept {

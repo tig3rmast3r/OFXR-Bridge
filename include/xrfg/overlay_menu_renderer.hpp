@@ -14,6 +14,8 @@ class OverlayMenuRenderer final {
 public:
     OverlayMenuRenderer() noexcept;
     ~OverlayMenuRenderer();
+    void swap(OverlayMenuRenderer&) noexcept;
+    HRESULT prepare_d3d12_pipeline() noexcept;
     OverlayMenuRenderer(const OverlayMenuRenderer&)=delete;
     OverlayMenuRenderer& operator=(const OverlayMenuRenderer&)=delete;
     HRESULT initialize(ID3D12Device* device12,ID3D12CommandQueue* queue12,

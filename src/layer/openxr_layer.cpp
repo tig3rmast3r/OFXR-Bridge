@@ -7181,6 +7181,8 @@ XrResult layer_create_session_impl(
                 ns = xrfg::interface_qpc_ns(qpc.QuadPart); return ns > 0;
             }, dispatch.get());
         bind_private_delivery_metrics(state);
+        state->fps_overlay->set_async_surface_creation(state->independent_pacing &&
+            state->private_runtime && state->graphics_binding==SessionGraphicsBinding::d3d12 && !state->dispatch->steamvr_runtime);
         state->fps_overlay->set_delivery_source(state->steamvr_delivery.get());
         if(state->dispatch->steamvr_runtime && state->private_runtime) {
             state->fps_overlay->set_native_swapchain_count_source([weak=std::weak_ptr<SessionState>(state)]()->std::optional<unsigned> {

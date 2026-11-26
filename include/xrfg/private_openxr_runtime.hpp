@@ -227,6 +227,9 @@ public:
         // Independent only: keep generated and real native publications
         // separate so either can be prepared while its peer awaits delivery.
         unsigned publication_lane=0);
+    // Optional UI construction owns a new, unpublished chain. Native creation
+    // and texture allocation must not hold the delivery/Wait-result mutex.
+    XrResult create_optional_swapchain(const XrSwapchainCreateInfo*,XrSwapchain*);
     XrResult destroy_swapchain(XrSwapchain);
     // Optional UI retirement: busy readers/consumers leave the chain intact
     // and return XR_ERROR_CALL_ORDER_INVALID for a later frame-thread retry.
@@ -257,6 +260,8 @@ public:
     // CPU-only inventory; busy transport returns no partial snapshot.
     [[nodiscard]] std::optional<std::vector<SwapchainMapping>> native_swapchain_mapping() const;
 private:
+    XrResult create_swapchain_impl(const XrSwapchainCreateInfo*,XrSwapchain*,
+        D3D12_RESOURCE_STATES,std::uint32_t,XrSwapchain,ID3D12Device*,unsigned,bool optional);
     XrResult destroy_swapchain_impl(XrSwapchain,bool blocking);
     XrResult acquire_image_impl(XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t*,bool blocking);
     struct Impl;

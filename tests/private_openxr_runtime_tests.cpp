@@ -107,6 +107,8 @@ struct Fixture {
     unsigned expected_views{1};
     unsigned native_image_count{2};
     std::function<XrResult(XrSwapchain,unsigned)> release_callback;
+    std::function<void()> create_callback;
+    std::atomic_uint ignored_optional_lateness{};
     std::function<void(unsigned)> begin_callback;
     std::function<void()> after_head_ready;
     std::function<void(std::uint64_t)> preparation_callback;
@@ -199,6 +201,7 @@ struct Fixture {
                 residence_sample_count.store(unsigned(residence_samples.size()),std::memory_order_release);
             }
             if(stage==97)spacing_samples.push_back({std::int64_t(seq),at,margin});
+            if(stage==101)++ignored_optional_lateness;
         };
         if(!diagnostics)options.trace_enabled=[]{return false;};
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
@@ -358,7 +361,8 @@ struct Fixture {
         return f.fail_end?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;
     }
     static XrResult XRAPI_CALL create(XrSession,const XrSwapchainCreateInfo* info,XrSwapchain* output) {
-        auto& f=*current;if(f.chains.size()>=f.native_chain_limit)return XR_ERROR_LIMIT_REACHED;
+        auto& f=*current;if(f.create_callback)f.create_callback();
+        if(f.chains.size()>=f.native_chain_limit)return XR_ERROR_LIMIT_REACHED;
         *output=reinterpret_cast<XrSwapchain>(f.next_handle++);auto& chain=f.chains[*output];
         chain.static_image=(info->createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT)!=0;
         const bool depth=(info->usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)!=0;
@@ -2378,8 +2382,17 @@ void binding_queue_handoff_test(bool render) {
 }
 
 #include "private_native_image_state_tests.inc"
+#include "private_optional_creation_tests.inc"
 
 int main(int argc,char** argv){
+if(argc>1 && std::string_view(argv[1])=="ui-learning") {optional_creation_learning(true);return 0;}
+if(argc>1 && std::string_view(argv[1])=="ui-create") {
+    for(bool d12:{true,false}) {
+        for(unsigned transition=0;transition<3;++transition)optional_creation_progress(d12,transition);
+        optional_creation_learning(d12);
+    }
+    return 0;
+}
 if(argc>1 && std::string_view(argv[1])=="independent-batch-accounting"){for(bool handoff:{false,true})independent_residence_accounting_test(handoff);return 0;}
 if(argc>1 && std::string_view(argv[1])=="native-image-state"){native_image_state_checks();return 0;}
     if(argc>1 && std::string_view(argv[1])=="binding-queue-handoff"){binding_queue_handoff_test(true);binding_queue_handoff_test(false);return 0;}

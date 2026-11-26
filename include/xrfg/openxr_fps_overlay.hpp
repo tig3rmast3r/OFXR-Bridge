@@ -46,6 +46,9 @@ public:
     struct PreparedEndFrame { XrResult result{XR_SUCCESS}; ObservedEndFrame submit; };
     using PrepareEndFrame=std::function<PreparedEndFrame()>;
     void set_private_delivery_end(ObservedEndFrame,PrepareEndFrame prepare={});
+    // Private D12 Independent delivery: optional direct UI construction runs
+    // off the application frame thread; only a finished owner is published.
+    void set_async_surface_creation(bool enabled) noexcept;
     void set_unique_content_only(bool enabled) noexcept;
     void set_luke_scene_measurement(bool enabled) noexcept;
     [[nodiscard]] XrResult end_frame(const XrFrameEndInfo* info, bool synthetic, bool new_content = true,
