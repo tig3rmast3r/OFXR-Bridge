@@ -784,6 +784,24 @@ std::shared_ptr<UevrAfrOsrState> make_uevr_afr_osr_state() noexcept;
 struct AerNativeGuideCache;
 
 struct IndependentSynthesisWork;
+struct SessionState;
+// A source remains admitted while it is a Wait ticket, a begun frame, or an
+// EndFrame awaiting handoff. Generation jobs take over the same credit.
+class IndependentSourceCredit {
+    std::weak_ptr<SessionState> owner_;
+    bool active_{};
+public:
+    IndependentSourceCredit() = default;
+    IndependentSourceCredit(const IndependentSourceCredit&) = delete;
+    IndependentSourceCredit& operator=(const IndependentSourceCredit&) = delete;
+    IndependentSourceCredit(IndependentSourceCredit&& other) noexcept;
+    IndependentSourceCredit& operator=(IndependentSourceCredit&& other) noexcept;
+    ~IndependentSourceCredit();
+    void acquire_locked(const std::shared_ptr<SessionState>& state);
+    void release_locked(SessionState& state, unsigned stage = 2) noexcept;
+    void reset() noexcept;
+    void begun() const noexcept;
+};
 struct SessionState {
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> panel_synthesis_queue;
     std::vector<std::pair<XrSwapchain,XrTime>> panel_generated;
@@ -909,6 +927,7 @@ struct SessionState {
     std::chrono::steady_clock::time_point luke_clock_wall_origin{};
     std::chrono::steady_clock::time_point application_wait_returned_at{};
     bool application_wait_pending_begin{};
+    IndependentSourceCredit independent_wait_credit, independent_begun_credit; // frame_call_mutex
     // Some applications run the next wait on a dedicated thread before the
     // current render thread ends its frame. Two consecutive overlaps select a
     // virtual application loop; the runtime-facing presenter then owns all
@@ -1157,6 +1176,7 @@ struct SessionState {
     xrfg::IndependentBatchDeadlines independent_batch_deadlines; // presenter_mutex
     std::atomic_uint independent_streamed_first{};
     std::deque<std::shared_ptr<SynthesisJob>> independent_sources;
+    unsigned independent_source_reservations{}; // presenter_mutex; Wait/Begin/End, before job handoff
     std::deque<std::shared_ptr<ThreeSlotFrame>> independent_outputs;
     bool three_slot_director{};
     bool fsr_two_slot_presenter{}; // presenter_mutex; immutable while thread runs
@@ -1311,6 +1331,44 @@ struct SessionState {
     bool presenter_active{};
     XrSession handle{XR_NULL_HANDLE};
 };
+
+std::size_t independent_gpu_jobs(const SessionState& state) noexcept {
+    return state.independent_sources.size() + unsigned(state.synthesis_busy) +
+        state.independent_completions.size() + unsigned(state.independent_completion_busy);
+}
+// 113505: a=0 reserve,1 transfer to job,2 cancel,3 Begin; b=reserved sources,
+// c=unfinished generation jobs. A new Begin must have at most one older job.
+void log_independent_source_credit(const SessionState& state, unsigned stage) noexcept {
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+        113505, stage, state.independent_source_reservations, independent_gpu_jobs(state));
+}
+IndependentSourceCredit::IndependentSourceCredit(IndependentSourceCredit&& other) noexcept
+    : owner_(std::move(other.owner_)), active_(std::exchange(other.active_, false)) {}
+IndependentSourceCredit& IndependentSourceCredit::operator=(IndependentSourceCredit&& other) noexcept {
+    if(this != &other) { reset(); owner_=std::move(other.owner_);active_=std::exchange(other.active_,false); }
+    return *this;
+}
+IndependentSourceCredit::~IndependentSourceCredit() { reset(); }
+void IndependentSourceCredit::acquire_locked(const std::shared_ptr<SessionState>& state) {
+    owner_=state;active_=true;++state->independent_source_reservations;
+    log_independent_source_credit(*state,0);
+}
+void IndependentSourceCredit::release_locked(SessionState& state, unsigned stage) noexcept {
+    if(!std::exchange(active_,false))return;
+    --state.independent_source_reservations;owner_.reset();
+    log_independent_source_credit(state,stage);state.presenter_condition.notify_all();
+}
+void IndependentSourceCredit::reset() noexcept {
+    if(!active_)return;
+    if(const auto state=owner_.lock()) {
+        std::scoped_lock lock(state->presenter_mutex);release_locked(*state);
+    } else {active_=false;owner_.reset();}
+}
+void IndependentSourceCredit::begun() const noexcept {
+    if(active_)if(const auto state=owner_.lock()) {
+        std::scoped_lock lock(state->presenter_mutex);log_independent_source_credit(*state,3);
+    }
+}
 
 // R20/R21 promise fixes, gated by the owner's existing live camera checkbox.
 // OFF has no history work; each toggle/configuration epoch discards stale feedback.
@@ -7503,6 +7561,8 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         std::scoped_lock frame_call_lock(state->frame_call_mutex);
         state->application_wait_pending_begin = false;
         state->application_frame_in_progress = false;
+        state->independent_wait_credit.reset();
+        state->independent_begun_credit.reset();
         state->application_frame_has_overlapping_wait = false;
         state->aer_input_detection={};
         state->aer_warning_started_ms=0;
@@ -7662,23 +7722,26 @@ void update_luke_application_clock(SessionState& state, bool recognized, bool du
 // render, not after receiving its image. Neither native pending outputs nor
 // pacing reserve delays a rendered image. Ready ownership also limits future
 // renders, so draining a surplus queue never requires a producer End to wait.
-XrResult wait_for_independent_source_budget(SessionState& state,unsigned divisor=1) {
+XrResult wait_for_independent_source_budget(SessionState& state,unsigned divisor=1,
+    IndependentSourceCredit* credit=nullptr,const std::shared_ptr<SessionState>& owner={}) {
     // This stop flag retires the generation worker, not the OpenXR session.
     // FG-off still uses the live private endpoint and must reach predict_frame.
-    if(!state.menu_enabled || !temporal_generation_requested())return XR_SUCCESS;
+    const auto reserve=[&] {if(credit)credit->acquire_locked(owner);};
+    if(!state.menu_enabled || !temporal_generation_requested()) {
+        std::scoped_lock lock(state.presenter_mutex);reserve();return XR_SUCCESS;
+    }
     const auto entered=xrfg::interface_clock_ns();
     std::unique_lock lock(state.presenter_mutex);
     // After re-enabling FG, EndFrame still has to bootstrap its new worker.
     // A retired worker's stop flag cannot prevent that first source render.
-    if(!state.presenter_active)return XR_SUCCESS;
+    if(!state.presenter_active) {reserve();return XR_SUCCESS;}
     const auto work=[&] {
-        return state.independent_sources.size()+unsigned(state.synthesis_busy)+
-            state.independent_completions.size()+unsigned(state.independent_completion_busy);
+        return independent_gpu_jobs(state)+state.independent_source_reservations;
     };
     const auto before=work();
     const auto available=[&] {
         if(!state.menu_enabled)return true;
-        if(!xrfg::independent_source_budget_available(state.independent_sources.size(),state.synthesis_busy,
+        if(!xrfg::independent_source_budget_available(state.independent_sources.size()+state.independent_source_reservations,state.synthesis_busy,
             state.independent_completions.size(),state.independent_completion_busy))return false;
         if(!state.independent_pacing || !state.private_runtime)return true;
         const auto delivery=state.private_runtime->independent_load();
@@ -7704,6 +7767,7 @@ XrResult wait_for_independent_source_budget(SessionState& state,unsigned divisor
     }
     const auto result=!generation_needed || !state.menu_enabled?XR_SUCCESS:
         state.presenter_stop_requested?XR_ERROR_SESSION_NOT_RUNNING:state.presenter_failure;
+    if(XR_SUCCEEDED(result))reserve();
     const auto after=work();
     const auto source=state.next_source_sequence;
     lock.unlock();
@@ -7726,6 +7790,7 @@ XrResult layer_wait_frame_impl(
         return XR_ERROR_HANDLE_INVALID;
     }
 
+    IndependentSourceCredit source_credit;
     std::unique_lock adaptive_wait_lock(state->adaptive_wait_mutex);
     std::unique_lock frame_call_lock(state->frame_call_mutex);
     state->frame_call_condition.wait(frame_call_lock, [&] {
@@ -7749,7 +7814,11 @@ XrResult layer_wait_frame_impl(
             : native_frame_multiplier(*state);
         const auto now=xrfg::interface_clock_ns();
         auto target=state->independent_source_clock.claim(now,physical,divisor);
-        const auto admitted=wait_for_independent_source_budget(*state,divisor);
+        // End owns a previously admitted source. It must be able to transfer
+        // that credit to generation while the next pipelined Wait is full.
+        frame_call_lock.unlock();
+        const auto admitted=wait_for_independent_source_budget(*state,divisor,&source_credit,state);
+        frame_call_lock.lock();
         if(XR_FAILED(admitted))return admitted;
         const auto wait_for_source_appointment = [&](std::int64_t appointment) {
             if (xrfg::interface_clock_ns() >= appointment) return;
@@ -8135,6 +8204,7 @@ XrResult layer_wait_frame_impl(
                 static_cast<void>(flush_session_pending_copies(state));
         }
         state->application_wait_pending_begin = true;
+        state->independent_wait_credit=std::move(source_credit);
         std::scoped_lock lock(state->mutex);
         // Every runtime, not only SteamVR: the synthetic interpolation fraction
         // needs a display period wherever generation runs, and the promotion
@@ -8262,6 +8332,7 @@ XrResult layer_begin_frame_impl(
     } catch (...) {
         if (state->application_wait_pending_begin) {
             state->application_wait_pending_begin = false;
+            state->independent_wait_credit.reset();
             frame_call_lock.unlock();
             state->frame_call_condition.notify_all();
         }
@@ -8269,6 +8340,8 @@ XrResult layer_begin_frame_impl(
     }
     if (XR_SUCCEEDED(result)) {
         if(state->independent_pacing) {
+            state->independent_begun_credit=std::move(state->independent_wait_credit);
+            state->independent_begun_credit.begun();
             std::scoped_lock lock(state->mutex);
             // Wait admission permits only one unbegun ticket. Older entries
             // can belong to the previous begun/discarded frame, never the new
@@ -8281,6 +8354,7 @@ XrResult layer_begin_frame_impl(
     }
     if (state->application_wait_pending_begin) {
         state->application_wait_pending_begin = false;
+        if(XR_FAILED(result))state->independent_wait_credit.reset();
         frame_call_lock.unlock();
         state->frame_call_condition.notify_all();
     }
@@ -16771,7 +16845,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     const std::shared_ptr<SessionState>& state, const XrFrameEndInfo* source,
     const ProjectionSnapshot& snapshot, std::span<const ProjectionResourceMapping> mappings,
     bool metadata_pairable,
-    std::shared_ptr<const CompletedAfwFrame> post_afw_frame = {}) {
+    std::shared_ptr<const CompletedAfwFrame> post_afw_frame = {},
+    IndependentSourceCredit* source_credit = nullptr) {
     if (!metadata_pairable && !state->independent_pacing) {
         const XrResult drain = wait_for_presenter_idle(state);
         if (XR_FAILED(drain)) return drain;
@@ -16856,7 +16931,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
          job->current->source_sequence=state->next_source_sequence++;
          job->current->previous_sequence=job->pair?state->director_anchor_sequence:0;
          state->director_anchor_sequence=job->current->source_sequence;
-         state->independent_sources.push_back(job);}
+         state->independent_sources.push_back(job);
+         if(source_credit)source_credit->release_locked(*state,1);}
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
             98610,job->current->source_sequence,job->current->previous_sequence,job->sources.size());
         if(job->stereo_recovery)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
@@ -19745,6 +19821,7 @@ XrResult layer_end_frame_impl(
             interface_stamp.cycle=interface_call.cycle=begun_cycle;
     }
     state->application_frame_in_progress = false;
+    IndependentSourceCredit source_credit=std::move(state->independent_begun_credit);
     state->frame_call_condition.notify_all();
     state->application_frame_has_overlapping_wait = false;
     update_aer_input(*state,end_info);
@@ -20780,7 +20857,7 @@ XrResult layer_end_frame_impl(
         }
         const XrResult handoff = handoff_three_slot_frame(
             state, end_info, current_snapshot, projection_mappings, metadata_pairable,
-            completed_afw);
+            completed_afw,&source_credit);
         // Auxiliary admission may have retired the complete generation budget.
         // This frame and later frames must use real-image delivery, never hand
         // a job to a worker whose generators were just destroyed.
