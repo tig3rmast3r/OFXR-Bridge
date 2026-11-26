@@ -234,7 +234,7 @@ struct PrivateOpenXrRuntime::Impl {
             if(owner.tracing())owner.options.trace(100,0,started,finished);
         }
     };
-    struct IndependentMiss {std::int64_t due{},available{},offset{};};
+    struct IndependentMiss {std::int64_t due{},available{};IndependentRecoveryTiming timing;};
     std::deque<IndependentMiss> independent_misses; // mutex guarded
     bool expired_independent(const Packet& packet) const noexcept {
         const auto physical=independent_period.load();
@@ -820,7 +820,7 @@ struct PrivateOpenXrRuntime::Impl {
             // Learn only when its GPU/source readiness is known. Our FIFO and
             // native target ownership must not purchase more expiry allowance.
             const auto available=packet->source_ready_at;
-            if(available)independent_misses.push_back({packet->independent_due,available,packet->recovery.scheduled_offset});
+            if(available)independent_misses.push_back({packet->independent_due,available,packet->recovery});
         }
         if(packet->delivery)packet->delivery->discarded();
         ++independent_expired_count;
@@ -1226,13 +1226,15 @@ struct PrivateOpenXrRuntime::Impl {
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
         IndependentDeliveryReserve reserve;
         IndependentDeliveryClock cadence;
-        const auto observe_lateness=[&](std::int64_t available,std::int64_t due,std::int64_t physical,std::int64_t offset) {
+        const auto observe_lateness=[&](std::int64_t available,std::int64_t due,std::int64_t physical,const IndependentRecoveryTiming& timing) {
             // An optional surface's known CPU setup/retirement pause is not
             // recurring synthesis lateness. Keep stale-image expiry intact;
             // do not purchase persistent tolerance for deadlines it crossed.
-            const auto first_due=due-std::clamp(offset,std::int64_t{},physical*3);
-            if(!optional_work_active.load() && first_due>std::max(optional_work_finished.load(),generation_initialized_at.load()))
-                reserve.observe(available,due+reserve.reserve(),physical);
+            const auto first_due=due-std::clamp(timing.scheduled_offset,std::int64_t{},physical*3);
+            if(!optional_work_active.load() && first_due>std::max(optional_work_finished.load(),generation_initialized_at.load())) {
+                const bool sampled=reserve.observe_source(available,due,physical,timing);
+                if(timing.accelerated && tracing())options.trace(105,first_due,sampled?0:timing.source_queued?1:2,available);
+            }
             else if(tracing() && available>due+reserve.reserve()+physical/2)
                 options.trace(101,0,due,available);
         };
@@ -1348,7 +1350,7 @@ struct PrivateOpenXrRuntime::Impl {
                 reserve.set_limit(physical*cap);independent_reserve=reserve.reserve();
                 std::deque<IndependentMiss> misses;
                 {std::scoped_lock lock(mutex);misses.swap(independent_misses);}
-                for(const auto& [due,at,offset]:misses)observe_lateness(at,due,physical,offset);
+                for(const auto& [due,at,timing]:misses)observe_lateness(at,due,physical,timing);
                 // Retire measurements in presentation order. The presenter
                 // never waits here. Only measured GPU completion can train
                 // the buffer or shorten its allowance on a queued handoff.
@@ -1358,7 +1360,7 @@ struct PrivateOpenXrRuntime::Impl {
                     if(!ready)break;
                     const auto available=sample->source_ready_at;
                     if(sample->independent_due) {
-                        observe_lateness(available,sample->independent_due,physical,sample->recovery.scheduled_offset);
+                        observe_lateness(available,sample->independent_due,physical,sample->recovery);
                         if(entered && independent_ready_residence.load()<=physical/2+2'000'000)
                             reserve.delivered(available,sample->independent_due+reserve.reserve(),entered,physical,sample->recovery.accelerated);
                     }
@@ -1400,7 +1402,7 @@ struct PrivateOpenXrRuntime::Impl {
                         // no independent GPU sample to add to the learner.
                         packet->deadline_observed=true;
                     } else if(packet->independent_due && !packet->deadline_observed.exchange(true)) {
-                        observe_lateness(packet->independent_available_at,packet->independent_due,physical,packet->recovery.scheduled_offset);
+                        observe_lateness(packet->independent_available_at,packet->independent_due,physical,packet->recovery);
                         independent_reserve=reserve.reserve();
                         packet->deadline_observed=true;
                     }

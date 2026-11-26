@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1086.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1087.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -923,6 +923,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_private_optional_ui_creation_gpu COMMAND xrfg_private_openxr_runtime_tests ui-create)
         add_test(NAME xrfg_private_optional_ui_readiness_gpu COMMAND xrfg_private_openxr_runtime_tests ui-ready)
         add_test(NAME xrfg_independent_startup_learning COMMAND xrfg_private_openxr_runtime_tests startup-learning)
+        add_test(NAME xrfg_independent_source_recovery_gpu COMMAND xrfg_private_openxr_runtime_tests source-recovery)
+        set_tests_properties(xrfg_independent_source_recovery_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_WARP=1")
         add_test(NAME xrfg_private_generation_creation_gpu COMMAND xrfg_private_openxr_runtime_tests generation-create)
         add_test(NAME xrfg_independent_async_generation COMMAND xrfg_private_runtime_layer_tests independent-async-generation)
         add_test(NAME xrfg_independent_native_binding_handoff COMMAND xrfg_private_runtime_layer_tests independent-native-binding-handoff)

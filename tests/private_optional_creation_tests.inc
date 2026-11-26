@@ -103,8 +103,13 @@ static void optional_creation_learning(bool d12) {
         f.native_chain_limit=f.chains.size();XrSwapchain refused=reinterpret_cast<XrSwapchain>(1);
         check(f.transport->create_optional_swapchain(&info,&refused)==XR_ERROR_LIMIT_REACHED && !refused,
             "refused optional allocation must publish no handle");
-        std::this_thread::sleep_for(std::chrono::nanoseconds(2*period));
-        for(unsigned n=0;n<4 && !f.transport->independent_load().reserve;++n)send(ns()-period,5+n);
+        // Keep new source appointments later than the already accepted fresh
+        // batch. A deliberately old deadline is not a new independent source.
+        std::this_thread::sleep_for(std::chrono::nanoseconds(4*period));
+        for(unsigned n=0;n<4 && !f.transport->independent_load().reserve;++n) {
+            send(ns()-period,5+n);
+            std::this_thread::sleep_for(std::chrono::nanoseconds(2*period));
+        }
         for(unsigned n=0;n<200 && !f.transport->independent_load().reserve;++n)std::this_thread::sleep_for(1ms);
         check(f.transport->independent_load().reserve>0,"optional work disabled genuine future lateness learning");
         f.transport->stop();
@@ -228,11 +233,56 @@ static void independent_initialization_learning() {
         check(!f.transport->independent_load().reserve && f.ignored_optional_lateness>=4,
             "one-off initialization delay trained future 2X/3X/4X tolerance");
         check(send(ns()+2*period,5)->outcome==1,"fresh startup scene did not resume");
-        for(unsigned n=0;n<4 && !f.transport->independent_load().reserve;++n)send(ns()-period,6+n);
+        std::this_thread::sleep_for(std::chrono::nanoseconds(4*period));
+        for(unsigned n=0;n<4 && !f.transport->independent_load().reserve;++n) {
+            send(ns()-period,6+n);
+            std::this_thread::sleep_for(std::chrono::nanoseconds(2*period));
+        }
         for(unsigned n=0;n<200 && !f.transport->independent_load().reserve;++n)std::this_thread::sleep_for(1ms);
         check(f.transport->independent_load().reserve>0,"initialization exclusion disabled later genuine source lateness learning");
         f.transport->stop();xr_ok(f.transport->destroy_swapchain(scene),"initialization source cleanup");
     }
     independent_fixture_mode=false;independent_fixture_auto=false;period=saved;
     std::puts("INITIALIZATION no stale batch tolerance, fresh recovery, later genuine learning PASS");
+}
+
+static void independent_source_recovery() {
+    const auto saved=period;period=25'000'000;
+    independent_fixture_mode=true;independent_fixture_auto=true;
+    {
+        Fixture f(true);f.throttled=false;f.block_end=false;
+        const auto scene=f.make_chain();f.write(scene,80);f.gpu_wait();
+        const auto send=[&](std::int64_t first,unsigned slot,bool queued,float identity) {
+            f.begin_virtual();
+            f.transport->set_next_independent_deadline(first+slot*period,false,{slot*period,true,true,queued});
+            auto receipt=std::make_shared<xrfg::InterfaceDeliveryReceipt>(false);
+            xr_ok(f.submit(scene,identity,XR_NULL_HANDLE,receipt),"source evidence submission");
+            xr_ok(f.transport->drain(),"source evidence retirement");
+            return receipt;
+        };
+        // The captured failure: both outputs of ONE slow source expire. The
+        // next sources wait behind its GPU work; none is independent evidence.
+        const auto first=ns()-4*period;
+        check(send(first,0,false,1)->outcome==-2,"late head must expire");
+        check(send(first,1,false,2)->outcome==-2,"late tail must expire independently");
+        for(unsigned source=1;source<=2;++source)for(unsigned slot=0;slot<2;++slot)
+            check(send(first+source*period,slot,true,float(3+2*source+slot))->outcome==-2,
+                "queued stale source was rescued");
+        std::this_thread::sleep_for(std::chrono::nanoseconds(2*period));
+        check(!f.transport->independent_load().reserve,"one source and its backlog trained extra delivery tolerance");
+        const auto fresh_due=ns()+2*period;
+        check(send(fresh_due,0,false,10)->outcome==1,"fresh source failed to recover");
+        check(f.positions.back()==10 && f.pixels.back()==80,"recovery changed submitted scene pose or pixels");
+        std::this_thread::sleep_for(std::chrono::nanoseconds(6*period));
+        for(unsigned n=0;n<4 && !f.transport->independent_load().reserve;++n) {
+            std::this_thread::sleep_for(std::chrono::nanoseconds(2*period));
+            send(ns()-period,0,false,11+n);
+        }
+        for(unsigned n=0;n<200 && !f.transport->independent_load().reserve;++n)std::this_thread::sleep_for(1ms);
+        check(f.transport->independent_load().reserve>0,"distinct unqueued late sources no longer train bounded tolerance");
+        check(f.chains.size()==1,"recovery created another native image owner");
+        f.transport->stop();xr_ok(f.transport->destroy_swapchain(scene),"source evidence cleanup");
+    }
+    independent_fixture_mode=false;independent_fixture_auto=false;period=saved;
+    std::puts("SOURCE_RECOVERY distinct expiry, single-source evidence, queued backlog, fresh pixels/poses and genuine learning PASS");
 }

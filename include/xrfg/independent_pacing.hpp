@@ -64,6 +64,7 @@ struct IndependentRecoveryTiming {
     std::int64_t scheduled_offset{};
     bool accelerated{};
     bool protect_next_output{};
+    bool source_queued{}; // prior generation/descriptor backlog, not a new GPU lateness sample
 };
 // Consume surplus output ownership by postponing future source appointments,
 // never by accelerating native End or discarding rendered images. Qualification
@@ -146,6 +147,7 @@ class IndependentDeliveryReserve {
     IndependentRecoveryWindow recovery_;
     unsigned late_{},window_{};
     bool accelerated_{};
+    std::int64_t source_due_{},source_period_{};
     void unstable() noexcept {last_delivery_=0;recovery_.reset();}
 public:
     void set_limit(std::int64_t limit) noexcept {
@@ -175,6 +177,21 @@ public:
             }
         }
         if(++window_>=32){late_=window_=0;peak_=0;}
+    }
+    bool observe_source(std::int64_t available,std::int64_t due,std::int64_t period,
+        const IndependentRecoveryTiming& timing) noexcept {
+        if(!timing.accelerated){observe(available,due+reserve_,period);return true;}
+        if(!due || period<=0)return false;
+        const auto first=due-std::clamp(timing.scheduled_offset,std::int64_t{},3*period);
+        if(source_period_!=period){source_period_=period;source_due_=0;late_=window_=0;peak_=0;}
+        if(first<=source_due_)return false;
+        source_due_=first;
+        if(timing.source_queued) {
+            // One overrun and the work queued behind it are one disturbance.
+            // Keep real expiry strict; do not turn that backlog into tolerance.
+            late_=window_=0;peak_=0;return false;
+        }
+        observe(available,first+reserve_,period);return true;
     }
     void delivered(std::int64_t ready,std::int64_t expected,
                    std::int64_t entered,std::int64_t period,bool accelerated=false) noexcept {
