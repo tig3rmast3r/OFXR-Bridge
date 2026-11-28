@@ -13,6 +13,14 @@ static bool hybrid_layout = false;
 #ifndef XRFG_HYBRID_MAX_SURFACE_SOLVES
 #define XRFG_HYBRID_MAX_SURFACE_SOLVES 2
 #endif
+// FidelityFX Hybrid uses the 0.2.14.3 agreement threshold (62/255) so DLSS/TAA
+// resampling noise does not send large panning regions into the second
+// optical-flow synthesis pass; other Hybrid entries keep 0.02.
+#ifdef XRFG_HYBRID_RELAXED_AGREE
+static const float kHybridAgreeThreshold = 62.0 / 255.0;
+#else
+static const float kHybridAgreeThreshold = 0.02;
+#endif
 Texture2DArray<float4> SceneOnlyFrame : register(t7);
 // Hybrid's depth search (0.2 V505, V555): the game's depth beside its
 // vectors, at their resolution, and the midpoint splat BuildDepthSplat
@@ -1684,9 +1692,16 @@ float4 synthesize_midpoint(
                     }
                     // The hybrid compares its two branches' samples blurred a
                     // little: sharp detail resampled at a fraction of a pixel
-                    // disagrees even where the motion is exact.
+                    // disagrees even where the motion is exact. When single-tap
+                    // game-motion disagreement is already below the Hybrid
+                    // agreement threshold, the vectors already explain the
+                    // pixel and the 8-tap 6K blur can be skipped.
                     float compared = disagreement;
+#ifdef XRFG_HYBRID_FAST_AGREE
+                    [branch] if (hybrid_layout && (!use_game_motion_pipeline || disagreement >= kHybridAgreeThreshold)) {
+#else
                     if (hybrid_layout) {
+#endif
                         float4 a_low = 0.0, b_low = 0.0;
                         [unroll] for (uint k = 0; k < 4; ++k) {
                             float2 o = float2((k & 1) != 0 ? 0.5 : -0.5, (k & 2) != 0 ? 0.5 : -0.5);
@@ -1885,15 +1900,6 @@ float4 SynthesizeGameMotionMidpointPS(FullscreenVertex input) : SV_Target {
 // explains both frames better. Content the vectors do not describe - a
 // shadow, a reflection - moves as the image does, which the flow follows.
 // The vectors keep a tie.
-// FidelityFX Hybrid uses the 0.2.14.3 agreement threshold (62/255) so DLSS/TAA
-// resampling noise does not send large panning regions into the second
-// optical-flow synthesis pass; other Hybrid entries keep 0.02.
-#ifdef XRFG_HYBRID_RELAXED_AGREE
-static const float kHybridAgreeThreshold = 62.0 / 255.0;
-#else
-static const float kHybridAgreeThreshold = 0.02;
-#endif
-
 float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
     hybrid_layout = true;
     if(hybrid_motion_invalid_at(input.position.xy-.5))
