@@ -675,6 +675,7 @@ static int aer_input_warning_test() {
 }
 
 int main(int argc,char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="independent-required-ui-budget")return independent_panel_budget_test(4);
     if(argc>1 && std::string_view(argv[1])=="independent-panel-priority")return independent_panel_budget_test(3);
     if(argc>1 && std::string_view(argv[1])=="independent-budget-rearm-legacy")return independent_budget_rearm_probe(true);
     if(argc>1 && std::string_view(argv[1])=="independent-budget-rearm-control")return independent_budget_rearm_probe();

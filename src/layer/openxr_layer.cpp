@@ -17031,6 +17031,48 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     return packet;
 }
 
+// Required UI snapshots can exhaust the native handle budget after optional
+// panel generators were admitted. Keep the same recovery in both handoff
+// paths; Independent must not turn this allocation refusal into a frozen HMD.
+[[nodiscard]] XrResult own_composition_images_with_budget_recovery(
+    const std::shared_ptr<SessionState>& state, const XrFrameEndInfo* source,
+    const ProjectionSnapshot& snapshot,
+    std::span<const ProjectionResourceDestination> identities,
+    std::shared_ptr<GeneratedFrameEndInfo>& metadata) {
+    XrResult refusal=XR_SUCCESS;
+    const auto composition=own_composition_images(state,*metadata,&refusal);
+    if(XR_SUCCEEDED(composition) || refusal!=XR_ERROR_LIMIT_REACHED)return composition;
+    // A failed multi-quad attempt may already own its first quad. Drop those
+    // temporary leases before retiring resources and rebuild from app handles.
+    metadata.reset();
+    const auto idle=wait_for_presenter_idle(state);
+    if(XR_FAILED(idle))return idle;
+    bool panels_retired=false;
+    {
+        std::scoped_lock content(state->presenter_content_mutex);
+        {
+            std::scoped_lock lock(state->presenter_mutex);
+            state->director_anchor_sequence=0;
+            state->presenter_last_frame.reset();
+        }
+        if(!state->panel_budget_refused.exchange(true,std::memory_order_acq_rel))
+            panels_retired=retire_panel_generation(state);
+        if(!panels_retired) {
+            state->generation_budget_exhausted.store(true,std::memory_order_release);
+            release_session_generation_budget(state);
+        }
+    }
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+        763,panels_retired?1:2,handle_value(state->handle));
+    // The existing real-frame bypass takes over on the next frame when even
+    // removing optional generation could not preserve the eye generators.
+    if(!panels_retired)return composition;
+    GeneratedFrameEndInfo rebuilt;
+    if(!build_generated_frame_end_info(source,snapshot,false,identities,&rebuilt))return XR_ERROR_LAYER_INVALID;
+    metadata=make_presenter_owned_frame(std::move(rebuilt));
+    return metadata?own_composition_images(state,*metadata):XR_ERROR_LAYER_INVALID;
+}
+
 [[nodiscard]] XrResult handoff_three_slot_frame(
     const std::shared_ptr<SessionState>& state, const XrFrameEndInfo* source,
     const ProjectionSnapshot& snapshot, std::span<const ProjectionResourceMapping> mappings,
@@ -17086,7 +17128,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         job->independent_period_ns=timing.period;
         job->independent_first_due_ns=xrfg::independent_first_deadline(job->independent_source_ns,timing.period,timing.cycle_ns);
         if(!job->post_afw_frame) {
-            const auto owned=own_composition_images(state,*job->metadata);
+            const auto owned=own_composition_images_with_budget_recovery(state,source,snapshot,identities,job->metadata);
             if(XR_FAILED(owned))return owned;
         }
         for(const auto& mapping:mappings) {
@@ -17194,45 +17236,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                 // prepare_frame_generation retires/prime-copies BOTH eyes.
             }
         }
-        XrResult refusal = XR_SUCCESS;
-        XrResult composition = job->post_afw_frame ? XR_SUCCESS
-            : own_composition_images(state, *job->metadata, &refusal);
-        if (XR_FAILED(composition) && refusal == XR_ERROR_LIMIT_REACHED) {
-            // SteamVR caps native swapchains per session. Returning this
-            // refusal from every EndFrame froze the headset for good (Returnal
-            // under UEVR: two generated UI panels left no handle for the quad
-            // copies). Hand the panels' outputs back once and retry; if the
-            // runtime still refuses, hand back the session's generation budget
-            // so later frames go out real instead of failing.
-            const XrResult idle = wait_for_presenter_idle(state);
-            if (XR_FAILED(idle)) return idle;
-            bool panels_retired = false;
-            {
-                std::scoped_lock content(state->presenter_content_mutex);
-                {
-                    std::scoped_lock presenter_lock(state->presenter_mutex);
-                    state->director_anchor_sequence = 0;
-                    state->presenter_last_frame.reset();
-                }
-                if (!state->panel_budget_refused.exchange(true, std::memory_order_acq_rel))
-                    panels_retired = retire_panel_generation(state);
-                if (!panels_retired) {
-                    state->generation_budget_exhausted.store(true, std::memory_order_release);
-                    release_session_generation_budget(state);
-                }
-            }
-            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
-                763, panels_retired ? 1 : 2, handle_value(state->handle));
-            if (!panels_retired) return composition;
-            // Rebuild from original metadata: a multi-quad attempt can have
-            // leased/replaced earlier layers before the refusal.
-            GeneratedFrameEndInfo rebuilt;
-            if (!build_generated_frame_end_info(source, snapshot, false, identities, &rebuilt))
-                return XR_ERROR_LAYER_INVALID;
-            job->metadata = make_presenter_owned_frame(std::move(rebuilt));
-            if (!job->metadata) return XR_ERROR_LAYER_INVALID;
-            composition = own_composition_images(state, *job->metadata);
-        }
+        const XrResult composition = job->post_afw_frame ? XR_SUCCESS
+            : own_composition_images_with_budget_recovery(state,source,snapshot,identities,job->metadata);
         if (XR_FAILED(composition)) return composition;
         job->panels=freeze_panel_inputs(*state,job->snapshot,mappings);
         lock.lock();
