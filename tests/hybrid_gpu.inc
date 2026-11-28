@@ -1189,3 +1189,201 @@ void test_eye_order_measurement_on_gpu(D3D12WarpFixture& fixture, bool native = 
             "the DLSS-G route did not measure the eye's own stream");
     }
 }
+
+// Quad-Views eye-tracked foveated inset test: a diagonal wing silhouette moves
+// across a contrasting background. The peripheral guide is 8x coarser than the
+// eye (mirroring MSFS 2024's 6.66 px/texel peripheral grid), while the inset
+// guide covers the central 128x64 box at 2 px/texel with a simulated (+12, -6)
+// eye-tracked gaze shift between Frame A and Frame B. Hybrid must use the
+// sharper inset motion + depth splat inside the focus box and drop edge MAE.
+void test_hybrid_foveated_inset_sharp_edge(D3D12WarpFixture& fixture) {
+    constexpr UINT width = 256, height = 128;
+    constexpr UINT periph_w = 32, periph_h = 16;   // 8x8 output px per MV texel
+    constexpr UINT inset_mw = 64, inset_mh = 32;   // 2x2 output px per MV texel inside 128x64
+    constexpr float inset_ox = 64.0F, inset_oy = 32.0F, inset_ow = 128.0F, inset_oh = 64.0F;
+    constexpr float prev_ox = 76.0F, prev_oy = 26.0F; // (+12, -6) eye-tracked gaze shift
+    constexpr int bg_motion = 4, wing_motion = 16;
+    // Diagonal wing edge spanning the foveated inset so coarse 8x8 MV cells
+    // produce heavy stair-stepping along the silhouette.
+    const auto wing_at = [&](float x, float y, float shift) {
+        const float lx = x - shift;
+        const float top = 46.0F + (lx - 76.0F) * 0.25F;
+        return lx >= 76.0F && lx < 164.0F && y >= top && y < top + 24.0F;
+    };
+    const auto make_scene = [&](float, float fg_shift) {
+        StereoPattern pattern;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto& bytes = pattern[eye];
+            bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
+            for (UINT y = 0; y < height; ++y) {
+                for (UINT x = 0; x < width; ++x) {
+                    const bool fg = wing_at(static_cast<float>(x), static_cast<float>(y), fg_shift);
+                    const RgbaBytes color = fg
+                        ? RgbaBytes{235, 235, 240, 255}
+                        : RgbaBytes{20, 45, 115, 255};
+                    std::copy(color.begin(), color.end(),
+                        bytes.begin() + (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel);
+                }
+            }
+        }
+        return pattern;
+    };
+    const StereoPattern previous = make_scene(0.0F, 0.0F);
+    const StereoPattern current = make_scene(static_cast<float>(bg_motion), static_cast<float>(wing_motion));
+    const StereoPattern expected = make_scene(bg_motion * 0.5F, wing_motion * 0.5F);
+
+    const auto periph_mv = create_and_upload_game_motion_field(
+        fixture, periph_w, periph_h, [&](UINT, UINT tx, UINT ty) {
+            const float px = (static_cast<float>(tx) + 0.5F) * (static_cast<float>(width) / periph_w) - 0.5F;
+            const float py = (static_cast<float>(ty) + 0.5F) * (static_cast<float>(height) / periph_h) - 0.5F;
+            const float mv = wing_at(px, py, static_cast<float>(wing_motion))
+                ? -static_cast<float>(wing_motion) : -static_cast<float>(bg_motion);
+            // Raw vector in render-texel units (scale_x = 1 -> multiplied by output_w / motion_w).
+            return std::array<float, 2>{mv * (static_cast<float>(periph_w) / width), 0.0F};
+        });
+    const auto periph_depth = create_and_upload_game_depth_field(
+        fixture, periph_w, periph_h, [&](UINT, UINT tx, UINT ty) {
+            const float px = (static_cast<float>(tx) + 0.5F) * (static_cast<float>(width) / periph_w) - 0.5F;
+            const float py = (static_cast<float>(ty) + 0.5F) * (static_cast<float>(height) / periph_h) - 0.5F;
+            return wing_at(px, py, static_cast<float>(wing_motion)) ? 0.5F : 0.01F;
+        });
+    // Inset MVs encode Frame B inset UV -> Frame A inset UV (in render texels):
+    // p_A = prev_origin + (uv_B + raw / inset_m) * prev_extent => raw = ((p_A - prev_origin)/prev_extent - uv_B) * inset_m.
+    const auto inset_mv = create_and_upload_game_motion_field(
+        fixture, inset_mw, inset_mh, [&](UINT, UINT tx, UINT ty) {
+            const float uvx = (static_cast<float>(tx) + 0.5F) / inset_mw;
+            const float uvy = (static_cast<float>(ty) + 0.5F) / inset_mh;
+            const float px = inset_ox + uvx * inset_ow - 0.5F;
+            const float py = inset_oy + uvy * inset_oh - 0.5F;
+            const float dx = wing_at(px, py, static_cast<float>(wing_motion))
+                ? -static_cast<float>(wing_motion) : -static_cast<float>(bg_motion);
+            const float ax = px + dx, ay = py;
+            const float auvx = (ax - prev_ox + 0.5F) / inset_ow;
+            const float auvy = (ay - prev_oy + 0.5F) / inset_oh;
+            return std::array<float, 2>{(auvx - uvx) * inset_mw, (auvy - uvy) * inset_mh};
+        });
+    const auto inset_depth = create_and_upload_game_depth_field(
+        fixture, inset_mw, inset_mh, [&](UINT, UINT tx, UINT ty) {
+            const float px = inset_ox + (static_cast<float>(tx) + 0.5F) / inset_mw * inset_ow - 0.5F;
+            const float py = inset_oy + (static_cast<float>(ty) + 0.5F) / inset_mh * inset_oh - 0.5F;
+            return wing_at(px, py, static_cast<float>(wing_motion)) ? 0.5F : 0.01F;
+        });
+
+    const auto run = [&](bool attach_inset) {
+        std::array<ComPtr<ID3D12Resource>, 2> sources{
+            create_source_texture(fixture, width, height),
+            create_source_texture(fixture, width, height)};
+        std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
+            create_source_texture(fixture, width, height),
+            create_source_texture(fixture, width, height)};
+        std::array<ComPtr<ID3D12Resource>, 1> synthetic_destinations{
+            create_source_texture(fixture, width, height)};
+        upload_pattern(fixture, sources[0].Get(), previous);
+        upload_pattern(fixture, sources[1].Get(), current);
+        std::array<ID3D12Resource*, 2> source_ptrs{sources[0].Get(), sources[1].Get()};
+        std::array<ID3D12Resource*, 2> current_ptrs{current_destinations[0].Get(), current_destinations[1].Get()};
+        std::array<ID3D12Resource*, 1> synth_ptrs{synthetic_destinations[0].Get()};
+        auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+        require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
+                    source_ptrs, D3D12_RESOURCE_STATE_RENDER_TARGET)),
+            "foveated inset history init failed");
+        xrfg::D3D12NvidiaOpticalFlowOptions options{};
+        options.hybrid = true;
+        xrfg::D3D12FrameSynthesizer synthesizer;
+        require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
+                    history, current_ptrs, synth_ptrs, kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                    xrfg::D3D12OpticalFlowBackend::fidelity_fx, options)),
+            "foveated inset synthesizer init failed");
+        const auto guides = [&](std::uint64_t serial) {
+            auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+            set->eye_count = kEyeCount;
+            for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+                f->stream = 700 + eye;
+                f->epoch = 1;
+                f->serial = serial;
+                f->previous_serial = serial - 1;
+                f->motion_vectors = periph_mv;
+                f->depth = periph_depth;
+                f->depth_inverted = true;
+                f->producer_queue = fixture.queue();
+                f->output_width = width;
+                f->output_height = height;
+                f->motion_width = f->depth_width = periph_w;
+                f->motion_height = f->depth_height = periph_h;
+                f->motion_slice = f->output_slice = eye;
+                f->resource_state = f->depth_resource_state =
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                if (attach_inset) {
+                    auto in = std::make_shared<xrfg::DlssMotionVectorFrame>();
+                    in->stream = 710 + eye;
+                    in->epoch = 1;
+                    in->serial = serial;
+                    in->previous_serial = serial - 1;
+                    in->motion_vectors = inset_mv;
+                    in->depth = inset_depth;
+                    in->depth_inverted = true;
+                    in->producer_queue = fixture.queue();
+                    in->motion_width = in->depth_width = inset_mw;
+                    in->motion_height = in->depth_height = inset_mh;
+                    in->motion_slice = in->output_slice = eye;
+                    in->resource_state = in->depth_resource_state =
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                    f->foveated_inset = std::move(in);
+                    f->foveated_inset_output_rect = {inset_ox, inset_oy, inset_ow, inset_oh};
+                    f->foveated_inset_previous_origin = {prev_ox, prev_oy};
+                    f->foveated_inset_previous_extent = {inset_ow, inset_oh};
+                }
+                set->eyes[eye] = std::move(f);
+            }
+            return set;
+        };
+        const ReprojectionViews views = make_reprojection_views();
+        xrfg::D3D12HistoryCaptureTicket cap_a{}, cap_b{};
+        require(operation_succeeded(history->capture(0, &cap_a)) && operation_succeeded(history->commit(cap_a)),
+            "foveated inset capture A failed");
+        xrfg::D3D12FrameSynthesisTicket prime{}, pair{};
+        require(operation_succeeded(synthesizer.submit_prime(cap_a, views, 0, &prime, guides(1))),
+            "foveated inset prime failed");
+        require_frame_start_gate(synthesizer, "foveated inset frame-start gate");
+        require(operation_succeeded(history->capture(1, &cap_b)) && operation_succeeded(history->commit(cap_b)),
+            "foveated inset capture B failed");
+        require(operation_succeeded(synthesizer.submit_pair(cap_b, views, views, 0, 1, &pair, std::nullopt, guides(2))),
+            "foveated inset pair failed");
+        fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+        const StereoPattern actual = readback_pattern(fixture, synthetic_destinations[0].Get(),
+            D3D12_RESOURCE_STATE_RENDER_TARGET);
+        require(operation_succeeded(synthesizer.wait_for_idle()), "foveated inset drain failed");
+        require(operation_succeeded(history->invalidate()), "foveated inset invalidate failed");
+        // Measure MAE along a 6 px band straddling the diagonal top & bottom edges inside the inset.
+        double total = 0.0;
+        std::size_t count = 0;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            for (UINT y = 36; y < 92; ++y) {
+                for (UINT x = 86; x < 168; ++x) {
+                    const float top = 46.0F + (static_cast<float>(x) - wing_motion * 0.5F - 76.0F) * 0.25F;
+                    const float dy_top = std::fabs(static_cast<float>(y) - top);
+                    const float dy_bot = std::fabs(static_cast<float>(y) - (top + 24.0F));
+                    if (dy_top > 5.0F && dy_bot > 5.0F) continue;
+                    const std::size_t off = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
+                    for (UINT c = 0; c < 3; ++c, ++count) {
+                        total += std::abs(static_cast<int>(actual[eye][off + c]) -
+                                          static_cast<int>(expected[eye][off + c]));
+                    }
+                }
+            }
+        }
+        return total / static_cast<double>(count);
+    };
+
+    const bool saved_depth = xrfg::hybrid_depth_search_enabled();
+    xrfg::set_hybrid_depth_search(true);
+    const double periph_mae = run(false);
+    const double inset_mae = run(true);
+    xrfg::set_hybrid_depth_search(saved_depth);
+    std::cout << "hybrid foveated inset sharp edge: periph_mae=" << periph_mae
+              << " inset_mae=" << inset_mae << '\n';
+    require(inset_mae < periph_mae * 0.65 && inset_mae < 18.0,
+        "foveated inset did not sharpen the coarse peripheral moving edge (periph=" +
+            std::to_string(periph_mae) + ", inset=" + std::to_string(inset_mae) + ")");
+}

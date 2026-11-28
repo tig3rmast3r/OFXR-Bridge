@@ -278,6 +278,13 @@ struct DlssMotionVectorFrame {
     EyeGuideRenderIdentity eye_render;
     std::optional<std::array<float,2>> osr_depth_alignment;
     bool raw_motion_color_aligned{};
+    // High-resolution foveated inset guide covering a sub-rectangle of this eye
+    // (e.g. MSFS 2024 Quad-Views eye-tracked focus region). Attached only to
+    // resolved view-placed frames, never to stored producer frames or recursively.
+    std::shared_ptr<const DlssMotionVectorFrame> foveated_inset;
+    std::array<float, 4> foveated_inset_output_rect{};
+    std::array<float, 2> foveated_inset_previous_origin{};
+    std::array<float, 2> foveated_inset_previous_extent{};
 };
 
 // The vector and depth rectangles a consumer maps the guide's output onto:

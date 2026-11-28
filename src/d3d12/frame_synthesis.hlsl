@@ -27,10 +27,11 @@ Texture2DArray<float4> SceneOnlyFrame : register(t7);
 // writes, this eye's slices, one per synthetic output.
 Texture2DArray<float> GameDepth : register(t8);
 Texture2DArray<uint> DepthSplat : register(t9);
-// Where this eye's depth is in its texture, four floats: x, y, width, height.
-// Its own rectangle, since depth can be at render resolution beside vectors at
-// the output's (Ready or Not); the constants have no room left for it.
+// Where this eye's depth is in its texture, four floats: x, y, width, height,
+// followed by optional eye-tracked foveated inset geometry (bytes 16..95).
 ByteAddressBuffer GameDepthRegion : register(t11);
+Texture2DArray<float2> InsetMotionVectors : register(t12);
+Texture2DArray<float> InsetDepth : register(t13);
 // Hybrid's HUD fix (0.2 V559, V573): the still mask BuildStillMask writes, at
 // half the output's resolution over the whole image, four slices per image
 // slice: 4s the texels whose edge has stayed in place for enough pairs in a
@@ -812,101 +813,202 @@ float4 game_motion_output_rect() {
                   float(GameMotionPadding));
 }
 
-float2 game_motion_for_pixel(float2 pixel, uint slice, uint view_index) {
-    float4 output_rect = game_motion_output_rect();
-    float2 uv = (pixel - output_rect.xy + 0.5) /
-        max(output_rect.zw, float2(1.0, 1.0));
-    float2 coordinate = GameMotionRect.xy + uv * GameMotionRect.zw - 0.5;
-    float2 minimum = GameMotionRect.xy;
-    float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
-    float2 bounded = clamp(coordinate, minimum, maximum);
+// Optional eye-tracked foveated inset guide (e.g. MSFS 2024 Quad Views):
+// SynthesisFlags bit 29 signals t12/t13 and t11 bytes 16..95 are populated;
+// bit 30 signals DepthSplat (t9) carries an inset slice bank in its upper half;
+// bit 31 selects the inset slice bank during ClearDepthSplat/BuildDepthSplat.
+bool foveated_inset_available() { return hybrid_layout && (SynthesisFlags & (1u << 29u)) != 0u; }
+bool depth_splat_inset_available() { return (SynthesisFlags & (1u << 30u)) != 0u; }
+bool depth_splat_inset_pass() { return (SynthesisFlags & (1u << 31u)) != 0u; }
+
+float4 inset_output_rect() { return asfloat(GameDepthRegion.Load4(16)); }
+float4 inset_motion_rect() { return asfloat(GameDepthRegion.Load4(32)); }
+float4 inset_depth_rect() { return asfloat(GameDepthRegion.Load4(48)); }
+float4 inset_scale_offset() { return asfloat(GameDepthRegion.Load4(64)); }
+float4 inset_extra() { return asfloat(GameDepthRegion.Load4(80)); }
+uint inset_flags() { return GameDepthRegion.Load(88); }
+
+bool pixel_in_rect(float2 pixel, float4 rect, out float2 uv) {
+    uv = (pixel - rect.xy + 0.5) / max(rect.zw, float2(1.0, 1.0));
+    return rect.z > 0.0 && rect.w > 0.0 && uv.x >= 0.0 && uv.x < 1.0 && uv.y >= 0.0 && uv.y < 1.0;
+}
+
+float2 inset_depth_splat_extent() { return min(inset_depth_rect().zw, inset_motion_rect().zw); }
+
+float2 inset_motion_for_uv(float2 iuv, out bool valid) {
+    float4 mr = inset_motion_rect();
+    float2 coordinate = mr.xy + iuv * mr.zw - 0.5;
+    float2 maximum = mr.xy + mr.zw - 1.0;
+    float2 bounded = clamp(coordinate, mr.xy, maximum);
     int2 top_left = int2(floor(bounded));
     int2 bottom_right = min(top_left + int2(1, 1), int2(maximum));
     float2 fraction = bounded - float2(top_left);
-    // Each descriptor block owns one eye's independent mono DLSS resource.
-    // Rotation produces a spatially varying field, so nearest-neighbour lookup
-    // creates an avoidable endpoint error that uniform translation conceals.
-    float2 top = lerp(
-        GameMotionVectors.Load(int4(top_left, 0, 0)),
-        GameMotionVectors.Load(int4(bottom_right.x, top_left.y, 0, 0)),
-        fraction.x);
-    float2 bottom = lerp(
-        GameMotionVectors.Load(int4(top_left.x, bottom_right.y, 0, 0)),
-        GameMotionVectors.Load(int4(bottom_right, 0, 0)),
-        fraction.x);
-    float2 raw = lerp(top, bottom, fraction.y);
-    // 0.2 V503, Hybrid's built-in: DLSS vectors are at render resolution, and
-    // across a motion edge the blend of a thin bar's vector and the
-    // background's is a motion neither surface has: the solve never settles
-    // on the bar and the depth search refuses it. The nearest vector instead;
-    // the flow covers what that costs under rotation.
-    if (hybrid_layout) {
-#ifdef XRFG_HYBRID_SINGLE_MOTION_LOAD
-        // Select the same nearest texel before reading it. Selecting between
-        // four texture loads leaves extra load/selection instructions in the
-        // compiled Hybrid solve, repeated for every endpoint iteration.
-        int2 nearest = int2(fraction.x < 0.5 ? top_left.x : bottom_right.x,
-                            fraction.y < 0.5 ? top_left.y : bottom_right.y);
-        raw = GameMotionVectors.Load(int4(nearest, 0, 0));
-#else
-        raw = fraction.y < 0.5
-            ? (fraction.x < 0.5 ? GameMotionVectors.Load(int4(top_left, 0, 0))
-                                : GameMotionVectors.Load(int4(bottom_right.x, top_left.y, 0, 0)))
-            : (fraction.x < 0.5 ? GameMotionVectors.Load(int4(top_left.x, bottom_right.y, 0, 0))
-                                : GameMotionVectors.Load(int4(bottom_right, 0, 0)));
-#endif
-    }
-    raw=hybrid_layout && !all(isfinite(raw))?float2(0,0):raw;
-    float2 result = raw * GameMotionScale + GameMotionJitterDelta;
+    int2 nearest = int2(fraction.x < 0.5 ? top_left.x : bottom_right.x,
+                        fraction.y < 0.5 ? top_left.y : bottom_right.y);
+    float2 raw = InsetMotionVectors.Load(int4(nearest, 0, 0));
+    valid = all(isfinite(raw));
+    raw = valid ? raw : float2(0.0, 0.0);
+    float4 so = inset_scale_offset();
+    float2 ed = inset_extra().xy;
+    float2 result = raw * so.xy + so.zw + iuv * ed;
     float magnitude = length(result);
     return magnitude > 512.0 ? result * (512.0 / magnitude) : result;
+}
+
+float2 game_motion_for_pixel(float2 pixel, uint slice, uint view_index) {
+    float2 result = float2(0.0, 0.0);
+    bool handled = false;
+    [branch] if (foveated_inset_available()) {
+        float2 iuv;
+        if (pixel_in_rect(pixel, inset_output_rect(), iuv)) {
+            bool valid;
+            result = inset_motion_for_uv(iuv, valid);
+            handled = true;
+        }
+    }
+    if (!handled) {
+        float4 output_rect = game_motion_output_rect();
+        float2 uv = (pixel - output_rect.xy + 0.5) /
+            max(output_rect.zw, float2(1.0, 1.0));
+        float2 coordinate = GameMotionRect.xy + uv * GameMotionRect.zw - 0.5;
+        float2 minimum = GameMotionRect.xy;
+        float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
+        float2 bounded = clamp(coordinate, minimum, maximum);
+        int2 top_left = int2(floor(bounded));
+        int2 bottom_right = min(top_left + int2(1, 1), int2(maximum));
+        float2 fraction = bounded - float2(top_left);
+        // Each descriptor block owns one eye's independent mono DLSS resource.
+        // Rotation produces a spatially varying field, so nearest-neighbour lookup
+        // creates an avoidable endpoint error that uniform translation conceals.
+        float2 top = lerp(
+            GameMotionVectors.Load(int4(top_left, 0, 0)),
+            GameMotionVectors.Load(int4(bottom_right.x, top_left.y, 0, 0)),
+            fraction.x);
+        float2 bottom = lerp(
+            GameMotionVectors.Load(int4(top_left.x, bottom_right.y, 0, 0)),
+            GameMotionVectors.Load(int4(bottom_right, 0, 0)),
+            fraction.x);
+        float2 raw = lerp(top, bottom, fraction.y);
+        // 0.2 V503, Hybrid's built-in: DLSS vectors are at render resolution, and
+        // across a motion edge the blend of a thin bar's vector and the
+        // background's is a motion neither surface has: the solve never settles
+        // on the bar and the depth search refuses it. The nearest vector instead;
+        // the flow covers what that costs under rotation.
+        if (hybrid_layout) {
+#ifdef XRFG_HYBRID_SINGLE_MOTION_LOAD
+            // Select the same nearest texel before reading it. Selecting between
+            // four texture loads leaves extra load/selection instructions in the
+            // compiled Hybrid solve, repeated for every endpoint iteration.
+            int2 nearest = int2(fraction.x < 0.5 ? top_left.x : bottom_right.x,
+                                fraction.y < 0.5 ? top_left.y : bottom_right.y);
+            raw = GameMotionVectors.Load(int4(nearest, 0, 0));
+#else
+            raw = fraction.y < 0.5
+                ? (fraction.x < 0.5 ? GameMotionVectors.Load(int4(top_left, 0, 0))
+                                    : GameMotionVectors.Load(int4(bottom_right.x, top_left.y, 0, 0)))
+                : (fraction.x < 0.5 ? GameMotionVectors.Load(int4(top_left.x, bottom_right.y, 0, 0))
+                                    : GameMotionVectors.Load(int4(bottom_right, 0, 0)));
+#endif
+        }
+        raw=hybrid_layout && !all(isfinite(raw))?float2(0,0):raw;
+        result = raw * GameMotionScale + GameMotionJitterDelta;
+        float magnitude = length(result);
+        result = magnitude > 512.0 ? result * (512.0 / magnitude) : result;
+    }
+    return result;
 }
 
 #ifdef XRFG_HYBRID_SINGLE_MOTION_LOAD
 // Single-load Hybrid motion fetch that also reports whether the raw texel was
 // finite, avoiding a second identical GameMotionVectors.Load() per solve step.
 float2 game_motion_for_pixel_checked(float2 pixel, uint slice, uint view_index, out bool valid) {
-    float4 output_rect = game_motion_output_rect();
-    float2 uv = (pixel - output_rect.xy + 0.5) /
-        max(output_rect.zw, float2(1.0, 1.0));
-    float2 coordinate = GameMotionRect.xy + uv * GameMotionRect.zw - 0.5;
-    float2 minimum = GameMotionRect.xy;
-    float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
-    float2 bounded = clamp(coordinate, minimum, maximum);
-    int2 top_left = int2(floor(bounded));
-    int2 bottom_right = min(top_left + int2(1, 1), int2(maximum));
-    float2 fraction = bounded - float2(top_left);
-    int2 nearest = int2(fraction.x < 0.5 ? top_left.x : bottom_right.x,
-                        fraction.y < 0.5 ? top_left.y : bottom_right.y);
-    float2 raw = GameMotionVectors.Load(int4(nearest, 0, 0));
-    valid = all(isfinite(raw));
-    raw = valid ? raw : float2(0.0, 0.0);
-    float2 result = raw * GameMotionScale + GameMotionJitterDelta;
-    float magnitude = length(result);
-    return magnitude > 512.0 ? result * (512.0 / magnitude) : result;
+    float2 result = float2(0.0, 0.0);
+    valid = true;
+    bool handled = false;
+    [branch] if (foveated_inset_available()) {
+        float2 iuv;
+        if (pixel_in_rect(pixel, inset_output_rect(), iuv)) {
+            result = inset_motion_for_uv(iuv, valid);
+            handled = true;
+        }
+    }
+    if (!handled) {
+        float4 output_rect = game_motion_output_rect();
+        float2 uv = (pixel - output_rect.xy + 0.5) /
+            max(output_rect.zw, float2(1.0, 1.0));
+        float2 coordinate = GameMotionRect.xy + uv * GameMotionRect.zw - 0.5;
+        float2 minimum = GameMotionRect.xy;
+        float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
+        float2 bounded = clamp(coordinate, minimum, maximum);
+        int2 top_left = int2(floor(bounded));
+        int2 bottom_right = min(top_left + int2(1, 1), int2(maximum));
+        float2 fraction = bounded - float2(top_left);
+        int2 nearest = int2(fraction.x < 0.5 ? top_left.x : bottom_right.x,
+                            fraction.y < 0.5 ? top_left.y : bottom_right.y);
+        float2 raw = GameMotionVectors.Load(int4(nearest, 0, 0));
+        valid = all(isfinite(raw));
+        raw = valid ? raw : float2(0.0, 0.0);
+        result = raw * GameMotionScale + GameMotionJitterDelta;
+        float magnitude = length(result);
+        result = magnitude > 512.0 ? result * (512.0 / magnitude) : result;
+    }
+    return result;
 }
 #endif
 
 // The game's vector at the guide texel under pixel, unfiltered: enough to tell
 // surfaces apart.
 float2 game_motion_texel(float2 pixel) {
-    float4 output_rect = game_motion_output_rect();
-    float2 uv = (pixel - output_rect.xy + 0.5) /
-        max(output_rect.zw, float2(1.0, 1.0));
-    float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
-    int2 texel = int2(clamp(GameMotionRect.xy + uv * GameMotionRect.zw,
-        GameMotionRect.xy, maximum));
-    float2 raw=GameMotionVectors.Load(int4(texel,0,0));
-    raw=hybrid_layout && !all(isfinite(raw))?float2(0,0):raw;
-    return raw * GameMotionScale;
+    float2 result = float2(0.0, 0.0);
+    bool handled = false;
+    [branch] if (foveated_inset_available()) {
+        float2 iuv;
+        if (pixel_in_rect(pixel, inset_output_rect(), iuv)) {
+            float4 mr = inset_motion_rect();
+            float2 maximum = mr.xy + mr.zw - 1.0;
+            int2 texel = int2(clamp(mr.xy + iuv * mr.zw, mr.xy, maximum));
+            float2 raw = InsetMotionVectors.Load(int4(texel, 0, 0));
+            raw = !all(isfinite(raw)) ? float2(0.0, 0.0) : raw;
+            float4 so = inset_scale_offset();
+            float2 ed = inset_extra().xy;
+            result = raw * so.xy + so.zw + iuv * ed;
+            handled = true;
+        }
+    }
+    if (!handled) {
+        float4 output_rect = game_motion_output_rect();
+        float2 uv = (pixel - output_rect.xy + 0.5) /
+            max(output_rect.zw, float2(1.0, 1.0));
+        float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
+        int2 texel = int2(clamp(GameMotionRect.xy + uv * GameMotionRect.zw,
+            GameMotionRect.xy, maximum));
+        float2 raw=GameMotionVectors.Load(int4(texel,0,0));
+        raw=hybrid_layout && !all(isfinite(raw))?float2(0,0):raw;
+        result = raw * GameMotionScale;
+    }
+    return result;
 }
 
 bool hybrid_motion_invalid_at(float2 pixel) {
-    float4 rect=game_motion_output_rect();
-    float2 uv=(pixel-rect.xy+.5)/max(rect.zw,float2(1,1));
-    int2 at=int2(clamp(GameMotionRect.xy+uv*GameMotionRect.zw,GameMotionRect.xy,
-        GameMotionRect.xy+GameMotionRect.zw-1));
-    return !all(isfinite(GameMotionVectors.Load(int4(at,0,0))));
+    bool invalid = false;
+    bool handled = false;
+    [branch] if (foveated_inset_available()) {
+        float2 iuv;
+        if (pixel_in_rect(pixel, inset_output_rect(), iuv)) {
+            float4 mr = inset_motion_rect();
+            int2 at = int2(clamp(mr.xy + iuv * mr.zw, mr.xy, mr.xy + mr.zw - 1.0));
+            invalid = !all(isfinite(InsetMotionVectors.Load(int4(at, 0, 0))));
+            handled = true;
+        }
+    }
+    if (!handled) {
+        float4 rect=game_motion_output_rect();
+        float2 uv=(pixel-rect.xy+.5)/max(rect.zw,float2(1,1));
+        int2 at=int2(clamp(GameMotionRect.xy+uv*GameMotionRect.zw,GameMotionRect.xy,
+            GameMotionRect.xy+GameMotionRect.zw-1));
+        invalid = !all(isfinite(GameMotionVectors.Load(int4(at,0,0))));
+    }
+    return invalid;
 }
 
 // ---- Hybrid's depth search, 0.2's (V505, V544, V555) at its built-in
@@ -939,8 +1041,24 @@ int2 game_depth_texel(float2 pixel) {
 // How near the surface B shows at `pixel` is, larger nearer. Only its order
 // is used.
 float game_nearness(float2 pixel) {
-    float depth = GameDepth.Load(int4(game_depth_texel(pixel), 0, 0));
-    return (GameMotionPadding & 0x80000000u) != 0u ? depth : 1.0 - depth;
+    float result = 0.0;
+    bool handled = false;
+    [branch] if (foveated_inset_available() && (inset_flags() & 2u) != 0u) {
+        float2 iuv;
+        if (pixel_in_rect(pixel, inset_output_rect(), iuv)) {
+            float4 region = inset_depth_rect();
+            float2 maximum = region.xy + region.zw - 1.0;
+            int2 texel = int2(clamp(region.xy + iuv * region.zw, region.xy, maximum));
+            float depth = InsetDepth.Load(int4(texel, 0, 0));
+            result = (inset_flags() & 4u) != 0u ? depth : 1.0 - depth;
+            handled = true;
+        }
+    }
+    if (!handled) {
+        float depth = GameDepth.Load(int4(game_depth_texel(pixel), 0, 0));
+        result = (GameMotionPadding & 0x80000000u) != 0u ? depth : 1.0 - depth;
+    }
+    return result;
 }
 
 bool nearer(float a, float b) { return a > b * kDepthNearerFactor + 1.0e-6; }
@@ -1386,22 +1504,40 @@ uint depth_priority_rank(float nearness) {
 // `a_coord` shows that occluder rather than the surface at B — this pixel is
 // trailing-edge disoccluded background and must use B alone without blending
 // the occluder from A.
-bool a_frame_occluded(float2 a_coord, float b_nearness, float2 b_displacement) {
+uint load_depth_splat_word(float2 coordinate, uint slice_index, bool frame_a_slice) {
     uint sw, sh, slices;
     DepthSplat.GetDimensions(sw, sh, slices);
+    bool has_inset = depth_splat_inset_available() && foveated_inset_available() && slices >= 4u;
+    uint base_slices = has_inset ? (slices >> 1u) : slices;
+    uint word = 0u;
+    [branch] if (has_inset) {
+        float2 iuv;
+        if (pixel_in_rect(coordinate, inset_output_rect(), iuv)) {
+            float2 ext = inset_depth_splat_extent();
+            float2 limit = max(ceil(ext), float2(1.0, 1.0));
+            int2 texel = int2(clamp(floor(iuv * ext), float2(0.0, 0.0), limit));
+            uint inset_slice = frame_a_slice ? (slices - 1u) : (base_slices + slice_index);
+            word = DepthSplat.Load(int4(texel, int(inset_slice), 0));
+        }
+    }
+    if (word == 0u && (!frame_a_slice || base_slices > 1u)) {
+        uint base_slice = frame_a_slice ? (base_slices - 1u) : slice_index;
+        word = DepthSplat.Load(int4(coverage_mask_texel(coordinate), int(base_slice), 0));
+    }
+    return word;
+}
+
+bool a_frame_occluded(float2 a_coord, float b_nearness, float2 b_displacement) {
     bool occluded = false;
-    if (slices > 1u) {
-        const uint word = DepthSplat.Load(int4(coverage_mask_texel(a_coord),
-            int(slices - 1u), 0));
-        if (word != 0u) {
-            const uint a_rank = word >> 24u;
-            const uint far_rank = depth_priority_rank(b_nearness * kDepthNearerFactor + 1.0e-6);
-            const uint self_rank = depth_priority_rank(b_nearness);
-            if (a_rank >= far_rank) {
-                occluded = true;
-            } else if (a_rank > self_rank) {
-                occluded = length(coverage_mask_motion(word) - b_displacement) > 3.0;
-            }
+    const uint word = load_depth_splat_word(a_coord, 0u, true);
+    if (word != 0u) {
+        const uint a_rank = word >> 24u;
+        const uint far_rank = depth_priority_rank(b_nearness * kDepthNearerFactor + 1.0e-6);
+        const uint self_rank = depth_priority_rank(b_nearness);
+        if (a_rank >= far_rank) {
+            occluded = true;
+        } else if (a_rank > self_rank) {
+            occluded = length(coverage_mask_motion(word) - b_displacement) > 3.0;
         }
     }
     return occluded;
@@ -1414,8 +1550,7 @@ bool try_depth_splat_surface(float2 pixel, float reference_nearness, out float4 
     color = float4(0.0, 0.0, 0.0, 1.0);
     bool found = false;
     const uint rank = depth_priority_rank(reference_nearness * kDepthNearerFactor + 1.0e-6);
-    const uint word = DepthSplat.Load(int4(coverage_mask_texel(pixel),
-        int(depth_splat_output()), 0));
+    const uint word = load_depth_splat_word(pixel, depth_splat_output(), false);
     if (word != 0u && (word >> 24u) >= rank) {
         const float2 start = pixel -
             (1.0 - synthesis_fraction()) * coverage_mask_motion(word);
@@ -2182,35 +2317,55 @@ float4 ReprojectGeneratedWithLateHudPS(FullscreenVertex input) : SV_Target {
 [numthreads(8, 8, 1)]
 void ClearDepthSplat(uint3 id : SV_DispatchThreadID) {
     hybrid_layout = true;
-    float2 limit = ceil(depth_splat_extent());
+    uint sw, sh, total_slices;
+    DepthSplatOut.GetDimensions(sw, sh, total_slices);
+    bool inset_pass = depth_splat_inset_pass();
+    float2 limit = ceil(inset_pass ? inset_depth_splat_extent() : depth_splat_extent());
+    uint slice = depth_splat_output() + (inset_pass ? (total_slices >> 1u) : 0u);
     if (float(id.x) <= limit.x && float(id.y) <= limit.y) {
-        DepthSplatOut[uint3(id.xy, depth_splat_output())] = 0u;
+        DepthSplatOut[uint3(id.xy, slice)] = 0u;
     }
 }
 
 [numthreads(8, 8, 1)]
 void BuildDepthSplat(uint3 id : SV_DispatchThreadID) {
     hybrid_layout = true;
-    float2 extent = depth_splat_extent();
+    uint sw, sh, total_slices;
+    DepthSplatOut.GetDimensions(sw, sh, total_slices);
+    bool inset_pass = depth_splat_inset_pass();
+    float2 extent = inset_pass ? inset_depth_splat_extent() : depth_splat_extent();
     if (float(id.x) >= extent.x || float(id.y) >= extent.y) return;
     // The output pixel under this texel's centre: game_motion_texel's map,
     // inverted.
-    float4 output_rect = game_motion_output_rect();
+    float4 output_rect = inset_pass ? inset_output_rect() : game_motion_output_rect();
     float2 uv = (float2(id.xy) + 0.5) / max(extent, float2(1.0, 1.0));
     float2 pixel = output_rect.xy + uv * output_rect.zw - 0.5;
-    float2 motion = game_motion_for_pixel(pixel, Slice, ViewIndex);
-    if(hybrid_motion_invalid_at(pixel))return;
+    float2 motion;
+    float nearness;
+    if (inset_pass) {
+        bool valid = true;
+        motion = inset_motion_for_uv(uv, valid);
+        if (!valid) return;
+        float4 dreg = inset_depth_rect();
+        int2 dtex = int2(clamp(dreg.xy + uv * dreg.zw, dreg.xy, dreg.xy + dreg.zw - 1.0));
+        float d = InsetDepth.Load(int4(dtex, 0, 0));
+        nearness = (inset_flags() & 4u) != 0u ? d : 1.0 - d;
+    } else {
+        motion = game_motion_for_pixel(pixel, Slice, ViewIndex);
+        if (hybrid_motion_invalid_at(pixel)) return;
+        nearness = game_nearness(pixel);
+    }
     MappedCoordinate previous = map_source_to_target(pixel + motion, PreviousMappings[ViewIndex]);
     if (previous.valid < 0.5) return;
     float2 displacement = previous.coordinate - pixel;
     uint word = coverage_mask_word(displacement,
-        coverage_mask_depth_priority(game_nearness(pixel)));
+        coverage_mask_depth_priority(nearness));
     float2 midpoint = pixel + (1.0 - synthesis_fraction()) * displacement;
     float2 per_pixel = extent / max(output_rect.zw, float2(1.0, 1.0));
     float2 at = (midpoint - output_rect.xy + 0.5) * per_pixel;
     int2 limit = int2(ceil(extent));
     int2 base = int2(floor(at - 0.5));
-    uint slice = depth_splat_output();
+    uint slice = depth_splat_output() + (inset_pass ? (total_slices >> 1u) : 0u);
     [unroll] for (uint corner = 0; corner < 4; ++corner) {
         int2 texel = base + int2(corner & 1u, corner >> 1);
         if (all(texel >= 0) && all(texel <= limit)) {

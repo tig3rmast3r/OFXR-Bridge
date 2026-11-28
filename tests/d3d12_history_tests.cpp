@@ -4102,16 +4102,19 @@ void test_view_placed_dlss_guides(D3D12WarpFixture& fixture) {
     const View left_periphery{-1.25F, 0.95F, 1.05F, -1.25F, -0.03F};
     const View right_periphery{-0.95F, 1.25F, 1.05F, -1.25F, 0.03F};
     const View left_inset{-0.4F, 0.3F, 0.3F, -0.4F, -0.03F}, right_inset{-0.3F, 0.4F, 0.3F, -0.4F, 0.03F};
+    // Shift the eye-tracked inset frustum between frame 1 and frame 2 to verify
+    // previous-frame inset rect capture for gaze-shift motion compensation.
+    const View left_inset_f2{-0.3F, 0.4F, 0.35F, -0.35F, -0.03F}, right_inset_f2{-0.2F, 0.5F, 0.35F, -0.35F, 0.03F};
     const auto eye_view = [](const View& v) {
         return xrfg::DlssEyeView{v.left, v.right, v.up, v.down, 0, 0, 200, 220};
     };
     const std::array<xrfg::DlssEyeView, 2> eyes{eye_view(left_eye), eye_view(right_eye)};
     std::uint64_t release{};
     for (int frame = 0; frame < 2; ++frame) {
-        publish(901, left_inset, false);
+        publish(901, frame == 0 ? left_inset : left_inset_f2, false);
         publish(902, right_periphery, true);
         publish(903, left_periphery, true);
-        release = publish(904, right_inset, false);
+        release = publish(904, frame == 0 ? right_inset : right_inset_f2, false);
     }
     const auto placed = xrfg::resolve_view_placed_dlss_guides(fixture.queue(), eyes, {release, release});
     require(placed[0] && placed[1] && placed[0]->eyes[0]->stream == 903 &&
@@ -4129,6 +4132,20 @@ void test_view_placed_dlss_guides(D3D12WarpFixture& fixture) {
     require(mr == left.placed_motion_rect, "a placed guide's vectors are not its placed rectangle");
     require(placed[0]->eyes[0]->serial == 2 && placed[1]->eyes[0]->serial == 2,
         "the newest evaluation by the release was not taken");
+    // Each eye must also attach its own finer foveated inset stream plus its
+    // previous frame's projected origin/extent for eye-tracking compensation.
+    const auto& right = *placed[1]->eyes[0];
+    require(left.foveated_inset && left.foveated_inset->stream == 901 && left.foveated_inset->serial == 2 &&
+            right.foveated_inset && right.foveated_inset->stream == 904 && right.foveated_inset->serial == 2,
+        "each eye did not attach its own foveated inset guide");
+    const float expected_l_x1 = (-0.4F - (-1.2F)) / 2.1F * 200.0F;
+    const float expected_l_x2 = (-0.3F - (-1.2F)) / 2.1F * 200.0F;
+    const float expected_l_w = 0.7F / 2.1F * 200.0F;
+    require(std::fabs(left.foveated_inset_output_rect[0] - expected_l_x2) < 1e-2F &&
+            std::fabs(left.foveated_inset_output_rect[2] - expected_l_w) < 1e-2F &&
+            std::fabs(left.foveated_inset_previous_origin[0] - expected_l_x1) < 1e-2F &&
+            std::fabs(left.foveated_inset_previous_extent[0] - expected_l_w) < 1e-2F,
+        "foveated inset current/previous projected rects did not match eye-tracked gaze shift");
     {
         // The eye's own image matches no stream by size. The lookup xrEndFrame
         // revisits by camera is tentative: its failure must not replace the
@@ -7439,7 +7456,15 @@ int main(int argc, char** argv) {
             test_hybrid_eye_identity_from_order(fixture);
             test_eye_order_measurement_on_gpu(fixture);
             test_view_placed_dlss_guides(fixture);
+            test_hybrid_foveated_inset_sharp_edge(fixture);
             test_enlarged_dlss_guides(fixture);
+            fixture.require_no_debug_errors();
+            return 0;
+        }
+        if (argc > 1 && std::string_view(argv[1]) == "foveated-inset") {
+            D3D12WarpFixture fixture;
+            test_view_placed_dlss_guides(fixture);
+            test_hybrid_foveated_inset_sharp_edge(fixture);
             fixture.require_no_debug_errors();
             return 0;
         }

@@ -1803,7 +1803,141 @@ resolve_view_placed_dlss_guides(
             set->eyes[0] = std::move(placed);
             result[eye] = std::move(set);
         }
+        // Attach each eye's higher-resolution foveated inset guide (e.g. MSFS
+        // 2024 eye-tracked Quad Views) when a narrower stream sits inside the
+        // eye's view with strictly finer motion-vector density and a valid
+        // previous frame for gaze-shift compensation.
+        const auto project_rect = [](const DlssViewGeometry& g, const DlssEyeView& view,
+                                     std::array<float, 4>& out) noexcept -> bool {
+            const double eye_width = static_cast<double>(view.tan_right) - view.tan_left;
+            const double eye_height = static_cast<double>(view.tan_up) - view.tan_down;
+            if (!g.known || view.x < 0 || view.y < 0 || view.width == 0 || view.height == 0 ||
+                !(eye_width > 0.0) || !(eye_height > 0.0)) return false;
+            const double left = view.x + (g.tan_left - view.tan_left) / eye_width * view.width;
+            const double right = view.x + (g.tan_right - view.tan_left) / eye_width * view.width;
+            const double top = view.y + (view.tan_up - g.tan_up) / eye_height * view.height;
+            const double bottom = view.y + (view.tan_up - g.tan_down) / eye_height * view.height;
+            const double w = right - left, h = bottom - top;
+            if (!std::isfinite(left) || !std::isfinite(top) || !std::isfinite(w) || !std::isfinite(h) ||
+                !(w >= 8.0) || !(h >= 8.0)) return false;
+            out = {static_cast<float>(left), static_cast<float>(top),
+                   static_cast<float>(w), static_cast<float>(h)};
+            return true;
+        };
+        const auto pos_dist2 = [](const std::array<float, 3>& a, const std::array<float, 3>& b) noexcept {
+            const double dx = static_cast<double>(a[0]) - b[0];
+            const double dy = static_cast<double>(a[1]) - b[1];
+            const double dz = static_cast<double>(a[2]) - b[2];
+            return dx * dx + dy * dy + dz * dz;
+        };
+        std::array<std::uint64_t, kDlssMotionVectorEyeCount> inset_streams{};
+        for (std::uint32_t eye = 0; eye < kDlssMotionVectorEyeCount; ++eye) {
+            const auto& base = *result[eye]->eyes[0];
+            const auto base_mr = guide_motion_rect(base);
+            const double base_density_x = base_mr[2] / std::max<double>(eyes[eye].width, 1.0);
+            const double base_density_y = base_mr[3] / std::max<double>(eyes[eye].height, 1.0);
+            const auto& own_cam = cameras[chosen_streams[eye]];
+            const auto& other_cam = cameras[chosen_streams[1 - eye]];
+            std::size_t best_inset = candidates.size();
+            double best_density = 0.0;
+            std::uint64_t best_pub = 0;
+            std::shared_ptr<const DlssMotionVectorFrame> best_chosen, best_prev;
+            std::array<float, 4> best_curr_rect{}, best_prev_rect{};
+            for (std::size_t idx = 0; idx < candidates.size(); ++idx) {
+                if (idx == chosen_streams[0] || idx == chosen_streams[1]) continue;
+                if (by_release && group[idx] != eye) continue;
+                const Candidate& cand = candidates[idx];
+                std::shared_ptr<const DlssMotionVectorFrame> cur = cand.frame;
+                std::shared_ptr<const DlssMotionVectorFrame> prv = cand.previous;
+                if (released_at[eye] != 0 && cur->publication > released_at[eye]) {
+                    cur = cand.previous && cand.previous->epoch == cand.frame->epoch &&
+                            cand.previous->publication <= released_at[eye]
+                        ? cand.previous : nullptr;
+                    prv = cand.older;
+                }
+                if (!cur || !prv || cur->reset || !cur->motion_vectors ||
+                    cur->motion_width == 0 || cur->motion_height == 0 ||
+                    prv->epoch != cur->epoch ||
+                    (prv->serial != cur->previous_serial && prv->serial + 1 != cur->serial)) continue;
+                const DlssViewGeometry g_cur = dlss_view_geometry(*cur);
+                const DlssViewGeometry g_prv = dlss_view_geometry(*prv);
+                std::array<float, 4> cur_rect{}, prv_rect{};
+                if (!project_rect(g_cur, eyes[eye], cur_rect) ||
+                    !project_rect(g_prv, eyes[eye], prv_rect)) continue;
+                // Must be strictly smaller than the full eye and centered inside it.
+                if (cur_rect[2] >= static_cast<float>(eyes[eye].width) * 0.95F ||
+                    cur_rect[3] >= static_cast<float>(eyes[eye].height) * 0.95F) continue;
+                const float cx = cur_rect[0] + 0.5F * cur_rect[2];
+                const float cy = cur_rect[1] + 0.5F * cur_rect[3];
+                if (cx < static_cast<float>(eyes[eye].x) ||
+                    cx > static_cast<float>(eyes[eye].x) + static_cast<float>(eyes[eye].width) ||
+                    cy < static_cast<float>(eyes[eye].y) ||
+                    cy > static_cast<float>(eyes[eye].y) + static_cast<float>(eyes[eye].height)) continue;
+                // Must bring strictly finer motion-vector density than the periphery.
+                const double dens_x = static_cast<double>(cur->motion_width) / cur_rect[2];
+                const double dens_y = static_cast<double>(cur->motion_height) / cur_rect[3];
+                if (!(dens_x > base_density_x * 1.25) || !(dens_y > base_density_y * 1.25)) continue;
+                if (!by_release) {
+                    const double d_own = pos_dist2(g_cur.position, own_cam.position);
+                    const double d_other = pos_dist2(g_cur.position, other_cam.position);
+                    if (d_own > d_other + 1e-9) continue;
+                    // If positions tie (e.g. zeroed), skip ambiguous assignment.
+                    if (std::fabs(d_own - d_other) <= 1e-9 &&
+                        pos_dist2(own_cam.position, other_cam.position) > 1e-9) continue;
+                }
+                const double density = dens_x * dens_y;
+                if (best_inset == candidates.size() || density > best_density * 1.01 ||
+                    (std::fabs(density - best_density) <= best_density * 0.01 && cur->publication > best_pub)) {
+                    best_inset = idx;
+                    best_density = density;
+                    best_pub = cur->publication;
+                    best_chosen = std::move(cur);
+                    best_prev = std::move(prv);
+                    best_curr_rect = cur_rect;
+                    best_prev_rect = prv_rect;
+                }
+            }
+            if (best_inset < candidates.size() && best_chosen) {
+                const bool synced = same_identity(best_chosen->producer_queue.Get(), consumer_queue) ||
+                    (best_chosen->producer_fence && best_chosen->producer_fence_value != 0 &&
+                     same_device(best_chosen->producer_fence.Get(), consumer_queue) &&
+                     SUCCEEDED(consumer_queue->Wait(best_chosen->producer_fence.Get(),
+                         best_chosen->producer_fence_value)));
+                if (synced) {
+                    auto mutable_base = std::make_shared<DlssMotionVectorFrame>(base);
+                    auto inset_copy = std::make_shared<DlssMotionVectorFrame>(*best_chosen);
+                    inset_copy->foveated_inset.reset();
+                    mutable_base->foveated_inset = std::move(inset_copy);
+                    mutable_base->foveated_inset_output_rect = best_curr_rect;
+                    mutable_base->foveated_inset_previous_origin = {best_prev_rect[0], best_prev_rect[1]};
+                    mutable_base->foveated_inset_previous_extent = {best_prev_rect[2], best_prev_rect[3]};
+                    auto set = std::make_shared<DlssMotionVectorSet>(*result[eye]);
+                    set->eyes[0] = std::move(mutable_base);
+                    result[eye] = std::move(set);
+                    inset_streams[eye] = best_chosen->stream;
+                }
+            }
+        }
         state.statistics.matched += kDlssMotionVectorEyeCount;
+        // 872: foveated inset streams attached per eye (low 24 bits left << 8 | right << 32),
+        // logged on change so flight logs prove when Quad-Views insets are active.
+        {
+            static std::uint64_t last_inset_key = ~0ULL;
+            const std::uint64_t inset_key =
+                ((inset_streams[0] & 0xFFFFFFULL) << 8U) |
+                ((inset_streams[1] & 0xFFFFFFULL) << 32U) |
+                (inset_streams[0] ? 1ULL : 0ULL) | (inset_streams[1] ? 2ULL : 0ULL);
+            if (inset_key != last_inset_key && inset_key != 0ULL) {
+                bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 872,
+                    inset_key,
+                    inset_streams[0] ? static_cast<std::uint64_t>(std::lround(result[0]->eyes[0]->foveated_inset_output_rect[2])) : 0ULL,
+                    inset_streams[0] ? static_cast<std::uint64_t>(std::lround(result[0]->eyes[0]->foveated_inset_output_rect[3])) : 0ULL);
+                last_inset_key = inset_key;
+            } else if (inset_key == 0ULL && last_inset_key != 0ULL && last_inset_key != ~0ULL) {
+                bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 872, 0ULL, 0ULL, 0ULL);
+                last_inset_key = 0ULL;
+            }
+        }
         // 870: how the eyes were joined, the first 16, every 512th and each
         // change: a 1 by the releases' order, 2 by the cameras | the left
         // stream's low 24 bits << 8 | the right's << 32, b the eye released
