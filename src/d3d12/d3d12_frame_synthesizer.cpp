@@ -3491,7 +3491,7 @@ struct D3D12FrameSynthesizer::Impl {
                         return made;
                     }
                 }
-                const auto region = guide_depth_rect(*frame);
+                const auto region = guide_depth_sample_rect(*frame);
                 std::memcpy(slot.depth_regions_mapped + eye * 4U, region.data(), sizeof(float) * 4U);
                 D3D12_SHADER_RESOURCE_VIEW_DESC region_view{};
                 region_view.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -3551,7 +3551,7 @@ struct D3D12FrameSynthesizer::Impl {
         parameters.game_motion_padding = (guide.output_width & 0x7FFFU) |
             ((guide.output_height & 0x7FFFU) << 16U) | (depth ? 0x8000U : 0U) |
             (depth && guide.depth_inverted ? 0x80000000U : 0U);
-        parameters.game_motion_rect = guide_motion_rect(guide);
+        parameters.game_motion_rect = guide_motion_sample_rect(guide);
         parameters.game_motion_scale = {
             guide.scale_x * static_cast<float>(guide.output_width) /
                 parameters.game_motion_rect[2],
@@ -4435,7 +4435,7 @@ struct D3D12FrameSynthesizer::Impl {
                 // periphery) maps the fractional part of its vectors under
                 // the image rectangle, so the scale into image pixels is the
                 // camera's.
-                parameters.game_motion_rect = guide_motion_rect(*guide);
+                parameters.game_motion_rect = guide_motion_sample_rect(*guide);
                 // DLSS low-resolution vectors are expressed in render-space pixel
                 // units after applying MV_Scale. Synthesis and pose reprojection
                 // operate in the final output rectangle's pixel space, so convert

@@ -1174,7 +1174,7 @@ struct LukeAfwSynthesizer::Impl {
         }
         parameters[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         parameters[2].Constants.ShaderRegister=0;
-        parameters[2].Constants.Num32BitValues=60;
+        parameters[2].Constants.Num32BitValues=sizeof(LukeNativeMotionConstants)/4;
         D3D12_ROOT_SIGNATURE_DESC root_description{};
         root_description.NumParameters =
             static_cast<UINT>(parameters.size());
@@ -1294,7 +1294,8 @@ struct LukeAfwSynthesizer::Impl {
         list->SetComputeRootDescriptorTable(0,gpu);
         gpu.ptr+=4*composed_motion_descriptor_size;
         list->SetComputeRootDescriptorTable(1,gpu);
-        list->SetComputeRoot32BitConstants(2,60,&constants,0);
+        const auto sampling=luke_native_motion_sampling_constants(guide,constants);
+        list->SetComputeRoot32BitConstants(2,sizeof(sampling)/4,&sampling,0);
         list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
         for(UINT i=0;i<history_barrier_count;++i)
             std::swap(history_barriers[i].Transition.StateBefore,history_barriers[i].Transition.StateAfter);
@@ -2686,6 +2687,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             contract.raw_previous_clip_to_clip = guide.raw_previous_clip_to_clip;
             contract.camera_position = guide.camera_position;
             contract.osr_source_dejitter=source_depth_dejitter;
+            contract.osr_motion_color_aligned=guide.raw_motion_color_aligned && !guide.jittered &&
+                guide.raw_motion_native_span_confirmed && guide.raw_motion_native_span==1;
             std::copy_n(impl_->osr_full.history(1-source_eye).dejitter,2,contract.osr_history_dejitter.begin());
             const DlssMotionVectorFrame* tracked[]{&guide,
                 guide.previous_opposite_guide.get(),guide.previous_same_guide.get()};
@@ -2796,6 +2799,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             in.source_motion = impl_->motion_resource.Get(); // composed same-eye motion, COMMON after compose_motion
             in.source_motion_state = D3D12_RESOURCE_STATE_COMMON;
             in.source_eye = source_eye;
+            in.original_motion_color_aligned=guide.raw_motion_color_aligned && !guide.jittered &&
+                guide.raw_motion_native_span_confirmed && guide.raw_motion_native_span==1;
             in.use_history = history_usable;
             // RDR2's field is classified only later, inside the OSR shader.
             // The earlier N1 composition is therefore NOT verified N2 motion.

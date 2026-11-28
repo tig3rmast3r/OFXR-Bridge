@@ -268,6 +268,7 @@ public:
         bool retain_history_motion{true};
         bool use_current_history_motion{}; // exact native endpoints; N1 has a separate original field
         bool native_history_motion{}; // stored original N1; camera_previous is the previous opposite eye
+        bool original_motion_color_aligned{};
         float native_history_stereo[16]{};
         float native_history_previous_dejitter[2]{};
         bool background_history_only{}; // recent real peer fills occluded holes after a missed native frame
@@ -368,6 +369,7 @@ public:
         constants.depth_width = depth_width_; constants.depth_height = depth_height_;
         constants.color_width = color_width_; constants.color_height = color_height_;
         constants.flags = osr_full_flags(in.debug, in.use_history);
+        if(in.original_motion_color_aligned)constants.flags|=kOsrFullFlagColorAlignedN1;
         if(in.background_history_only)constants.flags|=8192u;
         constants.flags |= (source_eye << 4) | ((!scene_initialized_ || in.reset_history) ? 8u : 0u);
         if (in.warp_keeps_attached) constants.flags |= kOsrFullFlagWarpKeepsAttached;

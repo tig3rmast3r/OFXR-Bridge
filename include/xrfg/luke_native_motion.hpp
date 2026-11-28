@@ -14,8 +14,9 @@ struct LukeNativeMotionConstants {
     // Producer depth-dependent stereo interval. Exact native history already
     // includes it in opposite/same; identity makes its disparity zero there.
     std::array<float,16> stereo{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+    std::array<float,2> middle_raster_offset{};
 };
-static_assert(sizeof(LukeNativeMotionConstants)==60*sizeof(std::uint32_t));
+static_assert(sizeof(LukeNativeMotionConstants)==62*sizeof(std::uint32_t));
 namespace native_motion_detail {
 using Matrix=std::array<std::array<double,4>,4>;
 inline Matrix matrix(const std::array<float,16>& values) noexcept {
@@ -140,9 +141,13 @@ inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
         std::uint64_t(guide.motion_x)+guide.motion_width>d.Width || std::uint64_t(guide.motion_y)+guide.motion_height>d.Height)return false;
     out.source_base={guide.motion_x,guide.motion_y};out.crop={crop_x,crop_y};
     out.extent={float(guide.motion_width),float(guide.motion_height)};out.scale={guide.scale_x,guide.scale_y};
-    // N-2 input already carries its same-eye jitter difference. Only N-1 input
-    // needs the missing middle->older jitter interval added to reconstruction.
-    out.jitter_difference=guide.raw_motion_native_span==2?std::array<float,2>{0,0}:
+    // A colour-aligned original N1 field already excludes projection jitter.
+    // Its camera-only fallback must not invent a middle->older raster phase
+    // at occlusions/sky, where no measured middle interval replaces it.
+    // Legacy raster-domain N1 producers retain their existing estimate.
+    const bool colour_n1=guide.raw_motion_color_aligned && guide.raw_motion_native_span_confirmed &&
+        guide.raw_motion_native_span==1;
+    out.jitter_difference=(guide.raw_motion_native_span==2 || colour_n1)?std::array<float,2>{0,0}:
         std::array<float,2>{middle.jitter_x-older.jitter_x,middle.jitter_y-older.jitter_y};
     out.padding[0]=float(guide.raw_motion_native_span);failure=9;
     // DOOM's original pre-wrapper packet supplies DOWN, while its captured
@@ -181,5 +186,28 @@ inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
         out.padding[1]=1.F;
     }
     failure=0;return true;
+}
+
+// Camera receipts above remain in the unjittered native projection. Only the
+// composition dispatch converts its raster-addressed depth/motion samples.
+inline LukeNativeMotionConstants luke_native_motion_sampling_constants(
+    const DlssMotionVectorFrame& guide,LukeNativeMotionConstants constants) noexcept {
+    const auto& middle=guide.previous_opposite_guide;
+    if(!guide.raw_motion_color_aligned || !guide.raw_motion_native_span_confirmed ||
+        guide.raw_motion_native_span!=1 || constants.padding[1]!=1.F || !middle ||
+        !guide.motion_width || !guide.motion_height)return constants;
+    const auto shift_input=[](std::array<float,16>& m,float x,float y) {
+        for(unsigned c=0;c<4;++c)m[12+c]+=x*m[c]+y*m[4+c];
+    };
+    const auto shift_output=[](std::array<float,16>& m,float x,float y) {
+        for(unsigned r=0;r<4;++r){m[r*4]+=x*m[r*4+3];m[r*4+1]+=y*m[r*4+3];}
+    };
+    const float sx=-2*guide.jitter_x/guide.motion_width,sy=2*guide.jitter_y/guide.motion_height;
+    shift_input(constants.opposite,sx,sy);shift_input(constants.same,sx,sy);
+    const float mx=-2*middle->jitter_x/guide.motion_width,my=2*middle->jitter_y/guide.motion_height;
+    shift_input(constants.stereo,mx,my);shift_output(constants.stereo,-mx,-my);
+    constants.middle_raster_offset={middle->jitter_x-guide.jitter_x,middle->jitter_y-guide.jitter_y};
+    constants.padding[1]=2.F; // colour-domain N1: validate the measured middle footprint in pixel space
+    return constants;
 }
 }

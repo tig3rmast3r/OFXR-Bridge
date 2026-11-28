@@ -64,7 +64,7 @@ void save(Fixture& f,unsigned eye,const std::vector<UINT>& color,float z,ID3D12R
     xrfg::OsrFullHistory kept{};kept.publication=identity.publication;kept.stream=identity.stream;kept.epoch=identity.epoch;
     f.warp.record_history_update(f.list.Get(),in,kept);submit(f);f.warp.commit();
 }
-void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=false,bool zero=false,bool hard_near=false,bool reverse=false,bool screen_locked=false,float history_scale=1.F,bool adjacent=false,bool world_near=false) {
+void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=false,bool zero=false,bool hard_near=false,bool reverse=false,bool screen_locked=false,float history_scale=1.F,bool adjacent=false,bool world_near=false,bool native_colour_phase=false,bool old_phase_control=false) {
     Fixture f;std::vector<UINT> previous(width*height),current(width*height),motion(width*height,0);
     for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
         previous[y*width+x]=grey(35+(x*7+y*11)%90);
@@ -89,6 +89,11 @@ void current_vectors(unsigned eye,bool low,float native_z,bool invalid_native=fa
     }
     begin(f);f.upload(field.Get(),motion.data());submit(f);
     auto in=inputs(f,eye);in.lower_quality=low;in.source_motion=field.Get();
+    if(native_colour_phase) {
+        in.original_motion_color_aligned=!old_phase_control;
+        in.source_dejitter[0]=-.110949159F;in.source_dejitter[1]=-.0556243695F;
+        in.history_dejitter[0]=-.735949159F;in.history_dejitter[1]=-.388957739F;
+    }
     const auto identity=[](const auto& h){return Id{h.publication,h.stream,h.epoch};};
     in.use_current_history_motion=xrfg::osr_full_current_motion_usable(current_id,
         identity(f.warp.history(1-eye)),identity(f.warp.history(eye)),peer_id,same_id,2,true,false);
@@ -757,6 +762,12 @@ void unclassified_history(unsigned eye,bool low) {
 }
 #include "rdr2_next_targets.inc"
 int main(int argc,char** argv) {
+    if(argc==2&&(std::string_view(argv[1])=="daysgone-colour-phase"||std::string_view(argv[1])=="daysgone-colour-phase-r12")) {
+        for(unsigned eye:{0u,1u})for(bool low:{false,true})for(bool reverse:{false,true})
+            current_vectors(eye,low,.2F,false,false,false,reverse,false,1.F,true,false,true,
+                std::string_view(argv[1])=="daysgone-colour-phase-r12");
+        std::puts("Days Gone unjittered N1: colour correspondence remains exact across independent depth-raster phases PASS");return 0;
+    }
     if(argc==2&&std::string_view(argv[1])=="owned-gap") {
         for(unsigned eye:{0u,1u})for(bool low:{false,true})owned_gap_history(eye,low);
         std::puts("OSR owned gap: both eyes/qualities retain own camera/depth colour across skipped original publications PASS");return 0;

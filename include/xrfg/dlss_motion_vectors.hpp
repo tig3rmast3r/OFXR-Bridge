@@ -119,6 +119,9 @@ struct DlssMotionVectorPublication {
     // Native producer's residual depth-to-colour alignment in guide texels.
     // Absent keeps the established Luke crop alignment for existing titles.
     std::optional<std::array<float,2>> osr_depth_alignment;
+    // Exact original N1 displacement already maps the resolved colour grid.
+    // Depth raster jitter must not be added again to colour correspondence.
+    bool raw_motion_color_aligned{};
 };
 
 // A camera attached to a published frame at its submission.
@@ -276,6 +279,9 @@ struct DlssMotionVectorFrame {
     // Native producer's residual depth-to-colour alignment in guide texels.
     // Absent keeps the established Luke crop alignment for existing titles.
     std::optional<std::array<float,2>> osr_depth_alignment;
+    // Exact original N1 displacement already maps the resolved colour grid.
+    // Depth raster jitter must not be added again to colour correspondence.
+    bool raw_motion_color_aligned{};
 };
 
 // The vector and depth rectangles a consumer maps the guide's output onto:
@@ -296,6 +302,22 @@ struct DlssMotionVectorFrame {
     return {static_cast<float>(f.depth_x) + (m[0] - static_cast<float>(f.motion_x)) * sx,
         static_cast<float>(f.depth_y) + (m[1] - static_cast<float>(f.motion_y)) * sy,
         m[2] * sx, m[3] * sy};
+}
+
+// Native colour-aligned vectors retain the jittered raster's sample locations.
+// Move the lookup rectangle, never add that raster phase to a displacement.
+[[nodiscard]] inline std::array<float,4> guide_motion_sample_rect(const DlssMotionVectorFrame& f) noexcept {
+    auto rect=guide_motion_rect(f);
+    if(f.raw_motion_color_aligned && !f.jittered){rect[0]+=f.jitter_x;rect[1]+=f.jitter_y;}
+    return rect;
+}
+[[nodiscard]] inline std::array<float,4> guide_depth_sample_rect(const DlssMotionVectorFrame& f) noexcept {
+    auto rect=guide_depth_rect(f);
+    if(f.raw_motion_color_aligned && !f.jittered && f.motion_width && f.motion_height) {
+        rect[0]+=f.jitter_x*float(f.depth_width)/f.motion_width;
+        rect[1]+=f.jitter_y*float(f.depth_height)/f.motion_height;
+    }
+    return rect;
 }
 
 // The field a DLSS evaluation rendered, from its camera's projection

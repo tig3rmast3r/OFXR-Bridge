@@ -206,6 +206,7 @@ constexpr std::uint32_t kOsrFullFlagLockedFollows = 64u;
 // which the head turns away from: taken from the previous frame it lagged the
 // head and ghosted (Dead Island 2, 2026-11-02; the UEVR fork, on V766, did not).
 constexpr std::uint32_t kOsrFullFlagWarpKeepsAttached = 128u;
+constexpr std::uint32_t kOsrFullFlagColorAlignedN1 = 262144u;
 
 inline std::uint32_t osr_full_flags(bool debug, bool history, bool history_first = true) noexcept {
     return (debug ? kOsrFullFlagDebug : 0u) | (history ? kOsrFullFlagHistory : 0u) |

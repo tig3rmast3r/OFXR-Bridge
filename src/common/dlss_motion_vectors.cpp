@@ -884,6 +884,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->compose_native_object_history = publication.compose_native_object_history;
         frame->osr_native_cabin_motion = publication.osr_native_cabin_motion;
         frame->osr_depth_alignment = publication.osr_depth_alignment;
+        frame->raw_motion_color_aligned = publication.raw_motion_color_aligned;
         frame->source_camera_time = publication.source_camera_time;
         frame->gta_headlock=publication.gta_headlock;
         frame->camera_pending = publication.camera_pending && !publication.camera_data_valid;

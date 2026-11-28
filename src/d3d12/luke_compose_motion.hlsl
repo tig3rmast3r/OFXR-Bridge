@@ -16,6 +16,7 @@ cbuffer Composition : register(b0)
     column_major float4x4 ToOpposite;
     column_major float4x4 ToSame;
     column_major float4x4 StereoInterval;
+    float2 MiddleRasterOffset;
 };
 
 // Finite half sentinel excludes invalid flow; no clamped/missing correspondence.
@@ -33,7 +34,7 @@ void ComposeLukeSameEyeMotion(uint3 thread_id : SV_DispatchThreadID)
     float4 clip=float4(uv.x*2.0-1.0,1.0-uv.y*2.0,depth,1.0);
     float4 opposite=mul(ToOpposite,clip);
     float4 same=mul(ToSame,clip);
-    bool object_history=Padding==1.0;
+    bool object_history=Padding>=1.0;
     float4 stereo=object_history?clip:mul(StereoInterval,clip);
     float4 far_clip=clip; far_clip.z=0.0;
     float4 stereo_far=object_history?far_clip:mul(StereoInterval,far_clip);
@@ -52,7 +53,7 @@ void ComposeLukeSameEyeMotion(uint3 thread_id : SV_DispatchThreadID)
     if(object_history) {
         // Follow the native current->middle correspondence, rather than
         // assuming uniform head/camera or object velocity across A/B/A.
-        float2 p=float2(source)+raw*RawScale;
+        float2 p=float2(source)+raw*RawScale+MiddleRasterOffset;
         if(all(p>=0.0) && all(p<GuideExtent-1.0)) {
             int2 base=int2(floor(p)); float2 weight=frac(p);
             int2 address=int2(SourceBase)+base;
@@ -69,11 +70,27 @@ void ComposeLukeSameEyeMotion(uint3 thread_id : SV_DispatchThreadID)
             // In this explicitly admitted path StereoInterval carries the
             // exact native middle->older camera, not a stereo approximation.
             float4 older=mul(StereoInterval,middle_clip);
+            bool coherent=true;
+            if(Padding==2.0) {
+                // A relative depth ratio can still span several pixels of
+                // stereo disparity. Never import another surface's object
+                // motion through such a footprint.
+                float expected=opposite.z/opposite.w;
+                float4 reference_clip=middle_clip;reference_clip.z=expected;
+                float4 reference=mul(StereoInterval,reference_clip);
+                float4 delta=float4(za,zb,zc,zd)-expected;
+                float4 w=reference.w+StereoInterval[3][2]*delta;
+                float2 numerator=float2(StereoInterval[0][2],StereoInterval[1][2])*reference.w-
+                    reference.xy*StereoInterval[3][2];
+                float scale=length(numerator/reference.w*GuideExtent*.5);
+                coherent=all(isfinite(reference)) && reference.w>1.e-8 && all(w>1.e-8) &&
+                    all(abs(delta)*scale/w<=.5);
+            }
             if(all(isfinite(a)) && all(isfinite(b)) && all(isfinite(c)) && all(isfinite(d)) &&
                 all(abs(a)<65504.0) && all(abs(b)<65504.0) &&
                 all(abs(c)<65504.0) && all(abs(d)<65504.0) &&
                 all(isfinite(float4(za,zb,zc,zd))) && z>0.0 && z<1.0 &&
-                all(isfinite(older)) && older.w>1e-8) {
+                all(isfinite(older)) && older.w>1e-8 && coherent) {
                 float2 camera=(older.xy/older.w-middle_clip.xy)*float2(0.5,-0.5)*GuideExtent;
                 // The measured middle interval already carries its jitter;
                 // replace the missing-interval estimate instead of adding it twice.

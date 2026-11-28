@@ -176,6 +176,12 @@ void classify_interval(uint lane) {
 bool original_is_adjacent() {
     return CurrentHistoryData[15].z==1 && ((Flags&4096u)==0 || SceneState[uint2(5,0)]==1);
 }
+float2 original_colour_phase(float2 raster_phase) {
+    // Some original producers already remove projection jitter from motion.
+    // Their vectors map resolved colour centres directly; the raster phase
+    // still belongs in depth lookups, never in that colour displacement.
+    return (Flags&262144u)!=0 ? float2(0,0) : raster_phase;
+}
 
 // Only group zero participates. Reuse the clear dispatch, existing cameras,
 // colour and depth; 576 samples independent of headset resolution.
@@ -293,7 +299,7 @@ float2 history_texel_now(int2 t, float z, out bool locked) {
     locked = z >= LockedDepth;
     if((Flags&2048u)!=0 && z>SkyDepth && SceneState[uint2(4,0)]!=0) {
         const float2 total=HistoryMotion.Load(int3(t,0))*MotionScale;
-        const float2 at=pos+total+SourceDejitter-HistoryDejitter;
+        const float2 at=pos+total+original_colour_phase(SourceDejitter-HistoryDejitter);
         const float4 scene_point=float4(pos.x/DepthSize.x*2-1,1-pos.y/DepthSize.y*2,z,1);
         const float4 world=mul(scene_point,BackwardHistory),peer=mul(scene_point,BackwardSource);
         if(all(isfinite(total))&&all(abs(total)<4096)&&all(isfinite(world))&&all(isfinite(peer))&&world.w>1e-8&&peer.w>1e-8&&all(at>=0)&&all(at<float2(DepthSize))) {
@@ -921,7 +927,7 @@ bool adjacent_history_disoccluded(float2 source_at,float source_z,float2 ndc) {
     if(any(address<0)||any(address>=int2(aw,ah)))break;
     const float2 original=AdjacentMotion.Load(int3(address,0));
     if(!all(isfinite(original))||any(abs(original)>=65504))break;
-    const float2 at=source_at+original*CurrentHistoryData[14].xy+((Flags&4096u)!=0?float2(0,0):HistoryDejitter-SourceDejitter);
+    const float2 at=source_at+original*CurrentHistoryData[14].xy+((Flags&4096u)!=0?float2(0,0):original_colour_phase(HistoryDejitter-SourceDejitter));
     if(any(at<0)||any(at>=float2(DepthSize)))break;
     const float4 now=float4(source_at.x/DepthSize.x*2-1,1-source_at.y/DepthSize.y*2,source_z,1);
     const float4 camera=current_history_transform(now,0);
@@ -963,7 +969,7 @@ bool adjacent_local_history(float2 source_at,float source_z,bool strict_surface,
     if(any(address<0)||any(address>=int2(aw,ah)))break;
     const float2 original=AdjacentMotion.Load(int3(address,0));
     if(!all(isfinite(original))||any(abs(original)>=65504))break;
-    const float2 at=source_at+original*CurrentHistoryData[14].xy+((Flags&4096u)!=0?float2(0,0):HistoryDejitter-SourceDejitter);
+    const float2 at=source_at+original*CurrentHistoryData[14].xy+((Flags&4096u)!=0?float2(0,0):original_colour_phase(HistoryDejitter-SourceDejitter));
     if(any(abs(at-source_at)>4096)||any(at<0)||any(at>=float2(DepthSize)))break;
     const float4 now=float4(source_at.x/DepthSize.x*2-1,1-source_at.y/DepthSize.y*2,source_z,1);
     const float4 peer=mul(now,Forward);
@@ -1061,7 +1067,7 @@ bool current_history(float2 source_at, float source_z, float2 target_at, bool st
         if(any(address<0)||any(address>=int2(aw,ah)))break;
         const float2 original=AdjacentMotion.Load(int3(address,0));
         if(!all(isfinite(original))||any(abs(original)>=65504))break;
-        previous_at=source_at+original*CurrentHistoryData[14].xy+((Flags&4096u)!=0?float2(0,0):HistoryDejitter-SourceDejitter);
+        previous_at=source_at+original*CurrentHistoryData[14].xy+((Flags&4096u)!=0?float2(0,0):original_colour_phase(HistoryDejitter-SourceDejitter));
         if(any(abs(previous_at-source_at)>4096))break;
     }
     const float expected=middle.z/middle.w;

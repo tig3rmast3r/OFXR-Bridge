@@ -25,7 +25,8 @@ D3D12_RESOURCE_BARRIER barrier(ID3D12Resource* r, D3D12_RESOURCE_STATES a, D3D12
     D3D12_RESOURCE_BARRIER x{}; x.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     x.Transition={r,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,a,b}; return x;
 }
-int main() { try {
+int main(int argc,char** argv) { try {
+    const bool hardware=argc==2 && std::string(argv[1])=="hardware";
     expect(xrfg::luke_afw_effective_mode(3,785,783,0,0,783)==1);
     expect(xrfg::luke_afw_effective_mode(3,804,802,1,1,802)==1);
     expect(xrfg::luke_afw_effective_mode(3,815,813,0,0,813)==1);
@@ -50,7 +51,7 @@ int main() { try {
     expect(xrfg::luke_afw_effective_mode(3,1840,1838,0,0,1838,true)==1);
     ComPtr<ID3D12Debug> debug; if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) debug->EnableDebugLayer();
     ComPtr<IDXGIFactory4> factory;check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
-    ComPtr<IDXGIAdapter> warp;check(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)));
+    ComPtr<IDXGIAdapter> warp;if(!hardware)check(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)));
     ComPtr<ID3D12Device> device;check(D3D12CreateDevice(warp.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)));
     ComPtr<ID3D12InfoQueue> info; device.As(&info);
     ComPtr<ID3D12CommandQueue> queue;D3D12_COMMAND_QUEUE_DESC q{};check(device->CreateCommandQueue(&q,IID_PPV_ARGS(&queue)));
@@ -388,7 +389,7 @@ int main() { try {
         motion_params[i].DescriptorTable={1,&motion_ranges[i]};
     }
     motion_params[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    motion_params[2].Constants.Num32BitValues=60;
+    motion_params[2].Constants.Num32BitValues=sizeof(xrfg::LukeNativeMotionConstants)/4;
     D3D12_ROOT_SIGNATURE_DESC motion_rd{};motion_rd.NumParameters=3;motion_rd.pParameters=motion_params.data();
     ComPtr<ID3DBlob> motion_blob;check(D3D12SerializeRootSignature(&motion_rd,D3D_ROOT_SIGNATURE_VERSION_1,&motion_blob,&errors));
     ComPtr<ID3D12RootSignature> motion_root;check(device->CreateRootSignature(0,motion_blob->GetBufferPointer(),motion_blob->GetBufferSize(),IID_PPV_ARGS(&motion_root)));
@@ -460,7 +461,7 @@ int main() { try {
         constants.same=xrfg::native_motion_detail::window_to_guide_transform(previous,to_window);
         auto stereo=identity;stereo[8]=stereo_step;
         constants.stereo=xrfg::native_motion_detail::window_to_guide_transform(stereo,to_window);
-        list->SetComputeRoot32BitConstants(2,60,&constants,0);list->Dispatch(1,1,1);
+        list->SetComputeRoot32BitConstants(2,sizeof(constants)/4,&constants,0);list->Dispatch(1,1,1);
         auto b=barrier(composed.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);list->ResourceBarrier(1,&b);
         list->CopyResource(afw_motion.Get(),composed.Get());b=barrier(afw_motion.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COPY_SOURCE);list->ResourceBarrier(1,&b);
         const auto desc=afw_motion->GetDesc();D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};UINT64 bytes{};device->GetCopyableFootprints(&desc,0,1,0,&fp,nullptr,nullptr,&bytes);
@@ -493,5 +494,5 @@ int main() { try {
     }
     expect(xrfg::luke_depth_format(DXGI_FORMAT_R8G8B8A8_UNORM).resource==DXGI_FORMAT_UNKNOWN);
     if(info) for(UINT64 i=0;i<info->GetNumStoredMessages();++i) { SIZE_T n=0;check(info->GetMessage(i,nullptr,&n));auto data=new char[n];auto msg=reinterpret_cast<D3D12_MESSAGE*>(data);check(info->GetMessage(i,msg,&n));bool bad=msg->Severity<=D3D12_MESSAGE_SEVERITY_ERROR; if(bad) std::cerr<<msg->pDescription<<'\n';delete[] data;expect(!bad); }
-    CloseHandle(event);std::cout<<"Depth families and typed float16/float32 depth/camera correction passed on WARP\n";return 0;
+    CloseHandle(event);std::cout<<"Depth families and typed float16/float32 depth/camera correction passed on "<<(hardware?"hardware":"WARP")<<'\n';return 0;
 } catch(const std::exception& e) { std::cerr<<e.what()<<'\n';return 1; } }

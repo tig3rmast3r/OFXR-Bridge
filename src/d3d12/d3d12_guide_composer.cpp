@@ -1,4 +1,5 @@
 #include "xrfg/d3d12_guide_composer.hpp"
+#include "xrfg/luke_native_motion.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -31,11 +32,13 @@ struct Params {
     float tangents_r[4];
     float minimum_offset;
     UINT force_compose;
-    UINT depth_padding[2]{};
+    float raster_phase[2]{};
     float depth_b[4]{},depth_r[4]{},planes[4]{};
     UINT depth_flags{},reject_occlusions{},depth_slice_b{},depth_slice_r{};
+    std::array<float,16> depth_to_source{};
+    float middle_jitter[2]{};
 };
-static_assert(sizeof(Params) == 44 * 4);
+static_assert(sizeof(Params) == 62 * 4);
 
 DXGI_FORMAT depth_format(DXGI_FORMAT format) noexcept {
     switch(format) {
@@ -249,6 +252,23 @@ std::shared_ptr<const DlssMotionVectorSet> D3D12GuideComposer::compose(
             p.tangents_r[0] = -t[1]; p.tangents_r[1] = -t[0]; p.tangents_r[2] = t[2]; p.tangents_r[3] = t[3];
             p.minimum_offset = 16.0F;
             p.force_compose = b->raw_motion_native_span_confirmed && b->raw_motion_native_span==1;
+            if(p.force_compose && b->raw_motion_color_aligned && r.raw_motion_color_aligned &&
+                r.raw_motion_native_span_confirmed && r.raw_motion_native_span==1 && !b->jittered && !r.jittered &&
+                b->camera_data_valid && r.camera_data_valid && b->camera_matrices_valid && r.camera_matrices_valid &&
+                b->depth_inverted && r.depth_inverted && b->depth_infinite && r.depth_infinite &&
+                b->camera_near>0 && b->camera_near==r.camera_near) {
+                if(native_motion_detail::transform(dlss_native_camera_history(r),dlss_native_camera_history(*b),p.depth_to_source)) {
+                    const auto rect=guide_motion_rect(*b);
+                    const float px=float(b->output_width)/rect[2],py=float(b->output_height)/rect[3];
+                    p.output[0]=b->motion_width*px;p.output[1]=b->motion_height*py;
+                    p.scale_b[0]=b->scale_x*px;p.scale_b[1]=b->scale_y*py;
+                    p.scale_r[0]=r.scale_x*p.output[0]/r.motion_width;
+                    p.scale_r[1]=r.scale_y*p.output[1]/r.motion_height;
+                    p.middle_jitter[0]=r.jitter_x/r.motion_width;p.middle_jitter[1]=r.jitter_y/r.motion_height;
+                    p.raster_phase[0]=r.jitter_x/r.motion_width-b->jitter_x/b->motion_width;
+                    p.raster_phase[1]=r.jitter_y/r.motion_height-b->jitter_y/b->motion_height;
+                }
+            }
             p.reject_occlusions=depth_check;
             if(depth_check) {
                 p.depth_b[0]=float(b->depth_x);p.depth_b[1]=float(b->depth_y);p.depth_b[2]=float(b->depth_width);p.depth_b[3]=float(b->depth_height);

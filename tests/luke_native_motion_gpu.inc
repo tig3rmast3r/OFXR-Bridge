@@ -9,7 +9,7 @@
         params[i].DescriptorTable={1,&ranges[i]};
     }
     params[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[2].Constants.Num32BitValues=60;
+    params[2].Constants.Num32BitValues=sizeof(xrfg::LukeNativeMotionConstants)/4;
     D3D12_ROOT_SIGNATURE_DESC rd{};rd.NumParameters=3;rd.pParameters=params.data();
     ComPtr<ID3DBlob> blob;check(D3D12SerializeRootSignature(&rd,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors));
     ComPtr<ID3D12RootSignature> root;check(device->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&root)));
@@ -19,7 +19,7 @@
     for(unsigned native_span:{1u,2u})
     for(bool left_handed:{false,true})
     for(auto format:{DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_R32G32_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT})
-    for(unsigned scenario=0;scenario<20;++scenario) {
+    for(unsigned scenario=0;scenario<22;++scenario) {
         if(scenario>=17 && native_span!=1)continue;
         auto current=texture(10,8,format,D3D12_RESOURCE_FLAG_NONE,D3D12_RESOURCE_STATE_COPY_DEST);
         auto depth=texture(3,2,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_FLAG_NONE,D3D12_RESOURCE_STATE_COPY_DEST);
@@ -39,6 +39,11 @@
             if(left_handed) {f.camera_view_to_clip[11]=1;f.camera_clip_to_view[14]=1;}
         };
         init(g,5);init(*middle,4);xrfg::DlssMotionVectorFrame old{};init(old,3);
+        if(scenario>=20) {
+            g.raw_motion_color_aligned=g.raw_motion_native_span_confirmed=true;
+            middle->jitter_x=.5F;middle->jitter_y=-1.F/3;old.jitter_x=-.125F;old.jitter_y=2.F/9;
+            if(scenario==21){g.jitter_x=-.125F;g.jitter_y=2.F/9;}
+        }
         if(scenario>=17)old.camera_position[0]=.04F;
         g.previous_serial=3;g.motion_x=g.motion_y=1;g.scale_x=g.scale_y=4;
         if(scenario==10){g.scale_x=8;g.scale_y=2;}
@@ -92,6 +97,15 @@
         const auto axes=native_view_rows?xrfg::LukeProducerCameraAxes::native_view_rows:
             doom_pitch?xrfg::LukeProducerCameraAxes::right_down_forward:xrfg::LukeProducerCameraAxes::view;
         expect(xrfg::luke_native_motion_constants(g,2,2,constants,failure,axes) && failure==0);
+        if(scenario>=20) {
+            expect(constants.jitter_difference==std::array<float,2>{0,0});
+            g.raw_motion_color_aligned=false;
+            xrfg::LukeNativeMotionConstants legacy{};
+            expect(xrfg::luke_native_motion_constants(g,2,2,legacy,failure,axes));
+            expect(std::abs(legacy.jitter_difference[0]-.625F)<1e-6F);
+            expect(std::abs(legacy.jitter_difference[1]+5.F/9)<1e-6F);
+            g.raw_motion_color_aligned=true;
+        }
         {
             const auto single_stream_constants=constants;
             // Same three physical cameras, two native feature histories:
@@ -122,8 +136,8 @@
             const double vy=std::cos(pitch)*py+std::sin(pitch)*yaw_z;
             const double vz=-std::sin(pitch)*py+std::cos(pitch)*yaw_z;
             const float projection_sign=left_handed?1.F:-1.F;
-            return std::array<float,2>{float(((vx/-vz+projection_sign*target.camera_view_to_clip[8]-nx)*4-target.jitter_x)/g.scale_x),
-                float(((vy/-vz+projection_sign*target.camera_view_to_clip[9]-ny)*-3-target.jitter_y)/g.scale_y)};
+            return std::array<float,2>{float(((vx/-vz+projection_sign*target.camera_view_to_clip[8]-nx)*4-(scenario>=20?0:target.jitter_x))/g.scale_x),
+                float(((vy/-vz+projection_sign*target.camera_view_to_clip[9]-ny)*-3-(scenario>=20?0:target.jitter_y))/g.scale_y)};
         };
         const std::array<float,2> object=(scenario==3 || scenario==13 || scenario==16 || scenario>=17)?std::array<float,2>{.125F,-.0625F}:std::array<float,2>{};
         const auto c=[&](unsigned x,unsigned y) {
@@ -144,11 +158,12 @@
             const unsigned pixel_bytes=(slot&1)?4:(wide?4:2)*(four?4:2);
             for(unsigned y=0;y<desc.Height;++y)for(unsigned x=0;x<desc.Width;++x) {
                 auto* dst=static_cast<char*>(data)+fp.Offset+y*fp.Footprint.RowPitch+x*pixel_bytes;
-                if(slot&1) {const float z=slot==3&&scenario==18?0.F:d(x+2,y+2);std::memcpy(dst,&z,4);continue;}
+                if(slot&1) {const float z=slot==3&&(scenario==18||scenario==20)?0.F:d(x+2,y+2);std::memcpy(dst,&z,4);continue;}
                 auto v=(x>=1 && x<9 && y>=1 && y<7)?c(x-1,y-1):std::array<float,2>{97,-81};
                 if(slot==2 && scenario>=17) {
                     const auto a=camera(old,old_yaw,x,y,.05F),b=camera(*middle,mid_yaw,x,y,.05F);
                     v={a[0]-b[0]+.25F,a[1]-b[1]-.125F};
+                    if(scenario==21)v[0]+=.0625F*(float(x)-1);
                 }
                 if(wide) {const float values[]{v[0],v[1],123,-91};std::memcpy(dst,values,pixel_bytes);}
                 else {const std::uint16_t values[]{std::isfinite(v[0])?half(v[0]):std::uint16_t(0x7e00),std::isfinite(v[1])?half(v[1]):std::uint16_t(0x7e00),half(123),half(-91)};std::memcpy(dst,values,pixel_bytes);}
@@ -166,7 +181,8 @@
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};uav.Format=xrfg::kLukeAfwMotionFormat;uav.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;device->CreateUnorderedAccessView(output.Get(),nullptr,&uav,cpu);
         ID3D12DescriptorHeap* heaps[]{views.Get()};list->SetDescriptorHeaps(1,heaps);list->SetComputeRootSignature(root.Get());list->SetPipelineState(pipeline.Get());
         auto gpu=views->GetGPUDescriptorHandleForHeapStart();list->SetComputeRootDescriptorTable(0,gpu);gpu.ptr+=4*stride;list->SetComputeRootDescriptorTable(1,gpu);
-        list->SetComputeRoot32BitConstants(2,60,&constants,0);list->Dispatch(1,1,1);
+        const auto sampling=xrfg::luke_native_motion_sampling_constants(g,constants);
+        list->SetComputeRoot32BitConstants(2,sizeof(sampling)/4,&sampling,0);list->Dispatch(1,1,1);
         auto b=barrier(output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);list->ResourceBarrier(1,&b);list->CopyResource(copied.Get(),output.Get());b=barrier(copied.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COPY_SOURCE);list->ResourceBarrier(1,&b);
         const auto desc=copied->GetDesc();D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};UINT64 bytes{};device->GetCopyableFootprints(&desc,0,1,0,&fp,nullptr,nullptr,&bytes);
         D3D12_RESOURCE_DESC bd{};bd.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;bd.Width=bytes;bd.Height=1;bd.DepthOrArraySize=bd.MipLevels=1;bd.SampleDesc.Count=1;bd.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -179,7 +195,13 @@
             const bool invalid=scenario==8 || scenario==9 || ((scenario==6 || scenario==7) && x==0 && y==0);
             auto expected=camera(old,old_yaw,x+2,y+2,d(x+2,y+2));
             for(unsigned axis=0;axis<2;++axis) {
-                const float wanted=invalid?65504.F:expected[axis]+object[axis]+((scenario==17||scenario==19)?(axis?-.125F:.25F):0.F);
+                float extra=(scenario==17||scenario==19)?(axis?-.125F:.25F):0.F;
+                if(scenario==21) {
+                    const auto raw=c(x+2,y+2);
+                    const float middle_x=float(x+2)+raw[0]*g.scale_x+middle->jitter_x-g.jitter_x;
+                    extra=axis?-.125F:.25F+.0625F*middle_x;
+                }
+                const float wanted=invalid?65504.F:expected[axis]+object[axis]+extra;
                 if(!(std::abs(unhalf(values[axis])-wanted)<.001F)) {
                     std::cerr<<"scenario "<<scenario<<" format "<<format<<" pixel "<<x<<','<<y<<" axis "<<axis<<" actual "<<unhalf(values[axis])<<" expected "<<wanted<<'\n';expect(false);
                 }
@@ -233,5 +255,5 @@
         if(scenario<17)expect(!middle->motion_vectors && !middle->motion_retention);admission(0);
         if(scenario>=17) {middle->compose_native_object_history=false;admission(10);middle->compose_native_object_history=true;admission(0);}
     }
-    std::cout<<"Depth/camera motion correction: "<<scenarios<<" WARP scenarios plus admission guards passed\n";
+    std::cout<<"Depth/camera motion correction: "<<scenarios<<" GPU scenarios plus admission guards passed\n";
     }

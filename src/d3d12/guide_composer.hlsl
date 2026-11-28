@@ -37,7 +37,7 @@ cbuffer Params : register(b0) {
     // motion, and leave the vectors as they are.
     float MinimumOffset;
     uint ForceCompose;
-    uint2 DepthPadding;
+    float2 RasterPhase;
     float4 DepthRectB;
     float4 DepthRectR;
     float4 NearFar;
@@ -45,6 +45,8 @@ cbuffer Params : register(b0) {
     uint RejectOcclusions;
     uint DepthSliceB;
     uint DepthSliceR;
+    column_major float4x4 DepthToSource;
+    float2 MiddleJitter;
 };
 
 float view_depth(float depth,float near_z,float far_z,bool inverted,bool infinite) {
@@ -95,7 +97,8 @@ void Compose(uint3 id : SV_DispatchThreadID) {
         return;
     }
     float2 b = raw * ScaleB;
-    float2 u = (float2(id.xy) + 0.5) / float2(SizeB) + b / Output;
+    float2 source_uv=(float2(id.xy)+.5)/float2(SizeB);
+    float2 u = source_uv + b / Output + RasterPhase;
     if(RejectOcclusions) {
         bool valid=all(isfinite(raw)) && all(u>=0) && all(u<1);
         float db=DepthB.Load(int4(int2(DepthRectB.xy+(float2(id.xy)+.5)/SizeB*DepthRectB.zw),DepthSliceB,0));
@@ -108,6 +111,37 @@ void Compose(uint3 id : SV_DispatchThreadID) {
             // Hybrid-only invalid correspondence, never a fabricated vector.
             Composed[id.xy]=asfloat(uint2(0x7fc00000,0x7fc00000));return;
         }
+    }
+    if(DepthToSource[3][3]!=0 && RejectOcclusions) {
+        // Colour-aligned N1 at a jittered raster location. Filter only a
+        // depth-compatible footprint; optical flow owns unresolved edges.
+        float db=DepthB.Load(int4(int2(DepthRectB.xy+source_uv*DepthRectB.zw),DepthSliceB,0));
+        float2 position=u*float2(SizeR)-.5;
+        int2 base=int2(floor(position));float2 weight=frac(position);float2 sum=0;
+        bool valid=true;
+        [unroll] for(int yy=0;yy<2;++yy) [unroll] for(int xx=0;xx<2;++xx) {
+            float fraction=(xx?weight.x:1-weight.x)*(yy?weight.y:1-weight.y);
+            if(fraction>1.e-6) {
+                int2 t=base+int2(xx,yy);
+                float2 uv=(float2(t)+.5)/float2(SizeR);
+                float dr=DepthR.Load(int4(int2(DepthRectR.xy+uv*DepthRectR.zw),DepthSliceR,0));
+                float2 mv=MotionR.Load(int4(int2(OriginR)+t,SliceR,0));
+                float2 ndc=(uv-MiddleJitter)*float2(2,-2)+float2(-1,1);
+                // Infinite reversed depth, equal near planes: source.z=middle.z.
+                // Solve source.z/source.w=db on this exact middle ray.
+                float denominator=1-db*DepthToSource[3][2];
+                float expected=db*(dot(ndc,DepthToSource[3].xy)+DepthToSource[3][3])/denominator;
+                float4 reference=mul(DepthToSource,float4(ndc,expected,1));
+                float4 observed=mul(DepthToSource,float4(ndc,dr,1));
+                float2 error=(observed.xy/observed.w-reference.xy/reference.w)*Output*.5;
+                valid=valid && all(t>=0) && all(t<int2(SizeR)) && isfinite(dr) && dr>=0 && dr<=1 &&
+                    all(isfinite(mv)) && isfinite(expected) && reference.w>1.e-8 && observed.w>1.e-8 &&
+                    all(isfinite(error)) && length(error)<=1.0;
+                sum+=mv*ScaleR*fraction;
+            }
+        }
+        Composed[id.xy]=valid?(b+sum)/ScaleB:asfloat(uint2(0x7fc00000,0x7fc00000));
+        return;
     }
     uint2 r_texel = OriginR + uint2(clamp(u * float2(SizeR), 0.0, float2(SizeR) - 1.0));
     float2 r = load_r(r_texel);
