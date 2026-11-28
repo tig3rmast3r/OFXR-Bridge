@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$BuildDir,
     [Parameter(Mandatory=$true)][string]$OutDir,
-    [int]$Version=1110,
+    [int]$Version=1111,
     [string]$SourceDir,
     [string]$CrtSource,
     [switch]$StandaloneInstaller

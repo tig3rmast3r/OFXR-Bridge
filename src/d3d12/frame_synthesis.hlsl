@@ -1821,6 +1821,15 @@ float4 SynthesizeGameMotionMidpointPS(FullscreenVertex input) : SV_Target {
 // explains both frames better. Content the vectors do not describe - a
 // shadow, a reflection - moves as the image does, which the flow follows.
 // The vectors keep a tie.
+// FidelityFX Hybrid uses the 0.2.14.3 agreement threshold (62/255) so DLSS/TAA
+// resampling noise does not send large panning regions into the second
+// optical-flow synthesis pass; other Hybrid entries keep 0.02.
+#ifdef XRFG_HYBRID_RELAXED_AGREE
+static const float kHybridAgreeThreshold = 62.0 / 255.0;
+#else
+static const float kHybridAgreeThreshold = 0.02;
+#endif
+
 float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
     hybrid_layout = true;
     if(hybrid_motion_invalid_at(input.position.xy-.5))
@@ -1828,7 +1837,7 @@ float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
     float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
     float vectors_disagreement = last_disagreement;
     // Where the vectors explain both frames, the flow need not be asked.
-    [branch] if (vectors_disagreement < 0.02) return vectors;
+    [branch] if (vectors_disagreement < kHybridAgreeThreshold) return vectors;
     float4 flow = synthesize_midpoint(input, 1.0, false, false, false, false, false);
     return lerp(flow, vectors, saturate(1.0 + (last_disagreement - vectors_disagreement) * 8.0));
 }
