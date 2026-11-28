@@ -9,6 +9,10 @@ Texture2DArray<float2> GameMotionVectors : register(t6);
 // interpolation for the other reconstruction paths' existing pixel contract.
 SamplerState HybridLinearClamp : register(s0);
 static bool hybrid_layout = false;
+// FidelityFX Hybrid uses the 0.2 extra-surface budget; other entries keep two.
+#ifndef XRFG_HYBRID_MAX_SURFACE_SOLVES
+#define XRFG_HYBRID_MAX_SURFACE_SOLVES 2
+#endif
 Texture2DArray<float4> SceneOnlyFrame : register(t7);
 // Hybrid's depth search (0.2 V505, V555): the game's depth beside its
 // vectors, at their resolution, and the midpoint splat BuildDepthSplat
@@ -1739,7 +1743,7 @@ float4 synthesize_midpoint(
 #endif
                                             done = true;
                                         }
-                                        done = done || solves >= 2;
+                                        done = done || solves >= XRFG_HYBRID_MAX_SURFACE_SOLVES;
                                     }
                                 }
                             }

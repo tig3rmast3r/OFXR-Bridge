@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1106.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1107.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -450,7 +450,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /Fh "${XRFG_HYBRID_PACK_INPUT_HEADER}" /Vn g_xrfg_hybrid_pack_flow_input_shader
             "${XRFG_SYNTHESIS_SHADER}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeHybridMidpointPS
-            /D XRFG_HYBRID_EXPLAINED_SCORING=1 /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /D XRFG_HYBRID_EXPLAINED_SCORING=1 /D XRFG_HYBRID_MAX_SURFACE_SOLVES=1 /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_hybrid_synthesize_midpoint_pixel_shader
             "${XRFG_SYNTHESIS_SHADER}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ClearDepthSplat
