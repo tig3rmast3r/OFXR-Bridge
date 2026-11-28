@@ -41,6 +41,8 @@
 #include "nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
+#include "hybrid_nvidia_pack_flow_input_shader.hpp"
+#include "hybrid_nvidia_pack_luma_input_shader.hpp"
 #include "nvidia_pack_flow_input_shader.hpp"
 #include "nvidia_pack_luma_input_shader.hpp"
 #include "nvidia_synthesize_midpoint_pixel_shader.hpp"
@@ -1159,6 +1161,8 @@ struct D3D12FrameSynthesizer::Impl {
     UINT still_mask_parity{};
     ComPtr<ID3D12PipelineState> nvidia_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
+    ComPtr<ID3D12PipelineState> hybrid_nvidia_pack_pipeline;
+    ComPtr<ID3D12PipelineState> hybrid_nvidia_luma_pack_pipeline;
     DXGI_FORMAT nvidia_input_format{DXGI_FORMAT_B8G8R8A8_UNORM};
     ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_bidirectional_graphics_pipeline;
@@ -1531,6 +1535,18 @@ struct D3D12FrameSynthesizer::Impl {
             sizeof(g_xrfg_nvidia_pack_luma_input_shader)};
         result = device->CreateComputePipelineState(&compute_description,
             IID_PPV_ARGS(nvidia_luma_pack_pipeline.GetAddressOf()));
+        if (FAILED(result)) return result;
+
+        compute_description.CS = {g_xrfg_hybrid_nvidia_pack_flow_input_shader,
+            sizeof(g_xrfg_hybrid_nvidia_pack_flow_input_shader)};
+        result = device->CreateComputePipelineState(&compute_description,
+            IID_PPV_ARGS(hybrid_nvidia_pack_pipeline.GetAddressOf()));
+        if (FAILED(result)) return result;
+
+        compute_description.CS = {g_xrfg_hybrid_nvidia_pack_luma_input_shader,
+            sizeof(g_xrfg_hybrid_nvidia_pack_luma_input_shader)};
+        result = device->CreateComputePipelineState(&compute_description,
+            IID_PPV_ARGS(hybrid_nvidia_luma_pack_pipeline.GetAddressOf()));
         if (FAILED(result)) return result;
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics_description{};
@@ -5604,8 +5620,11 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->SetComputeRootSignature(root_signature.Get());
         const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start =
             slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
-        slot.command_list->SetPipelineState(nvidia_input_format == DXGI_FORMAT_R8_UNORM
-            ? nvidia_luma_pack_pipeline.Get() : nvidia_pack_pipeline.Get());
+        slot.command_list->SetPipelineState(nvidia_options.hybrid
+            ? (nvidia_input_format == DXGI_FORMAT_R8_UNORM
+                ? hybrid_nvidia_luma_pack_pipeline.Get() : hybrid_nvidia_pack_pipeline.Get())
+            : (nvidia_input_format == DXGI_FORMAT_R8_UNORM
+                ? nvidia_luma_pack_pipeline.Get() : nvidia_pack_pipeline.Get()));
 
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |

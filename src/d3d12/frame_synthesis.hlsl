@@ -581,6 +581,9 @@ void PackNvidiaFlowInput(uint3 thread_id : SV_DispatchThreadID) {
     if (thread_id.x >= PackedWidth || thread_id.y >= PackedHeight) {
         return;
     }
+#ifdef XRFG_HYBRID_PACK_LINEAR
+    hybrid_layout = true;
+#endif
 
     float4 previous_color = float4(0.0, 0.0, 0.0, 1.0);
     float4 current_color = float4(0.0, 0.0, 0.0, 1.0);
