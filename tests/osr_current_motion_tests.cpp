@@ -7,6 +7,7 @@
 #include <cmath>
 #include <string_view>
 #include "xrfg/luke_afw_continuity.hpp"
+#include "xrfg/daysgone_camera.hpp"
 #include "rdr2_camera_phase_pass.hpp"
 
 namespace {
@@ -382,37 +383,43 @@ void cabin_background(unsigned eye,bool low) {
 
 // Original N1 distinguishes a camera-following cabin from a static world
 // surface. The composed field and the two-publication camera are unsuitable.
-void cabin_native_history(unsigned eye,bool low,unsigned kind) {
+void cabin_native_history(unsigned eye,bool low,unsigned kind,const xrfg::DlssMotionVectorPublication* policy=nullptr) {
+    // Days Gone reports an outward echo in opposite directions per eye.
+    // Mirror the actual stereo and motion fields, not just the eye index.
+    const int direction=policy&&eye==1?-1:1;
     Fixture f;std::vector<UINT> previous(width*height),current(width*height),zero(width*height,0);
     for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
         previous[y*width+x]=grey(45+(x*7+y*11)%80);current[y*width+x]=previous[y*width+x]^0x00100000u;
     }
     warm(f,previous);auto field=f.texture(DXGI_FORMAT_R16G16_FLOAT),original=f.texture(DXGI_FORMAT_R16G16_FLOAT);
-    const std::vector<UINT> native(width*height,(kind==1||kind==3)?0x5100u:kind==4?0x4900u:0x4800u); // 40 world; 8 stereo; 10 = stereo + 2 temporal
+    const UINT raw=(kind==1||kind==3)?0x5100u:kind==4?0x4900u:0x4800u; // 40 world; 8 stereo; 10 = stereo + 2 temporal
+    const std::vector<UINT> native(width*height,raw|(direction<0?0x8000u:0u));
     begin(f);f.upload(field.Get(),zero.data());f.upload(original.Get(),native.data());submit(f);
     save(f,eye,previous,kind==2?.8F:.2F,field.Get(),{101,11,3});
     if(kind==3) {
         begin(f);f.upload(f.color.Get(),previous.data());const std::vector<float> depths(width*height,.2F);f.upload(f.depth.Get(),depths.data());
         auto store=inputs(f,1-eye);store.source_motion=field.Get();store.adjacent_motion=original.Get();
-        store.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;store.conservative_cabin_history=true;
-        store.use_current_history_motion=true;store.current_history_data[62]=1;store.forward_stereo[12]=.125F;
+        store.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;
+        store.conservative_cabin_history=!policy||(policy->osr_native_cabin_motion&&policy->compose_native_object_history);
+        store.use_current_history_motion=true;store.current_history_data[62]=1;store.forward_stereo[12]=.125F*direction;
         xrfg::OsrFullHistory kept{};kept.publication=102;kept.motion_scale[0]=kept.motion_scale[1]=1;
         f.warp.record_history_update(f.list.Get(),store,kept);submit(f);f.warp.commit();
         const auto& saved=f.warp.history(1-eye);
-        check(saved.native_motion&&saved.previous_publication==101&&saved.native_stereo[12]==.125F,
+        check(saved.native_motion&&saved.previous_publication==101&&saved.native_stereo[12]==.125F*direction,
             "native snapshot retains one-publication camera, stereo reference and original motion");
     } else save(f,1-eye,previous,.2F,original.Get(),{102,22,4});
     auto in=inputs(f,eye);in.lower_quality=low;in.source_motion=field.Get();in.adjacent_motion=original.Get();
     in.adjacent_motion_state=D3D12_RESOURCE_STATE_COMMON;in.use_current_history_motion=true;
-    in.conservative_cabin_history=true;in.native_history_motion=true;in.current_history_data[62]=1;
-    in.locked_depth=.6F;in.forward_history[12]=.25F;in.backward_history[12]=-.25F;
-    in.forward_history_previous[12]=.625F;
+    in.conservative_cabin_history=!policy||(policy->osr_native_cabin_motion&&policy->compose_native_object_history);
+    in.native_history_motion=true;in.current_history_data[62]=1;
+    in.locked_depth=.6F;in.forward_history[12]=.25F*direction;in.backward_history[12]=-.25F*direction;
+    in.forward_history_previous[12]=.625F*direction;
     for(unsigned i=0;i<4;++i)in.native_history_stereo[i*5]=1;
-    in.native_history_stereo[12]=.125F;
+    in.native_history_stereo[12]=.125F*direction;
     const std::vector<float> depths(width*height,.2F);
     const auto output=render_with_inputs(f,in,current,depths);
     for(UINT y=16;y<height-16;++y)for(UINT x=48;x<80;++x) {
-        const UINT sample_x=kind==4?x+2:kind==0?x:x-16;
+        const UINT sample_x=kind==4?x+2*direction:kind==0?x:x-16*direction;
         check(output[y*width+x]==previous[y*width+sample_x],
             "original N1 holds attached cabin only; static world and mismatched native depth keep camera projection");
     }
@@ -420,7 +427,7 @@ void cabin_native_history(unsigned eye,bool low,unsigned kind) {
         in.adjacent_motion=nullptr;
         const auto unavailable=render_with_inputs(f,in,current,depths);
         for(UINT y=16;y<height-16;++y)for(UINT x=48;x<80;++x)
-            check(unavailable[y*width+x]==previous[y*width+x-16],
+            check(unavailable[y*width+x]==previous[y*width+x-16*direction],
                 "unavailable current N1 must not reinterpret stored native N1 as composed N2");
     }
     std::printf("native cabin eye=%u lower=%u kind=%u PASS\n",eye,low,kind);
@@ -767,6 +774,22 @@ int main(int argc,char** argv) {
             current_vectors(eye,low,.2F,false,false,false,reverse,false,1.F,true,false,true,
                 std::string_view(argv[1])=="daysgone-colour-phase-r12");
         std::puts("Days Gone unjittered N1: colour correspondence remains exact across independent depth-raster phases PASS");return 0;
+    }
+    if(argc==2&&(std::string_view(argv[1])=="daysgone-n1"||std::string_view(argv[1])=="daysgone-n1-r10-control")) {
+        xrfg::daysgone_camera::Packet packet;packet.frame=4291;packet.sequence=4290;
+        packet.camera.projection[0]=.776647568F;packet.camera.projection[5]=1.03553009F;
+        packet.camera.projection[11]=1;packet.camera.projection[14]=10;
+        packet.camera.translated_view[0]=packet.camera.translated_view[5]=packet.camera.translated_view[10]=packet.camera.translated_view[15]=1;
+        xrfg::native_ingress::streamline_camera::Camera camera;xrfg::daysgone_camera::Rejection why;
+        check(xrfg::daysgone_camera::decode_native(packet.camera,camera,why),"Days Gone native GPU camera");
+        xrfg::DlssMotionVectorPublication guide;xrfg::daysgone_camera::apply(guide,packet,camera,1,true);
+        if(std::string_view(argv[1])=="daysgone-n1-r10-control")guide.osr_native_cabin_motion=guide.compose_native_object_history=false;
+        check(guide.raw_motion_native_span_confirmed&&guide.raw_motion_native_span==1,"Days Gone original N1 producer");
+        for(unsigned eye:{0u,1u})for(bool low:{false,true})for(unsigned kind:{0u,1u,2u,3u,4u})
+            cabin_native_history(eye,low,kind,&guide);
+        xrfg::daysgone_camera::apply(guide,packet,camera,1,false);
+        check(!guide.osr_native_cabin_motion&&!guide.compose_native_object_history,"Days Gone legacy AFW control");
+        std::puts("Days Gone N1 policy: actual history GPU path, both eyes/qualities, attachment/static/depth/missing-guide refusals PASS");return 0;
     }
     if(argc==2&&std::string_view(argv[1])=="owned-gap") {
         for(unsigned eye:{0u,1u})for(bool low:{false,true})owned_gap_history(eye,low);

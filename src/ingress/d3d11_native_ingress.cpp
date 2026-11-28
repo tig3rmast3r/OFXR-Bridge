@@ -8,6 +8,8 @@
 #include "xrfg/luke_color_origin.hpp"
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/luke_render_identity.hpp"
+#include "xrfg/eye_frame_metadata.h"
+#include "xrfg/native_ingress/DaysGoneCameraSource.h"
 #include <nvsdk_ngx.h>
 #include <safetyhook.hpp>
 #include <windows.h>
@@ -83,6 +85,12 @@ struct Feature {
     std::uint64_t owner{};
     // Last outcome and stream shape written to the capture log: one line per change.
     std::uint64_t noted{};std::array<std::uint64_t,5> described{};
+    std::uint64_t daysgone_camera_sequence{};
+    bool daysgone_context_admitted{};
+    unsigned daysgone_source_status{~0U};
+    std::uint64_t daysgone_source_next_report{};
+    std::uint64_t daysgone_handoff_next_report{},daysgone_handoff_last{~0ULL};
+    std::uint64_t daysgone_origin_next_report{},daysgone_origin_last{~0ULL};
     // Declared before transport so GPU resources retire before registration.
     std::shared_ptr<D3D11GuideCaptureOwner> capture_owner;
     std::unique_ptr<D3D11GuideTransport> transport;
@@ -184,9 +192,9 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     std::shared_ptr<D3D11GuideCaptureOwner> capture_owner;
     auto owner_result=acquire_d3d11_guide_owner(game_device.Get(),&device,&queue,&generation,&capture_owner);
     if(owner_result==HRESULT_FROM_WIN32(ERROR_NOT_READY)&&luke_detected()) {
-        // Luke can render the game on a different D3D11 device than XR submission.
-        // Allocate capture on the observed native game device; never borrow an
-        // arbitrary same-adapter session's bridge or relax exact-owner lookup.
+        // Days Gone's game device is not Luke's XR submission device. Allocate
+        // capture on the observed native game device; never borrow an arbitrary
+        // same-adapter session's bridge or relax the exact-owner lookup.
         owner_result=create_d3d11_guide_capture_owner(game_device.Get(),capture_owner);
         if(SUCCEEDED(owner_result)) {
             owner_result=acquire_d3d11_guide_owner(game_device.Get(),&device,&queue,&generation);
@@ -197,7 +205,7 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     }
     if(FAILED(owner_result)){note(1,owner_result,reinterpret_cast<std::uintptr_t>(game_device.Get()));return raw();}
     observe_copies(ctx.Get());configure_queue(queue.Get());
-    if(f->owner!=generation){f->transport.reset();f->owner=generation;}
+    if(f->owner!=generation){f->transport.reset();f->owner=generation;f->daysgone_context_admitted=false;}
     f->capture_owner=std::move(capture_owner);
     if(!f->transport){f->transport=std::make_unique<D3D11GuideTransport>();
         if(const auto hr=f->transport->initialize(ctx.Get(),device.Get(),queue.Get());FAILED(hr)){f->transport.reset();note(2,hr);return raw();}}
@@ -244,7 +252,39 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     // As the Vulkan guides do: PureDark's Skyrim VR upscaler passes 0, which
     // the registry refuses with depth (1187 c=64), so Hybrid never got vectors.
     if(!(g.frame_time_delta_ms>0.0F)||g.frame_time_delta_ms>1000.0F)g.frame_time_delta_ms=16.6667F;
-    const bool exact=apply_camera(g,nullptr);if(luke_detected()&&!exact){note(8,S_OK);return fail();}
+    bool daysgone_packet{},exact{};
+    const bool daysgone=daysgone_camera_process();
+    if(daysgone&&luke_detected()) {
+        daysgone_camera_source::poll(true);
+        const auto source=daysgone_camera_source::statistics();
+        const auto source_now=GetTickCount64();
+        if(f->daysgone_source_status!=source.status||source_now>=f->daysgone_source_next_report) {
+            f->daysgone_source_status=source.status;
+            f->daysgone_source_next_report=source_now+1000;
+            capture_log("daysgone_native_source",source.status,source.queued,source.executed,source.taken);
+        }
+        daysgone_camera::Packet packet;
+        const daysgone_camera::Binding binding{reinterpret_cast<std::uintptr_t>(context),reinterpret_cast<std::uintptr_t>(handle),
+            reinterpret_cast<std::uintptr_t>(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Color)),
+            reinterpret_cast<std::uintptr_t>(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Output)),
+            reinterpret_cast<std::uintptr_t>(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_Depth)),
+            reinterpret_cast<std::uintptr_t>(get<ID3D11Resource*>(p,NVSDK_NGX_Parameter_MotionVectors)),
+            GetCurrentThreadId(),render_width,render_height,f->out_width,f->out_height,g.jitter_x,g.jitter_y,g.depth_inverted};
+        streamline_camera::Camera camera;daysgone_camera::Rejection reason=daysgone_camera::Rejection::clock;
+        exact=daysgone_camera_source::take(binding,f->daysgone_camera_sequence,packet,reason)&&
+            daysgone_camera::decode(packet,binding,f->daysgone_camera_sequence,camera,reason);
+        if(!exact) {
+            record_native_camera_rejected();note(8,S_OK,static_cast<std::uint32_t>(reason));return fail();
+        }
+        const bool first_camera=!f->daysgone_camera_sequence;
+        daysgone_packet=true;f->daysgone_camera_sequence=packet.sequence;
+        daysgone_camera::apply(g,packet,camera,reinterpret_cast<std::uintptr_t>(game_device.Get()),
+            embedded::afw_snapshot().desired.osr==2);
+        record_native_camera_accepted();
+        if(first_camera||packet.sequence%300==0)
+            capture_log("d3d11_daysgone_camera",packet.frame,packet.sequence,pack(render_width,render_height),packet.flags);
+    } else exact=apply_camera(g,nullptr);
+    if(luke_detected()&&!exact){note(8,S_OK);return fail();}
     // The stream's shape (V520's lines), once per change of size or rectangle.
     if(const std::array<std::uint64_t,5> shape{pack(g.output_width,g.output_height),pack(g.motion_width,g.motion_height),
             pack(g.output_x,g.output_y),pack(g.motion_x,g.motion_y),pack(g.depth_x,g.depth_y)};f->described!=shape) {
@@ -259,11 +299,20 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     nr_guides(t,true);
     if(color)neural_rendering::before_sr(f->identity,t.list(),&shadow,queue.Get());
     nr_guides(t,false);
-    if(FAILED(t.submit()))return raw();
-    if(color&&FAILED(t.copy_back(D3D11GuideTransport::color,color.Get())))return raw();
-    const auto result=raw();if(NVSDK_NGX_FAILED(result))return result;
-    if(FAILED(t.begin()))return result;
-    if(FAILED(t.copy(D3D11GuideTransport::output,output.Get()))){(void)t.submit();return result;}
+    if(const auto hr=t.submit();FAILED(hr)){if(daysgone_packet)note(12,hr);return raw();}
+    if(color)if(const auto hr=t.copy_back(D3D11GuideTransport::color,color.Get());FAILED(hr)){
+        if(daysgone_packet)note(13,hr);return raw();
+    }
+    unsigned render_probe_before{},render_probe_after{};
+    const auto selected_before=daysgone_packet?query_daysgone_camera_render(g.camera_position,&render_probe_before):std::optional<LukeRenderIdentity>{};
+    const auto result=raw();if(NVSDK_NGX_FAILED(result)){if(daysgone_packet)note(14,E_FAIL,static_cast<std::uint32_t>(result));return result;}
+    if(daysgone_packet)if(const auto identity=stable_real_vr_render_identity(selected_before,
+        query_daysgone_camera_render(g.camera_position,&render_probe_after)))
+        g.eye_render={identity->object,identity->render,OFXR_EYE_SOURCE_REAL_VR,true};
+    if(const auto hr=t.begin();FAILED(hr)){if(daysgone_packet)note(15,hr);return result;}
+    if(const auto hr=t.copy(D3D11GuideTransport::output,output.Get());FAILED(hr)){
+        if(daysgone_packet)note(16,hr);(void)t.submit();return result;
+    }
     g.output=t.resource(D3D11GuideTransport::output);g.producer_command_list=t.list();
     g.resource_state=g.depth_resource_state=g.output_resource_state=D3D12_RESOURCE_STATE_COMMON;
     g.direct_output_receipt=!g.protect_snapshot_lifetime;
@@ -276,12 +325,57 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     neural_rendering::after_sr(f->identity,t.list(),&shadow,queue.Get());
     barrier(t,D3D11GuideTransport::output,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
     nr_guides(t,false);
-    if(frame&&g.protect_snapshot_lifetime&&embedded::afw_snapshot().desired.mode!=0&&!nested_evaluation)
-        mark_luke_color_origin(t.list(),g.output,frame->color_origin_token,D3D12_RESOURCE_STATE_COMMON,
-            device.Get(),{g.output_x,g.output_y,g.output_width,g.output_height});
-    if(SUCCEEDED(t.submit())&&SUCCEEDED(t.copy_back(D3D11GuideTransport::output,output.Get()))&&frame) {
+    const auto reconstruction_mode=embedded::afw_snapshot().desired.mode;
+    const bool mark_origin=!daysgone_packet&&frame&&g.protect_snapshot_lifetime&&reconstruction_mode!=0&&!nested_evaluation;
+    LukeColorOriginRect origin_rectangle{};
+    const auto origin_result=mark_origin
+        ?mark_luke_color_origin(t.list(),g.output,frame->color_origin_token,D3D12_RESOURCE_STATE_COMMON,
+            device.Get(),{g.output_x,g.output_y,g.output_width,g.output_height},DXGI_FORMAT_UNKNOWN,&origin_rectangle)
+        :(daysgone_packet?S_FALSE:E_PENDING);
+    if(daysgone_packet) {
+        const unsigned flags=unsigned(g.protect_snapshot_lifetime)|(unsigned(reconstruction_mode!=0)<<1)|
+            (unsigned(nested_evaluation)<<2)|(unsigned(mark_origin)<<3)|(unsigned(g.eye_render.producer!=0)<<4);
+        const auto key=pack(flags,static_cast<std::uint32_t>(origin_result));
+        const auto now=GetTickCount64();
+        if(key!=f->daysgone_origin_last||now>=f->daysgone_origin_next_report) {
+            f->daysgone_origin_last=key;f->daysgone_origin_next_report=now+1000;
+            const auto token=frame?frame->color_origin_token:0;
+            capture_log("d3d11_daysgone_origin",static_cast<std::uint32_t>(origin_result),token,
+                pack(flags,static_cast<std::uint32_t>(reconstruction_mode)),pack(g.output_width,g.output_height));
+            capture_log("d3d11_daysgone_eye_render",g.eye_render.owner,g.eye_render.render,
+                g.source_clock_sequence,frame?frame->publication:0);
+            capture_log("d3d11_daysgone_render_probe",render_probe_before,render_probe_after);
+            capture_log("d3d11_daysgone_motion_contract",g.raw_motion_native_span,
+                unsigned(g.raw_motion_native_span_confirmed)|(unsigned(g.compose_native_object_history)<<1)|
+                    (unsigned(g.osr_native_cabin_motion)<<2)|(unsigned(g.raw_motion_color_aligned)<<3),
+                pack(g.motion_x,g.motion_y),frame?frame->publication:0);
+            if(mark_origin&&SUCCEEDED(origin_result))capture_log("d3d11_daysgone_origin_rect",token,
+                pack(origin_rectangle.x,origin_rectangle.y),pack(origin_rectangle.width,origin_rectangle.height));
+        }
+    }
+    const auto submitted=t.submit();
+    const auto copied_back=SUCCEEDED(submitted)?t.copy_back(D3D11GuideTransport::output,output.Get()):submitted;
+    std::uint32_t handoff=FAILED(submitted)?1:FAILED(copied_back)?2:!frame?3:0;
+    const auto handoff_result=FAILED(submitted)?submitted:copied_back;
+    if(SUCCEEDED(submitted)&&SUCCEEDED(copied_back)&&frame) {
         set_d3d11_guide_receipt(output.Get(),{generation,g.stream,frame->publication,g.output_width,g.output_height});
-        (void)claim_d3d11_guides(game_device.Get(),generation);
+        if(!claim_d3d11_guides(game_device.Get(),generation))handoff=4;
+        if(daysgone_packet&&!f->daysgone_context_admitted) {
+            std::uint32_t rejection{};
+            if(admit_d3d11_luke_camera_context(game_device.Get(),generation,frame,&rejection)) {
+                f->daysgone_context_admitted=true;
+                capture_log("d3d11_daysgone_context",generation,frame->publication,
+                    reinterpret_cast<std::uintptr_t>(device.Get()),reinterpret_cast<std::uintptr_t>(queue.Get()));
+            }else handoff=1000+rejection;
+        }
+    }
+    if(daysgone_packet) {
+        const auto key=pack(handoff,static_cast<std::uint32_t>(handoff_result));
+        const auto now=GetTickCount64();
+        if(key!=f->daysgone_handoff_last||now>=f->daysgone_handoff_next_report) {
+            f->daysgone_handoff_last=key;f->daysgone_handoff_next_report=now+1000;
+            capture_log("d3d11_daysgone_handoff",handoff,static_cast<std::uint32_t>(handoff_result),generation,frame?frame->publication:0);
+        }
     }
     return result;
 }
@@ -309,7 +403,15 @@ template<unsigned Slot>void install(HMODULE module) {
     (void)m.create.enable();(void)m.evaluate.enable();(void)m.release.enable();
 }
 }
+bool daysgone_camera_process() noexcept {
+    static const bool selected=[] {
+        wchar_t path[32768]{};GetModuleFileNameW(nullptr,path,32768);
+        const auto* base=wcsrchr(path,L'\\');return _wcsicmp(base?base+1:path,L"DaysGone.exe")==0;
+    }();
+    return selected;
+}
 void poll_d3d11_ngx() noexcept {try {
+    daysgone_camera_source::poll(luke_detected());
     install<0>(GetModuleHandleW(L"nvngx_dlss.dll"));install<1>(GetModuleHandleW(L"nvngx_dlssd.dll"));
     install<2>(GetModuleHandleW(L"_nvngx.dll"));
 }catch(...) {}}

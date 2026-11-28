@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <optional>
+#include <array>
 
 namespace xrfg {
 struct LukeRenderIdentity {
@@ -11,6 +12,10 @@ struct LukeRenderIdentity {
 std::optional<LukeRenderIdentity> query_luke_render_identity() noexcept;
 // Selected render in the active REAL VR owner's camera ring, when verified.
 std::optional<LukeRenderIdentity> query_real_vr_selected_render() noexcept;
+// Days Gone's native ring matcher identifies a camera before "selected" is
+// populated later in the render pipeline. Exact XYZ, guarded layout, no writes.
+std::optional<LukeRenderIdentity> query_daysgone_camera_render(
+    const std::array<float,3>& origin,unsigned* rejection=nullptr) noexcept;
 // Both observations bracket the same native evaluation. A changed/missing
 // producer is not an identity for that output, and UE's frame counter is never
 // substituted for REAL VR's selected render.

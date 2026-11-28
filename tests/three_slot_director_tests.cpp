@@ -1,6 +1,8 @@
 // Compile the actual layer implementation into this test: no test-only switch
 // or alternate director implementation is added to the distributed DLL.
 #include "../src/layer/openxr_layer.cpp"
+#include "xrfg/daysgone_camera.hpp"
+#include "xrfg/native_ingress/DaysGoneRenderBinding.h"
 #include <iostream>
 #include <stdexcept>
 #include <fstream>
@@ -2328,6 +2330,8 @@ void refused_frame_recovery_test() {
 #include "native_prediction_clock_tests.inc"
 #include "luke_route_prediction_clock_tests.inc"
 #include "native_dx11_guide_session_tests.inc"
+#include "daysgone_capture_context_tests.inc"
+#include "daysgone_eye_metadata_tests.inc"
 #include "fsr_release_identity_tests.inc"
 #include "interface_cycle_layer_tests.inc"
 #include "elliott_controller_layer_tests.inc"
@@ -2946,6 +2950,9 @@ xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
         if (argc > 1) {
             const auto mode = std::string_view(argv[1]);
             if (mode == "native-dx11-guides") { native_dx11_guide_session_test(); return 0; }
+            if (mode == "daysgone-capture-context") { daysgone_capture_context_test(); return 0; }
+            if (mode == "daysgone-capture-color") { daysgone_capture_color_test(); return 0; }
+            if (mode == "daysgone-eye-metadata") { daysgone_eye_metadata_test(); return 0; }
             if (mode == "native-prediction-clock") { native_prediction_clock_test(); return 0; }
             if (mode == "luke-route-prediction-clock") { luke_route_prediction_clock_test(); return 0; }
             if (mode == "route-handoff") { pipelined_route_handoff_test(); return 0; }

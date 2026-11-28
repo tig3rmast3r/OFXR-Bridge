@@ -30,6 +30,9 @@ std::uint64_t real_vr_bind_mark() noexcept;
 void register_pending_real_vr_camera(std::uint64_t stream, std::uint64_t publication) noexcept;
 void poll_streamline() noexcept;
 void poll_d3d11_ngx() noexcept;
+// The integrated Days Gone camera route uses exact REAL VR eye metadata;
+// absence of a matching publication keeps reconstruction in bypass.
+bool daysgone_camera_process() noexcept;
 // One line in ofxr-ngx-capture-pid*.log, written only while diagnostics are on.
 void capture_log(const char* message, std::uint64_t a = 0, std::uint64_t b = 0,
     std::uint64_t c = 0, std::uint64_t d = 0) noexcept;
@@ -44,6 +47,7 @@ struct Statistics {
 Statistics statistics() noexcept;
 // Native API camera sources share the overlay's accepted-camera accounting.
 void record_native_camera_accepted() noexcept;
+void record_native_camera_rejected() noexcept;
 // Read-only F9 snapshot; never establishes a producer or changes hook policy.
 struct LukeContextDiagnostics {
     bool admitted{}, execute_hook{}, create_queue_hook{};

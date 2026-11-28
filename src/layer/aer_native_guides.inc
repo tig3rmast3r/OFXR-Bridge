@@ -194,7 +194,7 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
             }
             if (item.guides || item.epoch_rejected || item.attempted) continue;
             resolve_metadata(eye, EyeMetadataLookup::release_identity_only);
-            if (!metadata[eye]) read_mask |= 1U << eye;
+            if (!metadata[eye]&&!xrfg::native_ingress::daysgone_camera_process()) read_mask |= 1U << eye;
         }
         if(read_mask) {
             std::array<std::uint32_t,2> tokens{};

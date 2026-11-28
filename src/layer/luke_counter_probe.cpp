@@ -2,6 +2,7 @@
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/luke_gta_headlock.hpp"
 #include "xrfg/native_ingress/RealVrEyeLayout.h"
+#include "xrfg/native_ingress/DaysGoneRenderBinding.h"
 #include <windows.h>
 #include <algorithm>
 #include <array>
@@ -160,6 +161,26 @@ std::optional<LukeRenderIdentity> query_real_vr_selected_render() noexcept {
 #else
     return {};
 #endif
+}
+std::optional<LukeRenderIdentity> query_daysgone_camera_render(
+    const std::array<float,3>& origin,unsigned* rejection) noexcept {
+#if defined(_WIN64)
+    struct Binding {
+        std::uintptr_t base{};
+        std::optional<native_ingress::daysgone_render_binding::Layout> layout;
+        Binding() {
+            const auto module=game_luke_module();base=reinterpret_cast<std::uintptr_t>(module);
+            if(module)if(const auto eye=eye_layout::bind_module(base))
+                layout=native_ingress::daysgone_render_binding::discover(base,read_self,&*eye);
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,layout?1:0,1373,
+                layout?layout->matcher:0,layout?layout->writer:0);
+        }
+    };
+    static const Binding binding;
+    if(binding.layout&&module_still_current(binding.base))
+        return native_ingress::daysgone_render_binding::read_identity(binding.base,*binding.layout,origin,read_self,rejection);
+#endif
+    if(rejection)*rejection=1;return {};
 }
 } // namespace xrfg
 

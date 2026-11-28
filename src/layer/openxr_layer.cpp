@@ -3213,6 +3213,11 @@ std::shared_ptr<const xrfg::DlssMotionVectorFrame> resolve_eye_metadata(
             52,handle_value(state.handle),capture.serial,guide->publication);
         return guide;
     }
+    if(xrfg::native_ingress::daysgone_camera_process()) {
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::eye_frame_metadata,
+            53,handle_value(state.handle),capture.serial,native_render.render);
+        return {};
+    }
     if(!release_token&&lookup==EyeMetadataLookup::release_identity_only)return {};
     if (token) {
         auto guide = xrfg::resolve_luke_guide_token(token, queue, device);
@@ -17470,6 +17475,7 @@ struct LukeOriginHistoryProbe {
         std::uint32_t logical_eye{std::numeric_limits<std::uint32_t>::max()};
     };
     std::array<Entry, 2> entries{};
+    const bool metadata_only=xrfg::native_ingress::daysgone_camera_process();
     static const bool gta=[] {wchar_t p[MAX_PATH]{};GetModuleFileNameW(nullptr,p,MAX_PATH);
         const auto* n=wcsrchr(p,L'\\');return !_wcsicmp(n?n+1:p,L"GTA5_Enhanced.exe");}();
     const auto flat_quad=[&]() -> bool {
@@ -17598,7 +17604,7 @@ struct LukeOriginHistoryProbe {
         // Probe only while this accepted stream has a newer native epoch.
         // A positive CRC naming native serial1..3 keeps the already published
         // stereo pair; never synthesize from old-epoch depth or motion vectors.
-        if(!session->luke_warmup_probe_poisoned) {
+        if(!metadata_only&&!session->luke_warmup_probe_poisoned) {
             std::shared_ptr<const HeldAfwPair> pair;
             {std::scoped_lock lock(session->luke_guide_mutex);pair=session->luke_afw_last_pair;}
             const bool reset=pair&&(xrfg::luke_native_stream_reset(pair->native_domains[0].stream,pair->native_domains[0].epoch,session->d3d12_device.Get()) ||
@@ -17718,7 +17724,7 @@ struct LukeOriginHistoryProbe {
         }
         if (!rdr2) {
             resolve_metadata(EyeMetadataLookup::release_identity_only);
-            markers_attempted = !metadata[0] || !metadata[1];
+            markers_attempted = !metadata_only&&(!metadata[0] || !metadata[1]);
         }
         if (!rdr2 && markers_attempted) {
             const auto read_origins = [&] {
@@ -17803,7 +17809,7 @@ struct LukeOriginHistoryProbe {
             }
         }
         auto selected=xrfg::select_luke_afw_color_source(publications,last_evaluated);
-        if(!selected&&released_eye&&*released_eye<2) {
+        if(!metadata_only&&!selected&&released_eye&&*released_eye<2) {
             const auto missing=HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
             bool ambiguous=false;std::optional<std::size_t> current_index;
             for(std::size_t i=0;i<entries.size();++i) {
