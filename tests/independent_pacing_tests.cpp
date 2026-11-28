@@ -69,7 +69,54 @@ static void osr_pair_phase_tests() {
   std::printf("OSR stereo pair: recovered %.3fms with zero pending at source appointments, stable native slots\n",shift/1e6);
  }
 }
+static void physical_clock_lock_tests() {
+ for(const std::int64_t p:{8'333'333LL,11'111'111LL,13'888'889LL}) {
+  const auto anchor_lead=std::min<std::int64_t>(2'000'000,p/4);
+  const auto max_step=std::min<std::int64_t>(150'000,p/64);
+  constexpr std::int64_t base=10'000'000'000LL;
+  // 1. Bad post-VSync seeds (+0.54ms like pid48192, +1.1ms like pid34392, +5.2ms menu)
+  // must smoothly slew into vsync - anchor_lead without violating P/2 + lead.
+  for(const std::int64_t seed_offset:{540'000LL,1'100'000LL,5'200'000LL,-3'500'000LL}) {
+   xrfg::IndependentDeliveryClock grid;
+   const auto seed=base+seed_offset;
+   grid.claim(seed,p);grid.finish(seed);
+   std::int64_t prev=seed;
+   for(int i=1;i<=80;++i) {
+    const auto vsync=base+i*p;
+    const auto step=grid.sync_physical_clock(vsync,p);
+    check(step>=-max_step && step<=max_step);
+    const auto t=grid.claim(prev+1,p);
+    check(t-prev>=p/2+grid.lead());
+    grid.finish(t);
+    prev=t;
+   }
+   auto err=(grid.target()-(base-anchor_lead))%p;
+   if(err>p/2)err-=p;
+   if(err<=-p/2)err+=p;
+   check(err>=-100'000 && err<=100'000);
+  }
+  // 2. Crystal drift (-232ns/frame = -20.86us/s as measured in pid48192) over
+  // 10,000 frames (~111s at 90Hz) must remain phase-locked and never cross VSync.
+  xrfg::IndependentDeliveryClock drifted;
+  const std::int64_t real_p=p-232;
+  drifted.claim(base-anchor_lead,p);drifted.finish(base-anchor_lead);
+  std::int64_t latest_vsync=base;
+  std::int64_t max_abs_err=0;
+  for(int i=1;i<=10'000;++i) {
+   const auto true_vsync=base+i*real_p;
+   if(i%22==0)latest_vsync=true_vsync; // 250ms cached_vsync_anchor poll
+   drifted.sync_physical_clock(latest_vsync,p);
+   const auto t=drifted.claim(true_vsync-anchor_lead-1'000'000,p);
+   const auto err=t-(true_vsync-anchor_lead);
+   max_abs_err=std::max(max_abs_err,err>=0?err:-err);
+   drifted.finish(t);
+  }
+  check(max_abs_err<=200'000);
+ }
+ std::puts("PHYSICAL_CLOCK_LOCK post-VSync recovery and 10k-frame crystal drift lock PASS");
+}
 int main(){
+ physical_clock_lock_tests();
  spacing_replay_tests();
  source_phase_tests();
  aer_copy_overlap_tests();

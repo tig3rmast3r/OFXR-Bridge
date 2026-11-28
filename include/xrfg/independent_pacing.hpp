@@ -374,6 +374,31 @@ public:
         return spaced>=cutoff && original<cutoff?original:spaced;
     }
     bool delivered() const noexcept {return delivered_;}
+    // Keep the delivery grid phase-locked to the headset's physical VSync
+    // anchor when available (e.g. SteamVR). Without this, crystal drift
+    // (~20us/s) or a post-VSync seed places EndFrame right after VSync
+    // (wgp/nfr ~ -10.5ms), where SteamVR's D3D11 compositor holds swapchain
+    // images until compositor_render_start (~17ms) and triggers perpetual
+    // deadline expirations. Slew smoothly into the safe pre-VSync window.
+    std::int64_t sync_physical_clock(std::int64_t vsync_at,std::int64_t period) noexcept {
+        if(!delivered_ || !target_ || vsync_at<=0 || period<2'000'000 || period>50'000'000)return 0;
+        period=std::clamp<std::int64_t>(period,2'000'000,50'000'000);
+        const auto anchor_lead=std::min<std::int64_t>(2'000'000,period/4);
+        const auto anchor=vsync_at-anchor_lead;
+        auto rem=(target_-anchor)%period;
+        if(rem>period/2)rem-=period;
+        else if(rem<=-period/2)rem+=period;
+        constexpr std::int64_t deadband=100'000;
+        if(rem>=-deadband && rem<=deadband)return 0;
+        const auto max_step=std::min<std::int64_t>(150'000,period/64);
+        const auto step=std::clamp(-rem,-max_step,max_step);
+        if(step<0 && last_handoff_) {
+            const auto floor=last_handoff_+period/2+lead();
+            if(target_+step<floor)return 0;
+        }
+        target_+=step;
+        return step;
+    }
     void finish(std::int64_t handoff=0,bool pair_head=false,bool protect_spacing=false) noexcept {
         // The first real handoff seeds phase once, including after loading.
         if(handoff) {

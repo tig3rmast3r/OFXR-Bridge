@@ -1302,6 +1302,11 @@ struct PrivateOpenXrRuntime::Impl {
                 // Native timing runs concurrently with generation/preparation.
                 // A Wait grants a delivery window. Prepared images wake this
                 // consumer immediately within it; Wait return is not a cutoff.
+                if(options.physical_clock)if(const auto phys=options.physical_clock()) {
+                    const auto step=cadence.sync_physical_clock(phys->at,
+                        phys->period?phys->period:last_period);
+                    if(step && tracing())options.trace(107,0,step,cadence.target());
+                }
                 cadence.claim(clock_ns(),last_period);
                 // Release preparation keeps its original boundary. Apply the
                 // optical spacing floor only after the native window is known.
