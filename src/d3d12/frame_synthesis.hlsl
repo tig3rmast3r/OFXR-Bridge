@@ -824,11 +824,20 @@ float2 game_motion_for_pixel(float2 pixel, uint slice, uint view_index) {
     // on the bar and the depth search refuses it. The nearest vector instead;
     // the flow covers what that costs under rotation.
     if (hybrid_layout) {
+#ifdef XRFG_HYBRID_SINGLE_MOTION_LOAD
+        // Select the same nearest texel before reading it. Selecting between
+        // four texture loads leaves extra load/selection instructions in the
+        // compiled Hybrid solve, repeated for every endpoint iteration.
+        int2 nearest = int2(fraction.x < 0.5 ? top_left.x : bottom_right.x,
+                            fraction.y < 0.5 ? top_left.y : bottom_right.y);
+        raw = GameMotionVectors.Load(int4(nearest, 0, 0));
+#else
         raw = fraction.y < 0.5
             ? (fraction.x < 0.5 ? GameMotionVectors.Load(int4(top_left, 0, 0))
                                 : GameMotionVectors.Load(int4(bottom_right.x, top_left.y, 0, 0)))
             : (fraction.x < 0.5 ? GameMotionVectors.Load(int4(top_left.x, bottom_right.y, 0, 0))
                                 : GameMotionVectors.Load(int4(bottom_right, 0, 0)));
+#endif
     }
     raw=hybrid_layout && !all(isfinite(raw))?float2(0,0):raw;
     float2 result = raw * GameMotionScale + GameMotionJitterDelta;
