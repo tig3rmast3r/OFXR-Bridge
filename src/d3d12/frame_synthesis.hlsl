@@ -851,6 +851,31 @@ float2 game_motion_for_pixel(float2 pixel, uint slice, uint view_index) {
     return magnitude > 512.0 ? result * (512.0 / magnitude) : result;
 }
 
+#ifdef XRFG_HYBRID_SINGLE_MOTION_LOAD
+// Single-load Hybrid motion fetch that also reports whether the raw texel was
+// finite, avoiding a second identical GameMotionVectors.Load() per solve step.
+float2 game_motion_for_pixel_checked(float2 pixel, uint slice, uint view_index, out bool valid) {
+    float4 output_rect = game_motion_output_rect();
+    float2 uv = (pixel - output_rect.xy + 0.5) /
+        max(output_rect.zw, float2(1.0, 1.0));
+    float2 coordinate = GameMotionRect.xy + uv * GameMotionRect.zw - 0.5;
+    float2 minimum = GameMotionRect.xy;
+    float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
+    float2 bounded = clamp(coordinate, minimum, maximum);
+    int2 top_left = int2(floor(bounded));
+    int2 bottom_right = min(top_left + int2(1, 1), int2(maximum));
+    float2 fraction = bounded - float2(top_left);
+    int2 nearest = int2(fraction.x < 0.5 ? top_left.x : bottom_right.x,
+                        fraction.y < 0.5 ? top_left.y : bottom_right.y);
+    float2 raw = GameMotionVectors.Load(int4(nearest, 0, 0));
+    valid = all(isfinite(raw));
+    raw = valid ? raw : float2(0.0, 0.0);
+    float2 result = raw * GameMotionScale + GameMotionJitterDelta;
+    float magnitude = length(result);
+    return magnitude > 512.0 ? result * (512.0 / magnitude) : result;
+}
+#endif
+
 // The game's vector at the guide texel under pixel, unfiltered: enough to tell
 // surfaces apart.
 float2 game_motion_texel(float2 pixel) {
@@ -1264,7 +1289,7 @@ bool game_motion_static_overlay(float2 pixel, float4 current) {
     int2 texel = int2(pixel + 0.5);
     bool overlay = rgb_error(PreviousFrame.Load(int4(texel, int(Slice), 0)), current) <= 1.0 / 255.0;
     MappedCoordinate moved = (MappedCoordinate)0;
-    if (overlay) {
+    [branch] if (overlay) {
         // Content its vector holds still is explained without a sample, and in
         // a still scene that is nearly every pixel.
         moved = map_source_to_target(pixel + game_motion_texel(pixel), PreviousMappings[ViewIndex]);
@@ -1274,7 +1299,7 @@ bool game_motion_static_overlay(float2 pixel, float4 current) {
     int2 offsets[4] = {int2(2, 0), int2(-2, 0), int2(0, 2), int2(0, -2)};
     float4 around[4] = {current, current, current, current};
     bool flat = true;
-    if (overlay) {
+    [branch] if (overlay) {
         int2 limit = int2(int(Width) - 1, int(Height) - 1);
         [unroll] for (uint i = 0; i < 4; ++i) {
             int2 neighbour = clamp(texel + offsets[i], int2(0, 0), limit);
@@ -1284,7 +1309,7 @@ bool game_motion_static_overlay(float2 pixel, float4 current) {
             flat = flat && rgb_error(around[i], current) <= 1.0 / 255.0;
         }
     }
-    if (overlay) {
+    [branch] if (overlay) {
         // Somewhere in it not what the vector predicts. A repeating pattern
         // can match its own shift at one pixel; a flat patch cannot tell, and
         // its centre has already been asked.
@@ -1500,13 +1525,27 @@ float4 synthesize_midpoint(
                     // Keep the step count odd: see the covered-background
                     // case below.
                     [unroll] for (uint iteration = 0; iteration < 3; ++iteration) {
-                        if(hybrid_layout && hybrid_motion_invalid_at(current_endpoint)) {
-                            endpoints_valid=false;break;
+#ifdef XRFG_HYBRID_SINGLE_MOTION_LOAD
+                        if (hybrid_layout) {
+                            bool mv_valid = true;
+                            float2 mv = game_motion_for_pixel_checked(
+                                current_endpoint, Slice, ViewIndex, mv_valid);
+                            if (!mv_valid) {
+                                endpoints_valid = false;
+                                break;
+                            }
+                            raw_backward = repeated_capture_flag() != 0 ? float2(0.0, 0.0) : mv;
+                        } else
+#endif
+                        {
+                            if(hybrid_layout && hybrid_motion_invalid_at(current_endpoint)) {
+                                endpoints_valid=false;break;
+                            }
+                            raw_backward = repeated_capture_flag() != 0
+                                ? float2(0.0, 0.0)
+                                : game_motion_for_pixel(
+                                    current_endpoint, Slice, ViewIndex);
                         }
-                        raw_backward = repeated_capture_flag() != 0
-                            ? float2(0.0, 0.0)
-                            : game_motion_for_pixel(
-                                current_endpoint, Slice, ViewIndex);
                         previous_endpoint = map_source_to_target(
                             current_endpoint + raw_backward,
                             PreviousMappings[ViewIndex]);
@@ -1519,12 +1558,28 @@ float4 synthesize_midpoint(
                         current_endpoint =
                             pixel - (1.0 - synthesis_fraction()) * target_displacement;
                     }
-                    if(endpoints_valid && hybrid_layout && hybrid_motion_invalid_at(current_endpoint))endpoints_valid=false;
+#ifdef XRFG_HYBRID_SINGLE_MOTION_LOAD
+                    if (endpoints_valid && hybrid_layout) {
+                        bool mv_valid = true;
+                        float2 mv = game_motion_for_pixel_checked(
+                            current_endpoint, Slice, ViewIndex, mv_valid);
+                        if (!mv_valid) {
+                            endpoints_valid = false;
+                        } else {
+                            raw_backward = repeated_capture_flag() != 0 ? float2(0.0, 0.0) : mv;
+                        }
+                    } else
+#endif
+                    {
+                        if(endpoints_valid && hybrid_layout && hybrid_motion_invalid_at(current_endpoint))endpoints_valid=false;
+                        if (endpoints_valid) {
+                            raw_backward = repeated_capture_flag() != 0
+                                ? float2(0.0, 0.0)
+                                : game_motion_for_pixel(
+                                    current_endpoint, Slice, ViewIndex);
+                        }
+                    }
                     if (endpoints_valid) {
-                        raw_backward = repeated_capture_flag() != 0
-                            ? float2(0.0, 0.0)
-                            : game_motion_for_pixel(
-                                current_endpoint, Slice, ViewIndex);
                         previous_endpoint = map_source_to_target(
                             current_endpoint + raw_backward,
                             PreviousMappings[ViewIndex]);
@@ -1614,10 +1669,19 @@ float4 synthesize_midpoint(
                     // Game motion's disagreements are mostly resampling at sharp
                     // detail, which a gentle slope keeps on the warp.
                     float confidence = saturate(1.0 - disagreement * 3.0);
-                    float4 stable_previous =
-                        sample_previous_target(pixel, Slice, ViewIndex).color;
-                    float4 stable_midpoint = lerp(
-                        stable_previous, current_fallback.color, synthesis_fraction());
+                    // Only fetch stable_previous (6K sample + camera mapping)
+                    // when the flow branch needs it or the game-motion vector
+                    // is near-zero so camera_explains can actually trigger.
+                    float4 stable_previous = current_fallback.color;
+                    float4 stable_midpoint = current_fallback.color;
+                    float stable_error = 1.0;
+                    [branch] if (!use_game_motion_pipeline || length(raw_backward) <= 0.1) {
+                        stable_previous =
+                            sample_previous_target(pixel, Slice, ViewIndex).color;
+                        stable_midpoint = lerp(
+                            stable_previous, current_fallback.color, synthesis_fraction());
+                        stable_error = rgb_error(stable_previous, current_fallback.color);
+                    }
                     // The hybrid compares its two branches' samples blurred a
                     // little: sharp detail resampled at a fraction of a pixel
                     // disagrees even where the motion is exact.
@@ -1642,7 +1706,7 @@ float4 synthesize_midpoint(
                         // the forward flow's consistency - which all leaned on
                         // the camera-only blend where the game had moved.
                         confidence = saturate(1.0 +
-                            (rgb_error(stable_previous, current_fallback.color) - disagreement) * 8.0);
+                            (stable_error - disagreement) * 8.0);
                     }
                     if (use_nvidia_bidirectional && repeated_capture_flag() == 0) {
                         // The bidirectional option still keeps the flow only
@@ -1668,7 +1732,7 @@ float4 synthesize_midpoint(
                     if (!use_game_motion_pipeline) {
                         output_color = saturate(lerp(stable_midpoint, flow_midpoint, confidence));
                         last_disagreement = lerp(
-                            rgb_error(stable_previous, current_fallback.color),
+                            stable_error,
                             compared, confidence);
                     } else {
                         // OFXR-BRIDGE's XR mapping can explain a head turn
@@ -1677,7 +1741,7 @@ float4 synthesize_midpoint(
                         // exact camera result. Moving guides still own the
                         // occlusion and fade solve below.
                         bool camera_explains = length(raw_backward) <= 0.1 &&
-                            rgb_error(stable_previous, current_fallback.color) +
+                            stable_error +
                                 1.0 / 255.0 < disagreement;
                         // The game's vectors are trusted: away from a motion
                         // edge, warped samples that disagree are one surface
@@ -1687,7 +1751,7 @@ float4 synthesize_midpoint(
 #ifdef XRFG_HYBRID_EXPLAINED_SCORING
                         if (camera_explains) {
                             last_disagreement = min(last_disagreement,
-                                rgb_error(stable_previous, current_fallback.color));
+                                stable_error);
                         }
 #endif
                         // Background a leading edge is covering shows only in
