@@ -1028,6 +1028,7 @@ struct SessionState {
     std::mutex video_memory_mutex;
     Microsoft::WRL::ComPtr<IDXGIAdapter3> video_memory_adapter;
     bool video_memory_unavailable{};
+    std::atomic<std::uint64_t> dedicated_vram_bytes{};
     xrfg::GpuUsageSampler gpu_usage;
     std::chrono::steady_clock::time_point video_memory_poll_at{};
     std::chrono::steady_clock::time_point video_memory_first_poll{};
@@ -2131,15 +2132,59 @@ unsigned rife_frames(const SessionState& state) noexcept {
     const bool private_triple=state.private_runtime && extra_output_capacity(state);
     return reduced_native_outputs(state) && !private_triple ? 1U : 2U;
 }
-[[nodiscard]] unsigned source_synthetic_rings(const SessionState& state,bool panel) noexcept {
-    // Private RIFE Normal keeps the next complete batch independent of S1/S2/S3
-    // still being copied by the endpoint. Fast retains the minimal allocation.
+[[nodiscard]] std::uint64_t swapchain_bytes_per_pixel(std::int64_t format) noexcept {
+    switch (static_cast<DXGI_FORMAT>(format)) {
+    case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+    case DXGI_FORMAT_R32G32B32A32_FLOAT:
+    case DXGI_FORMAT_R32G32B32A32_UINT:
+    case DXGI_FORMAT_R32G32B32A32_SINT:
+        return 16;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_UNORM:
+    case DXGI_FORMAT_R16G16B16A16_UINT:
+    case DXGI_FORMAT_R16G16B16A16_SNORM:
+    case DXGI_FORMAT_R16G16B16A16_SINT:
+    case DXGI_FORMAT_R32G32_TYPELESS:
+    case DXGI_FORMAT_R32G32_FLOAT:
+    case DXGI_FORMAT_R32G32_UINT:
+    case DXGI_FORMAT_R32G32_SINT:
+        return 8;
+    default:
+        return 4;
+    }
+}
+[[nodiscard]] bool independent_optical_second_bank_fits(
+    const SessionState& state,const XrSwapchainCreateInfo* info) noexcept {
+    const auto vram=state.dedicated_vram_bytes.load(std::memory_order_acquire);
+    if(vram==0 || info==nullptr || info->width==0 || info->height==0)return true;
+    const auto extra_rings=rife_frames(state)>2 ? static_cast<std::uint64_t>(rife_frames(state)-1) : 0ULL;
+    if(extra_rings==0)return true;
+    const auto slices=std::max<std::uint64_t>(1,info->arraySize);
+    const std::uint64_t eyes=(slices==1 && static_cast<std::uint64_t>(info->width)*2 < static_cast<std::uint64_t>(info->height)*3) ? 2ULL : 1ULL;
+    const std::uint64_t bank2_bytes=extra_rings*info->width*info->height*slices*
+        swapchain_bytes_per_pixel(info->format)*eyes;
+    // Keep the second synthetic bank within 6.25% (1/16) of static hardware VRAM
+    // so normal VR resolutions double-bank everywhere while oversized 3X/4X
+    // allocations stay on a single bank on smaller-VRAM GPUs without runtime churn.
+    return bank2_bytes<=vram/16;
+}
+[[nodiscard]] unsigned source_synthetic_rings(const SessionState& state,bool panel,
+    const XrSwapchainCreateInfo* info=nullptr) noexcept {
+    // Private RIFE Normal and Independent D3D12 optical/Hybrid Normal keep the
+    // next complete batch independent of S1/S2/S3 still being copied by the
+    // endpoint. Fast retains the minimal allocation.
     // Distinct handles preserve the exact image behind each queued descriptor.
     const bool native_rife_bank=state.private_runtime && state.dispatch->steamvr_runtime &&
         state.graphics_binding==SessionGraphicsBinding::d3d12 && !state.luke_afw_enabled &&
         !state.d3d11_bridge && !state.vulkan_bridge && state.nvidia_options.rife_model>=0 &&
         !reduced_native_outputs(state);
-    return (panel || native_rife_bank || native_optical_batch_overlap(state)) && ordered_multiframe(state) && rife_frames(state)>2
+    const bool independent_optical_bank=state.independent_pacing && state.private_runtime &&
+        state.graphics_binding==SessionGraphicsBinding::d3d12 && !state.luke_afw_enabled &&
+        !state.d3d11_bridge && !state.vulkan_bridge && !state.nvidia_options.ofr &&
+        state.nvidia_options.rife_model<0 && !reduced_native_outputs(state) &&
+        independent_optical_second_bank_fits(state,info);
+    return (panel || native_rife_bank || independent_optical_bank || native_optical_batch_overlap(state)) && ordered_multiframe(state) && rife_frames(state)>2
         ? 2U*(rife_frames(state)-1) : native_synthetic_rings(state);
 }
 [[nodiscard]] unsigned native_current_rings(const SessionState& state) noexcept {
@@ -2732,6 +2777,37 @@ enum class VideoMemoryStage : std::int64_t {
     aer_double_begin = 12,
     aer_double_ready = 13,
 };
+
+void ensure_dedicated_vram_bytes(SessionState& session) noexcept {
+    if (session.dedicated_vram_bytes.load(std::memory_order_acquire) != 0 || !session.d3d12_device) {
+        return;
+    }
+    try {
+        Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter;
+        {
+            std::scoped_lock lock(session.video_memory_mutex);
+            if (session.dedicated_vram_bytes.load(std::memory_order_acquire) != 0) {
+                return;
+            }
+            if (!session.video_memory_adapter && !session.video_memory_unavailable) {
+                Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+                if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+                    static_cast<void>(factory->EnumAdapterByLuid(
+                        session.d3d12_device->GetAdapterLuid(),
+                        IID_PPV_ARGS(&session.video_memory_adapter)));
+                }
+            }
+            adapter = session.video_memory_adapter;
+        }
+        if (!adapter) return;
+        DXGI_ADAPTER_DESC description{};
+        if (SUCCEEDED(adapter->GetDesc(&description)) && description.DedicatedVideoMemory > 0) {
+            session.dedicated_vram_bytes.store(
+                static_cast<std::uint64_t>(description.DedicatedVideoMemory),
+                std::memory_order_release);
+        }
+    } catch (...) {}
+}
 
 void log_video_memory(
     SessionState& session,
@@ -4373,8 +4449,9 @@ create_d3d12_frame_generation_swapchains(
         const auto output_slots = native_current_rings(*state->session);
         // Banked sources alternate complete output sets; each bank retains
         // its existing per-descriptor and per-image reuse waits.
+        ensure_dedicated_vram_bytes(*state->session);
         generation->current_runtime_rings = output_slots;
-        generation->synthetic_runtime_rings = source_synthetic_rings(*state->session,state->panel_source);
+        generation->synthetic_runtime_rings = source_synthetic_rings(*state->session,state->panel_source,&state->create_info);
         if(generation->synthetic_runtime_rings>native_synthetic_rings(*state->session))
             generation->synthetic_batch_width=rife_frames(*state->session)-1;
         generation->direct_extra_outputs = !generation->staged_outputs && extra_output_capacity(*state->session);
@@ -7039,6 +7116,7 @@ XrResult layer_create_session_impl(
                         state->d3d12_device, state->d3d12_queue))) {
                     return XR_ERROR_GRAPHICS_DEVICE_INVALID;
                 }
+                ensure_dedicated_vram_bytes(*state);
                 break;
             }
             if (next->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
@@ -18746,7 +18824,7 @@ HRESULT reconcile_multiplier_outputs(const std::shared_ptr<SessionState>& state)
         const auto ready=generation->synthesizer->wait_for_idle();
         if(FAILED(ready)) return ready;
         if((generation->staged_outputs && generation->staging_stride!=(extra?2U:1U)) ||
-            generation->synthetic_runtime_rings!=source_synthetic_rings(*state,chain->panel_source) ||
+            generation->synthetic_runtime_rings!=source_synthetic_rings(*state,chain->panel_source,&chain->create_info) ||
             generation->current_runtime_rings!=native_current_rings(*state) ||
             state->frame_generation_mode==xrfg::D3D12FrameGenerationMode::native_dlss) {
             lock.unlock();
@@ -19204,7 +19282,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
              ((state->graphics_binding == SessionGraphicsBinding::d3d12 &&
             (chain->frame_generation->staged_outputs != staged_native_outputs(*state) ||
              chain->frame_generation->current_runtime_rings != native_current_rings(*state) ||
-             chain->frame_generation->synthetic_runtime_rings != source_synthetic_rings(*state,chain->panel_source) ||
+             chain->frame_generation->synthetic_runtime_rings != source_synthetic_rings(*state,chain->panel_source,&chain->create_info) ||
              chain->frame_generation->direct_extra_outputs != (!staged_native_outputs(*state) && extra_output_capacity(*state)) ||
              chain->frame_generation->staging_stride != (staged_native_outputs(*state) && extra_output_capacity(*state) ? 2U : 1U))) ||
              (state->graphics_binding == SessionGraphicsBinding::d3d11 &&

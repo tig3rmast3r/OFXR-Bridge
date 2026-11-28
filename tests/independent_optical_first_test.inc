@@ -174,5 +174,46 @@ static int independent_optical_first_test() {
         check(image.phase==(mode==0?PrivateOwnershipPhase::idle:mode==1?PrivateOwnershipPhase::acquired:PrivateOwnershipPhase::waited),
             "partial S2 acquisition must retain its exact teardown ownership state");
     }
+    // Independent D3D12 3X/4X optical/Hybrid Normal keeps two complete synthetic
+    // banks so batch N does not stall on batch N-1's S1/S2 leases/copies; Fast
+    // retains minimal single-bank allocation.
+    {
+        Fixture f(true);f.unblock();f.throttled=false;
+        for(bool steamvr:{false,true}) {
+            auto dispatch=std::make_shared<Dispatch>();dispatch->steamvr_runtime=steamvr;
+            auto state=std::make_shared<SessionState>(dispatch);
+            state->private_runtime=f.transport;state->graphics_binding=SessionGraphicsBinding::d3d12;
+            state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::ofxr;
+            state->independent_pacing=true;state->nvidia_options.rife_model=-1;
+            state->nvidia_options.hybrid=true;
+            for(unsigned factor:{2U,3U,4U})for(bool fast:{false,true}) {
+                state->nvidia_options.rife_multiplier=factor;state->lower_vram=fast?1:0;
+                const auto minimal=native_synthetic_rings(*state);
+                check(source_synthetic_rings(*state,false)==(!fast && factor>2 ? 2U*(factor-1) : minimal),
+                    "Independent optical Normal must allocate two banks at 3X/4X; Fast keeps minimal rings");
+            }
+            // Proportional hardware-VRAM guard: keep Bank 2 within 1/16 of static
+            // dedicated VRAM so high-res allocations stay on 1 bank on small GPUs.
+            state->lower_vram=0;
+            XrSwapchainCreateInfo hi{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            hi.width=6780;hi.height=6694;hi.arraySize=1;hi.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            XrSwapchainCreateInfo mid{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            mid.width=3072;mid.height=3216;mid.arraySize=1;mid.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            constexpr std::uint64_t kGiB=1024ULL*1024ULL*1024ULL;
+            state->nvidia_options.rife_multiplier=3;
+            state->dedicated_vram_bytes.store(32ULL*kGiB);
+            check(source_synthetic_rings(*state,false,&hi)==4U,"32 GiB GPU must allow 6.8K 3X two-bank");
+            state->dedicated_vram_bytes.store(8ULL*kGiB);
+            check(source_synthetic_rings(*state,false,&hi)==2U,"8 GiB GPU must keep 6.8K 3X on one bank");
+            check(source_synthetic_rings(*state,false,&mid)==4U,"8 GiB GPU must still allow 3K 3X two-bank");
+            state->nvidia_options.rife_multiplier=4;
+            state->dedicated_vram_bytes.store(16ULL*kGiB);
+            check(source_synthetic_rings(*state,false,&hi)==3U,"16 GiB GPU must keep 6.8K 4X on one bank");
+            check(source_synthetic_rings(*state,false,&mid)==6U,"16 GiB GPU must allow 3K 4X two-bank");
+            state->dedicated_vram_bytes.store(24ULL*kGiB);
+            check(source_synthetic_rings(*state,false,&hi)==6U,"24 GiB GPU must allow 6.8K 4X two-bank");
+            state->private_runtime.reset();
+        }
+    }
     independent_fixture_mode=false;return 0;
 }
