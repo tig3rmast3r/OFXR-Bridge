@@ -9,6 +9,9 @@
 #include <DirectXPackedVector.h>
 #include <d3d11sdklayers.h>
 #include <d3d12sdklayers.h>
+#include "xrfg/d3d12_native_binding.hpp"
+#include "d3d12_reported_device_alias.hpp"
+#include "luke_stale_queue_fixture.hpp"
 using Microsoft::WRL::ComPtr;
 namespace {
 unsigned checks{},failures{};
@@ -83,6 +86,128 @@ void packed_depth(ID3D11Device* d11,ID3D11DeviceContext* context,ID3D12Device* d
     }
     context->OMSetRenderTargets(0,nullptr,nullptr);
 }
+void submitted_queue_alias(ID3D11Device* game,ID3D11DeviceContext* context,
+    ID3D12Device* device,ID3D12CommandQueue* queue) {
+    ComPtr<QueueWithReportedDeviceAlias> producer;
+    producer.Attach(new QueueWithReportedDeviceAlias(queue,device));
+    auto motion=texture(game,DXGI_FORMAT_R16G16_FLOAT,2,0);
+    auto color=texture(game,DXGI_FORMAT_R16G16B16A16_FLOAT,4,.25f);
+    xrfg::D3D11GuideTransport transport;
+    require(transport.initialize(context,device,producer.Get()),"receipt alias transport");
+    require(transport.begin(),"receipt alias begin");
+    require(transport.copy(xrfg::D3D11GuideTransport::motion,motion.Get()),"receipt alias motion");
+    require(transport.copy(xrfg::D3D11GuideTransport::output,color.Get()),"receipt alias output");
+    xrfg::DlssMotionVectorPublication p;p.stream=90992;
+    p.output=transport.resource(xrfg::D3D11GuideTransport::output);
+    p.motion_vectors=transport.resource(xrfg::D3D11GuideTransport::motion);
+    p.producer_queue=producer.Get();p.producer_command_list=transport.list();p.verified_producer_device=device;
+    p.output_width=p.output_height=p.motion_width=p.motion_height=8;
+    p.resource_state=D3D12_RESOURCE_STATE_COMMON;
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    const auto frame=xrfg::publish_dlss_motion_vectors(p);expect(bool(frame),"receipt alias publication");
+    if(!frame)return;
+    std::uint32_t reason{};
+    expect(!xrfg::resolve_dlss_guide_publication(p.stream,frame->publication,producer.Get(),&reason)&&reason==4,
+        "same producer still needs an actual submission fence");
+    require(transport.submit(),"receipt alias actual submission and Signal");
+    ComPtr<ReportedDeviceAlias> alias;alias.Attach(new ReportedDeviceAlias(device));
+    producer->report_device(alias.Get());
+    const auto queries=producer->device_queries();
+    const auto resolved=xrfg::resolve_dlss_guide_publication(p.stream,frame->publication,producer.Get(),&reason);
+    expect(resolved&&resolved->producer_fence_value&&!reason,
+        "exact submitted producer resolves despite a changed reported device alias (r4 code 1105)");
+    expect(producer->device_queries()==queries,"same submitted queue needs no reported-device requalification");
+    D3D12_COMMAND_QUEUE_DESC desc{};ComPtr<ID3D12CommandQueue> other;
+    require(device->CreateCommandQueue(&desc,IID_PPV_ARGS(&other)),"receipt foreign queue");
+    ComPtr<QueueWithReportedDeviceAlias> foreign;
+    foreign.Attach(new QueueWithReportedDeviceAlias(other.Get(),alias.Get()));
+    expect(!xrfg::resolve_dlss_guide_publication(p.stream,frame->publication,foreign.Get(),&reason)&&reason==5,
+        "another queue retains the exact fence-owner check");
+    foreign->report_device(device);
+    expect(bool(xrfg::resolve_dlss_guide_publication(p.stream,frame->publication,foreign.Get(),&reason))&&!reason,
+        "another verified queue resolves through an actual GPU Wait");
+    expect(!xrfg::resolve_dlss_guide_publication(p.stream,frame->publication+1,producer.Get(),&reason)&&reason==3,
+        "same queue does not accept an unrelated publication");
+    require(transport.drain(),"receipt alias retirement");
+    xrfg::retire_dlss_motion_vector_stream(p.stream);
+}
+void split_device_capture(ID3D11Device* game,ID3D11DeviceContext* context,
+    IDXGIAdapter* adapter,ID3D12Device* xr_device,ID3D12CommandQueue* xr_queue) {
+    ComPtr<ID3D11Device> xr_source;ComPtr<ID3D11DeviceContext> xr_context;
+    require(D3D11CreateDevice(adapter,D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,nullptr,0,
+        D3D11_SDK_VERSION,&xr_source,nullptr,&xr_context),"distinct XR submission device");
+    xrfg::register_d3d11_guide_owner(90,xr_source.Get(),xr_device,xr_queue);
+    ComPtr<ID3D12Device> capture_device;ComPtr<ID3D12CommandQueue> capture_queue;std::uint64_t generation{};
+    expect(xrfg::acquire_d3d11_guide_owner(game,&capture_device,&capture_queue,&generation)==
+        HRESULT_FROM_WIN32(ERROR_NOT_READY),"Days Gone split-device lookup reproduces ERROR_NOT_READY");
+    std::shared_ptr<xrfg::D3D11GuideCaptureOwner> lease,second_lease;
+    require(xrfg::create_d3d11_guide_capture_owner(game,lease),"native game owns a separate capture bridge");
+    require(xrfg::acquire_d3d11_guide_owner(game,&capture_device,&capture_queue,&generation,&second_lease),
+        "a later NGX feature retains an existing standalone capture bridge");
+    expect(lease==second_lease,"no ambiguous duplicate registration for one native source");
+    require(xrfg::acquire_d3d11_guide_owner(game,capture_device.ReleaseAndGetAddressOf(),
+        capture_queue.ReleaseAndGetAddressOf(),&generation),"game lookup now resolves");
+    expect(capture_queue.Get()!=xr_queue&&generation,"capture does not steal the unrelated XR queue");
+    ComPtr<ID3D12Device> reconstruction_device;ComPtr<ID3D12CommandQueue> reconstruction_queue;
+    expect(!xrfg::query_d3d11_luke_camera_context(&reconstruction_device,&reconstruction_queue),
+        "creating a capture bridge alone cannot authorize OSR");
+    {
+        auto depth=texture(game,DXGI_FORMAT_R32_FLOAT,1,.75f);
+        auto motion=texture(game,DXGI_FORMAT_R16G16_FLOAT,2,0);
+        auto color=texture(game,DXGI_FORMAT_R16G16B16A16_FLOAT,4,.25f);
+        xrfg::D3D11GuideTransport transport;
+        require(transport.initialize(context,capture_device.Get(),capture_queue.Get()),"native game transport initialization");
+        require(transport.begin(),"split-device capture begins");
+        require(transport.copy(xrfg::D3D11GuideTransport::depth,depth.Get()),"actual native game guide crosses to its bridge");
+        require(transport.copy(xrfg::D3D11GuideTransport::motion,motion.Get()),"exact native motion transport");
+        require(transport.copy(xrfg::D3D11GuideTransport::output,color.Get()),"exact native output transport");
+        xrfg::DlssMotionVectorPublication publication;
+        publication.stream=90990;publication.output=transport.resource(xrfg::D3D11GuideTransport::output);
+        publication.motion_vectors=transport.resource(xrfg::D3D11GuideTransport::motion);
+        publication.depth=transport.resource(xrfg::D3D11GuideTransport::depth);
+        publication.producer_queue=capture_queue.Get();publication.producer_command_list=transport.list();
+        publication.verified_producer_device=capture_device.Get();
+        publication.output_width=publication.output_height=publication.motion_width=publication.motion_height=
+            publication.depth_width=publication.depth_height=8;
+        publication.resource_state=publication.depth_resource_state=D3D12_RESOURCE_STATE_COMMON;
+        publication.camera_view_to_clip={1,0,0,0,0,1,0,0,0,0,0,1,0,0,10,0};
+        publication.camera_clip_to_view={1,0,0,0,0,1,0,0,0,0,0,.1f,0,0,1,0};
+        publication.camera_right={1,0,0};publication.camera_up={0,1,0};publication.camera_forward={0,0,1};
+        publication.camera_near=10;publication.camera_far=0;publication.camera_fov_vertical=1.5707963f;
+        publication.depth_inverted=publication.depth_infinite=true;
+        publication.camera_data_valid=publication.camera_matrices_valid=true;
+        publication.camera_frame_token=1;publication.camera_frame_token_valid=true;
+        publication.source_clock_owner=reinterpret_cast<std::uintptr_t>(game);publication.source_clock_sequence=1;
+        publication.protect_snapshot_lifetime=true;
+        xrfg::configure_dlss_motion_vector_tracking(true);
+        const auto frame=xrfg::publish_dlss_motion_vectors(publication);
+        expect(bool(frame),"exact camera guides publish on the observed game capture bridge");
+        expect(xrfg::claim_d3d11_guides(game,generation),"claim the exact game source before checking GPU submission");
+        expect(!xrfg::admit_d3d11_luke_camera_context(game,generation,frame),"unsubmitted capture cannot authorize OSR");
+        require(transport.submit(),"split-device capture submission");require(transport.drain(),"split-device capture retirement");
+        expect(!xrfg::admit_d3d11_luke_camera_context(game,generation+1,frame),"foreign capture generation rejected");
+        expect(!xrfg::admit_d3d11_luke_camera_context(xr_source.Get(),generation,frame),"unrelated XR source cannot adopt game camera");
+        expect(xrfg::admit_d3d11_luke_camera_context(game,generation,frame),"submitted exact-camera capture authorizes reconstruction");
+        expect(xrfg::query_d3d11_luke_camera_context(&reconstruction_device,&reconstruction_queue)&&
+            reconstruction_device.Get()==capture_device.Get()&&reconstruction_queue.Get()==capture_queue.Get(),
+            "OSR initialization receives the verified capture context");
+        expect(std::abs(read12(capture_device.Get(),capture_queue.Get(),
+            transport.resource(xrfg::D3D11GuideTransport::depth),7,5)-.75f)<1e-6f,"source guide pixels reach the capture bridge");
+    }
+    lease.reset();
+    require(xrfg::acquire_d3d11_guide_owner(game,capture_device.ReleaseAndGetAddressOf(),
+        capture_queue.ReleaseAndGetAddressOf(),&generation),"second feature keeps capture alive");
+    second_lease.reset();
+    reconstruction_device.Reset();reconstruction_queue.Reset();
+    expect(!xrfg::query_d3d11_luke_camera_context(&reconstruction_device,&reconstruction_queue),
+        "feature teardown retires OSR capture authority");
+    xrfg::retire_dlss_motion_vector_stream(90990);
+    expect(xrfg::acquire_d3d11_guide_owner(game,capture_device.ReleaseAndGetAddressOf(),
+        capture_queue.ReleaseAndGetAddressOf(),&generation)==HRESULT_FROM_WIN32(ERROR_NOT_READY),"last feature retires capture registration");
+    require(xrfg::acquire_d3d11_guide_owner(xr_source.Get(),&capture_device,&capture_queue,&generation),"XR registration remains intact");
+    expect(capture_queue.Get()==xr_queue,"XR queue identity preserved");
+    xrfg::unregister_d3d11_guide_owner(90);
+}
 }
 int main() {
     ComPtr<ID3D12Debug> debug12;
@@ -98,9 +223,14 @@ int main() {
         require(d11.As(&dxgi),"DXGI device");require(dxgi->GetAdapter(adapter.GetAddressOf()),"same adapter");
         require(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(d12.GetAddressOf())),"D12 owner");
         D3D12_COMMAND_QUEUE_DESC q{};require(d12->CreateCommandQueue(&q,IID_PPV_ARGS(queue.GetAddressOf())),"owner queue");
+        split_device_capture(d11.Get(),context.Get(),adapter.Get(),d12.Get(),queue.Get());
+        submitted_queue_alias(d11.Get(),context.Get(),d12.Get(),queue.Get());
         ComPtr<ID3D12Device> acquired;ComPtr<ID3D12CommandQueue> acquired_queue;std::uint64_t generation{};
         expect(FAILED(xrfg::acquire_d3d11_guide_owner(d11.Get(),acquired.GetAddressOf(),acquired_queue.GetAddressOf(),&generation)),"no speculative owner");
         xrfg::register_d3d11_guide_owner(1,d11.Get(),d12.Get(),queue.Get());
+        std::shared_ptr<xrfg::D3D11GuideCaptureOwner> unnecessary_capture;
+        expect(xrfg::create_d3d11_guide_capture_owner(d11.Get(),unnecessary_capture)==
+            HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)&&!unnecessary_capture,"standalone capture cannot replace an existing XR owner");
         require(xrfg::acquire_d3d11_guide_owner(d11.Get(),acquired.GetAddressOf(),acquired_queue.GetAddressOf(),&generation),"exact owner");
         expect(acquired.Get()==d12.Get() && acquired_queue.Get()==queue.Get() && generation,"actual queue/device returned");
         expect(xrfg::claim_d3d11_guides(d11.Get(),generation),"claim owner");expect(xrfg::d3d11_guides_claimed(d11.Get()),"strict resource resolution active");

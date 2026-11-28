@@ -5,6 +5,7 @@ public:
         bool exposes_native = false)
         : native_(native), reported_(reported), exposes_native_(exposes_native) {}
     LONG device_queries() noexcept { return InterlockedCompareExchange(&device_queries_, 0, 0); }
+    void report_device(ID3D12Device* device) { reported_=device; }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
         if (!object) return E_POINTER;
         *object = nullptr;

@@ -83,6 +83,8 @@ struct Feature {
     std::uint64_t owner{};
     // Last outcome and stream shape written to the capture log: one line per change.
     std::uint64_t noted{};std::array<std::uint64_t,5> described{};
+    // Declared before transport so GPU resources retire before registration.
+    std::shared_ptr<D3D11GuideCaptureOwner> capture_owner;
     std::unique_ptr<D3D11GuideTransport> transport;
     std::mutex mutex;
 };
@@ -179,9 +181,24 @@ template<unsigned Slot>NVSDK_NGX_Result evaluate(ID3D11DeviceContext* context,co
     };
     ComPtr<ID3D11Device> game_device;ctx->GetDevice(&game_device);
     ComPtr<ID3D12Device> device;ComPtr<ID3D12CommandQueue> queue;std::uint64_t generation{};
-    if(const auto hr=acquire_d3d11_guide_owner(game_device.Get(),&device,&queue,&generation);FAILED(hr)){note(1,hr);return raw();}
+    std::shared_ptr<D3D11GuideCaptureOwner> capture_owner;
+    auto owner_result=acquire_d3d11_guide_owner(game_device.Get(),&device,&queue,&generation,&capture_owner);
+    if(owner_result==HRESULT_FROM_WIN32(ERROR_NOT_READY)&&luke_detected()) {
+        // Luke can render the game on a different D3D11 device than XR submission.
+        // Allocate capture on the observed native game device; never borrow an
+        // arbitrary same-adapter session's bridge or relax exact-owner lookup.
+        owner_result=create_d3d11_guide_capture_owner(game_device.Get(),capture_owner);
+        if(SUCCEEDED(owner_result)) {
+            owner_result=acquire_d3d11_guide_owner(game_device.Get(),&device,&queue,&generation);
+            capture_log("d3d11_capture_owner",static_cast<std::uint32_t>(owner_result),
+                reinterpret_cast<std::uintptr_t>(game_device.Get()),reinterpret_cast<std::uintptr_t>(device.Get()),
+                reinterpret_cast<std::uintptr_t>(queue.Get()));
+        }
+    }
+    if(FAILED(owner_result)){note(1,owner_result,reinterpret_cast<std::uintptr_t>(game_device.Get()));return raw();}
     observe_copies(ctx.Get());configure_queue(queue.Get());
     if(f->owner!=generation){f->transport.reset();f->owner=generation;}
+    f->capture_owner=std::move(capture_owner);
     if(!f->transport){f->transport=std::make_unique<D3D11GuideTransport>();
         if(const auto hr=f->transport->initialize(ctx.Get(),device.Get(),queue.Get());FAILED(hr)){f->transport.reset();note(2,hr);return raw();}}
     auto& t=*f->transport;

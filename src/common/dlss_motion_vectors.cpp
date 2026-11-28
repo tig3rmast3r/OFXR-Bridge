@@ -1449,19 +1449,29 @@ void report_dlss_motion_vector_submission(
 
 std::shared_ptr<const DlssMotionVectorFrame> resolve_dlss_guide_publication(
     std::uint64_t stream_id, std::uint64_t publication,
-    ID3D12CommandQueue* consumer) noexcept {
+    ID3D12CommandQueue* consumer,std::uint32_t* rejection) noexcept {
+    if(rejection)*rejection=0;
+    const auto refuse=[&](std::uint32_t reason)->std::shared_ptr<const DlssMotionVectorFrame>{
+        if(rejection)*rejection=reason;return {};
+    };
     try {
-        if (!g_tracking_enabled.load(std::memory_order_acquire) || !publication || !consumer) return {};
+        if (!g_tracking_enabled.load(std::memory_order_acquire) || !publication || !consumer) return refuse(1);
         auto& state=registry(); std::scoped_lock lock(state.mutex);
         const auto found=state.streams.find(stream_id);
-        if (found==state.streams.end()) return {};
+        if (found==state.streams.end()) return refuse(2);
         const auto& frame=found->second.latest;
-        if (!frame || frame->publication!=publication || !frame->producer_fence || !frame->producer_fence_value ||
-            !same_device(frame->producer_fence.Get(),consumer)) return {};
-        if (!same_identity(frame->producer_queue.Get(),consumer) &&
-            FAILED(consumer->Wait(frame->producer_fence.Get(),frame->producer_fence_value))) return {};
+        if (!frame || frame->publication!=publication) return refuse(3);
+        if (!frame->producer_fence || !frame->producer_fence_value) return refuse(4);
+        // Submission already proved this exact queue could Signal this fence.
+        // REAL VR can expose a different GetDevice identity afterward. As with
+        // the stereo/token resolvers, requalify and Wait only for another queue;
+        // an adapter match or an unsubmitted publication never authorizes it.
+        if (!same_identity(frame->producer_queue.Get(),consumer)) {
+            if (!same_device(frame->producer_fence.Get(),consumer)) return refuse(5);
+            if (FAILED(consumer->Wait(frame->producer_fence.Get(),frame->producer_fence_value))) return refuse(6);
+        }
         return frame;
-    } catch (...) { return {}; }
+    } catch (...) { return refuse(7); }
 }
 
 // The tangents of a view's image edges from its projection: x's left edge

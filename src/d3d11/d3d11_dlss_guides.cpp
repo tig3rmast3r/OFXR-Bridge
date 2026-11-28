@@ -1,4 +1,5 @@
 #include "xrfg/d3d11_dlss_guides.hpp"
+#include "xrfg/d3d11_d3d12_interop.hpp"
 #include <mutex>
 #include <unordered_map>
 #include <atomic>
@@ -6,6 +7,13 @@
 #include <algorithm>
 
 namespace xrfg {
+class D3D11GuideCaptureOwner {
+public:
+    bool registered{};
+    ~D3D11GuideCaptureOwner() {
+        if(registered)unregister_d3d11_guide_owner(reinterpret_cast<std::uintptr_t>(this));
+    }
+};
 namespace {
 using Microsoft::WRL::ComPtr;
 constexpr GUID receipt_guid{0x62935ac7, 0x5aac, 0x47d9, {0xaa,0x59,0x97,0x61,0x46,0x3f,0x96,0x28}};
@@ -18,7 +26,7 @@ struct SrStagingTarget {
     std::uintptr_t swapchain{};
     bool ambiguous{};
 };
-struct Owner { ComPtr<IUnknown> identity; ComPtr<ID3D12Device> device; ComPtr<ID3D12CommandQueue> queue; std::uint64_t generation{}; bool claimed{}; };
+struct Owner { ComPtr<IUnknown> identity; ComPtr<ID3D12Device> device; ComPtr<ID3D12CommandQueue> queue; std::uint64_t generation{}; bool claimed{}; std::weak_ptr<D3D11GuideCaptureOwner> capture; bool capture_owned{},luke_camera{}; };
 struct OwnerRegistry {
     std::mutex mutex;
     std::unordered_map<std::uintptr_t,Owner> values;
@@ -222,19 +230,74 @@ D3D11SuperResolutionOrigin get_d3d11_sr_origin(ID3D11Resource* resource) noexcep
         !resolve_d3d11_sr_frame(origin.frame)) return {};
     return origin;
 }
-HRESULT acquire_d3d11_guide_owner(ID3D11Device* source, ID3D12Device** device, ID3D12CommandQueue** queue, std::uint64_t* generation) noexcept {
+HRESULT acquire_d3d11_guide_owner(ID3D11Device* source, ID3D12Device** device, ID3D12CommandQueue** queue,
+    std::uint64_t* generation,std::shared_ptr<D3D11GuideCaptureOwner>* retained_capture) noexcept {
     if (!device || !queue || !generation) return E_INVALIDARG;
     *device=nullptr; *queue=nullptr; *generation=0;
     try {
-        auto key=identity(source); std::scoped_lock lock(owner_mutex);
-        const Owner* found{};
-        for (const auto& [session,owner]:owners) {
-            static_cast<void>(session);
-            if (key && owner.identity.Get()==key.Get()) { if (found) return E_UNEXPECTED; found=&owner; }
+        auto key=identity(source);std::shared_ptr<D3D11GuideCaptureOwner> capture;
+        {
+            std::scoped_lock lock(owner_mutex);
+            const Owner* found{};
+            for (const auto& [session,owner]:owners) {
+                static_cast<void>(session);
+                if (key && owner.identity.Get()==key.Get()) { if (found) return E_UNEXPECTED; found=&owner; }
+            }
+            if (!found) return HRESULT_FROM_WIN32(ERROR_NOT_READY);
+            capture=found->capture.lock();
+            if(found->capture_owned&&!capture)return HRESULT_FROM_WIN32(ERROR_NOT_READY);
+            found->device.CopyTo(device);found->queue.CopyTo(queue);*generation=found->generation;
         }
-        if (!found) return HRESULT_FROM_WIN32(ERROR_NOT_READY);
-        found->device.CopyTo(device); found->queue.CopyTo(queue); *generation=found->generation; return S_OK;
+        // Replacing a caller's old lease may unregister it: never do that while
+        // holding the registry mutex.
+        if(retained_capture)*retained_capture=std::move(capture);
+        return S_OK;
     } catch (...) { return E_FAIL; }
+}
+HRESULT create_d3d11_guide_capture_owner(ID3D11Device* source,
+    std::shared_ptr<D3D11GuideCaptureOwner>& output) noexcept {
+    output.reset();
+    if(!source)return E_POINTER;
+    try {
+        // Only features using this exact native D3D11 source share a bridge.
+        // A weak cache lets the last feature release it after GPU retirement.
+        struct Cache {
+            std::mutex mutex;
+            std::unordered_map<IUnknown*,std::weak_ptr<D3D11GuideCaptureOwner>> sources;
+        };
+        static auto& cache=*new Cache;
+        auto key=identity(source);if(!key)return E_INVALIDARG;
+        std::scoped_lock lock(cache.mutex);
+        std::erase_if(cache.sources,[](const auto& entry){return entry.second.expired();});
+        if(const auto found=cache.sources.find(key.Get());found!=cache.sources.end()) {
+            output=found->second.lock();if(output)return S_OK;
+        }
+        {
+            std::scoped_lock registered_lock(owner_mutex);
+            for(const auto& [session,owner]:owners) {
+                static_cast<void>(session);
+                if(owner.identity.Get()==key.Get())return HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
+            }
+        }
+        ComPtr<ID3D12Device> device;ComPtr<ID3D12CommandQueue> queue;
+        const auto result=create_d3d12_device_for_d3d11(source,&device,&queue);
+        if(FAILED(result))return result;
+        auto owner=std::make_shared<D3D11GuideCaptureOwner>();
+        const auto session=reinterpret_cast<std::uintptr_t>(owner.get());
+        register_d3d11_guide_owner(session,source,device.Get(),queue.Get());
+        // Registration can fail closed (e.g. a device/queue mismatch). Never
+        // return a lease which appears usable but has no authoritative owner.
+        {
+            std::scoped_lock registered_lock(owner_mutex);
+            owner->registered=owners.contains(session);
+            if(owner->registered) {
+                owners.at(session).capture=owner;
+                owners.at(session).capture_owned=true;
+            }
+        }
+        if(!owner->registered)return E_FAIL;
+        cache.sources[key.Get()]=owner;output=std::move(owner);return S_OK;
+    } catch (...) {return E_FAIL;}
 }
 bool claim_d3d11_guides(ID3D11Device* source, std::uint64_t generation) noexcept {
     try { auto key=identity(source); std::scoped_lock lock(owner_mutex);
@@ -242,6 +305,48 @@ bool claim_d3d11_guides(ID3D11Device* source, std::uint64_t generation) noexcept
             if (key && owner.identity.Get()==key.Get() && owner.generation==generation) { owner.claimed=true; return true; }
         }
     } catch (...) {} return false;
+}
+bool admit_d3d11_luke_camera_context(ID3D11Device* source,std::uint64_t generation,
+    const std::shared_ptr<const DlssMotionVectorFrame>& frame,std::uint32_t* rejection) noexcept {
+    if(rejection)*rejection=0;
+    const auto refuse=[&](std::uint32_t reason){if(rejection)*rejection=reason;return false;};
+    if(!frame||!frame->publication||!frame->camera_data_valid||!frame->camera_matrices_valid||
+        !frame->camera_frame_token_valid||!frame->source_clock_sequence||
+        frame->source_clock_owner!=reinterpret_cast<std::uintptr_t>(source))return refuse(1);
+    try {
+        std::uint32_t lookup{};
+        const auto submitted=resolve_dlss_guide_publication(frame->stream,frame->publication,frame->producer_queue.Get(),&lookup);
+        if(!submitted||!submitted->producer_fence||!submitted->producer_fence_value)return refuse(100+lookup);
+        auto key=identity(source);std::scoped_lock lock(owner_mutex);Owner* found{};
+        for(auto& [session,owner]:owners) {
+            static_cast<void>(session);
+            if(key&&owner.identity.Get()==key.Get()){if(found)return refuse(2);found=&owner;}
+        }
+        if(!found)return refuse(3);
+        if(found->generation!=generation)return refuse(4);
+        if(!found->capture_owned)return refuse(5);
+        if(!found->claimed)return refuse(6);
+        if(found->capture.expired())return refuse(7);
+        if(frame->producer_queue.Get()!=found->queue.Get())return refuse(8);
+        if(frame->verified_producer_device.Get()!=found->device.Get())return refuse(9);
+        found->luke_camera=true;return true;
+    }catch(...){return refuse(10);}
+}
+bool query_d3d11_luke_camera_context(ID3D12Device** device,ID3D12CommandQueue** queue) noexcept {
+    if(!device||!queue)return false;*device=nullptr;*queue=nullptr;
+    try {
+        std::shared_ptr<D3D11GuideCaptureOwner> capture;
+        std::scoped_lock lock(owner_mutex);const Owner* found{};
+        for(const auto& [session,owner]:owners) {
+            static_cast<void>(session);
+            if(owner.luke_camera&&owner.claimed&&owner.capture_owned&&!owner.capture.expired()) {
+                if(found)return false;found=&owner;
+            }
+        }
+        if(!found)return false;
+        capture=found->capture.lock();if(!capture)return false;
+        found->device.CopyTo(device);found->queue.CopyTo(queue);return true;
+    }catch(...){return false;}
 }
 bool d3d11_guides_claimed(ID3D11Device* source) noexcept {
     try {

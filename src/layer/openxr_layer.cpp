@@ -3366,6 +3366,7 @@ void initialize_luke_synthesis_queue(SessionState& state) noexcept {
     const auto query = reinterpret_cast<QueryLukeRossD3D12Context>(
         GetProcAddress(module, "OFXR_GetLukeRossD3D12ContextV1"));
     if(query != nullptr && query(device, queue) != 0 && *device != nullptr && *queue != nullptr)return true;
+    if(xrfg::native_ingress::luke_detected()&&xrfg::query_d3d11_luke_camera_context(device,queue))return true;
     return xrfg::native_vulkan::query_luke_context(device,queue);
 }
 

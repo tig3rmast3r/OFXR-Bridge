@@ -36,7 +36,18 @@ void clear_d3d11_sr_origin(ID3D11Resource*) noexcept;
 // One actual OpenXR D3D11 device -> its authoritative DX12 bridge owner.
 void register_d3d11_guide_owner(std::uintptr_t session, ID3D11Device*, ID3D12Device*, ID3D12CommandQueue*) noexcept;
 void unregister_d3d11_guide_owner(std::uintptr_t session) noexcept;
-HRESULT acquire_d3d11_guide_owner(ID3D11Device*, ID3D12Device**, ID3D12CommandQueue**, std::uint64_t*) noexcept;
+// Luke can render the game and submit OpenXR on distinct D3D11 devices. Capture
+// then needs its own bridge on the observed game's device, not an unrelated XR
+// session chosen by adapter/size. Keep this lease until its transport retires.
+class D3D11GuideCaptureOwner;
+HRESULT acquire_d3d11_guide_owner(ID3D11Device*, ID3D12Device**, ID3D12CommandQueue**, std::uint64_t*,
+    std::shared_ptr<D3D11GuideCaptureOwner>* retained_capture = nullptr) noexcept;
+HRESULT create_d3d11_guide_capture_owner(ID3D11Device*, std::shared_ptr<D3D11GuideCaptureOwner>&) noexcept;
+// A source-owned D3D11 capture is distinct from an original game D3D12 queue.
+// Admit it for reconstruction only after a submitted, exact-camera publication.
+bool admit_d3d11_luke_camera_context(ID3D11Device*,std::uint64_t generation,
+    const std::shared_ptr<const DlssMotionVectorFrame>&,std::uint32_t* rejection=nullptr) noexcept;
+bool query_d3d11_luke_camera_context(ID3D12Device**,ID3D12CommandQueue**) noexcept;
 bool claim_d3d11_guides(ID3D11Device*, std::uint64_t generation) noexcept;
 bool d3d11_guides_claimed(ID3D11Device*) noexcept;
 struct D3D11GuideReceipt {
@@ -51,5 +62,5 @@ bool propagate_d3d11_guide_receipt(ID3D11Resource* destination, ID3D11Resource* 
 std::shared_ptr<const DlssMotionVectorSet> resolve_d3d11_dlss_guides(ID3D11Resource*, ID3D12CommandQueue*) noexcept;
 // Exact receipt lookup; never select another stream or a later publication.
 std::shared_ptr<const DlssMotionVectorFrame> resolve_dlss_guide_publication(
-    std::uint64_t stream, std::uint64_t publication, ID3D12CommandQueue*) noexcept;
+    std::uint64_t stream, std::uint64_t publication, ID3D12CommandQueue*,std::uint32_t* rejection=nullptr) noexcept;
 }
