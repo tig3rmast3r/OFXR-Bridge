@@ -14,11 +14,16 @@ static int independent_overlap_recovery_test() {
         GeneratedFrameEndInfo image;assign_independent_output_timing(job,image,0);
         auto timing=image.independent_recovery;
         xrfg::IndependentDeliveryReserve reserve;reserve.set_limit(4*period);
-        for(unsigned i=0;i<10;++i) {
+        for(unsigned i=0;i<2;++i) {
             const auto due=1'000'000'000LL+i*factor*period;
-            check(!reserve.observe_source(due+2*period,due,period,timing),"GPU overlap must not earn stale-image tolerance");
+            check(reserve.observe_source(due+2*period,due,period,timing),"normal GPU overlap must be observed");
         }
-        check(reserve.reserve()==0,"phase fix increased expiry allowance");
+        check(reserve.reserve()==0,"brief GPU overlap transient must not inflate reserve");
+        {
+            const auto due=1'000'000'000LL+2*factor*period;
+            check(reserve.observe_source(due+2*period,due,period,timing),"sustained GPU overlap must be observed");
+        }
+        check(reserve.reserve()>0 && reserve.reserve()<=4*period,"sustained GPU overlap lateness must earn bounded reserve");
         xrfg::IndependentSourcePhase phase;std::int64_t trim{};
         const auto target=period/2+2'000'000;
         for(unsigned n=0;n<12;++n) {
@@ -34,8 +39,14 @@ static int independent_overlap_recovery_test() {
         check(independent_source_backlogged(job,job.current->queued_at+std::chrono::nanoseconds(period),&overlap_only) && !overlap_only,
             "real CPU source backlog must retain its recovery veto");
         timing.source_overlap_only=overlap_only;
+        xrfg::IndependentDeliveryReserve backlog_reserve;backlog_reserve.set_limit(4*period);
+        for(unsigned i=0;i<6;++i) {
+            const auto due=2'000'000'000LL+i*factor*period;
+            check(!backlog_reserve.observe_source(due+2*period,due,period,timing),"real CPU backlog must retain its reserve veto");
+        }
+        check(backlog_reserve.reserve()==0,"real CPU backlog inflated expiry allowance");
         check(xrfg::independent_phase_source_due(1'000'000'000,timing)==0,"queued-source age authorized phase acquisition");
-        std::printf("OVERLAP_RECOVERY factor=%u normal GPU overlap trims one measured slot; reserve unchanged; real backlog veto PASS\n",factor);
+        std::printf("OVERLAP_RECOVERY factor=%u normal GPU overlap trims one measured slot, ignores brief spikes, learns bounded reserve on sustained lateness; real backlog veto PASS\n",factor);
     }
     return 0;
 }

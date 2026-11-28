@@ -212,7 +212,7 @@ public:
     }
     std::int64_t reserve() const noexcept {return reserve_;}
     std::int64_t take_refill() noexcept {auto n=refill_;refill_=0;return n;}
-    void observe(std::int64_t available,std::int64_t expected,std::int64_t period) noexcept {
+    void observe(std::int64_t available,std::int64_t expected,std::int64_t period,unsigned threshold=2) noexcept {
         if(!limit_ || period<=0 || !expected)return;
         const auto late=available-expected;
         // Loading or a disconnected runtime is not evidence for a larger
@@ -220,7 +220,7 @@ public:
         if(late>period*8){unstable();late_=window_=0;peak_=0;return;}
         if(late>period/2) {
             unstable();peak_=std::max(peak_,late);++late_;
-            if(late_>=2) {
+            if(late_>=std::max(threshold,2U)) {
                 const auto missed=(peak_+period/2)/period;
                 const auto next=std::min(limit_,reserve_+missed*period);
                 refill_+=std::max(std::int64_t{},next-reserve_);reserve_=next;
@@ -237,12 +237,15 @@ public:
         if(source_period_!=period){source_period_=period;source_due_=0;late_=window_=0;peak_=0;}
         if(first<=source_due_)return false;
         source_due_=first;
-        if(timing.source_queued) {
+        if(timing.source_queued && !timing.source_overlap_only) {
             // One overrun and the work queued behind it are one disturbance.
             // Keep real expiry strict; do not turn that backlog into tolerance.
             late_=window_=0;peak_=0;return false;
         }
-        observe(available,first+reserve_,period);return true;
+        // Normal GPU overlap is steady state at 3X/4X under load. Reject a brief
+        // 1-2 source disturbance while still letting sustained overlap lateness
+        // earn bounded reserve promptly instead of dropping 12+ frames first.
+        observe(available,first+reserve_,period,timing.source_overlap_only?3U:2U);return true;
     }
     void delivered(std::int64_t ready,std::int64_t expected,
                    std::int64_t entered,std::int64_t period,bool accelerated=false) noexcept {
