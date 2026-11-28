@@ -362,6 +362,12 @@ public:
     // so the wait would park the consumer for a whole display period.
     [[nodiscard]] HRESULT flush_current_copy(
         ID3D12CommandQueue* consumer_queue = nullptr) noexcept;
+    // Queue a GPU-side wait on another synthesizer's fence before flushing a
+    // deferred tail, so Eye 0's S2/B tail cannot preempt Eye 1's S1 on isolated
+    // per-eye queues. Same-fence waits and empty tails are no-ops.
+    [[nodiscard]] HRESULT wait_submission_fence(
+        ID3D12Fence* peer_fence,
+        std::uint64_t peer_value) noexcept;
     // Discard unsubmitted writes after a deferred acquisition failure, signal
     // retirement after S1, and disable this engine. Never publish its S2/B.
     [[nodiscard]] HRESULT discard_current_copy() noexcept;

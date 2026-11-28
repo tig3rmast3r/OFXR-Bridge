@@ -8660,6 +8660,23 @@ HRESULT D3D12FrameSynthesizer::flush_current_copy(
     }
 }
 
+HRESULT D3D12FrameSynthesizer::wait_submission_fence(
+    ID3D12Fence* peer_fence,
+    std::uint64_t peer_value) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (impl_ == nullptr || peer_fence == nullptr || peer_value == 0 ||
+            impl_->queue == nullptr || peer_fence == impl_->fence.Get() ||
+            impl_->pending_copy_slot == Impl::kNoPendingCopy ||
+            !impl_->synthesis_enabled) {
+            return S_OK;
+        }
+        return impl_->queue->Wait(peer_fence, peer_value);
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
 HRESULT D3D12FrameSynthesizer::discard_current_copy() noexcept {
     try {
         std::scoped_lock lock(mutex_);

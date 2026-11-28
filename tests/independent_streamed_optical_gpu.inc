@@ -134,5 +134,63 @@ static void test_independent_streamed_optical(D3D12WarpFixture& f) {
         }
         f.require_no_debug_errors();
     }
+    // On isolated per-eye queues, waiting on the peer's S1 fence before
+    // flushing the tail must keep Eye 0's S2/B parked behind Eye 1's S1 while
+    // allowing Eye 0's own S1 to finish immediately.
+    {
+        std::array<xrfg::D3D12FrameSynthesizer,2> engines;
+        std::array<std::shared_ptr<xrfg::D3D12SwapchainHistory>,2> eye_history;
+        std::array<xrfg::D3D12HistoryCaptureTicket,2> eye_a,eye_b;
+        std::array<ComPtr<ID3D12Resource>,2> real;
+        std::array<std::array<ComPtr<ID3D12Resource>,2>,2> generated;
+        std::array<xrfg::D3D12FrameSynthesisTicket,2> tickets;
+        for(unsigned eye=0;eye<2;++eye) {
+            eye_history[eye]=std::make_shared<xrfg::D3D12SwapchainHistory>();
+            require_hresult(eye_history[eye]->initialize(f.device(),f.queue(),sp,D3D12_RESOURCE_STATE_RENDER_TARGET),"isolated peer history");
+            require_hresult(eye_history[eye]->capture(0,&eye_a[eye]),"isolated peer A");require_hresult(eye_history[eye]->commit(eye_a[eye]),"commit isolated A");
+            require_hresult(eye_history[eye]->capture(1,&eye_b[eye]),"isolated peer B");require_hresult(eye_history[eye]->commit(eye_b[eye]),"commit isolated B");
+            real[eye]=create_source_texture(f);upload_pattern(f,real[eye].Get(),make_pattern(203));
+            ID3D12Resource* rp[]={real[eye].Get()};
+            std::array<ID3D12Resource*,2> gp{};
+            for(unsigned i=0;i<2;++i){generated[eye][i]=create_source_texture(f);gp[i]=generated[eye][i].Get();upload_pattern(f,gp[i],make_pattern(203));}
+            require_hresult(engines[eye].initialize(f.device(),f.queue(),eye_history[eye],rp,gp,kFormat,D3D12_RESOURCE_STATE_RENDER_TARGET,
+                xrfg::D3D12OpticalFlowBackend::fidelity_fx,options,false,xrfg::D3D12FrameGenerationMode::ofxr,false,false,true),"isolated peer engine");
+            xrfg::D3D12FrameSynthesisTicket first;
+            require_hresult(engines[eye].submit_prime(eye_a[eye],views,0,&first,guides(1)),"isolated peer prime");
+            require_hresult(engines[eye].wait_for_previous_submission(3000),"isolated peer prime drain");
+            upload_pattern(f,real[eye].Get(),make_pattern(203));
+        }
+        ComPtr<ID3D12Fence> eye1_gate;
+        require_hresult(f.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&eye1_gate)),"isolated eye1 S1 gate");
+        struct ReleaseEye1Gate {ID3D12Fence* gate;~ReleaseEye1Gate(){gate->Signal(1);}} release_eye1{eye1_gate.Get()};
+        require_hresult(engines[1].submission_queue()->Wait(eye1_gate.Get(),1),"hold Eye 1 S1 on isolated queue");
+        for(unsigned eye=0;eye<2;++eye) {
+            require_hresult(engines[eye].submit_pair(eye_b[eye],moved,moved,0,0,&tickets[eye],std::nullopt,guides(2),true,1.f/3.f,{},
+                extra,false,3,false,false,true,true),"isolated peer S1 stages");
+        }
+        std::array<ComPtr<ID3D12Fence>,2> eye_fences{engines[0].submission_fence(tickets[0]),engines[1].submission_fence(tickets[1])};
+        require(eye_fences[0].Get()!=eye_fences[1].Get(),"isolated engines must own distinct submission fences");
+        for(unsigned eye=0;eye<2;++eye) {
+            require_hresult(engines[eye].wait_submission_fence(eye_fences[1-eye].Get(),tickets[1-eye].synthetic_fence_value),"peer S1 barrier before tail");
+            require_hresult(engines[eye].flush_current_copy(),"flush isolated peer tail");
+        }
+        f.wait_for_fence(eye_fences[0].Get(),tickets[0].synthetic_fence_value);
+        D3D12_COMMAND_QUEUE_DESC oq{};oq.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;ComPtr<ID3D12CommandQueue> observe_isolated;
+        require_hresult(f.device()->CreateCommandQueue(&oq,IID_PPV_ARGS(&observe_isolated)),"observe isolated Eye 0 outputs");
+        require(eye_fences[0]->GetCompletedValue()<tickets[0].fence_value,"Eye 0 tail ran before Eye 1 S1 completed");
+        require(readback_pattern(f,generated[0][0].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,observe_isolated.Get())==control[0],"isolated Eye 0 S1 pixels differ");
+        require(readback_pattern(f,generated[0][1].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,observe_isolated.Get())==make_pattern(203) &&
+            readback_pattern(f,real[0].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,observe_isolated.Get())==make_pattern(203),
+            "Eye 0 S2/B must remain untouched while Eye 1 S1 is gated");
+        require_hresult(eye1_gate->Signal(1),"release Eye 1 S1");
+        for(unsigned eye=0;eye<2;++eye) {
+            require_hresult(engines[eye].wait_for_previous_submission(3000),"isolated peer full drain");
+            require(readback_pattern(f,generated[eye][0].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==control[0] &&
+                readback_pattern(f,generated[eye][1].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==control[1],"isolated peer synthetic pixels differ");
+            require(readback_pattern(f,real[eye].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==make_pattern(57),"isolated peer real pixels differ");
+            require_hresult(engines[eye].wait_for_idle(),"isolated peer idle");
+        }
+        f.require_no_debug_errors();
+    }
     std::puts("STREAMED_OPTICAL_3X both S1 eyes pixel-complete before GPU-held S2/B, immediate tail submission, exact moving-camera control and full-fence reuse PASS");
 }

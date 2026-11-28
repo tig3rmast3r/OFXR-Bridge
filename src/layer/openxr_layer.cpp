@@ -13971,9 +13971,14 @@ static_assert(!should_preserve_missing_capture_anchor(
 // Queue each eye's existing tail once, after both S1 stages. When S2 is not
 // yet acquired, failure must retire S1 without executing that tail's writes.
 struct QueuedOpticalTail {
+    struct PeerWait {
+        Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+        std::uint64_t value{};
+    };
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> engine;
     std::shared_ptr<DirectSyntheticLease> extra_lease;
     std::function<HRESULT()> before_flush;
+    std::vector<PeerWait> peer_s1_waits;
     bool submitted{};
     std::once_flag once;
     HRESULT result{S_OK};
@@ -13989,6 +13994,17 @@ struct QueuedOpticalTail {
                         const auto retired=engine->discard_current_copy();
                         if(FAILED(retired))result=retired;
                         return;
+                    }
+                }
+                if(submitted) {
+                    for(const auto& peer:peer_s1_waits) {
+                        const auto waited=engine->wait_submission_fence(peer.fence.Get(),peer.value);
+                        if(FAILED(waited)) {
+                            result=waited;
+                            const auto retired=engine->discard_current_copy();
+                            if(FAILED(retired))result=retired;
+                            return;
+                        }
                     }
                 }
                 result=engine->flush_current_copy();
@@ -15797,6 +15813,17 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             };
             prepared = prepare_source();
             unsigned streamed_eyes{};
+            // On isolated per-eye queues, hold each eye's S2/B tail until every
+            // sibling eye's S1 stage completes so Eye 0's tail cannot preempt Eye 1's S1.
+            for(auto& resource:prepared.resources)if(resource.generation.optical_tail && resource.generation.optical_tail->submitted) {
+                for(const auto& peer:prepared.resources) {
+                    if(&peer==&resource || !peer.generation.optical_tail || !peer.generation.optical_tail->submitted ||
+                        !peer.generation.worker_fence || !peer.generation.worker_synthetic_fence_value)continue;
+                    if(peer.generation.worker_fence.Get()==resource.generation.worker_fence.Get())continue;
+                    resource.generation.optical_tail->peer_s1_waits.push_back(
+                        {peer.generation.worker_fence,peer.generation.worker_synthetic_fence_value});
+                }
+            }
             for(auto& resource:prepared.resources)if(resource.generation.optical_tail) {
                 ++streamed_eyes;
                 if(FAILED(resource.generation.optical_tail->flush()))preparation_cleanup_failed=true;
