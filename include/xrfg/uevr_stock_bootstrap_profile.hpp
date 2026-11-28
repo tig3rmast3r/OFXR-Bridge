@@ -1,0 +1,26 @@
+#pragma once
+#include <array>
+#include <cstdint>
+#include <string_view>
+namespace xrfg::uevr_stock_profile {
+// Official nightly-01143, source4ee5c6b. RVAs verified against its matching
+// PDB and disassembly. No engine/vtable/member offset is assumed by OFXR.
+inline constexpr char commit[]="4ee5c6b6162dee2291fc75f9dfc57667f6d45a2d";
+inline bool supports_sdk(int major,int minor,std::string_view hash) noexcept {
+    return major==2 && minor==39 && hash==commit;
+}
+inline constexpr char sha256[]="1a34cf65e4c12002ec967ed167ddda4e1cc7ae1da82157d0e279597beddeed75";
+inline constexpr std::uint32_t image_size=11649024;
+inline constexpr std::uint32_t entry=0x155840, gate=0x155ab0, accepted=0x155adc;
+inline constexpr std::uint32_t guard_start=0x155aa8;
+inline constexpr std::uint32_t function_size=695;
+inline constexpr std::uint64_t function_digest=0x6843753593284d8bULL;
+inline constexpr std::uint64_t digest(const std::uint8_t* data,std::size_t size) noexcept {
+    std::uint64_t hash=14695981039346656037ULL;
+    for(std::size_t i=0;i<size;++i)hash=(hash^data[i])*1099511628211ULL;
+    return hash;
+}
+inline constexpr std::array<std::uint8_t,16> entry_bytes{0x48,0x8b,0xc4,0x53,0x41,0x56,0x48,0x81,0xec,0xe8,0x00,0x00,0x00,0x80,0x3d,0xef};
+inline constexpr std::array<std::uint8_t,52> guard_bytes{0x48,0x83,0xb9,0x70,0x01,0x00,0x00,0x02,0x73,0xc3,0x80,0xb9,0x26,0x1d,0x00,0x00,0x00,0x74,0xba,0x48,0x83,0xb9,0xb8,0x00,0x00,0x00,0x00,0x74,0xb0,0x48,0x83,0xb9,0xc0,0x00,0x00,0x00,0x00,0x74,0xa6,0x33,0xc0,0x38,0x81,0x51,0x1d,0x00,0x00,0x0f,0x95,0xc0,0xff,0xc0};
+inline constexpr std::array<std::uint8_t,11> accepted_bytes{0x48,0x81,0xc4,0xe8,0x00,0x00,0x00,0x41,0x5e,0x5b,0xc3};
+} // namespace xrfg::uevr_stock_profile

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1104.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1105.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1040,7 +1040,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set(XRFG_VULKAN_INGRESS_SOURCE src/ingress/vulkan_native_ingress.cpp)
     endif()
     target_sources(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE src/layer/ngx_guide_capture.cpp src/layer/reshade_dxgi_compat.cpp src/layer/provider_api.cpp src/ingress/native_ingress.cpp src/ingress/luke_detection.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp ${XRFG_VULKAN_INGRESS_SOURCE} src/ingress/vulkan_command_stream.cpp src/ingress/vulkan_guide_ingress.cpp)
-    target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE safetyhook version)
+    target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE safetyhook version bcrypt)
     if(TARGET xrfg_vulkan_capture_suspended_tests)
         add_dependencies(xrfg_vulkan_capture_suspended_tests XR_APILAYER_XRFrameBridge_diagnostic)
         set_tests_properties(xrfg_vulkan_capture_suspended_tests PROPERTIES
@@ -2356,7 +2356,7 @@ if(XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
         target_sources(${t} PRIVATE src/layer/ngx_guide_capture.cpp src/layer/reshade_dxgi_compat.cpp src/ingress/native_ingress.cpp src/ingress/luke_detection.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp src/ingress/vulkan_guide_ingress.cpp)
         target_include_directories(${t} PRIVATE "${XRFG_DLSS_SDK_ROOT}/include" "${XRFG_DEPENDENCY_ROOT}/Streamline")
         target_include_directories(${t} PRIVATE "${XRFG_GENERATED_SHADER_DIR}")
-        target_link_libraries(${t} PRIVATE xrfg_autonomous_control xrfg_neural_rendering safetyhook version)
+        target_link_libraries(${t} PRIVATE xrfg_autonomous_control xrfg_neural_rendering safetyhook version bcrypt)
         target_include_directories(${t} PRIVATE "${XRFG_FIDELITYFX_API_INCLUDE_DIR}")
         target_compile_definitions(${t} PRIVATE XRFG_NATIVE_DLSSG)
     endforeach()

@@ -13,6 +13,13 @@ namespace xrfg::uevr_stock_discovery {
 // Discovery runs once on CPU. RVAs and C++ member offsets are learned from
 // code, never used to dereference private UEVR objects. Unknown shapes fail closed.
 inline constexpr char anchor[]="get desired number of views hook called!";
+inline constexpr char native_bootstrap_marker[]="GhostingFixBootstrapViewStates";
+inline bool has_native_bootstrap(std::span<const std::uint8_t> image) {
+    // The fork declares this option in its compiled image, even when OFF.
+    // Inspect the capability without entering UEVR's live mod registry while
+    // its renderer is recursively constructing the OpenXR session.
+    return std::search(image.begin(),image.end(),std::begin(native_bootstrap_marker),std::end(native_bootstrap_marker)-1)!=image.end();
+}
 // The callback/get_mod_value prefix used here is present in stable 1.05
 // (SDK 2.34). SDK 2 appends fields; a different major remains incompatible.
 inline bool supports_sdk(int major,int minor) noexcept {return major==2 && minor>=34;}

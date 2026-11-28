@@ -31,6 +31,9 @@ std::vector<std::uint8_t> fixture() {
 }
 int main() {
     auto image=fixture();const auto sites=discover(image);
+    check(!has_native_bootstrap(image),"stock fixture mistaken for native bootstrap fork");
+    auto fork=image;std::memcpy(fork.data()+0x2300,native_bootstrap_marker,sizeof(native_bootstrap_marker));
+    check(has_native_bootstrap(fork),"compiled native bootstrap capability not detected");
     check(sites && sites->entry==0x1100 && sites->count==0x11a8 && sites->gate==0x11b0 && sites->accepted==0x11dc,"published relocated tail not discovered");
     // Member layout is not a version key: both independent bool offsets and
     // the count offset can change while the instruction contract stays intact.

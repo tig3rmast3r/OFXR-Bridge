@@ -34,6 +34,39 @@ void accepted(SafetyHookContext& ctx) noexcept {
 #endif
 }
 
+bool module_hash(HMODULE module) {
+    wchar_t path[32768]{};
+    const auto n=GetModuleFileNameW(module,path,std::size(path));
+    if(!n || n==std::size(path))return false;
+    std::ifstream file(std::filesystem::path(path),std::ios::binary);
+    if(!file)return false;
+    struct Crypto {
+        BCRYPT_ALG_HANDLE algorithm{};BCRYPT_HASH_HANDLE hash{};std::vector<UCHAR> object;
+        ~Crypto(){if(hash)BCryptDestroyHash(hash);if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);}
+    } crypto;
+    if(BCryptOpenAlgorithmProvider(&crypto.algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)return false;
+    DWORD size{},bytes{};
+    if(BCryptGetProperty(crypto.algorithm,BCRYPT_OBJECT_LENGTH,reinterpret_cast<PUCHAR>(&size),sizeof(size),&bytes,0)<0)return false;
+    crypto.object.resize(size);
+    if(BCryptCreateHash(crypto.algorithm,&crypto.hash,crypto.object.data(),size,nullptr,0,0)<0)return false;
+    std::array<char,65536> buffer{};
+    while(file) {
+        file.read(buffer.data(),buffer.size());const auto count=file.gcount();
+        if(count && BCryptHashData(crypto.hash,reinterpret_cast<PUCHAR>(buffer.data()),ULONG(count),0)<0)return false;
+    }
+    if(!file.eof())return false;
+    std::array<UCHAR,32> digest{};
+    if(BCryptFinishHash(crypto.hash,digest.data(),digest.size(),0)<0)return false;
+    std::array<char,64> hex{};constexpr char digits[]="0123456789abcdef";
+    for(unsigned i=0;i<digest.size();++i){hex[i*2]=digits[digest[i]>>4];hex[i*2+1]=digits[digest[i]&15];}
+    return std::string_view(hex.data(),hex.size())==xrfg::uevr_stock_profile::sha256;
+}
+template<std::size_t N>
+bool code_matches(std::uintptr_t address,const std::array<std::uint8_t,N>& expected) noexcept {
+    std::array<std::uint8_t,N> bytes{};SIZE_T read{};
+    return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(address),bytes.data(),N,&read) &&
+        read==N && bytes==expected;
+}
 #if defined(_WIN64)
 std::vector<std::uint8_t> module_snapshot(HMODULE module) {
     MODULEINFO info{};
@@ -60,26 +93,36 @@ void install() noexcept {
 #if defined(_WIN64)
     try {
         const auto* api=uevr_api();
-        if(!api || !xrfg::uevr_stock_discovery::supports_sdk(api->version->major,api->version->minor) ||
-            !api->vr || !api->vr->get_mod_value)return;
-        // A fork that owns bootstrap must retain its native behavior. Check
-        // capability rather than guessing from a commit or SDK minor number.
-        char bootstrap[64]{};
-        api->vr->get_mod_value("VR_GhostingFixBootstrapViewStates",bootstrap,sizeof(bootstrap)-1);
-        if(bootstrap[0])return;
+        if(!api || !xrfg::uevr_stock_discovery::supports_sdk(api->version->major,api->version->minor))return;
+        // The exact r4 path remains authoritative for its verified binary.
+        // Other compatible builds use the additive code-discovery fallback.
+        const char* commit=api->version->minor==39 && api->functions && api->functions->get_commit_hash?
+            api->functions->get_commit_hash():nullptr;
         const auto module=GetModuleHandleW(L"UEVRBackend.dll");if(!module)return;
         auto& s=state();std::scoped_lock lock(s.mutex);
         if(s.attempted==module)return;s.attempted=module;
         const auto report=[](int reason){xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,reason,1462);};
-        const auto image=module_snapshot(module);
-        const auto sites=xrfg::uevr_stock_discovery::discover(image);
-        if(!sites){report(3);return;}
         const auto base=reinterpret_cast<std::uintptr_t>(module);
-        // Reject code changed between discovery and hook creation, including
-        // existing hooks. Both hook points came from decoded instructions.
-        std::vector<std::uint8_t> live(sites->end-sites->entry);SIZE_T read{};
-        if(!ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(base+sites->entry),live.data(),live.size(),&read) ||
-            read!=live.size() || !std::equal(live.begin(),live.end(),image.begin()+sites->entry)){report(3);return;}
+        namespace p=xrfg::uevr_stock_profile;
+        const bool known=commit && p::supports_sdk(api->version->major,api->version->minor,commit) && module_hash(module);
+        std::optional<xrfg::uevr_stock_discovery::Sites> sites;
+        if(known) {
+            std::array<std::uint8_t,p::function_size> body{};SIZE_T read{};
+            if(!ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(base+p::entry),body.data(),body.size(),&read) ||
+                read!=body.size() || p::digest(body.data(),body.size())!=p::function_digest){report(3);return;}
+            if(!code_matches(base+p::entry,p::entry_bytes) || !code_matches(base+p::guard_start,p::guard_bytes) ||
+                !code_matches(base+p::accepted,p::accepted_bytes)){report(3);return;}
+            sites.emplace();sites->entry=p::entry;sites->gate=p::gate;sites->accepted=p::accepted;
+        } else {
+            const auto image=module_snapshot(module);
+            if(xrfg::uevr_stock_discovery::has_native_bootstrap(image)){report(7);return;}
+            sites=xrfg::uevr_stock_discovery::discover(image);
+            if(!sites){report(3);return;}
+            // Reject a live code change between discovery and hook creation.
+            std::vector<std::uint8_t> live(sites->end-sites->entry);SIZE_T read{};
+            if(!ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(base+sites->entry),live.data(),live.size(),&read) ||
+                read!=live.size() || !std::equal(live.begin(),live.end(),image.begin()+sites->entry)){report(3);return;}
+        }
         auto a=safetyhook::create_mid(reinterpret_cast<void*>(base+sites->gate),gate,SafetyHookMid::StartDisabled);
         auto b=safetyhook::create_mid(reinterpret_cast<void*>(base+sites->accepted),accepted,SafetyHookMid::StartDisabled);
         if(!a || !b){report(4);return;}
@@ -94,7 +137,7 @@ void install() noexcept {
         s.gate=std::move(a);s.accepted=std::move(b);
         s.installed.store(true,std::memory_order_release);report(1);
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
-            0,1466,(std::uint64_t(sites->entry)<<32)|sites->gate,sites->accepted);
+            known?1:0,1466,(std::uint64_t(sites->entry)<<32)|sites->gate,sites->accepted);
     } catch(...) {}
 #endif
 }

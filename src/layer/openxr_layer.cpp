@@ -78,7 +78,9 @@
 #include "xrfg/uevr_osr.hpp"
 
 #include <windows.h>
+#include <bcrypt.h>
 #include "xrfg/uevr_stock_bootstrap.hpp"
+#include "xrfg/uevr_stock_bootstrap_profile.hpp"
 #if defined(_WIN64)
 #include "xrfg/uevr_stock_bootstrap_discovery.hpp"
 #endif
