@@ -442,7 +442,7 @@ void test_hybrid_depth_slices(D3D12WarpFixture& fixture) {
                 const auto eye_and_grid = (std::uint64_t(test.first_eye + i) << 48U) | grid;
                 expected.push_back("a=" + std::to_string(eye_and_grid) +
                     " b=" + std::to_string(test.outputs) +
-                    " c=" + std::to_string(test.eye_count * test.outputs));
+                    " c=" + std::to_string(test.eye_count * (test.outputs + 1U)));
             }
         }
     }
@@ -453,7 +453,7 @@ void test_hybrid_depth_slices(D3D12WarpFixture& fixture) {
         if (line.find("op=embedded_configuration result=867 ") != std::string::npos)
             actual.push_back(line.substr(line.find(" a=") + 1U));
     }
-    require(actual == expected, "depth splat did not allocate one slice per usable eye and output");
+    require(actual == expected, "depth splat did not allocate outputs+1 slices per usable eye");
     // Composed AER guides mark disoccluded background wake pixels as NaN; depth
     // search must still rescue the moving nearer bar on all 3 outputs (4X).
     for (const auto backend : {xrfg::D3D12OpticalFlowBackend::fidelity_fx,
@@ -462,8 +462,140 @@ void test_hybrid_depth_slices(D3D12WarpFixture& fixture) {
             HybridBarsLayout::single_eye, true) >= 0.95,
             "depth splat failed to rescue near bars over NaN disoccluded wake");
     }
+    // Orbiting foreground over low-contrast moving background at 4X:
+    // trailing disoccluded wake must not blend the occluder from Frame A even
+    // when color contrast is below the 0.1 disagreement threshold, and leading
+    // covered background must use the background's displacement (not the
+    // foreground's) despite starting outside the occluder in Frame B.
+    {
+        constexpr UINT width = 256, height = 128;
+        constexpr int bg_shift = 32; // B-to-A background mvx = -32 (bg moves +32 px right A->B)
+        constexpr int fg_x_b = 110, fg_w = 40; // fg stationary in screen (mvx = 0)
+        constexpr RgbaBytes fg_color{40, 40, 40, 255};
+        // Low-contrast striped background (values 22..26 vs fg 40: diff < 0.08 < 0.1!)
+        const auto bg_color = [](int world_x) -> RgbaBytes {
+            const std::uint8_t v = ((world_x / 4) & 1) ? 26 : 22;
+            return RgbaBytes{v, v, v, 255};
+        };
+        const auto in_fg = [&](UINT x, UINT y) {
+            return static_cast<int>(x) >= fg_x_b &&
+                static_cast<int>(x) < fg_x_b + fg_w && y >= 24 && y < 104;
+        };
+        const auto make_pattern = [&](bool is_b) {
+            StereoPattern pattern;
+            for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                auto& bytes = pattern[eye];
+                bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
+                for (UINT y = 0; y < height; ++y) {
+                    for (UINT x = 0; x < width; ++x) {
+                        const int wx = is_b ? (static_cast<int>(x) - bg_shift) : static_cast<int>(x);
+                        const RgbaBytes c = in_fg(x, y) ? fg_color : bg_color(wx);
+                        const std::size_t o = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
+                        bytes[o + 0] = c[0]; bytes[o + 1] = c[1]; bytes[o + 2] = c[2]; bytes[o + 3] = 255;
+                    }
+                }
+            }
+            return pattern;
+        };
+        const StereoPattern frame_a = make_pattern(false);
+        const StereoPattern frame_b = make_pattern(true);
+        auto gm_res = create_and_upload_game_motion_field(
+            fixture, width, height, [&](UINT, UINT x, UINT y) {
+                const float vx = in_fg(x, y) ? 0.0F : -static_cast<float>(bg_shift);
+                return std::array<float, 2>{vx, 0.0F};
+            });
+        auto gd_res = create_and_upload_game_depth_field(
+            fixture, width, height, [&](UINT, UINT x, UINT y) {
+                return in_fg(x, y) ? 0.020F : 0.002F;
+            });
+        const auto make_color = [&] { return create_single_slice_texture(fixture, width, height); };
+        std::array<ComPtr<ID3D12Resource>, 2> sources{make_color(), make_color()};
+        std::array<ComPtr<ID3D12Resource>, 2> currents{make_color(), make_color()};
+        std::array<ComPtr<ID3D12Resource>, 3> synthetics{make_color(), make_color(), make_color()};
+        upload_pattern(fixture, sources[0].Get(), frame_a);
+        upload_pattern(fixture, sources[1].Get(), frame_b);
+        std::array<ID3D12Resource*, 2> src_ptrs{sources[0].Get(), sources[1].Get()};
+        std::array<ID3D12Resource*, 2> cur_ptrs{currents[0].Get(), currents[1].Get()};
+        std::array<ID3D12Resource*, 3> syn_ptrs{synthetics[0].Get(), synthetics[1].Get(), synthetics[2].Get()};
+        const ReprojectionViews stereo_views = make_reprojection_views();
+        const auto views = std::span(stereo_views).first(1);
+        for (const auto backend : {xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                                   xrfg::D3D12OpticalFlowBackend::nvidia}) {
+            auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+            require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
+                src_ptrs, D3D12_RESOURCE_STATE_RENDER_TARGET)), "orbit history init failed");
+            xrfg::D3D12FrameSynthesizer synthesizer;
+            xrfg::D3D12NvidiaOpticalFlowOptions options;
+            options.hybrid = true;
+            require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
+                history, cur_ptrs, syn_ptrs, kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                backend, options)), "orbit synth init failed");
+            const auto make_guides = [&](std::uint64_t serial) {
+                auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+                set->eye_count = 1;
+                auto frame = std::make_shared<xrfg::DlssMotionVectorFrame>();
+                frame->stream = 701; frame->epoch = 1; frame->serial = serial; frame->previous_serial = serial - 1;
+                frame->motion_vectors = gm_res; frame->depth = gd_res; frame->producer_queue = fixture.queue();
+                frame->output_width = frame->motion_width = frame->depth_width = width;
+                frame->output_height = frame->motion_height = frame->depth_height = height;
+                frame->depth_inverted = true;
+                frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                frame->depth_resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                set->eyes[0] = frame;
+                return set;
+            };
+            xrfg::D3D12HistoryCaptureTicket ca{}, cb{};
+            require(operation_succeeded(history->capture(0, &ca)) && operation_succeeded(history->commit(ca)),
+                "orbit capture A failed");
+            xrfg::D3D12FrameSynthesisTicket prime{}, pair{};
+            require(operation_succeeded(synthesizer.submit_prime(ca, views, 0, &prime, make_guides(1))),
+                "orbit prime failed");
+            require_frame_start_gate(synthesizer, "orbit frame-start gate");
+            require(operation_succeeded(history->capture(1, &cb)) && operation_succeeded(history->commit(cb)),
+                "orbit capture B failed");
+            const std::array<float, 3> fracs{0.25F, 0.50F, 0.75F};
+            const auto extra = std::make_optional(xrfg::D3D12ExtraSynthetic{1U, fracs[1], {}, 2U, fracs[2]});
+            require(operation_succeeded(synthesizer.submit_pair(cb, views, views, 0, 1, &pair,
+                std::nullopt, make_guides(2), false, fracs[0], {}, extra)), "orbit pair failed");
+            fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+            for (UINT out = 0; out < 3; ++out) {
+                const auto img = readback_single_slice(fixture, synthetics[out].Get(),
+                    D3D12_RESOURCE_STATE_RENDER_TARGET);
+                // Trailing wake behind fg right edge: [fg_x_b + fg_w + 2 .. fg_x_b + fg_w + int(bg_shift * t) - 2]
+                const int trail_x0 = fg_x_b + fg_w + 2;
+                const int trail_x1 = fg_x_b + fg_w + static_cast<int>(bg_shift * fracs[out]) - 2;
+                int max_trail_err = 0;
+                for (int y = 40; y < 88; ++y) {
+                    for (int x = trail_x0; x < trail_x1; ++x) {
+                        const int expected_v = bg_color(x - static_cast<int>(std::lround(bg_shift * fracs[out])))[0];
+                        const int actual_v = img[(static_cast<std::size_t>(y) * width + x) * kBytesPerPixel];
+                        max_trail_err = std::max(max_trail_err, std::abs(actual_v - expected_v));
+                    }
+                }
+                // Leading covered band left of fg left edge: [fg_x_b - int(bg_shift * (1 - t)) + 2 .. fg_x_b - 2]
+                const int lead_x0 = fg_x_b - static_cast<int>(bg_shift * (1.0F - fracs[out])) + 2;
+                const int lead_x1 = fg_x_b - 2;
+                int max_lead_err = 0;
+                for (int y = 40; y < 88; ++y) {
+                    for (int x = lead_x0; x < lead_x1; ++x) {
+                        const int expected_v = bg_color(x - static_cast<int>(std::lround(bg_shift * fracs[out])))[0];
+                        const int actual_v = img[(static_cast<std::size_t>(y) * width + x) * kBytesPerPixel];
+                        max_lead_err = std::max(max_lead_err, std::abs(actual_v - expected_v));
+                    }
+                }
+                std::cout << "orbit wake " << (backend == xrfg::D3D12OpticalFlowBackend::nvidia ? "nvidia" : "ffx")
+                          << " out=" << out << " max_trail_err=" << max_trail_err
+                          << " max_lead_err=" << max_lead_err << '\n';
+                require(max_trail_err <= 2, "trailing disoccluded wake ghosted low-contrast foreground");
+                require(max_lead_err <= 2, "leading covered background used wrong parity displacement");
+            }
+            require(operation_succeeded(synthesizer.wait_for_idle()), "orbit drain failed");
+            require(operation_succeeded(history->invalidate()), "orbit invalidate failed");
+        }
+    }
     log.shutdown();
-    std::cout << "Hybrid depth splat: exact 1/2/4/6 slices, sparse right eye, NaN wake rescue and distinct output times PASS\n";
+    std::cout << "Hybrid depth splat: exact outputs+1 slices, sparse right eye, NaN wake rescue, orbiting wakes and distinct output times PASS\n";
 }
 
 // 0.2 V559-V573: Hybrid's HUD fix. A translucent HUD over a flat world, whose

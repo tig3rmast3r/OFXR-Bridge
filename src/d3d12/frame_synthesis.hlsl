@@ -1375,14 +1375,45 @@ bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
     return game_motion_surface_at(pixel, start, previous_color, current_color, endpoint);
 }
 
+uint depth_priority_rank(float nearness) {
+    return uint(saturate(coverage_mask_depth_priority(nearness)) * 255.0);
+}
+
+// The trailing slice of DepthSplat is built at t = 0 (Frame A): every B texel
+// splatted to its pose-mapped A coordinate with its depth priority and B-to-A
+// displacement. If a nearer surface won that texel in Frame A (by 1.5x depth,
+// or strictly nearer in depth with a > 3 px motion jump), then Frame A at
+// `a_coord` shows that occluder rather than the surface at B — this pixel is
+// trailing-edge disoccluded background and must use B alone without blending
+// the occluder from A.
+bool a_frame_occluded(float2 a_coord, float b_nearness, float2 b_displacement) {
+    uint sw, sh, slices;
+    DepthSplat.GetDimensions(sw, sh, slices);
+    bool occluded = false;
+    if (slices > 1u) {
+        const uint word = DepthSplat.Load(int4(coverage_mask_texel(a_coord),
+            int(slices - 1u), 0));
+        if (word != 0u) {
+            const uint a_rank = word >> 24u;
+            const uint far_rank = depth_priority_rank(b_nearness * kDepthNearerFactor + 1.0e-6);
+            const uint self_rank = depth_priority_rank(b_nearness);
+            if (a_rank >= far_rank) {
+                occluded = true;
+            } else if (a_rank > self_rank) {
+                occluded = length(coverage_mask_motion(word) - b_displacement) > 3.0;
+            }
+        }
+    }
+    return occluded;
+}
+
 // 0.2 V505/V555: query this output's depth splat at `pixel` for a nearer
 // surface than `reference_nearness`, solve from its splatted B endpoint, and
 // accept it when it is genuinely nearer and its A/B samples agree.
 bool try_depth_splat_surface(float2 pixel, float reference_nearness, out float4 color) {
     color = float4(0.0, 0.0, 0.0, 1.0);
     bool found = false;
-    const uint rank = uint(saturate(coverage_mask_depth_priority(
-        reference_nearness * kDepthNearerFactor + 1.0e-6)) * 255.0);
+    const uint rank = depth_priority_rank(reference_nearness * kDepthNearerFactor + 1.0e-6);
     const uint word = DepthSplat.Load(int4(coverage_mask_texel(pixel),
         int(depth_splat_output()), 0));
     if (word != 0u && (word >> 24u) >= rank) {
@@ -1548,6 +1579,12 @@ float4 synthesize_midpoint(
                 // its final B-to-A displacement.
                 float solve_residual = 0.0;
                 float2 last_displacement = float2(0.0, 0.0);
+                // The prior fixed-point iterate, kept so an oscillating
+                // leading-edge solve can pick the farther (covered background)
+                // surface regardless of whether `pixel` started inside or
+                // outside the occluder.
+                float2 previous_step_endpoint = pixel;
+                float2 previous_step_displacement = float2(0.0, 0.0);
                 // Where the A and B samples were taken.
                 float2 a_coordinate = pixel, b_coordinate = pixel;
                 if (use_game_motion_pipeline) {
@@ -1591,6 +1628,8 @@ float4 synthesize_midpoint(
                         }
                         float2 target_displacement =
                             previous_endpoint.coordinate - current_endpoint;
+                        previous_step_endpoint = current_endpoint;
+                        previous_step_displacement = target_displacement;
                         current_endpoint =
                             pixel - (1.0 - synthesis_fraction()) * target_displacement;
                     }
@@ -1798,24 +1837,81 @@ float4 synthesize_midpoint(
                         }
 #endif
                         // Background a leading edge is covering shows only in
-                        // A. There the solve has no fixed point: B shows the
-                        // occluder at the pixel, so it starts inside it and
-                        // alternates outside and in. After its odd number of
-                        // steps it ends outside, on the covered surface's
-                        // displacement, which places A's sample.
+                        // A. There the solve has no fixed point and alternates
+                        // between the covered surface and the occluder. With
+                        // depth available, pick the farther of the two
+                        // alternating endpoints rather than relying on step
+                        // parity (which lands on the occluder when the
+                        // background moves faster than the foreground).
+                        float covered_nearness = 0.0;
                         if (!camera_explains && solve_residual >= 0.5) {
-                            CameraSample covered = sample_previous_target(
-                                pixel + synthesis_fraction() * last_displacement, Slice, ViewIndex);
+                            float2 covered_displacement = last_displacement;
+                            bool covered_use_b = false;
+                            if (hybrid_layout && game_depth_available()) {
+                                float curr_near = game_nearness(b_coordinate);
+                                float prev_near = game_nearness(previous_step_endpoint);
+                                if (prev_near < curr_near) {
+                                    covered_displacement = previous_step_displacement;
+                                    covered_nearness = prev_near;
+                                } else {
+                                    covered_nearness = curr_near;
+                                }
+                                float2 covered_a = pixel + synthesis_fraction() * covered_displacement;
+                                if (depth_splat_available() && repeated_capture_flag() == 0 &&
+                                    a_frame_occluded(covered_a, covered_nearness, covered_displacement)) {
+                                    // If A at covered_a was occluded by a nearer
+                                    // surface (e.g. grass-blade jitter on a
+                                    // trailing wake), prefer B only when B at
+                                    // covered_b is not itself occluded.
+                                    float2 covered_b = pixel - (1.0 - synthesis_fraction()) * covered_displacement;
+                                    float b_near = game_nearness(covered_b);
+                                    float2 b_motion = game_motion_for_pixel(covered_b, Slice, ViewIndex);
+                                    MappedCoordinate b_prev = map_source_to_target(
+                                        covered_b + b_motion, PreviousMappings[ViewIndex]);
+                                    float2 b_disp = b_prev.valid >= 0.5
+                                        ? (b_prev.coordinate - covered_b) : covered_displacement;
+                                    bool b_occluded = nearer(b_near, covered_nearness) ||
+                                        (depth_priority_rank(b_near) > depth_priority_rank(covered_nearness) &&
+                                         length(b_disp - covered_displacement) > 3.0);
+                                    if (!b_occluded) {
+                                        CameraSample covered_current = sample_current_target(
+                                            covered_b, Slice, ViewIndex);
+                                        if (covered_current.valid >= 0.5) {
+                                            output_color = saturate(covered_current.color);
 #ifdef XRFG_HYBRID_EXPLAINED_SCORING
-                            if (covered.valid >= 0.5) {
-                                output_color = saturate(covered.color);
-                                // No surface in B reaches this covered pixel.
-                                // A alone explains it; asking flow again can
-                                // replace that answer with the covering edge.
-                                last_disagreement = 0.0;
+                                            last_disagreement = 0.0;
+#endif
+                                            covered_use_b = true;
+                                        }
+                                    }
+                                }
                             }
+                            if (!covered_use_b) {
+                                CameraSample covered = sample_previous_target(
+                                    pixel + synthesis_fraction() * covered_displacement, Slice, ViewIndex);
+#ifdef XRFG_HYBRID_EXPLAINED_SCORING
+                                if (covered.valid >= 0.5) {
+                                    output_color = saturate(covered.color);
+                                    // No surface in B reaches this covered pixel.
+                                    // A alone explains it; asking flow again can
+                                    // replace that answer with the covering edge.
+                                    last_disagreement = 0.0;
+                                }
 #else
-                            if (covered.valid >= 0.5) output_color = saturate(covered.color);
+                                if (covered.valid >= 0.5) output_color = saturate(covered.color);
+#endif
+                            }
+                        } else if (!camera_explains && hybrid_layout && game_depth_available() &&
+                                   depth_splat_available() && repeated_capture_flag() == 0 &&
+                                   a_frame_occluded(a_coordinate, game_nearness(b_coordinate), last_displacement)) {
+                            // Trailing-edge disocclusion: a nearer surface
+                            // occupied a_coordinate in Frame A, so A shows the
+                            // occluder rather than this background surface.
+                            // B alone explains it; keep B cleanly without
+                            // blending the occluder from A or invoking flow.
+                            output_color = saturate(current_sample.color);
+#ifdef XRFG_HYBRID_EXPLAINED_SCORING
+                            last_disagreement = 0.0;
 #endif
                         } else if (!camera_explains && disagreement > 0.1 && repeated_capture_flag() == 0) {
                             // Where the motion is not uniform - a vector 16
@@ -1879,10 +1975,11 @@ float4 synthesize_midpoint(
                         // the answer by the margin, one solve from where it is
                         // in B, held to its own agreement.
                         if (hybrid_layout && game_depth_available() && depth_splat_available() &&
-                            !(!camera_explains && solve_residual >= 0.5) &&
                             repeated_capture_flag() == 0) {
                             float4 splat_color;
-                            if (try_depth_splat_surface(pixel, game_nearness(b_coordinate), splat_color)) {
+                            float ref_nearness = (!camera_explains && solve_residual >= 0.5)
+                                ? covered_nearness : game_nearness(b_coordinate);
+                            if (try_depth_splat_surface(pixel, ref_nearness, splat_color)) {
                                 output_color = splat_color;
                                 // Verified by depth and its own samples, so the
                                 // hybrid keeps it: the flow, following the

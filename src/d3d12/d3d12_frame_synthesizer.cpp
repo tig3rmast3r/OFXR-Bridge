@@ -3609,6 +3609,10 @@ struct D3D12FrameSynthesizer::Impl {
         std::array<EyeSplat, kMaxReprojectionViews> eyes{};
         std::array<bool, kMaxReprojectionViews> built{};
         const UINT outputs = synthetic_output_count();
+        // One slice per synthetic output plus one extra slice at t = 0 (Frame A)
+        // so Hybrid can tell geometrically when a background pixel's A-endpoint
+        // was occluded by a nearer surface in Frame A (trailing disocclusion).
+        const UINT slices_per_eye = outputs + 1U;
         UINT slice_count = 0;
         UINT width = 0, height = 0;
         for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
@@ -3635,7 +3639,7 @@ struct D3D12FrameSynthesizer::Impl {
             splat.columns = static_cast<UINT>(std::ceil(grid_width)) + 1U;
             splat.rows = static_cast<UINT>(std::ceil(grid_height)) + 1U;
             splat.first_slice = slice_count;
-            slice_count += outputs;
+            slice_count += slices_per_eye;
             width = std::max(width, splat.columns);
             height = std::max(height, splat.rows);
             built[eye] = true;
@@ -3673,13 +3677,13 @@ struct D3D12FrameSynthesizer::Impl {
         eye_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
         eye_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         eye_view.Texture2DArray.MipLevels = 1;
-        eye_view.Texture2DArray.ArraySize = outputs;
+        eye_view.Texture2DArray.ArraySize = slices_per_eye;
         D3D12_UNORDERED_ACCESS_VIEW_DESC eye_uav{};
         eye_uav.Format = DXGI_FORMAT_R32_UINT;
         eye_uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-        eye_uav.Texture2DArray.ArraySize = outputs;
+        eye_uav.Texture2DArray.ArraySize = slices_per_eye;
         for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
-            // The draw's t9: this eye's slices, one per output, or nothing.
+            // The draw's t9: this eye's slices (one per output plus Frame A), or nothing.
             auto* resource = built[eye] ? slot.depth_splat.Get() : nullptr;
             eye_view.Texture2DArray.FirstArraySlice = eyes[eye].first_slice;
             device->CreateShaderResourceView(resource, &eye_view,
@@ -3700,12 +3704,13 @@ struct D3D12FrameSynthesizer::Impl {
         list->SetDescriptorHeaps(1, heaps);
         list->SetComputeRootSignature(root_signature.Get());
         // Each output's pass carries that output's fraction and index, as its
-        // draws will.
+        // draws will; the trailing slice carries fraction 0 (Frame A).
         const auto bind = [&](UINT eye, UINT output) {
             SynthesisParameters parameters = eyes[eye].parameters;
+            const float fraction = output < outputs ? synthetic_output_fraction(output) : 0.0F;
             parameters.synthesis_flags =
                 (parameters.synthesis_flags & 0xFF0000FFU & ~kDepthSplatOutputMask) |
-                packed_synthesis_fraction(synthetic_output_fraction(output)) |
+                packed_synthesis_fraction(fraction) |
                 (output << kDepthSplatOutputShift);
             list->SetComputeRootDescriptorTable(0,
                 offset_gpu_handle(gpu_start, eye * kDescriptorBlockSize, descriptor_increment));
@@ -3717,7 +3722,7 @@ struct D3D12FrameSynthesizer::Impl {
         list->SetPipelineState(depth_splat_clear_pipeline.Get());
         for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
             if (!built[eye]) continue;
-            for (UINT output = 0; output < outputs; ++output) {
+            for (UINT output = 0; output < slices_per_eye; ++output) {
                 bind(eye, output);
                 list->Dispatch((eyes[eye].columns + 7U) / 8U, (eyes[eye].rows + 7U) / 8U, 1);
             }
@@ -3729,7 +3734,7 @@ struct D3D12FrameSynthesizer::Impl {
         list->SetPipelineState(depth_splat_build_pipeline.Get());
         for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
             if (!built[eye]) continue;
-            for (UINT output = 0; output < outputs; ++output) {
+            for (UINT output = 0; output < slices_per_eye; ++output) {
                 bind(eye, output);
                 list->Dispatch((eyes[eye].columns + 6U) / 8U, (eyes[eye].rows + 6U) / 8U, 1);
             }
@@ -3748,7 +3753,7 @@ struct D3D12FrameSynthesizer::Impl {
             const std::uint64_t a = (static_cast<std::uint64_t>(eye) << 48U) |
                 (static_cast<std::uint64_t>(eyes[eye].columns & 0xFFFFFU) << 20U) |
                 (eyes[eye].rows & 0xFFFFFU);
-            const std::uint64_t key = (a << 5U) | (outputs << 3U) | slot.depth_splat_slices;
+            const std::uint64_t key = (a << 8U) | (outputs << 4U) | slot.depth_splat_slices;
             if (depth_splat_recorded[eye].exchange(key + 1U, std::memory_order_relaxed) == key + 1U) continue;
             bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 867, a,
                 outputs, slot.depth_splat_slices);
