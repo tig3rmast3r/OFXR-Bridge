@@ -1665,6 +1665,12 @@ float4 synthesize_midpoint(
                         // whose shading changed - a fade, a flash - and their
                         // motion-compensated blend is the frame between.
                         output_color = saturate(camera_explains ? stable_midpoint : flow_midpoint);
+#ifdef XRFG_HYBRID_EXPLAINED_SCORING
+                        if (camera_explains) {
+                            last_disagreement = min(last_disagreement,
+                                rgb_error(stable_previous, current_fallback.color));
+                        }
+#endif
                         // Background a leading edge is covering shows only in
                         // A. There the solve has no fixed point: B shows the
                         // occluder at the pixel, so it starts inside it and
@@ -1674,7 +1680,17 @@ float4 synthesize_midpoint(
                         if (!camera_explains && solve_residual >= 0.5) {
                             CameraSample covered = sample_previous_target(
                                 pixel + synthesis_fraction() * last_displacement, Slice, ViewIndex);
+#ifdef XRFG_HYBRID_EXPLAINED_SCORING
+                            if (covered.valid >= 0.5) {
+                                output_color = saturate(covered.color);
+                                // No surface in B reaches this covered pixel.
+                                // A alone explains it; asking flow again can
+                                // replace that answer with the covering edge.
+                                last_disagreement = 0.0;
+                            }
+#else
                             if (covered.valid >= 0.5) output_color = saturate(covered.color);
+#endif
                         } else if (!camera_explains && disagreement > 0.1 && repeated_capture_flag() == 0) {
                             // Where the motion is not uniform - a vector 16
                             // pixels away differs by a tenth of a pixel -
@@ -1718,6 +1734,9 @@ float4 synthesize_midpoint(
                                         if (game_motion_surface(pixel, start, a, b) &&
                                             rgb_error(a, b) < 0.05) {
                                             output_color = saturate(lerp(a, b, synthesis_fraction()));
+#ifdef XRFG_HYBRID_EXPLAINED_SCORING
+                                            last_disagreement = min(last_disagreement, rgb_error(a, b));
+#endif
                                             done = true;
                                         }
                                         done = done || solves >= 2;

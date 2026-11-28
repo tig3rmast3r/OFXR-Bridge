@@ -156,6 +156,15 @@ void test_hybrid_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, Hybrid
         require(hybrid && !overlay ? edge_error < blend_error : edge_error <= (fade ? 1.0 : overlay ? 12.0 : hybrid ? 5.0 : 2.0),
             "DLSS vectors showed the wrong frame around a moving edge for eye " +
                 std::to_string(eye) + ": " + std::to_string(edge_error));
+        // A covered surface already explained by the vectors must not be
+        // replaced with the optical branch's covering edge. This analytic
+        // midpoint catches the old initial-disagreement scoring in both eyes
+        // and at both flow input scales (old MAE: 7.66-13.90).
+        if (hybrid && !overlay && !fade && flow == HybridFlow::fidelity_fx) {
+            require(edge_error <= 5.0,
+                "FidelityFX Hybrid replaced explained occlusion pixels: " +
+                    std::to_string(edge_error));
+        }
     }
     require(operation_succeeded(synthesizer.wait_for_idle()), "occlusion final drain failed");
     require(operation_succeeded(history->invalidate()), "occlusion history invalidate failed");
