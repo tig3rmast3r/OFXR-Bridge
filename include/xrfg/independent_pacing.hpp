@@ -199,6 +199,8 @@ class IndependentDeliveryReserve {
     unsigned late_{},window_{};
     bool accelerated_{};
     std::int64_t source_due_{},source_period_{};
+    std::int64_t delivery_peak_{},delivery_source_due_{},delivery_source_period_{};
+    unsigned delivery_late_{},delivery_window_{};
     void unstable() noexcept {last_delivery_=0;recovery_.reset();}
 public:
     void set_limit(std::int64_t limit) noexcept {
@@ -247,6 +249,35 @@ public:
         // earn bounded reserve promptly instead of dropping 12+ frames first.
         observe(available,first+reserve_,period,timing.source_overlap_only?3U:2U);return true;
     }
+    bool observe_delivery_expiry(std::int64_t prepared,std::int64_t due,std::int64_t period,
+        const IndependentRecoveryTiming& timing) noexcept {
+        if(!limit_ || period<=0 || !due || !prepared)return false;
+        const auto first=timing.accelerated?due-std::clamp(timing.scheduled_offset,std::int64_t{},3*period):due;
+        if(delivery_source_period_!=period) {
+            delivery_source_period_=period;delivery_source_due_=0;
+            delivery_late_=delivery_window_=0;delivery_peak_=0;
+        }
+        if(first<=delivery_source_due_)return false;
+        delivery_source_due_=first;
+        if(timing.accelerated && timing.source_queued && !timing.source_overlap_only) {
+            delivery_late_=delivery_window_=0;delivery_peak_=0;return false;
+        }
+        const auto late=prepared-(due+reserve_);
+        if(late>period*8){unstable();delivery_late_=delivery_window_=0;delivery_peak_=0;return false;}
+        if(late>period/2) {
+            unstable();delivery_peak_=std::max(delivery_peak_,late);++delivery_late_;
+            if(delivery_late_>=4U) {
+                const auto missed=(delivery_peak_+period/2)/period;
+                const auto next=std::min(limit_,reserve_+missed*period);
+                refill_+=std::max(std::int64_t{},next-reserve_);reserve_=next;
+                late_=window_=0;peak_=0;
+                delivery_late_=delivery_window_=0;delivery_peak_=0;
+                return true;
+            }
+        }
+        if(++delivery_window_>=32){delivery_late_=delivery_window_=0;delivery_peak_=0;}
+        return false;
+    }
     void delivered(std::int64_t ready,std::int64_t expected,
                    std::int64_t entered,std::int64_t period,bool accelerated=false) noexcept {
         if(!limit_ || period<=0 || !ready || !expected || !entered)return;
@@ -256,6 +287,7 @@ public:
         const auto previous=last_delivery_;last_delivery_=entered;
         const bool healthy=recovery_.observe(entered,period,spare?1:0,accelerated?125'000'000:500'000'000);
         if(!healthy || !spare || !previous || entered<=previous || entered-previous>period*8)return;
+        delivery_late_=delivery_window_=0;delivery_peak_=0;
         // Retire margin promptly once actual native deliveries prove spare
         // readiness. The current frame still vetoes unsafe cuts. In particular
         // this stops before shrinking tolerance underneath a queued late frame;

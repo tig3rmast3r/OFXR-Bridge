@@ -19,6 +19,9 @@ inline HRESULT create_private_d11_delivery(ID3D11Device* source,ID3D11Device** o
     if(SUCCEEDED(result)) {
         Microsoft::WRL::ComPtr<ID3D11Multithread> multithread;
         if(SUCCEEDED((*context)->QueryInterface(IID_PPV_ARGS(&multithread))))multithread->SetMultithreadProtected(TRUE);
+        Microsoft::WRL::ComPtr<IDXGIDevice> delivery_dxgi;
+        if(SUCCEEDED((*output)->QueryInterface(IID_PPV_ARGS(&delivery_dxgi))))
+            static_cast<void>(delivery_dxgi->SetGPUThreadPriority(7));
     }
     return result;
 }

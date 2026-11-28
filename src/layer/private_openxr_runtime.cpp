@@ -1425,7 +1425,16 @@ struct PrivateOpenXrRuntime::Impl {
                     if(XR_FAILED(result)){if(!stopping)fail(result);retire(packet);fifo->retire();packet.reset();break;}
                     const bool stale_pose=packet->content_time && packet->content_time<=last_end_prediction.load();
                     if(stale_pose && options.trace)options.trace(95,packet->sequence,packet->content_time,last_end_prediction.load());
-                    if(!stale_pose && !packet->expired_by_director.load() && !independent_expired(packet->independent_due,clock_ns(),reserve.reserve(),physical))break;
+                    const auto expired_at=clock_ns();
+                    if(!stale_pose && !packet->expired_by_director.load() && !independent_expired(packet->independent_due,expired_at,reserve.reserve(),physical))break;
+                    if(!stale_pose && !packet->expired_by_director.load() && !packet->copy_owns_sources &&
+                        packet->independent_due && packet->prepared_at>packet->independent_available_at) {
+                        const auto first_due=packet->independent_due-std::clamp(packet->recovery.scheduled_offset,std::int64_t{},physical*3);
+                        if(!optional_work_active.load() && first_due>std::max(optional_work_finished.load(),generation_initialized_at.load())) {
+                            reserve.observe_delivery_expiry(packet->prepared_at,packet->independent_due,physical,packet->recovery);
+                            independent_reserve=reserve.reserve();
+                        }
+                    }
                     retire_expired(packet);packet.reset();
                 }
                 if(XR_FAILED(result))break;
@@ -1473,7 +1482,8 @@ struct PrivateOpenXrRuntime::Impl {
                     // has drained. Preserve expiry allowance while source-phase
                     // recovery consumes that age, using its same residence goal.
                     if(independent_ready_residence.load()<=physical/2+2'000'000)
-                        reserve.delivered(packet->independent_available_at,packet->independent_due+reserve.reserve(),entered,physical,packet->recovery.accelerated);
+                        reserve.delivered(std::max(packet->independent_available_at,packet->prepared_at),
+                            packet->independent_due+reserve.reserve(),entered,physical,packet->recovery.accelerated);
                     independent_reserve=reserve.reserve();
                 }
                 if(result==XR_SUCCESS && end.layerCount) {

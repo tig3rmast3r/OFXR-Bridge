@@ -48,5 +48,39 @@ static int independent_overlap_recovery_test() {
         check(xrfg::independent_phase_source_due(1'000'000'000,timing)==0,"queued-source age authorized phase acquisition");
         std::printf("OVERLAP_RECOVERY factor=%u normal GPU overlap trims one measured slot, ignores brief spikes, learns bounded reserve on sustained lateness; real backlog veto PASS\n",factor);
     }
+    // Sustained synchronous D3D11 delivery-copy expirations (where source_ready_at
+    // is early but prepared_at repeatedly crosses due+reserve+period/2) must learn
+    // bounded reserve after 4 distinct sources without inflating on 2-source stalls,
+    // and delivered() must not cut reserve below prepared_at.
+    {
+        xrfg::IndependentDeliveryReserve sync_reserve;sync_reserve.set_limit(4*period);
+        const xrfg::IndependentRecoveryTiming sync_timing{0,true,true,false,false};
+        for(unsigned i=0;i<3;++i) {
+            const auto due=3'000'000'000LL+i*2*period;
+            check(!sync_reserve.observe_delivery_expiry(due+period*3/4,due,period,sync_timing),
+                "brief 1-3 synchronous delivery-copy expirations must not inflate reserve");
+        }
+        check(sync_reserve.reserve()==0,"transient delivery-copy stall inflated reserve");
+        {
+            const auto due=3'000'000'000LL+3*2*period;
+            check(sync_reserve.observe_delivery_expiry(due+period*3/4,due,period,sync_timing),
+                "4th sustained synchronous delivery-copy expiration must earn bounded reserve");
+        }
+        const auto learned=sync_reserve.reserve();
+        check(learned==period,"sustained synchronous delivery-copy overrun must earn one period of reserve");
+        for(unsigned i=0;i<40;++i) {
+            const auto due=4'000'000'000LL+i*period;
+            const auto prepared=due+period*3/4; // only period/4 slack below due+learned
+            sync_reserve.delivered(prepared,due+sync_reserve.reserve(),due+learned,period,true);
+        }
+        check(sync_reserve.reserve()==learned,"delivered() must not cut reserve underneath tight prepared_at");
+        for(unsigned i=0;i<60;++i) {
+            const auto due=5'000'000'000LL+i*period;
+            const auto prepared=due-period/4; // comfortable slack >= period/2
+            sync_reserve.delivered(prepared,due+sync_reserve.reserve(),due+period/4,period,true);
+        }
+        check(sync_reserve.reserve()<learned,"delivered() must still retire reserve once prepared_at finishes early");
+        std::puts("SYNC_DELIVERY_RESERVE brief stall ignored, sustained delivery expiry learns 1 period, delivered() preserves prepared_at margin and retires when early PASS");
+    }
     return 0;
 }
