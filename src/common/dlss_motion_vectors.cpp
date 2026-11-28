@@ -3095,6 +3095,39 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_render(
     return {};
 }
 
+std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_eye_metadata(
+    const EyeGuideRenderIdentity& source,ID3D12CommandQueue* queue,ID3D12Device* device) noexcept {
+    if(!source.owner||!source.producer||!queue||!device||!g_tracking_enabled.load(std::memory_order_acquire))return {};
+    try {
+        const auto unique=[&](const Registry& state) {
+            std::shared_ptr<const DlssMotionVectorFrame> candidate;
+            for(const auto& [stream_id,stream]:state.streams) {
+                static_cast<void>(stream_id);
+                for(const auto& frame:stream.luke_origin_history) {
+                    if(frame->epoch!=stream.epoch||!frame->eye_render.direct_metadata||
+                        !frame->eye_render.matches(source.producer,source.owner,source.render))continue;
+                    if(candidate)return std::shared_ptr<const DlssMotionVectorFrame>{};
+                    candidate=frame;
+                }
+            }
+            return candidate;
+        };
+        std::shared_ptr<const DlssMotionVectorFrame> candidate;
+        {
+            auto& state=registry();std::scoped_lock lock(state.mutex);candidate=unique(state);
+        }
+        if(!candidate)return {};
+        auto resolved=resolve_luke_guide_render(candidate->stream,candidate->epoch,source.owner,
+            source.render,queue,device,source.producer);
+        if(!resolved||resolved->publication!=candidate->publication)return {};
+        // A reset, retirement or second stream may have appeared while the
+        // existing resolver validated its temporal history and GPU receipts.
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        const auto current=unique(state);
+        return current&&current->publication==resolved->publication?resolved:nullptr;
+    }catch(...){return {};}
+}
+
 bool luke_native_stream_reset(std::uint64_t stream,std::uint64_t accepted_epoch,
     ID3D12Device* device) noexcept {
     try {

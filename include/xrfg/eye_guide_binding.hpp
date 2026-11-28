@@ -16,6 +16,9 @@ constexpr EyeIdentitySource operator|(EyeIdentitySource left, EyeIdentitySource 
 struct EyeGuideRenderIdentity {
     std::uint64_t owner{}, render{};
     std::uint32_t producer{};
+    // The producer bracketed its evaluation with this stable native identity.
+    // Legacy single observations still require their existing pixel anchors.
+    bool direct_metadata{};
 
     [[nodiscard]] bool matches(std::uint32_t producer_id, std::uint64_t stream_id,
         std::uint64_t render_id) const noexcept {
@@ -30,7 +33,7 @@ struct EyeGuideKey {
     bool operator==(const EyeGuideKey&) const = default;
 };
 
-// Readable markers establish the correspondence within one eye, producer
+// For legacy observations, readable markers establish correspondence within one eye, producer
 // lifetime and guide epoch. The two sides can name different owners and record
 // the same render at adjacent steps of the producer clock.
 struct EyeGuideBinding {

@@ -276,11 +276,7 @@ struct DlssMotionVectorFrame {
     OsrSourceTime source_camera_time{};
     std::shared_ptr<const DlssSnapshotAllocation> motion_allocation,depth_allocation;
     EyeGuideRenderIdentity eye_render;
-    // Native producer's residual depth-to-colour alignment in guide texels.
-    // Absent keeps the established Luke crop alignment for existing titles.
     std::optional<std::array<float,2>> osr_depth_alignment;
-    // Exact original N1 displacement already maps the resolved colour grid.
-    // Depth raster jitter must not be added again to colour correspondence.
     bool raw_motion_color_aligned{};
 };
 
@@ -575,12 +571,17 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_render(
     std::uint64_t stream_id, std::uint64_t epoch, std::uint64_t producer_owner,
     std::uint64_t original_render, ID3D12CommandQueue* consumer_queue,
     ID3D12Device* canonical_consumer_device, std::uint32_t producer = 0) noexcept;
+// Direct, unique native producer/owner/render join, without a pixel anchor or
+// assumed relation between the producer's and the game's frame counters.
+std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_eye_metadata(
+    const EyeGuideRenderIdentity&,ID3D12CommandQueue*,ID3D12Device*) noexcept;
 
 // The consumer has accepted this exact RDR2 color and its guide history.
 // Older lookup records can retire while outstanding readers retain their pins.
 void retire_consumed_luke_guides(const DlssMotionVectorFrame& frame) noexcept;
 // Control-only reset preflight. These metadata queries do NOT return a guide,
-// attach old history or authorize AFW generation. Tokens must still be decoded.
+// attach old history or authorize AFW generation. Consumers still require an
+// exact pixel identity or an authenticated native-metadata join.
 struct LukeNativeOriginMetadata {
     std::uint64_t stream{},epoch{},publication{},serial{};
 };

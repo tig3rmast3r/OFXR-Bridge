@@ -3176,7 +3176,7 @@ const OfxrEyeSourceV1* captured_eye_source(const SwapchainState& state,
     return nullptr;
 }
 
-enum class EyeMetadataLookup { any, release_token_only };
+enum class EyeMetadataLookup { any, release_identity_only };
 
 std::shared_ptr<const xrfg::DlssMotionVectorFrame> resolve_eye_metadata(
     SwapchainState& state, const xrfg::D3D12HistoryCaptureTicket& capture, unsigned eye,
@@ -3184,15 +3184,18 @@ std::shared_ptr<const xrfg::DlssMotionVectorFrame> resolve_eye_metadata(
     xrfg::EyeGuideKey key;
     xrfg::RepeatedEyeGuide repeated;
     std::uint32_t token{};
+    std::uint32_t release_token{};
+    xrfg::EyeGuideRenderIdentity native_render;
     std::optional<std::uint64_t> guide_render;
     {
         std::scoped_lock lock(state.mutex);
         const auto* source = captured_eye_source(state, capture, eye);
         if (!source) return {};
         token = source->guide_token;
-        if (!token && lookup == EyeMetadataLookup::release_token_only) return {};
+        release_token=token;
         const auto producer = state.released_eye_frame.frame.producer;
         const auto render = source->render_id;
+        native_render={source->stream_id,render,producer};
         const auto& binding = state.eye_guide_bindings[eye];
         if (binding.accepts(producer, source->stream_id)) {
             key = binding.key;
@@ -3202,6 +3205,15 @@ std::shared_ptr<const xrfg::DlssMotionVectorFrame> resolve_eye_metadata(
         if (!token && repeated.find(producer, source->stream_id, render)) token = repeated.token;
         else repeated = {};
     }
+    // The release and guide name the same native producer record. No pixel
+    // anchor, calibrated frame offset or newest-publication lookup is needed.
+    if(auto guide=xrfg::resolve_luke_guide_eye_metadata(native_render,queue,device)) {
+        if(release_token&&release_token!=guide->color_origin_token)return {};
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::eye_frame_metadata,
+            52,handle_value(state.handle),capture.serial,guide->publication);
+        return guide;
+    }
+    if(!release_token&&lookup==EyeMetadataLookup::release_identity_only)return {};
     if (token) {
         auto guide = xrfg::resolve_luke_guide_token(token, queue, device);
         if (!guide || xrfg::luke_native_stream_reset(guide->stream, guide->epoch, device)) return {};
@@ -17673,7 +17685,7 @@ struct LukeOriginHistoryProbe {
                 inputs[i].capture=entries[i].source_capture->capture;
             }
             if(session->luke_warmup_probe_poisoned) {output.reason=GenerationPrepareReason::missing_capture;return output;}
-            resolve_metadata(EyeMetadataLookup::release_token_only);
+            resolve_metadata(EyeMetadataLookup::release_identity_only);
             markers_attempted = !metadata[0] || !metadata[1];
             if (markers_attempted) {
                 const auto result=read_luke_capture_origins(session->d3d12_queue.Get(),inputs,origin_tokens,origin_results,
@@ -17705,7 +17717,7 @@ struct LukeOriginHistoryProbe {
             origin_colors[index]=images[entry.prepared.current_destination_index];
         }
         if (!rdr2) {
-            resolve_metadata(EyeMetadataLookup::release_token_only);
+            resolve_metadata(EyeMetadataLookup::release_identity_only);
             markers_attempted = !metadata[0] || !metadata[1];
         }
         if (!rdr2 && markers_attempted) {

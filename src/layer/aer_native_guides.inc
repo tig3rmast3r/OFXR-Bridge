@@ -193,7 +193,7 @@ HRESULT refresh_aer_native_guides(const std::shared_ptr<SessionState>& session,
                 std::scoped_lock lock(chains[eye]->mutex);chains[eye]->last_released_motion_vectors.reset();
             }
             if (item.guides || item.epoch_rejected || item.attempted) continue;
-            resolve_metadata(eye, EyeMetadataLookup::release_token_only);
+            resolve_metadata(eye, EyeMetadataLookup::release_identity_only);
             if (!metadata[eye]) read_mask |= 1U << eye;
         }
         if(read_mask) {
