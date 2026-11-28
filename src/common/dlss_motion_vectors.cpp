@@ -1973,6 +1973,22 @@ std::uint64_t dlss_motion_vector_publications() noexcept {
     }
 }
 
+DlssMotionVectorIdentity peek_dlss_motion_vector_identity(
+    ID3D12CommandQueue* queue,std::uint32_t width,std::uint32_t height) noexcept {
+    DlssMotionVectorIdentity out{};
+    if(!queue || !g_tracking_enabled.load(std::memory_order_acquire))return out;
+    try {
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        for(const auto& [id,stream]:state.streams) {
+            const auto& f=stream.latest;
+            if(!f || f->output_x || f->output_y || f->output_width!=width || f->output_height!=height ||
+                f->publication<=out.publication || !same_identity(f->producer_queue.Get(),queue))continue;
+            out={f->stream,f->epoch,f->serial,f->previous_serial,f->publication,f->reset};
+        }
+    } catch(...) {}
+    return out;
+}
+
 // 0.2 V547, 869: how a swapchain-per-eye session's two untold streams went to
 // an eye at its release, the first 16 and every 600th after: a the eye << 40 |
 // the path << 32 | the chosen stream's low 32 bits, b the paths so far: 0

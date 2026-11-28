@@ -21,6 +21,7 @@
 #include "uevr_camera_loss_test.inc"
 #include "uevr_turn_stop_test.inc"
 #include "uevr_aer_crop_test.inc"
+#include "uevr_stock_bootstrap_test.inc"
 #include "independent_source_queue_test.inc"
 #include "independent_stereo_recovery_test.inc"
 #include "independent_midpoint_test.inc"
@@ -674,6 +675,7 @@ static int aer_input_warning_test() {
 
 int main(int argc,char** argv) {
     if(argc>1 && std::string_view(argv[1])=="uevr-aer-crop")return uevr_aer_crop_test();
+    if(argc>1 && std::string_view(argv[1])=="uevr-stock-bootstrap")return uevr_stock_bootstrap_test();
     if(argc>1 && std::string_view(argv[1])=="uevr-turn-stop")return uevr_turn_stop_test();
     if(argc>1 && std::string_view(argv[1])=="independent-overlap-recovery")return independent_overlap_recovery_test();
 if(argc>1 && std::string_view(argv[1])=="independent-optical-first")return independent_optical_first_test();

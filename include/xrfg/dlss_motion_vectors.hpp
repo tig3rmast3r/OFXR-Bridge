@@ -393,6 +393,14 @@ struct DlssMotionVectorStatistics {
 std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
     const DlssMotionVectorPublication& publication) noexcept;
 void configure_dlss_motion_vector_tracking(bool enabled) noexcept;
+// Scalar observation only: never grants GPU guide admission, retains a
+// snapshot, or synchronizes a producer. Used to verify native eye histories.
+struct DlssMotionVectorIdentity {
+    std::uint64_t stream{},epoch{},serial{},previous{},publication{};
+    bool reset{};
+};
+DlssMotionVectorIdentity peek_dlss_motion_vector_identity(
+    ID3D12CommandQueue*,std::uint32_t width,std::uint32_t height) noexcept;
 // Request after the layer has drained its consumers on disable. Nonblocking:
 // exact unsubmitted/in-flight producer copies and retained GPU readers remain
 // protected. Repeat at a bounded cadence until the final writer receipts finish.

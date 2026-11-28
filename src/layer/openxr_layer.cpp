@@ -78,6 +78,9 @@
 #include "xrfg/uevr_osr.hpp"
 
 #include <windows.h>
+#include <bcrypt.h>
+#include "xrfg/uevr_stock_bootstrap.hpp"
+#include "xrfg/uevr_stock_bootstrap_profile.hpp"
 #include <psapi.h>
 #include <psapi.h>
 #include <d3d11_4.h>
@@ -782,6 +785,7 @@ struct CompositionImageSlot;
 
 struct UevrAfrOsrState;
 std::shared_ptr<UevrAfrOsrState> make_uevr_afr_osr_state() noexcept;
+bool uevr_stock_bootstrap_ready() noexcept;
 struct AerNativeGuideCache;
 
 struct IndependentSynthesisWork;
@@ -20645,6 +20649,10 @@ XrResult layer_end_frame_impl(
     }
     if(uevr_aer_crop_requested(*state) && uevr_reports_aer() && resource_mappings.ready() &&
         !projection_frame_generation_pending(state,projection_mappings)) {
+        if(!uevr_stock_bootstrap_ready()) {
+            state->generation_status=xrfg::autonomous::GenerationState::missing_motion;
+            return bypass_generation(GenerationPrepareReason::synthesis_stale_guides,true);
+        }
         record_projection_capture_order(current_snapshot,projection_mappings);
         // An inapplicable adapter leaves both original guide sets intact.
         // Existing consumer placement/validation still decides whether that

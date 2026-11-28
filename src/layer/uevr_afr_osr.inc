@@ -59,6 +59,8 @@ const UEVR_PluginInitializeParam* uevr_api() noexcept {
     return api;
 }
 
+#include "uevr_stock_bootstrap.inc"
+
 // A const Unreal getter inside the game-thread viewport draw. Reflect and
 // validate the return layout rather than assuming UE4 floats or UE5 doubles.
 // No game/UEVR value is changed and no UObject is retained across callbacks.
@@ -102,7 +104,8 @@ UevrGameYaw uevr_read_game_yaw(const UEVR_PluginInitializeParam* api) noexcept {
     return out;
 }
 
-void uevr_pre_viewport_draw(UEVR_UGameViewportClientHandle, UEVR_FViewportHandle, UEVR_FCanvasHandle) {
+void uevr_pre_viewport_draw(UEVR_UGameViewportClientHandle viewport, UEVR_FViewportHandle, UEVR_FCanvasHandle) {
+    uevr_stock_bootstrap::before_draw(viewport);
     static std::atomic_uint64_t next_frame{};
     t_uevr_game_yaw = {};
     t_uevr_game_frame = {};
@@ -138,6 +141,11 @@ std::array<double, 3> uevr_location(const UEVR_Vector3f* position, bool is_doubl
 
 void uevr_pre_view_offset(UEVR_StereoRenderingDeviceHandle, int, float, UEVR_Vector3f* position,
     UEVR_Rotatorf* rotation, bool is_double) {
+    // Stock bootstrap constructs a second view that UEVR removes before
+    // rendering. It must not become the next real colour's camera receipt.
+    if(uevr_stock_bootstrap::draw.overrode && uevr_stock_bootstrap::draw.camera_kept) {
+        t_uevr_base_valid=false;return;
+    }
     if (!position || !rotation) return;
     // Sample after this frame's viewpoint has been computed, rather than
     // possibly reading last frame's cache at the start of Draw. The TLS Draw
@@ -191,6 +199,7 @@ void uevr_post_view_offset(UEVR_StereoRenderingDeviceHandle, int, float world_to
         const float min_separation = std::max(0.02F, world_to_meters * 0.02F);
         const auto eye = feed.phase.observe(camera, min_separation);
         feed.queue.push(camera, eye.value_or(2));
+        if(uevr_stock_bootstrap::draw.overrode)uevr_stock_bootstrap::draw.camera_kept=true;
         if (!eye) ++feed.unknown_eye;
     } catch (...) {
     }
@@ -211,6 +220,11 @@ bool uevr_register_camera_feed() noexcept {
     const bool post = api->sdk->callbacks->on_post_calculate_stereo_view_offset(&uevr_post_view_offset);
     const bool game_camera = api->sdk->callbacks->on_pre_viewport_client_draw &&
         api->sdk->callbacks->on_pre_viewport_client_draw(&uevr_pre_viewport_draw);
+    if(uevr_stock_bootstrap::state().installed.load(std::memory_order_acquire)) {
+        const bool end=api->sdk->callbacks->on_post_viewport_client_draw &&
+            api->sdk->callbacks->on_post_viewport_client_draw(&uevr_stock_bootstrap::after_draw);
+        uevr_stock_bootstrap::state().callbacks_ready.store(pre && post && game_camera && end,std::memory_order_release);
+    }
     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
         (pre ? 1 : 0) | (post ? 2 : 0) | (game_camera ? 4 : 0), 1405, api->version->minor, 0);
     return pre && post;
@@ -409,6 +423,7 @@ void uevr_afr_reset_sources(UevrAfrOsrState& afr) {
 }
 
 std::shared_ptr<UevrAfrOsrState> make_uevr_afr_osr_state() noexcept {
+    uevr_stock_bootstrap::install();
     try { return std::make_shared<UevrAfrOsrState>(); } catch (...) { return {}; }
 }
 
@@ -528,6 +543,15 @@ bool uevr_afr_observe_end_frame(SessionState& session, const XrFrameEndInfo* inf
         (settings.rendering_method == xrfg::kUevrRenderingMethodAlternating ? 0u : 4u) |
         (settings.synchronization == xrfg::kUevrSynchronizationVeryLate ? 0u : 8u) | (layout ? 0u : 16u);
     const bool wanted = off_reasons == 0;
+    auto& stock=uevr_stock_bootstrap::state();
+    if(stock.installed.load(std::memory_order_acquire)) {
+        const bool native=session.graphics_binding==SessionGraphicsBinding::d3d12 && !session.d3d11_bridge && !session.vulkan_bridge;
+        const bool requested=wanted || (layout && native && session.menu_enabled && session.nvidia_options.ofr && session.nvidia_options.rife_model<0 &&
+            (session.hybrid_requested || session.frame_generation_mode!=xrfg::D3D12FrameGenerationMode::ofxr));
+        stock.requested.store(requested,std::memory_order_release);
+        if(!requested){std::scoped_lock stock_lock(stock.mutex);stock.policy.begin({},false);}
+        if(requested)uevr_register_camera_feed();
+    }
     // Changed pixels require a completed second-frame receipt. Untouched raw
     // pairs can pass through when no reconstruction source was available.
     out.discard = wanted && session.independent_pacing && session.private_runtime &&
@@ -730,6 +754,7 @@ UevrAfrSource uevr_afr_capture_source(SessionState& session, UevrAfrOsrState& af
             uevr_afr_source_gap(afr);
         prior = {swapchain, guide.stream, guide.epoch};
         afr.last_publication = guide.publication;
+        uevr_stock_bootstrap::observe(eye,{guide.stream,guide.epoch,guide.serial,guide.previous_serial,guide.publication,guide.reset});
     } else uevr_afr_source_gap(afr);
     {
         std::scoped_lock gpu_lock(session.gpu_mutex);
@@ -756,6 +781,19 @@ void uevr_afr_before_release(const std::shared_ptr<SwapchainState>& chain) {
     auto* afr = chain->session->uevr_afr.get();
     if (!afr) return;
     std::scoped_lock lock(afr->mutex);
+    if(!afr->inside && afr->layout && !afr->active && uevr_stock_bootstrap::active()) {
+        unsigned native_eye=2;
+        for(unsigned e=0;e<2;++e)if(afr->eye_swapchain[e]==chain->handle)native_eye=e;
+        if(native_eye<2) {
+            const bool was_ready=uevr_stock_bootstrap::ready();
+            const auto id=xrfg::peek_dlss_motion_vector_identity(chain->session->d3d12_queue.Get(),
+                chain->create_info.width,chain->create_info.height);
+            uevr_stock_bootstrap::observe(native_eye,id);
+            if(!was_ready)for(auto handle:afr->eye_swapchain)if(auto eye_chain=find_swapchain(handle)) {
+                std::scoped_lock eye_lock(eye_chain->mutex);eye_chain->fsr_eye_identity={};
+            }
+        }
+    }
     if (!afr->active || afr->inside || !afr->layout) return;
     unsigned eye = 2;
     for (unsigned i = 0; i < 2; ++i) if (afr->eye_swapchain[i] == chain->handle) eye = i;
@@ -866,6 +904,7 @@ bool uevr_afr_reconstruct(SessionState& session, UevrAfrOsrState& afr, const Uev
     if (destination->create_info.width != source->create_info.width ||
         destination->create_info.height != source->create_info.height) return refuse(2);
 
+    if(!uevr_stock_bootstrap_ready())return refuse(12);
     const auto& guide = captured.guide;
     if (!guide) return refuse(3);
     if (!captured.fresh_guide) return refuse(4, guide->publication);
