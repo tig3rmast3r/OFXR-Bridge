@@ -500,7 +500,8 @@ void write_session(const std::shared_ptr<Session>& session) {
         "\tnative_camera_token\tcolor_origin_token\tnative_production_sequence\tinterleaved_history"
         "\tgta_current_render\tgta_current_mode\tgta_current_yaw\tgta_current_tracking_valid\tgta_current_tracking"
         "\tgta_peer_render\tgta_peer_mode\tgta_peer_yaw\tgta_peer_tracking_valid\tgta_peer_tracking"
-        "\tgta_same_render\tgta_same_mode\tgta_same_yaw\tgta_same_tracking_valid\tgta_same_tracking\n";
+        "\tgta_same_render\tgta_same_mode\tgta_same_yaw\tgta_same_tracking_valid\tgta_same_tracking"
+        "\tosr_source_dejitter\tosr_history_dejitter\n";
     const auto write_array = [&guide_manifest](const auto& values) {
         for (std::size_t i = 0; i < values.size(); ++i) {
             if (i) guide_manifest << ',';
@@ -578,6 +579,8 @@ void write_session(const std::shared_ptr<Session>& session) {
                 << '\t' << c.gta_tracking_yaw[i] << '\t' << c.gta_tracking_valid[i] << '\t';
             write_array(c.gta_tracking_poses[i]);
         }
+        guide_manifest << '\t';write_array(c.osr_source_dejitter);
+        guide_manifest << '\t';write_array(c.osr_history_dejitter);
         guide_manifest << '\n';
     }
     std::ofstream nr_manifest(session->directory / L"nr-evaluations.tsv", std::ios::binary);

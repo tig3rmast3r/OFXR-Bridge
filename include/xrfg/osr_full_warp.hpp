@@ -1,6 +1,8 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#include <array>
+#include <optional>
 
 namespace xrfg {
 // OSR (OFXR Stereo Reconstruction), full reconstruction: OFXR renders the peer
@@ -78,6 +80,12 @@ constexpr std::uint32_t kOsrFullMaxRun = 256;
 // carried a ghost strip on one side, flipping with the eye.
 constexpr float kOsrFullDepthAlignX = 0.36F;
 constexpr float kOsrFullDepthAlignY = 0.0F;
+inline std::array<float,2> osr_full_depth_dejitter(
+    std::array<float,2> window_fraction,std::array<float,2> jitter,
+    const std::optional<std::array<float,2>>& native_alignment={}) noexcept {
+    const auto alignment=native_alignment.value_or(std::array<float,2>{kOsrFullDepthAlignX,kOsrFullDepthAlignY});
+    return {-window_fraction[0]+alignment[0]-jitter[0],-window_fraction[1]+alignment[1]-jitter[1]};
+}
 // A 3x3 depth-texel neighbourhood whose nearest depth exceeds its farthest by
 // this ratio holds a silhouette or thin geometry; there the destination eye's
 // own previous frame, motion compensated, replaces the warped source when it

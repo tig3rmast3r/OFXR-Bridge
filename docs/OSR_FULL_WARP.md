@@ -313,6 +313,13 @@ Without it every silhouette and blade moved by up to +-1 px from one
 generated frame to the next against a stable real eye: unstable edges and
 flickering vegetation.
 
+An exact native producer may now supply `osr_depth_alignment` on its immutable
+guide. OSR uses that residual in place of the historical CP77 term, retaining
+the same window-rounding correction and per-frame jitter. Days Gone supplies
+zero: its native raster and integer eye crop do not have CP77's measured
+residual. Other producers retain the established default. The actual source
+and history dejitter values are appended to the capture contract.
+
 ## What stays the same
 
 - The camera data, depth conversion, calibration, motion composition and

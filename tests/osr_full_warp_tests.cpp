@@ -10,6 +10,10 @@ void check(bool ok, const char* what) {
 }
 
 int main() {
+    const auto native=xrfg::osr_full_depth_dejitter({.5F,0},{.25F,-.125F},std::array<float,2>{0,0});
+    check(native==std::array<float,2>{-.75F,.125F},"native raster retains its exact crop fraction and jitter");
+    const auto legacy=xrfg::osr_full_depth_dejitter({.5F,0},{.25F,-.125F});
+    check(std::abs(legacy[0]-native[0]-.36F)<1e-6f&&legacy[1]==native[1],"legacy Luke crop alignment remains unchanged");
     using xrfg::osr_full_history_usable;
     // Luke alternates eyes: the destination eye's last real frame is one
     // publication old and is the frame the layer accepted for that eye.

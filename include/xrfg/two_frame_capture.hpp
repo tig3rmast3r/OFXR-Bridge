@@ -148,6 +148,7 @@ struct TwoFrameGuideContract {
         destination_view_to_clip{}, destination_clip_to_view{},
         camera_world_to_view{}, camera_view_to_world{},
         camera_view_to_clip{}, camera_clip_to_view{};
+    std::array<float,2> osr_source_dejitter{},osr_history_dejitter{};
 };
 
 void two_frame_capture_guide_contract(

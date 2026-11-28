@@ -1682,6 +1682,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         const UINT depth_crop_y = depth_window->y;
         const UINT motion_crop_x = motion_window->x;
         const UINT motion_crop_y = motion_window->y;
+        const auto source_depth_dejitter=osr_full_depth_dejitter(
+            {depth_window->fraction_x,depth_window->fraction_y},{guide.jitter_x,guide.jitter_y},guide.osr_depth_alignment);
 
         if(cropped_depth_width!=cropped_motion_width || cropped_depth_height!=cropped_motion_height ||
             depth_crop_x!=motion_crop_x || depth_crop_y!=motion_crop_y) return reject_input(42);
@@ -2683,6 +2685,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 contract.motion_current_to_middle_opposite.begin());
             contract.raw_previous_clip_to_clip = guide.raw_previous_clip_to_clip;
             contract.camera_position = guide.camera_position;
+            contract.osr_source_dejitter=source_depth_dejitter;
+            std::copy_n(impl_->osr_full.history(1-source_eye).dejitter,2,contract.osr_history_dejitter.begin());
             const DlssMotionVectorFrame* tracked[]{&guide,
                 guide.previous_opposite_guide.get(),guide.previous_same_guide.get()};
             for(unsigned i=0;i<3;++i)if(tracked[i]&&tracked[i]->gta_headlock) {
@@ -2822,8 +2826,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             // rounded to a texel (fraction = exact - rounded), Luke's eye crop
             // adds the measured alignment, and the DLSS depth was rendered with
             // this frame's sub-texel jitter (xrfg/osr_full_warp.hpp).
-            in.source_dejitter[0] = -depth_window->fraction_x + kOsrFullDepthAlignX - guide.jitter_x;
-            in.source_dejitter[1] = -depth_window->fraction_y + kOsrFullDepthAlignY - guide.jitter_y;
+            std::copy(source_depth_dejitter.begin(),source_depth_dejitter.end(),in.source_dejitter);
             in.history_dejitter[0] = history.dejitter[0];
             in.history_dejitter[1] = history.dejitter[1];
             // The history is the destination eye's own frame: its projection.

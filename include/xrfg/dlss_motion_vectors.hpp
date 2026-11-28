@@ -116,6 +116,9 @@ struct DlssMotionVectorPublication {
     // pixels are marked in-place. A D3D12 color resource is absent on this path.
     std::optional<DlssVulkanOutputExtent> vulkan_output_extent;
     EyeGuideRenderIdentity eye_render;
+    // Native producer's residual depth-to-colour alignment in guide texels.
+    // Absent keeps the established Luke crop alignment for existing titles.
+    std::optional<std::array<float,2>> osr_depth_alignment;
 };
 
 // A camera attached to a published frame at its submission.
@@ -270,6 +273,9 @@ struct DlssMotionVectorFrame {
     OsrSourceTime source_camera_time{};
     std::shared_ptr<const DlssSnapshotAllocation> motion_allocation,depth_allocation;
     EyeGuideRenderIdentity eye_render;
+    // Native producer's residual depth-to-colour alignment in guide texels.
+    // Absent keeps the established Luke crop alignment for existing titles.
+    std::optional<std::array<float,2>> osr_depth_alignment;
 };
 
 // The vector and depth rectangles a consumer maps the guide's output onto:

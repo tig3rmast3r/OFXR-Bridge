@@ -294,7 +294,8 @@ std::uint32_t invalid_bits(const DlssMotionVectorPublication& publication) noexc
         publication.output_height == 0 || publication.motion_width == 0 ||
         publication.motion_height == 0 || !std::isfinite(publication.scale_x) ||
         !std::isfinite(publication.scale_y) || !std::isfinite(publication.jitter_x) ||
-        !std::isfinite(publication.jitter_y)) {
+        !std::isfinite(publication.jitter_y) || (publication.osr_depth_alignment &&
+            (!std::isfinite((*publication.osr_depth_alignment)[0])||!std::isfinite((*publication.osr_depth_alignment)[1])))) {
         return 1;
     }
     const auto output = publication.output ? publication.output->GetDesc() : D3D12_RESOURCE_DESC{};
@@ -882,6 +883,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->motion_interval_native_view_rows = publication.motion_interval_native_view_rows;
         frame->compose_native_object_history = publication.compose_native_object_history;
         frame->osr_native_cabin_motion = publication.osr_native_cabin_motion;
+        frame->osr_depth_alignment = publication.osr_depth_alignment;
         frame->source_camera_time = publication.source_camera_time;
         frame->gta_headlock=publication.gta_headlock;
         frame->camera_pending = publication.camera_pending && !publication.camera_data_valid;
