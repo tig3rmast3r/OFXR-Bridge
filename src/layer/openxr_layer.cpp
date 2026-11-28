@@ -14785,7 +14785,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             const bool stream_optical=worker_submission && request_pair && (!panel_input || panel_input->projection) &&
                 independent_stereo_recovery(*state->session) &&
                 state->session->nvidia_options.hybrid && native_frame_multiplier(*state->session)<=3 &&
-                state->session->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::fidelity_fx &&
+                (state->session->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::fidelity_fx ||
+                 state->session->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia) &&
                 !generation->staged_outputs && !generation->d3d11_interop;
             const bool defer_current_copy = stream_optical || (!state->session->nvidia_options.ofr && !generation->staged_outputs && !worker_submission &&
                 generation->d3d11_interop == nullptr && !state->session->queued_nvidia_presenter);

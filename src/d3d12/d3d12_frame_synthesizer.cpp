@@ -5787,7 +5787,7 @@ struct D3D12FrameSynthesizer::Impl {
                 ? nvidia_bidirectional_graphics_pipeline.Get()
                 : nvidia_graphics_pipeline.Get());
         // The guides' motion is read by the hybrid composition.
-        const auto motion_barriers = [&](bool to_read) {
+        const auto motion_barriers = [&](ID3D12GraphicsCommandList* list, bool to_read) {
             if (!guides) return;
             for (UINT eye = 0; eye < guides->eye_count; ++eye) {
                 const auto& guide = guides->eyes[eye];
@@ -5798,10 +5798,10 @@ struct D3D12FrameSynthesizer::Impl {
                 const auto barrier = to_read
                     ? transition_barrier(guide->motion_vectors.Get(), guide->resource_state, kShaderReadState)
                     : transition_barrier(guide->motion_vectors.Get(), kShaderReadState, guide->resource_state);
-                synthesis->ResourceBarrier(1, &barrier);
+                list->ResourceBarrier(1, &barrier);
             }
         };
-        motion_barriers(true);
+        motion_barriers(synthesis, true);
         // Hybrid's depth search: the guides' depth readable, the splat built.
         const bool depth_search = guides && depth_search_requested();
         if (depth_search) guide_depth_barriers(synthesis, *guides, true);
@@ -5821,9 +5821,30 @@ struct D3D12FrameSynthesizer::Impl {
         dred_marker(synthesis, "OFXR NVIDIA composition draw");
         synthesis->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+        ID3D12GraphicsCommandList* draw_commands = synthesis;
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
+            if (output == 1 && slot.optical_first_split) {
+                // Stream S1 before S2/B on the existing B-copy list, leaving
+                // shared guide/depth textures in their declared state between
+                // independently submitted per-eye S1 stages.
+                motion_barriers(draw_commands, false);
+                if (depth_search) guide_depth_barriers(draw_commands, *guides, false);
+                draw_commands = slot.current_copy_command_list.Get();
+                motion_barriers(draw_commands, true);
+                if (depth_search) guide_depth_barriers(draw_commands, *guides, true);
+                draw_commands->SetDescriptorHeaps(1, heaps);
+                draw_commands->SetGraphicsRootSignature(root_signature.Get());
+                draw_commands->SetPipelineState(guides
+                    ? (nvidia_options.bidirectional
+                           ? hybrid_nvidia_bidirectional_graphics_pipeline.Get()
+                           : hybrid_nvidia_graphics_pipeline.Get())
+                    : nvidia_options.bidirectional
+                        ? nvidia_bidirectional_graphics_pipeline.Get()
+                        : nvidia_graphics_pipeline.Get());
+                draw_commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            }
             const UINT output_destination = synthetic_output_destination(output, synthetic_destination_index);
             parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
                 packed_synthesis_fraction(synthetic_output_fraction(output));
@@ -5831,8 +5852,8 @@ struct D3D12FrameSynthesizer::Impl {
                 : output_destination*image_description.DepthOrArraySize;
             if(slot.aer_early_copy) {
                 const auto barrier=transition_barrier(current_destination,release_state,D3D12_RESOURCE_STATE_RENDER_TARGET);
-                synthesis->ResourceBarrier(1,&barrier);
-            } else synthetic_target_state(synthesis, output_destination, true);
+                draw_commands->ResourceBarrier(1,&barrier);
+            } else synthetic_target_state(draw_commands, output_destination, true);
             for (UINT view_index = 0;
                  view_index < static_cast<UINT>(target_views.size());
                  ++view_index) {
@@ -5858,14 +5879,14 @@ struct D3D12FrameSynthesizer::Impl {
                     gpu_start,
                     descriptor_block * kDescriptorBlockSize,
                     descriptor_increment);
-                synthesis->SetGraphicsRootDescriptorTable(0, block);
-                synthesis->SetGraphicsRootDescriptorTable(
+                draw_commands->SetGraphicsRootDescriptorTable(0, block);
+                draw_commands->SetGraphicsRootDescriptorTable(
                     1,
                     offset_gpu_handle(
                         block,
                         kSrvDescriptorCount,
                         descriptor_increment));
-                synthesis->SetGraphicsRoot32BitConstants(
+                draw_commands->SetGraphicsRoot32BitConstants(
                     2,
                     kSynthesisConstantCount,
                     &parameters,
@@ -5874,23 +5895,23 @@ struct D3D12FrameSynthesizer::Impl {
                     rtv_start,
                     first_rtv + slice,
                     rtv_increment);
-                synthesis->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+                draw_commands->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
                 set_viewport_and_scissor(
-                    synthesis,
+                    draw_commands,
                     target_views[view_index].image_rect,
                     static_cast<UINT>(image_description.Width),
                     image_description.Height);
-                synthesis->DrawInstanced(3, 1, 0, 0);
-                clear_synthetic_marker(synthesis, rtv, target_views[view_index],
+                draw_commands->DrawInstanced(3, 1, 0, 0);
+                clear_synthetic_marker(draw_commands, rtv, target_views[view_index],
                     static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
             }
             if(slot.aer_early_copy) {
                 const auto barrier=transition_barrier(current_destination,D3D12_RESOURCE_STATE_RENDER_TARGET,release_state);
-                synthesis->ResourceBarrier(1,&barrier);
-            } else synthetic_target_state(synthesis, output_destination, false);
+                draw_commands->ResourceBarrier(1,&barrier);
+            } else synthetic_target_state(draw_commands, output_destination, false);
         }
-        motion_barriers(false);
-        if (depth_search) guide_depth_barriers(synthesis, *guides, false);
+        motion_barriers(draw_commands, false);
+        if (depth_search) guide_depth_barriers(draw_commands, *guides, false);
 
         std::array<D3D12_RESOURCE_BARRIER,
                    3U + 4U * kMaxReprojectionViews> before_current_copy{};
@@ -5926,14 +5947,14 @@ struct D3D12FrameSynthesizer::Impl {
             previous_resource,
             kShaderReadState,
             D3D12_RESOURCE_STATE_COMMON);
-        synthesis->ResourceBarrier(
+        draw_commands->ResourceBarrier(
             before_current_copy_count,
             before_current_copy.data());
         if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
             // Last mark of the pair's synthesis, before the current copy
             // that is submitted separately. The span therefore covers
             // exactly the work the synthetic frame is waiting on.
-            synthesis->EndQuery(
+            draw_commands->EndQuery(
                 nvidia_timestamp_heap.Get(),
                 D3D12_QUERY_TYPE_TIMESTAMP,
                 slot.timing_query_base + kSpanEnd);
@@ -7784,7 +7805,7 @@ struct D3D12FrameSynthesizer::Impl {
         // shared-resource routes flush first and retain the complete-
         // submission fence gate.
         const bool independent_nvidia_pair =
-            backend == D3D12OpticalFlowBackend::nvidia && (!defer_current_copy || nvidia_options.rife_async);
+            backend == D3D12OpticalFlowBackend::nvidia && (!defer_current_copy || nvidia_options.rife_async || separate_synthetic_ready);
         if (independent_nvidia_pair && pending_copy_slot != kNoPendingCopy) {
             return HRESULT_FROM_WIN32(ERROR_BUSY);
         }
@@ -7957,7 +7978,8 @@ struct D3D12FrameSynthesizer::Impl {
             generation_mode==D3D12FrameGenerationMode::ofxr && !nvidia_options.ofr &&
             !rife && !native_dlss && !extra_output;
         slot.optical_first_split=separate_synthetic_ready && defer_current_copy && extra_output &&
-            backend==D3D12OpticalFlowBackend::fidelity_fx && nvidia_options.hybrid &&
+            (backend==D3D12OpticalFlowBackend::fidelity_fx || backend==D3D12OpticalFlowBackend::nvidia) &&
+            nvidia_options.hybrid &&
             generation_mode==D3D12FrameGenerationMode::ofxr && !nvidia_options.ofr && !rife && !native_dlss;
         slot.aer_streamed=split_aer_first && nvidia_options.ofr && ofr_paired &&
             backend==D3D12OpticalFlowBackend::nvidia && generation_mode==D3D12FrameGenerationMode::ofxr &&
