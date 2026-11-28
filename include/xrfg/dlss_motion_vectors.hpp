@@ -350,6 +350,9 @@ struct DlssMotionVectorSet {
     // Two-slice XR guide sets use logical eye order until the submitted views
     // establish which physical array slice holds each eye.
     bool array_guides_in_eye_order{};
+    // Validated UEVR whole-colour extent. Keep the native grids intact for
+    // any N1 composition; apply the XR crop only at consumer placement.
+    std::array<std::uint32_t,2> uevr_aer_image_extent{};
 };
 
 enum class DlssMotionVectorStatus : std::uint32_t {

@@ -4,6 +4,7 @@
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/fsr_guide_geometry.hpp"
 #include "xrfg/luke_aer_guide_geometry.hpp"
+#include "xrfg/uevr_aer_guide_geometry.hpp"
 #include "xrfg/d3d12_guide_composer.hpp"
 #include "xrfg/d3d12_guide_ownership.hpp"
 #include "xrfg/fsr_frame_generation.hpp"
@@ -4214,9 +4215,20 @@ struct D3D12FrameSynthesizer::Impl {
     }
 
     [[nodiscard]] HRESULT place_aer_source_guides(RollingSource& source) noexcept {
-        if(!nvidia_options.ofr || !allow_luke_guide_device_alias ||
+        if(!nvidia_options.ofr ||
             (generation_mode==D3D12FrameGenerationMode::ofxr && !nvidia_options.hybrid) ||
             !source.motion_vectors)return S_OK;
+        const auto extent=source.motion_vectors->uevr_aer_image_extent;
+        if(extent[0] || extent[1]) {
+            if(source.view_count!=1 || extent[0]!=image_description.Width || extent[1]!=image_description.Height)
+                return kD3D12FrameSynthesisStaleGuides;
+            const auto& v=source.views[0];const auto r=resolved_rect(v.image_rect,extent[0],extent[1]);
+            const DlssEyeView view{0,0,0,0,int(r.offset_x),int(r.offset_y),r.width,r.height};
+            auto placed=place_uevr_aer_guides(source.motion_vectors,extent[0],extent[1],view,v.logical_eye);
+            if(!placed)return kD3D12FrameSynthesisStaleGuides;
+            source.motion_vectors=std::move(placed);return S_OK;
+        }
+        if(!allow_luke_guide_device_alias)return S_OK;
         std::array<DlssEyeView,kDlssMotionVectorEyeCount> views{};
         if(source.view_count>views.size())return kD3D12FrameSynthesisStaleGuides;
         for(UINT i=0;i<source.view_count;++i) {

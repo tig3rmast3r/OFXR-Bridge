@@ -74,6 +74,7 @@
 #include "xrfg/third_party/uevr_api.h"
 #include "xrfg/osr_full_warp.hpp"
 #include "xrfg/uevr_afr_osr.hpp"
+#include "xrfg/uevr_aer_guide_geometry.hpp"
 #include "xrfg/uevr_osr.hpp"
 
 #include <windows.h>
@@ -19766,6 +19767,83 @@ struct PrivateDepthStrip {
 
 bool uevr_reports_aer() noexcept;
 
+bool uevr_aer_crop_requested(const SessionState& state) noexcept {
+    return state.uevr_afr && !state.luke_afw_enabled && state.menu_enabled && state.nvidia_options.ofr &&
+        state.graphics_binding==SessionGraphicsBinding::d3d12 && !state.d3d11_bridge && !state.vulkan_bridge &&
+        state.nvidia_options.rife_model<0 && (state.hybrid_requested ||
+        state.frame_generation_mode==xrfg::D3D12FrameGenerationMode::fsr3 ||
+        state.frame_generation_mode==xrfg::D3D12FrameGenerationMode::native_dlss);
+}
+
+// Reuse each XR release's existing native guides. Unlike Luke's origin-token
+// recovery this performs no GPU reads, copies, allocations or queue waits.
+HRESULT prepare_uevr_aer_crop_guides(SessionState& session, const ProjectionSnapshot& snapshot,
+    std::span<const ProjectionResourceMapping> mappings) noexcept {
+    std::array<std::shared_ptr<SwapchainState>,2> chains;
+    std::array<std::shared_ptr<const xrfg::DlssMotionVectorSet>,2> original,placed;
+    std::array<std::shared_ptr<xrfg::D3D12SwapchainHistory>,2> histories;
+    std::array<xrfg::D3D12HistoryCaptureTicket,2> captures;
+    const auto refuse=[&](unsigned why,unsigned eye=2,std::uint64_t publication=0) {
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+            why,1460,eye,publication);
+        return S_FALSE;
+    };
+    try {
+        const auto scene=ofr_scene_projection(snapshot,mappings);
+        if(mappings.size()!=2 || !scene)return refuse(1);
+        for(const auto& mapping:mappings) {
+            if(mapping.views.size()!=1 || mapping.views[0].projection_index!=*scene || mapping.views[0].view_index>1)
+                return refuse(1);
+            const auto eye=unsigned(mapping.views[0].view_index);
+            auto chain=find_swapchain(mapping.application_swapchain);
+            if(!chain || chain->session.get()!=&session || chains[eye] || chain->create_info.arraySize!=1 ||
+                (chain->create_info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT))return refuse(1,eye);
+            chains[eye]=chain;
+            const auto& view=snapshot.layers[*scene].views[eye];
+            const auto recorded=std::find_if(snapshot.capture_order.begin(),snapshot.capture_order.end(),
+                [&](const auto& capture){return capture.swapchain==mapping.application_swapchain;});
+            if(recorded==snapshot.capture_order.end() || view.subImage.imageArrayIndex)return refuse(2,eye);
+            {
+                std::scoped_lock lock(chain->mutex);
+                histories[eye]=recorded->history.lock();
+                if(!chain->ownership_tracking_valid || !histories[eye] || histories[eye]!=chain->d3d12_history || !chain->last_released_capture ||
+                    !chain->last_released_index || chain->last_released_capture->source_index!=*chain->last_released_index ||
+                    !recorded->serial || chain->last_released_capture->serial!=recorded->serial ||
+                    chain->last_released_capture->fence_value!=recorded->fence_value)return refuse(2,eye);
+                captures[eye]=*chain->last_released_capture;
+                original[eye]=chain->last_released_motion_vectors;
+            }
+            const auto& rect=view.subImage.imageRect;
+            if(rect.extent.width<=0 || rect.extent.height<=0)return refuse(3,eye);
+            const xrfg::DlssEyeView crop{0,0,0,0,rect.offset.x,rect.offset.y,
+                unsigned(rect.extent.width),unsigned(rect.extent.height)};
+            xrfg::UevrAerCropReason reason{};
+            placed[eye]=xrfg::bind_uevr_aer_guides(original[eye],chain->create_info.width,
+                chain->create_info.height,crop,eye,&reason);
+            if(!placed[eye])return refuse(10+unsigned(reason),eye,
+                original[eye]&&original[eye]->eyes[0]?original[eye]->eyes[0]->publication:0);
+        }
+        if(!chains[0] || !chains[1] || chains[0]==chains[1])return refuse(1);
+        // Publish both metadata replacements together, only while the exact
+        // releases inspected above still own these captures and guide sets.
+        std::scoped_lock lock(chains[0]->mutex,chains[1]->mutex);
+        for(unsigned eye=0;eye<2;++eye) {
+            const auto& chain=chains[eye];
+            if(!chain->ownership_tracking_valid || chain->d3d12_history!=histories[eye] || !chain->last_released_capture ||
+                chain->last_released_capture->serial!=captures[eye].serial ||
+                chain->last_released_capture->fence_value!=captures[eye].fence_value ||
+                !chain->last_released_index || *chain->last_released_index!=captures[eye].source_index ||
+                chain->last_released_motion_vectors!=original[eye])return refuse(4,eye);
+        }
+        for(unsigned eye=0;eye<2;++eye) {
+            chains[eye]->last_released_motion_vectors=placed[eye];
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                eye,1461,captures[eye].serial,placed[eye]->eyes[0]->publication);
+        }
+        return S_OK;
+    } catch(...) { return refuse(5); }
+}
+
 // Advisory only. Observe the application's scene before reconstruction, never
 // use this result to select a generator or change the manual AER preference.
 void update_aer_input(SessionState& state,const XrFrameEndInfo* info,
@@ -20564,6 +20642,14 @@ XrResult layer_end_frame_impl(
             if(chain&&chain->create_info.arraySize==1)
                 xrfg::configure_luke_color_origin_extent(chain->create_info.width,chain->create_info.height);
         }
+    }
+    if(uevr_aer_crop_requested(*state) && uevr_reports_aer() && resource_mappings.ready() &&
+        !projection_frame_generation_pending(state,projection_mappings)) {
+        record_projection_capture_order(current_snapshot,projection_mappings);
+        // An inapplicable adapter leaves both original guide sets intact.
+        // Existing consumer placement/validation still decides whether that
+        // layout is usable; do not narrow previously supported UEVR inputs.
+        (void)prepare_uevr_aer_crop_guides(*state,current_snapshot,projection_mappings);
     }
     if(state->nvidia_options.ofr && state->luke_afw_enabled && state->dlss_motion_vectors &&
         resource_mappings.ready() && !projection_frame_generation_pending(state,projection_mappings) &&

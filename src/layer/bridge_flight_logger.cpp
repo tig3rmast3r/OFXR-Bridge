@@ -438,7 +438,7 @@ struct BridgeFlightLogger::Impl {
         // Preserve OSR gaps and measured-camera qualification/cost in normal
         // diagnostic logs without requiring an on-demand capture.
         const bool osr_continuity = record.operation==BridgeFlightOperation::luke_afw_stage &&
-            (record.a==1352 || record.a==1422 || record.a==1423 ||
+            (record.a==1352 || record.a==1422 || record.a==1423 || record.a==1460 || record.a==1461 ||
              (record.a==1310 && record.result>=256 && record.result<512));
         const bool input_gpu=record.operation==BridgeFlightOperation::gpu_history ||
             record.operation==BridgeFlightOperation::synthesis_gpu_span ||

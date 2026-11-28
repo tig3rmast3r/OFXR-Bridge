@@ -1,5 +1,6 @@
 #include "xrfg/fsr_guide_geometry.hpp"
 #include "xrfg/luke_aer_guide_geometry.hpp"
+#include "xrfg/uevr_aer_guide_geometry.hpp"
 #include "xrfg/luke_execution_owner.hpp"
 #include "xrfg/luke_producer_probe.hpp"
 #include "xrfg/d3d12_history.hpp"
@@ -6855,6 +6856,17 @@ int main(int argc, char** argv) {
         try {D3D12WarpFixture fixture;test_guide_composer(fixture);fixture.require_no_debug_errors();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
     }
+    if(argc>1&&(std::string_view(argv[1])=="uevr-aer-crop-hybrid" ||
+        std::string_view(argv[1])=="uevr-aer-crop-fsr")) {
+        try {
+            D3D12WarpFixture fixture(true);
+            const bool hybrid=std::string_view(argv[1])=="uevr-aer-crop-hybrid";
+            for(bool n1:{false,true})test_aer_split_eye_guide_endpoints(fixture,hybrid?
+                xrfg::D3D12FrameGenerationMode::ofxr:xrfg::D3D12FrameGenerationMode::fsr3,
+                n1,false,hybrid,false,false,true);
+            fixture.require_no_debug_errors();return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1&&std::string_view(argv[1])=="aer-guide-fsr") {
         try {
             D3D12WarpFixture fixture(true);
@@ -6863,6 +6875,16 @@ int main(int argc, char** argv) {
         }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
     }
 #ifdef XRFG_NATIVE_DLSSG
+    if(argc>1&&std::string_view(argv[1])=="uevr-aer-crop-native") {
+        try {
+            if(!native_test_has_supported_nvidia_adapter())return 77;
+            D3D12WarpFixture fixture(true);
+            if(!xrfg::native_dlssg_max_generated_frames(fixture.device()))return 77;
+            for(bool n1:{false,true})test_aer_split_eye_guide_endpoints(fixture,
+                xrfg::D3D12FrameGenerationMode::native_dlss,n1,false,false,false,false,true);
+            fixture.require_no_debug_errors();return 0;
+        }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1&&std::string_view(argv[1])=="aer-guide-native") {
         try {
             if(!native_test_has_supported_nvidia_adapter())return 77;

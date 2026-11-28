@@ -22,7 +22,7 @@ private:
 
 void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
     xrfg::D3D12FrameGenerationMode mode,bool n1=false,bool alias=false,bool hybrid=false,bool opaque=false,
-    bool dynamic_clip=false) {
+    bool dynamic_clip=false,bool uevr_crop=false) {
     constexpr UINT width=256,height=128;
     ComPtr<ID3D12Device> consumer=fixture.device();
     ComPtr<ID3D12CommandQueue> consumer_queue=fixture.queue();
@@ -79,6 +79,7 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
             options,false,xrfg::luke_primary_generation_mode(true,options.ofr,mode),true),"AER guide synthesizer");
         auto view=make_reprojection_views()[eye];view.logical_eye=eye;view.array_slice=0;
         view.image_rect={0,0,width,height};
+        if(uevr_crop)view.image_rect={eye?32U:0U,8,224,120};
         const auto guides=[&](UINT serial,UINT stream=0) {
             auto set=std::make_shared<xrfg::DlssMotionVectorSet>();set->eye_count=1;set->resolved_eye=int(eye);
             auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=stream?stream:910+eye;
@@ -99,12 +100,30 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
                 auto middle=std::make_shared<xrfg::DlssMotionVectorFrame>(*g);
                 middle->serial=g->serial-1;g->bridge=std::move(middle);
             }
-            set->eyes[0]=std::move(g);return set;
+            set->eyes[0]=std::move(g);
+            if(uevr_crop) {
+                // Real UEVR release resolution retains the opposite stream
+                // for comparison while its primary is already eye-assigned.
+                auto comparison=std::make_shared<xrfg::DlssMotionVectorFrame>(*set->eyes[0]);
+                comparison->stream=910+(eye^1);set->alternate=std::move(comparison);
+                const auto& r=view.image_rect;
+                const xrfg::DlssEyeView crop{0,0,0,0,int(r.offset_x),int(r.offset_y),r.width,r.height};
+                const auto bound=xrfg::bind_uevr_aer_guides(set,width,height,crop,eye);
+                require(bound && bound->eyes[0]==set->eyes[0] && !bound->eyes[0]->placed &&
+                    bound->eyes[0]->output_width==width,"UEVR binding must retain full native guides until composition");
+                set=std::make_shared<xrfg::DlssMotionVectorSet>(*bound);
+            }
+            return set;
         };
         xrfg::D3D12HistoryCaptureTicket capture{};
         require_hresult(history->capture(0,&capture),"AER guide prime capture");
         require_hresult(history->commit(capture),"AER guide prime commit");
         xrfg::D3D12FrameSynthesisTicket ticket{};
+        if(uevr_crop) {
+            auto old=guides(1);old->uevr_aer_image_extent={};
+            require(synthesizer.submit_prime(capture,{&view,1},0,&ticket,old)==xrfg::kD3D12FrameSynthesisStaleGuides,
+                "unadapted no-camera UEVR crop must reproduce the old stale-guide refusal");
+        }
         require_hresult(synthesizer.submit_prime(capture,{&view,1},0,&ticket,guides(1)),"AER guide prime");
         require_hresult(synthesizer.wait_for_previous_submission(30000),"AER guide prime ready");
         bool native_generated=false;
@@ -174,8 +193,15 @@ void test_aer_split_eye_guide_endpoints(D3D12WarpFixture& fixture,
                 std::nullopt,{},false,.5F,{},std::nullopt,false,1u<<(eye^1)),"AER guided held peer");
             require_hresult(synthesizer.wait_for_previous_submission(30000),"AER guided held peer ready");
             require(ticket.held_capture && ticket.aer_retimed,"AER guided held peer lost its real endpoint receipt");
-            require(readback_single_slice(fixture,synthetic.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==expected,
-                "held peer synthesized or mixed the other eye's pixels");
+            const auto held=readback_single_slice(fixture,synthetic.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+            if(uevr_crop) {
+                // Pixels outside the submitted XR subimage are not rendered
+                // by the held-eye draw and are not presented to the runtime.
+                const auto& r=view.image_rect;
+                for(UINT y=r.offset_y;y<r.offset_y+r.height;++y)for(UINT x=r.offset_x;x<r.offset_x+r.width;++x)
+                    for(UINT c=0;c<4;++c)require(held[(y*width+x)*4+c]==expected[(y*width+x)*4+c],
+                        "cropped held peer changed submitted eye pixels at "+std::to_string(x)+","+std::to_string(y));
+            } else require(held==expected,"held peer synthesized or mixed the other eye's pixels");
             require(readback_single_slice(fixture,current.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==expected,
                 "held peer changed its raw current endpoint");
         }
