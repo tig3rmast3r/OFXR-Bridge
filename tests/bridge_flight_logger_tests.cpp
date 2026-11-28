@@ -70,6 +70,7 @@ void concurrent_records(const fs::path& directory, bool wrap, bool flush) {
             E_INVALIDARG, 0x661D0069ULL, 256, 3);
         logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, 42, 33, 100);
         logger.event(xrfg::BridgeFlightOperation::benchmark_rates, 1, 42, 43, 42);
+        logger.event(xrfg::BridgeFlightOperation::luke_afw_stage, 0, 1466, 123, 456);
         logger.event(xrfg::BridgeFlightOperation::fsr_recovery, -1, 113, 5, 6);
         logger.event(xrfg::BridgeFlightOperation::fsr_eye_motion, 0, 42, 2, 3);
         logger.event(xrfg::BridgeFlightOperation::presenter_transition, 5750, 123, 456, 789);
@@ -161,6 +162,8 @@ void concurrent_records(const fs::path& directory, bool wrap, bool flush) {
         require(benchmark.find("op=benchmark_configuration result=0 dur_us=0 a=42 b=33 c=100") != std::string::npos &&
             benchmark.find("op=benchmark_rates result=1 dur_us=0 a=42 b=43 c=42") != std::string::npos,
             "compact benchmark lost first measurements during verbose rotation");
+        require(benchmark.find("op=luke_afw_stage result=0 dur_us=0 a=1466 b=123 c=456")!=std::string::npos,
+            "compact log lost discovered UEVR hook addresses during rotation");
         require(benchmark.find("op=fsr_recovery result=-1 dur_us=0 a=113 b=5 c=6")!=std::string::npos &&
             benchmark.find("op=fsr_eye_motion result=0 dur_us=0 a=42 b=2 c=3")!=std::string::npos,
             "compact diagnostics lost FSR failure or sampled guide inputs during rotation");

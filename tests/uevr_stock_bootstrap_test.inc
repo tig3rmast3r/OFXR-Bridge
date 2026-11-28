@@ -1,3 +1,4 @@
+#include "uevr_stock_code_fixture.hpp"
 static int uevr_stock_bootstrap_test() {
     using Policy=xrfg::UevrStockBootstrap;
     {
@@ -21,9 +22,11 @@ static int uevr_stock_bootstrap_test() {
             settings[index].second=saved;
         }
     }
-    check(xrfg::uevr_stock_profile::supports_sdk(2,39,xrfg::uevr_stock_profile::commit),"published stock SDK refused");
-    check(!xrfg::uevr_stock_profile::supports_sdk(2,41,xrfg::uevr_stock_profile::commit) &&
-        !xrfg::uevr_stock_profile::supports_sdk(2,39,"unknown"),"fork or unknown ABI entered bootstrap policy");
+    #if defined(_WIN64)
+    check(xrfg::uevr_stock_discovery::supports_sdk(2,39) && xrfg::uevr_stock_discovery::supports_sdk(2,41),"compatible stock SDK minor rejected");
+    check(xrfg::uevr_stock_discovery::supports_sdk(2,34) && !xrfg::uevr_stock_discovery::supports_sdk(3,39) &&
+        !xrfg::uevr_stock_discovery::supports_sdk(2,33),"SDK compatibility floor changed");
+#endif
     const std::array<std::uintptr_t,3> scene{1,2,3};
     Policy p;
     for(unsigned i=1;i<=11;++i)check(!p.begin(scene,true),"bootstrap ran before twelve stable frames");
@@ -73,7 +76,7 @@ static int uevr_stock_bootstrap_test() {
     std::memset(code,0xcc,4096);
     constexpr std::uint8_t prologue[]{0x53,0x41,0x56,0x48,0x81,0xec,0xe8,0,0,0,0xe9,0x99,0,0,0};
     std::memcpy(code,prologue,sizeof(prologue)); // jmp to copied CMP at+a8
-    std::memcpy(code+0x75,xrfg::uevr_stock_profile::test_tail.data(),xrfg::uevr_stock_profile::test_tail.size());
+    std::memcpy(code+0x75,xrfg::uevr_stock_fixture::test_tail.data(),xrfg::uevr_stock_fixture::test_tail.size());
     DWORD old{};check(VirtualProtect(code,4096,PAGE_EXECUTE_READ,&old)!=0,"protect CPU fixture");
     FlushInstructionCache(GetCurrentProcess(),code,4096);
     using Function=unsigned(*)(void*);const auto fn=reinterpret_cast<Function>(code);
