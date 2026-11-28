@@ -1,0 +1,21 @@
+DI2 DLSS reset for standard UEVR
+
+Copy ofxr_di2_dlss_reset.lua into:
+  %APPDATA%\UnrealVRMod\DeadIsland-Win64-Shipping\scripts\
+
+Load/reload UEVR scripts, or inject UEVR on the next launch. While gameplay is
+running, press and release F8. Keep gameplay advancing for the next ten engine
+ticks. The script disables FSR2 and then re-enables it at Quality, reproducing
+the reset part of the custom fork's F8 action. OptiScaler can then rebuild DLSS.
+
+The UEVR Scripts UI also has a "Restart DI2 FSR2 / DLSS (F8)" button.
+The script runs commands only on the game thread. It does not reset at startup,
+change VR modes, install OFXR, or repeat while F8 is held. A second press starts
+a fresh ten-tick reset. If the fork's native F8 binding is active, the script
+leaves keyboard F8 to that binding, preventing a duplicate reset.
+
+This is a DI2/FSR2 script. Install it in the DI2 profile, not the global scripts
+folder. Remove this Lua file to uninstall. Its reset temporarily suspends the
+upscaler; it adds no frame queue, GPU allocation or steady-state presentation
+delay. The original user_script.txt may still disable FSR2 during profile load;
+press F8 after gameplay starts to complete the reset.
