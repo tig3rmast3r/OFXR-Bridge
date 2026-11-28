@@ -3203,6 +3203,7 @@ std::shared_ptr<const xrfg::DlssMotionVectorFrame> resolve_eye_metadata(
     std::uint32_t release_token{};
     xrfg::EyeGuideRenderIdentity native_render;
     std::optional<std::uint64_t> guide_render;
+    bool fresh_shared_binding = false;
     {
         std::scoped_lock lock(state.mutex);
         const auto* source = captured_eye_source(state, capture, eye);
@@ -3216,6 +3217,7 @@ std::shared_ptr<const xrfg::DlssMotionVectorFrame> resolve_eye_metadata(
         if (binding.accepts(producer, source->stream_id)) {
             key = binding.key;
             guide_render = binding.guide_render(render);
+            fresh_shared_binding = binding.accepts_fresh_render(producer, source->stream_id, render);
         }
         repeated = state.repeated_eye_guides[eye];
         if (!token && repeated.find(producer, source->stream_id, render)) token = repeated.token;
@@ -3234,7 +3236,11 @@ std::shared_ptr<const xrfg::DlssMotionVectorFrame> resolve_eye_metadata(
             53,handle_value(state.handle),capture.serial,native_render.render);
         return {};
     }
-    if(!release_token&&lookup==EyeMetadataLookup::release_identity_only)return {};
+    if(!release_token&&lookup==EyeMetadataLookup::release_identity_only) {
+        if (!fresh_shared_binding || !guide_render) return {};
+        return xrfg::resolve_luke_guide_render(key.guide_stream, key.guide_epoch,
+            key.producer_owner, *guide_render, queue, device, key.producer);
+    }
     if (token) {
         auto guide = xrfg::resolve_luke_guide_token(token, queue, device);
         if (!guide || xrfg::luke_native_stream_reset(guide->stream, guide->epoch, device)) return {};
@@ -3273,6 +3279,14 @@ std::shared_ptr<const xrfg::DlssMotionVectorFrame> select_luke_eye_guide(
     }
     if (metadata && xrfg::use_eye_metadata(metadata->color_origin_token, marker, ambiguous_marker,
             exact_source_render)) {
+        {
+            std::scoped_lock lock(state.mutex);
+            if (const auto* source = captured_eye_source(state, capture, eye)) {
+                auto& binding = state.eye_guide_bindings[eye];
+                if (binding.accepts(state.released_eye_frame.frame.producer, source->stream_id))
+                    binding.advance(source->render_id);
+            }
+        }
         trace(marker ? 42 : marker_attempted ? 45 : 46, metadata->color_origin_token);
         if (ambiguous_marker) trace(50, metadata->color_origin_token);
         if (selected_from) *selected_from = xrfg::EyeIdentitySource::metadata;

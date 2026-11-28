@@ -2432,8 +2432,27 @@ void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_sp
                 binding.observe(key, frame->source_clock_sequence, frame->source_clock_sequence);
                 require(binding.accepts(1, 9) && !binding.accepts(1, 10) && !binding.accepts(2, 9),
                     "two exact anchors did not bind one compositor stream and producer");
+                require(!binding.accepts_fresh_render(1, 9, frame->source_clock_sequence + 1),
+                    "legacy clock binding must not bypass marker readbacks");
                 binding.observe(key, frame->source_clock_sequence, frame->source_clock_sequence + 1);
                 require(!binding.accepts(1, 9), "a marker disagreement retained the binding");
+                const xrfg::EyeGuideKey shared_key{9, frame->source_clock_owner, frame->stream, frame->epoch, 1, true};
+                xrfg::EyeGuideBinding shared_binding;
+                for (std::uint64_t r = 100; r <= 106; r += 2)
+                    shared_binding.observe(shared_key, r, r - 1);
+                require(shared_binding.confirmed && shared_binding.last_render == 106,
+                    "four advancing shared anchors did not confirm binding");
+                require(shared_binding.accepts_fresh_render(1, 9, 108) &&
+                    shared_binding.accepts_fresh_render(1, 9, 110) &&
+                    !shared_binding.accepts_fresh_render(1, 9, 106) &&
+                    !shared_binding.accepts_fresh_render(1, 9, 105) &&
+                    !shared_binding.accepts_fresh_render(1, 9, 111),
+                    "fresh shared render filter must accept 1..4 forward steps and reject stale or jumped renders");
+                shared_binding.advance(108);
+                require(shared_binding.last_render == 108 &&
+                    !shared_binding.accepts_fresh_render(1, 9, 108) &&
+                    shared_binding.accepts_fresh_render(1, 9, 110),
+                    "advancing shared binding must retire the consumed render ID");
                 const xrfg::RepeatedEyeGuide repeated{9, older->source_clock_sequence, older->stream, older->epoch,
                     2, older->color_origin_token};
                 require(repeated.find(2, 9, older->source_clock_sequence) == older->color_origin_token &&

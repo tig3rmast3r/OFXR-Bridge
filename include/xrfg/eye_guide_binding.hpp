@@ -65,6 +65,19 @@ struct EyeGuideBinding {
         return confirmed && key.producer == producer && key.compositor_stream == compositor_stream;
     }
 
+    // Confirmed shared REAL VR render identity advancing strictly forward by
+    // a normal render step (1..4). Stale/repeated renders or large jumps
+    // still require a pixel-marker check so lagging IDs cannot misbind.
+    [[nodiscard]] bool accepts_fresh_render(std::uint32_t producer,
+        std::uint64_t compositor_stream, std::uint64_t render) const noexcept {
+        return accepts(producer, compositor_stream) && key.shared_render_identity &&
+            render > last_render && render - last_render <= 4U;
+    }
+
+    void advance(std::uint64_t render) noexcept {
+        if (confirmed && render > last_render) last_render = render;
+    }
+
     [[nodiscard]] std::optional<std::uint64_t> guide_render(std::uint64_t render) const noexcept {
         if (!confirmed || (release_offset > 0 && render == 0) ||
             (release_offset < 0 && render == UINT64_MAX)) return {};
