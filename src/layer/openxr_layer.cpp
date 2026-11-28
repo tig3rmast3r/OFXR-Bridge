@@ -20798,7 +20798,13 @@ XrResult layer_end_frame_impl(
         record_projection_capture_order(current_snapshot,projection_mappings);
         const auto guides=refresh_aer_native_guides(state,current_snapshot,projection_mappings);
         if(FAILED(guides))return XR_ERROR_RUNTIME_FAILURE;
-        if(guides!=S_OK) {
+        // Hybrid's guide set is optional: record_pair already validates the
+        // exact predecessor and selects optical flow when it is unavailable.
+        // Bypassing here instead tears down that anchor and leaks staggered
+        // raw AER eyes between otherwise coherent generated stereo frames.
+        const bool hybrid_flow_fallback=state->frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr &&
+            state->hybrid_requested;
+        if(guides!=S_OK && !hybrid_flow_fallback) {
             state->generation_status=xrfg::autonomous::GenerationState::missing_motion;
             const bool fsr=state->frame_generation_mode==xrfg::D3D12FrameGenerationMode::fsr3;
             if(fsr)xrfg::report_fsr_frame_generation_status(xrfg::FsrFrameGenerationStatus::waiting_for_guides);
