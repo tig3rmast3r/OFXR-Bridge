@@ -1387,3 +1387,159 @@ void test_hybrid_foveated_inset_sharp_edge(D3D12WarpFixture& fixture) {
         "foveated inset did not sharpen the coarse peripheral moving edge (periph=" +
             std::to_string(periph_mae) + ", inset=" + std::to_string(inset_mae) + ")");
 }
+
+void test_hybrid_double_occlusion_and_silhouette_graze(D3D12WarpFixture& fixture) {
+    // Reproduces two MSFS 2024 orbiting artifacts on a half-res depth/MV guide grid:
+    // 1. Double occlusion: at open-sky pixels between an upper wing and lower strut,
+    //    warping backward hits the wing in A while warping forward hits the strut in B.
+    //    The shader must not stamp the Frame-A wing onto the sky.
+    // 2. Leading-edge AA silhouette graze: 1 px outside the strut's half-res depth edge,
+    //    DLSS/TAA AA color still darkens Frame B while depth/MV is already background.
+    //    The shader must keep unobstructed Frame A instead of painting a 1-px ghost line.
+    constexpr UINT width = 256, height = 128;
+    constexpr UINT guide_w = 128, guide_h = 64;
+    constexpr int bg_dy = -40; // background moves up 40 px from B to A (half-step = -20 px)
+    auto paint_scene = [&]() {
+        StereoPattern p{};
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            p[eye].resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
+            for (UINT y = 0; y < height; ++y) {
+                for (UINT x = 0; x < width; ++x) {
+                    std::uint8_t v = 128; // clean sky
+                    const bool on_wing = (x >= 40 && x < 120 && y >= 20 && y < 36);
+                    const bool on_strut = (x >= 40 && x < 216 && y >= 60 && y < 68);
+                    const bool on_aa_fringe = (x >= 40 && x < 216 && y == 68);
+                    if (on_wing) v = 250;
+                    else if (on_strut) v = 30;
+                    else if (on_aa_fringe) v = 60;
+                    const std::size_t off = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
+                    p[eye][off] = p[eye][off + 1] = p[eye][off + 2] = v;
+                    p[eye][off + 3] = 255;
+                }
+            }
+        }
+        return p;
+    };
+    const StereoPattern frame_a = paint_scene();
+    const StereoPattern frame_b = paint_scene();
+    auto is_fg = [&](float px, float py) {
+        return (px >= 40.0F && px < 120.0F && py >= 20.0F && py < 36.0F) ||
+               (px >= 40.0F && px < 216.0F && py >= 60.0F && py < 68.0F);
+    };
+    const auto mv_tex = create_and_upload_game_motion_field(
+        fixture, guide_w, guide_h, [&](UINT, UINT tx, UINT ty) {
+            const float px = (static_cast<float>(tx) + 0.5F) * 2.0F - 0.5F;
+            const float py = (static_cast<float>(ty) + 0.5F) * 2.0F - 0.5F;
+            const float vy = is_fg(px, py) ? 0.0F : static_cast<float>(bg_dy) * 0.5F;
+            return std::array<float, 2>{0.0F, vy};
+        });
+    const auto depth_tex = create_and_upload_game_depth_field(
+        fixture, guide_w, guide_h, [&](UINT, UINT tx, UINT ty) {
+            const float px = (static_cast<float>(tx) + 0.5F) * 2.0F - 0.5F;
+            const float py = (static_cast<float>(ty) + 0.5F) * 2.0F - 0.5F;
+            return is_fg(px, py) ? 0.5F : 0.01F;
+        });
+    std::array<ComPtr<ID3D12Resource>, 2> sources{
+        create_source_texture(fixture, width, height),
+        create_source_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
+        create_source_texture(fixture, width, height),
+        create_source_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 1> synthetic_destinations{
+        create_source_texture(fixture, width, height)};
+    upload_pattern(fixture, sources[0].Get(), frame_a);
+    upload_pattern(fixture, sources[1].Get(), frame_b);
+    std::array<ID3D12Resource*, 2> source_ptrs{sources[0].Get(), sources[1].Get()};
+    std::array<ID3D12Resource*, 2> current_ptrs{current_destinations[0].Get(), current_destinations[1].Get()};
+    std::array<ID3D12Resource*, 1> synth_ptrs{synthetic_destinations[0].Get()};
+    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+    require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
+                source_ptrs, D3D12_RESOURCE_STATE_RENDER_TARGET)),
+        "double-occlusion history init failed");
+    xrfg::D3D12NvidiaOpticalFlowOptions options{};
+    options.hybrid = true;
+    xrfg::D3D12FrameSynthesizer synthesizer;
+    require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
+                history, current_ptrs, synth_ptrs, kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                xrfg::D3D12OpticalFlowBackend::fidelity_fx, options)),
+        "double-occlusion synthesizer init failed");
+    const auto guides = [&](std::uint64_t serial) {
+        auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+        set->eye_count = kEyeCount;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+            f->stream = 720 + eye;
+            f->epoch = 1;
+            f->serial = serial;
+            f->previous_serial = serial - 1;
+            f->motion_vectors = mv_tex;
+            f->depth = depth_tex;
+            f->depth_inverted = true;
+            f->producer_queue = fixture.queue();
+            f->output_width = width;
+            f->output_height = height;
+            f->motion_width = f->depth_width = guide_w;
+            f->motion_height = f->depth_height = guide_h;
+            f->motion_slice = f->output_slice = eye;
+            f->resource_state = f->depth_resource_state =
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            set->eyes[eye] = std::move(f);
+        }
+        return set;
+    };
+    const bool saved_depth = xrfg::hybrid_depth_search_enabled();
+    xrfg::set_hybrid_depth_search(true);
+    const ReprojectionViews views = make_reprojection_views();
+    xrfg::D3D12HistoryCaptureTicket cap_a{}, cap_b{};
+    require(operation_succeeded(history->capture(0, &cap_a)) && operation_succeeded(history->commit(cap_a)),
+        "double-occlusion capture A failed");
+    xrfg::D3D12FrameSynthesisTicket prime{}, pair{};
+    require(operation_succeeded(synthesizer.submit_prime(cap_a, views, 0, &prime, guides(1))),
+        "double-occlusion prime failed");
+    require_frame_start_gate(synthesizer, "double-occlusion frame-start gate");
+    require(operation_succeeded(history->capture(1, &cap_b)) && operation_succeeded(history->commit(cap_b)),
+        "double-occlusion capture B failed");
+    require(operation_succeeded(synthesizer.submit_pair(cap_b, views, views, 0, 1, &pair, std::nullopt, guides(2))),
+        "double-occlusion pair failed");
+    fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+    const StereoPattern actual = readback_pattern(fixture, synthetic_destinations[0].Get(),
+        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    require(operation_succeeded(synthesizer.wait_for_idle()), "double-occlusion drain failed");
+    require(operation_succeeded(history->invalidate()), "double-occlusion invalidate failed");
+    xrfg::set_hybrid_depth_search(saved_depth);
+
+    // 1. Double-occlusion band: x=[50..110), y=[42..46) must stay clean sky (128), not white wing (250).
+    int max_double_occ_err = 0;
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        for (UINT y = 42; y < 46; ++y) {
+            for (UINT x = 50; x < 110; ++x) {
+                const std::size_t off = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
+                max_double_occ_err = std::max(max_double_occ_err, std::abs(static_cast<int>(actual[eye][off]) - 128));
+            }
+        }
+    }
+    // 2. Leading-edge AA graze line: x=[140..208), y=48 must stay clean sky (128), not dark fringe (60).
+    int max_graze_err = 0;
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        for (UINT x = 140; x < 208; ++x) {
+            const std::size_t off = (static_cast<std::size_t>(48) * width + x) * kBytesPerPixel;
+            max_graze_err = std::max(max_graze_err, std::abs(static_cast<int>(actual[eye][off]) - 128));
+        }
+    }
+    // 3. Strut itself at x=[140..208), y=64 must remain intact dark strut (30).
+    int max_strut_err = 0;
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        for (UINT x = 140; x < 208; ++x) {
+            const std::size_t off = (static_cast<std::size_t>(64) * width + x) * kBytesPerPixel;
+            max_strut_err = std::max(max_strut_err, std::abs(static_cast<int>(actual[eye][off]) - 30));
+        }
+    }
+    std::cout << "hybrid double-occlusion & silhouette-graze: double_occ_err=" << max_double_occ_err
+              << " graze_err=" << max_graze_err << " strut_err=" << max_strut_err << '\n';
+    require(max_double_occ_err <= 4,
+        "double-occlusion band stamped Frame-A occluder (err=" + std::to_string(max_double_occ_err) + ")");
+    require(max_graze_err <= 4,
+        "leading-edge AA graze painted ghost line (err=" + std::to_string(max_graze_err) + ")");
+    require(max_strut_err <= 4,
+        "real strut was damaged (err=" + std::to_string(max_strut_err) + ")");
+}

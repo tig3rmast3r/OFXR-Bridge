@@ -1543,6 +1543,100 @@ bool a_frame_occluded(float2 a_coord, float b_nearness, float2 b_displacement) {
     return occluded;
 }
 
+bool b_point_occluded(float2 coord, float ref_nearness, float2 ref_displacement, uint slice, uint view_index) {
+    float b_near = game_nearness(coord);
+    bool occluded = nearer(b_near, ref_nearness);
+    [branch] if (!occluded && depth_priority_rank(b_near) > depth_priority_rank(ref_nearness)) {
+        float2 b_motion = game_motion_for_pixel(coord, slice, view_index);
+        MappedCoordinate b_prev = map_source_to_target(
+            coord + b_motion, PreviousMappings[view_index]);
+        float2 b_disp = b_prev.valid >= 0.5 ? (b_prev.coordinate - coord) : ref_displacement;
+        occluded = length(b_disp - ref_displacement) > 3.0;
+    }
+    return occluded;
+}
+
+// True when `coord` sits on background within one guide depth texel of a
+// nearer foreground silhouette whose guide motion differs from `coord`'s own.
+// Bilinear / DLSS upscaled colour bleeds ~1-2 px past half-res depth texels,
+// so Frame B at `coord` can carry the foreground's AA fringe even though its
+// own depth texel is background.
+bool b_frame_silhouette_graze(float2 coord, float base_nearness) {
+    bool grazed = false;
+    static const int2 kOffsets[8] = {
+        int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1),
+        int2(-1, -1), int2(1, -1), int2(-1, 1), int2(1, 1)
+    };
+    bool use_inset = false;
+    float2 iuv = float2(0.0, 0.0);
+    [branch] if (foveated_inset_available() && (inset_flags() & 2u) != 0u) {
+        use_inset = pixel_in_rect(coord, inset_output_rect(), iuv);
+    }
+    [branch] if (use_inset) {
+        float4 dreg = inset_depth_rect();
+        int2 dmin = int2(dreg.xy);
+        int2 dmax = int2(dreg.xy + dreg.zw - 1.0);
+        int2 center = clamp(int2(dreg.xy + iuv * dreg.zw), dmin, dmax);
+        bool inverted = (inset_flags() & 4u) != 0u;
+        float4 mreg = inset_motion_rect();
+        float4 so = inset_scale_offset();
+        int2 mmin = int2(mreg.xy);
+        int2 mmax = int2(mreg.xy + mreg.zw - 1.0);
+        bool same_grid = all(abs(dreg - mreg) < 0.5);
+        int2 base_mt = same_grid ? center : clamp(int2(mreg.xy + iuv * mreg.zw), mmin, mmax);
+        bool base_mv_loaded = false;
+        float2 base_mv = float2(0.0, 0.0);
+        [unroll] for (uint k = 0; k < 8u; ++k) {
+            int2 nt = clamp(center + kOffsets[k], dmin, dmax);
+            float d = InsetDepth.Load(int4(nt, 0, 0));
+            float n_near = inverted ? d : 1.0 - d;
+            if (nearer(n_near, base_nearness)) {
+                if (!base_mv_loaded) {
+                    float2 raw0 = InsetMotionVectors.Load(int4(base_mt, 0, 0));
+                    base_mv = all(isfinite(raw0)) ? raw0 * so.xy : float2(0.0, 0.0);
+                    base_mv_loaded = true;
+                }
+                int2 n_mt = same_grid ? nt : clamp(int2(mreg.xy + ((float2(nt) - dreg.xy + 0.5) / max(dreg.zw, float2(1.0, 1.0))) * mreg.zw), mmin, mmax);
+                float2 raw1 = InsetMotionVectors.Load(int4(n_mt, 0, 0));
+                float2 n_mv = all(isfinite(raw1)) ? raw1 * so.xy : base_mv;
+                if (length(n_mv - base_mv) > 1.5) {
+                    grazed = true;
+                }
+            }
+        }
+    } else {
+        float4 dreg = game_depth_region();
+        int2 dmin = int2(dreg.xy);
+        int2 dmax = int2(dreg.xy + dreg.zw - 1.0);
+        int2 center = game_depth_texel(coord);
+        bool inverted = (GameMotionPadding & 0x80000000u) != 0u;
+        float4 mreg = GameMotionRect;
+        int2 mmin = int2(mreg.xy);
+        int2 mmax = int2(mreg.xy + mreg.zw - 1.0);
+        bool same_grid = all(abs(dreg - mreg) < 0.5);
+        bool base_mv_loaded = false;
+        float2 base_mv = float2(0.0, 0.0);
+        [unroll] for (uint k = 0; k < 8u; ++k) {
+            int2 nt = clamp(center + kOffsets[k], dmin, dmax);
+            float d = GameDepth.Load(int4(nt, 0, 0));
+            float n_near = inverted ? d : 1.0 - d;
+            if (nearer(n_near, base_nearness)) {
+                if (!base_mv_loaded) {
+                    base_mv = game_motion_texel(coord);
+                    base_mv_loaded = true;
+                }
+                int2 n_mt = same_grid ? nt : clamp(int2(mreg.xy + ((float2(nt) - dreg.xy + 0.5) / max(dreg.zw, float2(1.0, 1.0))) * mreg.zw), mmin, mmax);
+                float2 raw1 = GameMotionVectors.Load(int4(n_mt, 0, 0));
+                float2 n_mv = all(isfinite(raw1)) ? raw1 * GameMotionScale : base_mv;
+                if (length(n_mv - base_mv) > 1.5) {
+                    grazed = true;
+                }
+            }
+        }
+    }
+    return grazed;
+}
+
 // 0.2 V505/V555: query this output's depth splat at `pixel` for a nearer
 // surface than `reference_nearness`, solve from its splatted B endpoint, and
 // accept it when it is genuinely nearer and its A/B samples agree.
@@ -1981,7 +2075,7 @@ float4 synthesize_midpoint(
                         float covered_nearness = 0.0;
                         if (!camera_explains && solve_residual >= 0.5) {
                             float2 covered_displacement = last_displacement;
-                            bool covered_use_b = false;
+                            bool covered_resolved = false;
                             if (hybrid_layout && game_depth_available()) {
                                 float curr_near = game_nearness(b_coordinate);
                                 float prev_near = game_nearness(previous_step_endpoint);
@@ -1994,20 +2088,16 @@ float4 synthesize_midpoint(
                                 float2 covered_a = pixel + synthesis_fraction() * covered_displacement;
                                 if (depth_splat_available() && repeated_capture_flag() == 0 &&
                                     a_frame_occluded(covered_a, covered_nearness, covered_displacement)) {
-                                    // If A at covered_a was occluded by a nearer
-                                    // surface (e.g. grass-blade jitter on a
-                                    // trailing wake), prefer B only when B at
-                                    // covered_b is not itself occluded.
+                                    // A at covered_a is occluded by a nearer
+                                    // surface. Prefer B at covered_b when B is
+                                    // unobstructed; when BOTH A and B are
+                                    // occluded (e.g. wing in A, strut in B),
+                                    // never stamp the Frame-A occluder onto the
+                                    // background — use an unobstructed sample
+                                    // at `pixel` itself instead.
                                     float2 covered_b = pixel - (1.0 - synthesis_fraction()) * covered_displacement;
-                                    float b_near = game_nearness(covered_b);
-                                    float2 b_motion = game_motion_for_pixel(covered_b, Slice, ViewIndex);
-                                    MappedCoordinate b_prev = map_source_to_target(
-                                        covered_b + b_motion, PreviousMappings[ViewIndex]);
-                                    float2 b_disp = b_prev.valid >= 0.5
-                                        ? (b_prev.coordinate - covered_b) : covered_displacement;
-                                    bool b_occluded = nearer(b_near, covered_nearness) ||
-                                        (depth_priority_rank(b_near) > depth_priority_rank(covered_nearness) &&
-                                         length(b_disp - covered_displacement) > 3.0);
+                                    bool b_occluded = b_point_occluded(
+                                        covered_b, covered_nearness, covered_displacement, Slice, ViewIndex);
                                     if (!b_occluded) {
                                         CameraSample covered_current = sample_current_target(
                                             covered_b, Slice, ViewIndex);
@@ -2016,12 +2106,38 @@ float4 synthesize_midpoint(
 #ifdef XRFG_HYBRID_EXPLAINED_SCORING
                                             last_disagreement = 0.0;
 #endif
-                                            covered_use_b = true;
+                                            covered_resolved = true;
+                                        }
+                                    } else {
+                                        bool pixel_b_occluded = b_point_occluded(
+                                            pixel, covered_nearness, covered_displacement, Slice, ViewIndex);
+                                        if (!pixel_b_occluded) {
+                                            output_color = saturate(current_fallback.color);
+#ifdef XRFG_HYBRID_EXPLAINED_SCORING
+                                            last_disagreement = 0.0;
+#endif
+                                            covered_resolved = true;
+                                        } else if (!a_frame_occluded(pixel, covered_nearness, covered_displacement)) {
+                                            CameraSample prev_at_pixel = sample_previous_target(pixel, Slice, ViewIndex);
+                                            if (prev_at_pixel.valid >= 0.5) {
+                                                output_color = saturate(prev_at_pixel.color);
+#ifdef XRFG_HYBRID_EXPLAINED_SCORING
+                                                last_disagreement = 0.0;
+#endif
+                                                covered_resolved = true;
+                                            }
+                                        } else {
+                                            // Both warped endpoints and `pixel`
+                                            // itself are occluded in A and B;
+                                            // keep current_fallback without
+                                            // claiming zero disagreement.
+                                            output_color = saturate(current_fallback.color);
+                                            covered_resolved = true;
                                         }
                                     }
                                 }
                             }
-                            if (!covered_use_b) {
+                            if (!covered_resolved) {
                                 CameraSample covered = sample_previous_target(
                                     pixel + synthesis_fraction() * covered_displacement, Slice, ViewIndex);
 #ifdef XRFG_HYBRID_EXPLAINED_SCORING
@@ -2042,9 +2158,31 @@ float4 synthesize_midpoint(
                             // Trailing-edge disocclusion: a nearer surface
                             // occupied a_coordinate in Frame A, so A shows the
                             // occluder rather than this background surface.
-                            // B alone explains it; keep B cleanly without
-                            // blending the occluder from A or invoking flow.
-                            output_color = saturate(current_sample.color);
+                            // B alone explains it unless b_coordinate itself is
+                            // grazing a nearer moving silhouette's AA fringe in
+                            // B, in which case prefer an unoccluded `pixel` in B.
+                            float b_near = game_nearness(b_coordinate);
+                            bool use_pixel_fallback = false;
+                            [branch] if (disagreement > 0.02 &&
+                                         b_frame_silhouette_graze(b_coordinate, b_near) &&
+                                         !b_point_occluded(pixel, b_near, last_displacement, Slice, ViewIndex) &&
+                                         !b_frame_silhouette_graze(pixel, b_near)) {
+                                use_pixel_fallback = true;
+                            }
+                            output_color = saturate(use_pixel_fallback ? current_fallback.color : current_sample.color);
+#ifdef XRFG_HYBRID_EXPLAINED_SCORING
+                            last_disagreement = 0.0;
+#endif
+                        } else if (!camera_explains && hybrid_layout && game_depth_available() &&
+                                   depth_splat_available() && repeated_capture_flag() == 0 &&
+                                   disagreement > 0.02 &&
+                                   b_frame_silhouette_graze(b_coordinate, game_nearness(b_coordinate))) {
+                            // Leading-edge AA fringe: b_coordinate landed within
+                            // one guide texel of a nearer moving silhouette in B
+                            // while Frame A at a_coordinate is unobstructed
+                            // background. Keep A alone so Frame B's upscaled AA
+                            // edge does not paint a 1-px silhouette ghost.
+                            output_color = saturate(previous_sample.color);
 #ifdef XRFG_HYBRID_EXPLAINED_SCORING
                             last_disagreement = 0.0;
 #endif

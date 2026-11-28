@@ -7465,6 +7465,7 @@ int main(int argc, char** argv) {
             D3D12WarpFixture fixture;
             test_view_placed_dlss_guides(fixture);
             test_hybrid_foveated_inset_sharp_edge(fixture);
+            test_hybrid_double_occlusion_and_silhouette_graze(fixture);
             fixture.require_no_debug_errors();
             return 0;
         }
