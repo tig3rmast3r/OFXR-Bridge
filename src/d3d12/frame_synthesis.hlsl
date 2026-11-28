@@ -1916,15 +1916,20 @@ float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
 // the Hybrid route: the OFXR engine's flow branch, quality and direction.
 float4 synthesize_hybrid_nvidia(FullscreenVertex input, bool bidirectional, bool fast) {
     hybrid_layout = true;
-    bool invalid_motion=hybrid_motion_invalid_at(input.position.xy-.5);
-    float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
-    float vectors_disagreement = last_disagreement;
-    float4 result = vectors;
-    // Where the vectors explain both frames, the flow need not be asked.
-    [branch] if (invalid_motion || vectors_disagreement >= 0.02) {
-        float4 flow = synthesize_midpoint(input, 1.0 / 32.0, true, bidirectional, fast, false,
+    float4 result = float4(0.0, 0.0, 0.0, 1.0);
+    [branch] if (hybrid_motion_invalid_at(input.position.xy - .5)) {
+        result = synthesize_midpoint(input, 1.0 / 32.0, true, bidirectional, fast, false,
             (SynthesisFlags & 4u) != 0u);
-        result = invalid_motion?flow:lerp(flow, vectors, saturate(1.0 + (last_disagreement - vectors_disagreement) * 8.0));
+    } else {
+        float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
+        float vectors_disagreement = last_disagreement;
+        result = vectors;
+        // Where the vectors explain both frames, the flow need not be asked.
+        [branch] if (vectors_disagreement >= kHybridAgreeThreshold) {
+            float4 flow = synthesize_midpoint(input, 1.0 / 32.0, true, bidirectional, fast, false,
+                (SynthesisFlags & 4u) != 0u);
+            result = lerp(flow, vectors, saturate(1.0 + (last_disagreement - vectors_disagreement) * 8.0));
+        }
     }
     return result;
 }

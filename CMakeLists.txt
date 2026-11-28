@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.1115.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.1116.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -478,19 +478,19 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /Fh "${XRFG_EYE_ORDER_MEASURE_HEADER}" /Vn g_xrfg_eye_order_measure_shader
             "${XRFG_SYNTHESIS_SHADER}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeHybridNvidiaMidpointPS
-            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /D XRFG_HYBRID_EXPLAINED_SCORING=1 /D XRFG_HYBRID_MAX_SURFACE_SOLVES=1 /D XRFG_HYBRID_SINGLE_MOTION_LOAD=1 /D XRFG_HYBRID_RELAXED_AGREE=1 /D XRFG_HYBRID_FAST_AGREE=1 /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_HYBRID_NVIDIA_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_hybrid_nvidia_synthesize_midpoint_pixel_shader
             "${XRFG_SYNTHESIS_SHADER}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeHybridNvidiaBidirectionalMidpointPS
-            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /D XRFG_HYBRID_EXPLAINED_SCORING=1 /D XRFG_HYBRID_MAX_SURFACE_SOLVES=1 /D XRFG_HYBRID_SINGLE_MOTION_LOAD=1 /D XRFG_HYBRID_RELAXED_AGREE=1 /D XRFG_HYBRID_FAST_AGREE=1 /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_HYBRID_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader
             "${XRFG_SYNTHESIS_SHADER}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeHybridNvidiaFastMidpointPS
-            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /D XRFG_HYBRID_EXPLAINED_SCORING=1 /D XRFG_HYBRID_MAX_SURFACE_SOLVES=1 /D XRFG_HYBRID_SINGLE_MOTION_LOAD=1 /D XRFG_HYBRID_RELAXED_AGREE=1 /D XRFG_HYBRID_FAST_AGREE=1 /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_HYBRID_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_hybrid_nvidia_fast_synthesize_midpoint_pixel_shader
             "${XRFG_SYNTHESIS_SHADER}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeHybridNvidiaFastBidirectionalMidpointPS
-            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /D XRFG_HYBRID_EXPLAINED_SCORING=1 /D XRFG_HYBRID_MAX_SURFACE_SOLVES=1 /D XRFG_HYBRID_SINGLE_MOTION_LOAD=1 /D XRFG_HYBRID_RELAXED_AGREE=1 /D XRFG_HYBRID_FAST_AGREE=1 /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_HYBRID_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader
             "${XRFG_SYNTHESIS_SHADER}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E PackNvidiaFlowInput
