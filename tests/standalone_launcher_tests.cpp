@@ -23,7 +23,7 @@ static int status_json_tests() {
     {
         StatusInputs idle;
         idle.armed = true;
-        idle.build = 1128;
+        idle.build = 1129;
         idle.updated = "2026-10-28T09:12:03.512Z";
         const std::string without = build_status_json(idle);
         StatusInputs running = idle;

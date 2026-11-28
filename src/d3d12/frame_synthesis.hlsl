@@ -1375,6 +1375,31 @@ bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
     return game_motion_surface_at(pixel, start, previous_color, current_color, endpoint);
 }
 
+// 0.2 V505/V555: query this output's depth splat at `pixel` for a nearer
+// surface than `reference_nearness`, solve from its splatted B endpoint, and
+// accept it when it is genuinely nearer and its A/B samples agree.
+bool try_depth_splat_surface(float2 pixel, float reference_nearness, out float4 color) {
+    color = float4(0.0, 0.0, 0.0, 1.0);
+    bool found = false;
+    const uint rank = uint(saturate(coverage_mask_depth_priority(
+        reference_nearness * kDepthNearerFactor + 1.0e-6)) * 255.0);
+    const uint word = DepthSplat.Load(int4(coverage_mask_texel(pixel),
+        int(depth_splat_output()), 0));
+    if (word != 0u && (word >> 24u) >= rank) {
+        const float2 start = pixel -
+            (1.0 - synthesis_fraction()) * coverage_mask_motion(word);
+        float4 near_a, near_b;
+        float2 endpoint;
+        if (game_motion_surface_at(pixel, start, near_a, near_b, endpoint) &&
+            nearer(game_nearness(endpoint), reference_nearness) &&
+            rgb_error(near_a, near_b) < kDepthAgreeLimit) {
+            color = saturate(lerp(near_a, near_b, synthesis_fraction()));
+            found = true;
+        }
+    }
+    return found;
+}
+
 // djules75 V510: compare colour AND opacity, trying still motion and the
 // motion of nearby panel content at disagreeing transparent edges. This
 // implementation uses this branch's flow_for_pixel/sample_* entry points.
@@ -1856,29 +1881,25 @@ float4 synthesize_midpoint(
                         if (hybrid_layout && game_depth_available() && depth_splat_available() &&
                             !(!camera_explains && solve_residual >= 0.5) &&
                             repeated_capture_flag() == 0) {
-                            const float here = game_nearness(b_coordinate);
-                            const uint rank = uint(saturate(coverage_mask_depth_priority(
-                                here * kDepthNearerFactor + 1.0e-6)) * 255.0);
-                            const uint word = DepthSplat.Load(int4(coverage_mask_texel(pixel),
-                                int(depth_splat_output()), 0));
-                            if (word != 0u && (word >> 24u) >= rank) {
-                                const float2 start = pixel -
-                                    (1.0 - synthesis_fraction()) * coverage_mask_motion(word);
-                                float4 near_a, near_b;
-                                float2 endpoint;
-                                if (game_motion_surface_at(pixel, start, near_a, near_b, endpoint) &&
-                                    nearer(game_nearness(endpoint), here) &&
-                                    rgb_error(near_a, near_b) < kDepthAgreeLimit) {
-                                    output_color = saturate(lerp(near_a, near_b, synthesis_fraction()));
-                                    // Verified by depth and its own samples, so the
-                                    // hybrid keeps it: the flow, following the
-                                    // background, would take the bar back. 0.2 asked
-                                    // the flow only past 62/255, this limit's size.
-                                    last_disagreement = 0.0;
-                                }
+                            float4 splat_color;
+                            if (try_depth_splat_surface(pixel, game_nearness(b_coordinate), splat_color)) {
+                                output_color = splat_color;
+                                // Verified by depth and its own samples, so the
+                                // hybrid keeps it: the flow, following the
+                                // background, would take the bar back. 0.2 asked
+                                // the flow only past 62/255, this limit's size.
+                                last_disagreement = 0.0;
                             }
                         }
                     }
+                    }
+                } else if (use_game_motion_pipeline && hybrid_layout &&
+                           game_depth_available() && depth_splat_available() &&
+                           repeated_capture_flag() == 0) {
+                    float4 splat_color;
+                    if (try_depth_splat_surface(pixel, game_nearness(pixel), splat_color)) {
+                        output_color = splat_color;
+                        last_disagreement = 0.0;
                     }
                 }
             }
@@ -1899,14 +1920,51 @@ float4 SynthesizeGameMotionMidpointPS(FullscreenVertex input) : SV_Target {
     return synthesize_midpoint(input, 1.0, false, false, false, true, false);
 }
 
+// When composed AER guides mark disoccluded background as NaN at `pixel`, a
+// moving nearer surface whose own composed vectors are valid can still sit at
+// `pixel` at the generated instant. Query the depth splat before falling back
+// to pure optical flow.
+bool try_invalid_motion_depth_splat(FullscreenVertex input, out float4 color) {
+    color = float4(0.0, 0.0, 0.0, 1.0);
+    bool found = false;
+    if (game_depth_available() && depth_splat_available() && repeated_capture_flag() == 0) {
+        uint2 integer_pixel = uint2(input.position.xy);
+        if (integer_pixel.x < Width && integer_pixel.y < Height && Slice < ArraySize) {
+            OutputSource source = output_source(float2(integer_pixel));
+            if (!source.from_previous) {
+                float2 pixel = source.current;
+                MappedCoordinate previous_coverage = map_target_to_source(pixel, PreviousMappings[ViewIndex]);
+                bool allow = previous_coverage.valid >= 0.5;
+                [branch] if (allow && hud_fix_enabled()) {
+                    if (!still_mask_available()) {
+                        allow = false;
+                    } else {
+                        float2 hud_source = helmet_hud_source(float2(integer_pixel), pixel);
+                        if (((still_mask_word(hud_source, true) | still_mask_word(pixel, true)) & 128u) != 0u) {
+                            allow = false;
+                        }
+                    }
+                }
+                if (allow) {
+                    found = try_depth_splat_surface(pixel, game_nearness(pixel), color);
+                }
+            }
+        }
+    }
+    return found;
+}
+
 // The game's vectors and FidelityFX's optical flow both: per pixel, whichever
 // explains both frames better. Content the vectors do not describe - a
 // shadow, a reflection - moves as the image does, which the flow follows.
 // The vectors keep a tie.
 float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
     hybrid_layout = true;
-    if(hybrid_motion_invalid_at(input.position.xy-.5))
-        return synthesize_midpoint(input,1.0,false,false,false,false,false);
+    if (hybrid_motion_invalid_at(input.position.xy - .5)) {
+        float4 splat_color;
+        if (try_invalid_motion_depth_splat(input, splat_color)) return splat_color;
+        return synthesize_midpoint(input, 1.0, false, false, false, false, false);
+    }
     float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
     float vectors_disagreement = last_disagreement;
     // Where the vectors explain both frames, the flow need not be asked.
@@ -1921,8 +1979,13 @@ float4 synthesize_hybrid_nvidia(FullscreenVertex input, bool bidirectional, bool
     hybrid_layout = true;
     float4 result = float4(0.0, 0.0, 0.0, 1.0);
     [branch] if (hybrid_motion_invalid_at(input.position.xy - .5)) {
-        result = synthesize_midpoint(input, 1.0 / 32.0, true, bidirectional, fast, false,
-            (SynthesisFlags & 4u) != 0u);
+        float4 splat_color;
+        if (try_invalid_motion_depth_splat(input, splat_color)) {
+            result = splat_color;
+        } else {
+            result = synthesize_midpoint(input, 1.0 / 32.0, true, bidirectional, fast, false,
+                (SynthesisFlags & 4u) != 0u);
+        }
     } else {
         float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
         float vectors_disagreement = last_disagreement;

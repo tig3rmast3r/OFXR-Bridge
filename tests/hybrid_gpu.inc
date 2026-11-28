@@ -231,7 +231,8 @@ enum class HybridBarsLayout { stereo, single_eye, right_depth };
 double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
     xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx,
     UINT length = 256, bool vertical = false, UINT outputs = 1, UINT depth_thirds = 3,
-    bool forward_depth = false, HybridBarsLayout layout = HybridBarsLayout::stereo) {
+    bool forward_depth = false, HybridBarsLayout layout = HybridBarsLayout::stereo,
+    bool nan_wake = false) {
     const UINT width = vertical ? 128U : length;
     const UINT height = vertical ? length : 128U;
     const bool single_eye = layout == HybridBarsLayout::single_eye;
@@ -271,7 +272,14 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
     const StereoPattern current = make_scene(background_motion, bar_motion);
     auto game_motion = create_and_upload_game_motion_field(
         fixture, width, height, [&](UINT, UINT x, UINT y) {
-            const bool bar = bar_at(along(x, y), across(x, y), bar_motion);
+            const int u = along(x, y), v = across(x, y);
+            const bool bar = bar_at(u, v, bar_motion);
+            if (nan_wake && !bar &&
+                (bar_at(u, v, bar_motion / 4) || bar_at(u, v, bar_motion / 2) ||
+                 bar_at(u, v, bar_motion * 3 / 4))) {
+                const float qnan = std::numeric_limits<float>::quiet_NaN();
+                return std::array<float, 2>{qnan, qnan};
+            }
             const float motion = static_cast<float>(-(bar ? bar_motion : background_motion));
             return vertical ? std::array<float, 2>{0.0F, motion} : std::array<float, 2>{motion, 0.0F};
         });
@@ -446,8 +454,16 @@ void test_hybrid_depth_slices(D3D12WarpFixture& fixture) {
             actual.push_back(line.substr(line.find(" a=") + 1U));
     }
     require(actual == expected, "depth splat did not allocate one slice per usable eye and output");
+    // Composed AER guides mark disoccluded background wake pixels as NaN; depth
+    // search must still rescue the moving nearer bar on all 3 outputs (4X).
+    for (const auto backend : {xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                               xrfg::D3D12OpticalFlowBackend::nvidia}) {
+        require(test_hybrid_bars(fixture, true, backend, 256, false, 3, 3, false,
+            HybridBarsLayout::single_eye, true) >= 0.95,
+            "depth splat failed to rescue near bars over NaN disoccluded wake");
+    }
     log.shutdown();
-    std::cout << "Hybrid depth splat: exact 1/2/4/6 slices, sparse right eye and distinct output times PASS\n";
+    std::cout << "Hybrid depth splat: exact 1/2/4/6 slices, sparse right eye, NaN wake rescue and distinct output times PASS\n";
 }
 
 // 0.2 V559-V573: Hybrid's HUD fix. A translucent HUD over a flat world, whose
