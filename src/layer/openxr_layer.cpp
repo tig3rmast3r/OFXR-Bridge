@@ -594,6 +594,7 @@ void log_luke_guide_basis(const xrfg::DlssMotionVectorFrame& guide) noexcept {
 struct ThreeSlotFrame;
 struct SynthesisJob;
 struct IndependentAerDouble;
+struct IndependentAerDirect4x;
 
 struct PresenterSubmission {
     xrfg::InterfaceFrameStamp interface_stamp{};
@@ -886,6 +887,8 @@ struct SessionState {
     std::shared_ptr<Dispatch> dispatch;
     std::shared_ptr<xrfg::PrivateOpenXrRuntime> private_runtime;
     std::shared_ptr<IndependentAerDouble> independent_aer_double; // completion-worker owned
+    std::shared_ptr<IndependentAerDirect4x> independent_aer_direct_4x; // completion-worker owned
+    bool independent_aer_double_requested{};
     std::atomic_bool independent_aer_double_unavailable{};
     std::shared_ptr<xrfg::RuntimeAcceptanceRate> runtime_acceptance;
     xrfg::implicit_layer::ManualArmControl manual_control;
@@ -2169,8 +2172,21 @@ unsigned rife_frames(const SessionState& state) noexcept {
     // allocations stay on a single bank on smaller-VRAM GPUs without runtime churn.
     return bank2_bytes<=vram/16;
 }
+[[nodiscard]] bool independent_aer_direct_4x(const SessionState& state) noexcept {
+    return state.independent_pacing &&
+        state.nvidia_options.ofr &&
+        state.independent_aer_double_requested &&
+        state.nvidia_options.rife_model < 0 &&
+        state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr &&
+        !state.djules_route && !state.afw_only;
+}
+[[nodiscard]] unsigned d3d11_synthetic_rings(const SessionState& state) noexcept {
+    if (independent_aer_direct_4x(state)) return 6U;
+    return rife_frames(state) > 2 ? rife_frames(state) - 1 : 2U;
+}
 [[nodiscard]] unsigned source_synthetic_rings(const SessionState& state,bool panel,
     const XrSwapchainCreateInfo* info=nullptr) noexcept {
+    if (!panel && independent_aer_direct_4x(state)) return 6U;
     // Private RIFE Normal and Independent D3D12 optical/Hybrid Normal keep the
     // next complete batch independent of S1/S2/S3 still being copied by the
     // endpoint. Fast retains the minimal allocation.
@@ -4470,9 +4486,12 @@ create_d3d12_frame_generation_swapchains(
         ensure_dedicated_vram_bytes(*state->session);
         generation->current_runtime_rings = output_slots;
         generation->synthetic_runtime_rings = source_synthetic_rings(*state->session,state->panel_source,&state->create_info);
-        if(generation->synthetic_runtime_rings>native_synthetic_rings(*state->session))
+        const bool aer_direct = !state->panel_source && independent_aer_direct_4x(*state->session);
+        if (aer_direct) {
+            generation->synthetic_batch_width = 3U;
+        } else if(generation->synthetic_runtime_rings>native_synthetic_rings(*state->session))
             generation->synthetic_batch_width=rife_frames(*state->session)-1;
-        generation->direct_extra_outputs = !generation->staged_outputs && extra_output_capacity(*state->session);
+        generation->direct_extra_outputs = !generation->staged_outputs && (extra_output_capacity(*state->session) || aer_direct);
         if(generation->direct_extra_outputs)
             for(auto& lease:generation->direct_synthetic_leases) lease=std::make_shared<DirectSyntheticLease>();
         generation->staging_stride = generation->staged_outputs && extra_output_capacity(*state->session) ? 2U : 1U;
@@ -4749,7 +4768,7 @@ create_d3d11_frame_generation_swapchains(
         }
         log_video_memory(*state->session, VideoMemoryStage::current_ring, handle_value(state->handle));
         if (!create_current_ring(state, private_info, &synthetic, &refusal,
-                rife_frames(*session)>2?rife_frames(*session)-1:kSyntheticSlotCount,
+                d3d11_synthetic_rings(*session),
                 separate_native_publications(*session) ? 1U : 0U)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
@@ -4879,8 +4898,10 @@ create_d3d11_frame_generation_swapchains(
         log_video_memory(*state->session, VideoMemoryStage::synthesizer, handle_value(state->handle));
         auto generation = std::make_shared<FrameGenerationSwapchainState>();
         generation->separate_native_publications = separate_native_publications(*session);
-        generation->synthetic_runtime_rings=rife_frames(*session)>2?rife_frames(*session)-1:kSyntheticSlotCount;
-        generation->direct_extra_outputs=rife_frames(*session)>2;
+        const bool aer_direct = !state->panel_source && independent_aer_direct_4x(*session);
+        generation->synthetic_runtime_rings = d3d11_synthetic_rings(*session);
+        if (aer_direct) generation->synthetic_batch_width = 3U;
+        generation->direct_extra_outputs = rife_frames(*session)>2 || aer_direct;
         if(generation->direct_extra_outputs)
             for(auto& lease:generation->direct_synthetic_leases)lease=std::make_shared<DirectSyntheticLease>();
         generation->synthesizer = std::move(synthesizer);
@@ -7054,6 +7075,7 @@ XrResult layer_create_session_impl(
         state->nvidia_new_route, xrfg::flow_encoding_for_route(state->nvidia_new_route), state->nvidia_new_route, initial_control.desired.native_scale};
     state->nvidia_options.ofr=initial_control.desired.ofr&&initial_control.desired.enabled;
     state->nvidia_options.ofr_swap=initial_control.desired.ofr_swap;
+    state->independent_aer_double_requested=initial_control.desired.independent_aer_double;
     state->nvidia_options.rife_model=initial_control.desired.rife_model;
     state->nvidia_options.rife_resolution_percent=initial_control.desired.rife_resolution;
     state->nvidia_options.rife_multiplier=initial_control.desired.rife_multiplier;
@@ -8815,6 +8837,7 @@ XrResult layer_destroy_swapchain_impl(XrSwapchain swapchain) {
     // The lifetime guard drained both workers and native readers. Retire the
     // second-stage source-scoped publication owners before the app chain goes.
     state->session->independent_aer_double.reset();
+    state->session->independent_aer_direct_4x.reset();
     state->session->independent_aer_double_unavailable=false;
     xrfg::embedded::independent_aer_double_state=0;
     drain_swapchain_gpu(state);
@@ -10482,6 +10505,7 @@ struct SynthesisJob {
     bool first_published{};
     std::int64_t independent_synthetic_ready_ns{};
     bool aer_double{}; // immutable requested second-stage mode for this source
+    bool aer_direct_4x{}; // single-stage direct AER 4X (0.25/0.50/0.75 per eye)
     std::int64_t independent_source_ns{},independent_period_ns{},independent_first_due_ns{};
     std::vector<std::shared_ptr<PanelInput>> sources;
     std::vector<std::shared_ptr<PanelInput>> panels;
@@ -14131,7 +14155,7 @@ HRESULT acquire_optical_tail_image(const std::shared_ptr<SessionState>& owner,
 struct PreparedGeneration {
     std::shared_ptr<QueuedOpticalTail> optical_tail;
     std::shared_ptr<FrameGenerationSwapchainState> staging_generation;
-    std::shared_ptr<void> independent_current_lease, independent_synthetic_lease;
+    std::shared_ptr<void> independent_current_lease, independent_synthetic_lease, independent_extra_lease, independent_third_lease;
     std::shared_ptr<DirectSyntheticLease> direct_synthetic_lease, direct_extra_lease, direct_third_lease;
     xrfg::D3D12FrameSynthesisTicket staging_ticket{};
     Microsoft::WRL::ComPtr<ID3D12Fence> reference_fence;
@@ -14230,6 +14254,8 @@ void attach_djules_outputs(PreparedProjectionFrame& prepared,
         if(panel_third && output.direct_third_lease)panel_third->direct_synthetic_leases.push_back(output.direct_third_lease);
         if(output.independent_current_lease)real.independent_output_leases.push_back(output.independent_current_lease);
         if(panel_synthetic && output.independent_synthetic_lease)panel_synthetic->independent_output_leases.push_back(output.independent_synthetic_lease);
+        if(panel_extra && output.independent_extra_lease)panel_extra->independent_output_leases.push_back(output.independent_extra_lease);
+        if(panel_third && output.independent_third_lease)panel_third->independent_output_leases.push_back(output.independent_third_lease);
         if(output.direct_current_publication) real.direct_publications.push_back(output.direct_current_publication);
         if(panel_synthetic && output.direct_synthetic_publication) panel_synthetic->direct_publications.push_back(output.direct_synthetic_publication);
         if(panel_extra && output.direct_extra_publication) panel_extra->direct_publications.push_back(output.direct_extra_publication);
@@ -14387,7 +14413,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     std::span<const xrfg::D3D12ReprojectionView> synthetic_views = {},
     std::span<const xrfg::D3D12ReprojectionView> extra_views = {},
     float third_fraction=.75F, std::span<const xrfg::D3D12ReprojectionView> third_views={},
-    const PanelInput* panel_input=nullptr,unsigned aer_fresh_mask=3,bool real_copy=false) noexcept {
+    const PanelInput* panel_input=nullptr,unsigned aer_fresh_mask=3,bool real_copy=false,
+    bool direct_aer_4x=false) noexcept {
     PreparedGeneration output{};
     try {
         // AFW's frozen source is transport, never a temporal OFXR prime.
@@ -14510,9 +14537,11 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             }
         }
 
-        const bool request_third=request_pair && rife_frames(*state->session)==4;
-        const bool request_extra=request_pair && djules_triple_active(*state->session) &&
-            (generation->staged_outputs || generation->direct_extra_outputs);
+        const bool aer_direct_quad = direct_aer_4x && generation->direct_extra_outputs &&
+            generation->synthetic_runtime_rings >= 6;
+        const bool request_third=request_pair && (rife_frames(*state->session)==4 || aer_direct_quad);
+        const bool request_extra=request_pair && ((djules_triple_active(*state->session) &&
+            (generation->staged_outputs || generation->direct_extra_outputs)) || aer_direct_quad);
         // A private SteamVR route handoff joins the old presenter before inline
         // priming can promote its replacement. Its latched stop request belongs
         // to that retired owner, not to this new output transaction. Live owners
@@ -14557,9 +14586,16 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             std::unique_lock lock(state->session->presenter_mutex);
             auto& current_busy=generation->current_publication_busy[current_runtime_slot];
             auto& synthetic_busy=generation->synthetic_publication_busy[synthetic_runtime_slot];
+            const auto extra_slot=(synthetic_runtime_slot+1)%generation->synthetic_runtime_rings;
+            const auto third_slot=(synthetic_runtime_slot+2)%generation->synthetic_runtime_rings;
+            auto& extra_busy=generation->synthetic_publication_busy[extra_slot];
+            auto& third_busy=generation->synthetic_publication_busy[third_slot];
+            const bool need_extra_busy=request_extra && !defer_extra_acquire;
             state->session->presenter_condition.wait(lock,[&]{return
                 (!current_busy.load(std::memory_order_acquire) &&
-                 (!request_pair || !synthetic_busy.load(std::memory_order_acquire))) ||
+                 (!request_pair || !synthetic_busy.load(std::memory_order_acquire)) &&
+                 (!need_extra_busy || !extra_busy.load(std::memory_order_acquire)) &&
+                 (!request_third || !third_busy.load(std::memory_order_acquire))) ||
                 publication_stopping() || XR_FAILED(state->session->presenter_failure);});
             if(publication_stopping() || XR_FAILED(state->session->presenter_failure)) {
                 output.reason=GenerationPrepareReason::synthesis_busy;return output;
@@ -14574,6 +14610,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             };
             output.independent_current_lease=retain(current_busy);
             if(request_pair)output.independent_synthetic_lease=retain(synthetic_busy);
+            if(need_extra_busy)output.independent_extra_lease=retain(extra_busy);
+            if(request_third)output.independent_third_lease=retain(third_busy);
         }
         if (generation->staged_outputs) {
             std::unique_lock lock(state->session->presenter_mutex);
@@ -15175,7 +15213,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     const ProjectionSnapshot* synthetic_camera = nullptr,
     const ProjectionSnapshot* extra_camera = nullptr,
     float third_fraction=.75F,const ProjectionSnapshot* third_camera=nullptr,
-    std::span<const std::shared_ptr<PanelInput>> frozen_sources={},bool real_copy=false) noexcept {
+    std::span<const std::shared_ptr<PanelInput>> frozen_sources={},bool real_copy=false,
+    bool direct_aer_4x=false) noexcept {
     PreparedProjectionFrame output{};
     try {
         if (mappings.empty()) {
@@ -15221,7 +15260,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 target ? std::span<const xrfg::D3D12ReprojectionView>{*target} : std::span<const xrfg::D3D12ReprojectionView>{},
                 extra ? std::span<const xrfg::D3D12ReprojectionView>{*extra} : std::span<const xrfg::D3D12ReprojectionView>{},
                 third_fraction,third?std::span<const xrfg::D3D12ReprojectionView>{*third}:std::span<const xrfg::D3D12ReprojectionView>{},
-                [&]() -> const PanelInput* {for(const auto& input:frozen_sources)if(input->source.swapchain==mapping.application_swapchain)return input.get();return nullptr;}(),snapshot.aer_fresh_mask,real_copy);
+                [&]() -> const PanelInput* {for(const auto& input:frozen_sources)if(input->source.swapchain==mapping.application_swapchain)return input.get();return nullptr;}(),snapshot.aer_fresh_mask,real_copy,direct_aer_4x);
             all_expected_kind =
                 all_expected_kind && generation.kind == expected_kind;
             all_anchor_current =
@@ -15400,13 +15439,15 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 if(!success)return false;
                 const HRESULT extra=g.worker_generation->d3d11_interop->publish_completed(
                     g.current_destination,g.extra_destination,g.worker_fence.Get(),g.worker_fence_value,
-                    &g.worker_extra_publication);
+                    &g.worker_extra_publication,std::nullopt,
+                    state->independent_pacing && state->private_runtime && !g.staging_generation);
                 if(FAILED(extra))return false;
             }
             if(g.third_handle!=XR_NULL_HANDLE) {
                 const HRESULT third=g.worker_generation->d3d11_interop->publish_completed(
                     g.current_destination,g.third_destination,g.worker_fence.Get(),g.worker_fence_value,
-                    &g.worker_third_publication);
+                    &g.worker_third_publication,std::nullopt,
+                    state->independent_pacing && state->private_runtime && !g.staging_generation);
                 if(FAILED(third))return false;
             }
         }
@@ -15705,6 +15746,7 @@ void prepare_panel_generation(SessionState& state,const ProjectionSnapshot& snap
 }
 
 #include "independent_aer_double.inc"
+#include "independent_aer_direct4x.inc"
 
 struct IndependentSynthesisWork {
     std::shared_ptr<SynthesisJob> job;
@@ -15906,7 +15948,7 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                         ? std::span<const PostAfwFrameInput>{job->post_afw_frame->inputs}
                         : std::span<const PostAfwFrameInput>{},job->extra_fraction,
                     job->synthetic_camera ? &*job->synthetic_camera : nullptr,
-                    job->extra_camera ? &*job->extra_camera : nullptr,job->third_fraction,job->third_camera?&*job->third_camera:nullptr,job->sources);
+                    job->extra_camera ? &*job->extra_camera : nullptr,job->third_fraction,job->third_camera?&*job->third_camera:nullptr,job->sources,false,job->aer_direct_4x);
             };
             prepared = prepare_source();
             unsigned streamed_eyes{};
@@ -16100,13 +16142,20 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
             }
             std::shared_ptr<GeneratedFrameEndInfo> real;
             std::shared_ptr<GeneratedFrameEndInfo> synthetic, extra_synthetic, third_synthetic;
+            std::vector<std::shared_ptr<GeneratedFrameEndInfo>> direct_aer4_outputs;
             xrfg::bridge_flight_logger().end(auxiliary_token,
                 xrfg::BridgeFlightOperation::timing_aux_complete, success ? 0 : -1,
                 job->current->source_sequence, job->current->previous_sequence);
             const auto build_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_worker_build,
                 job->current->source_sequence, job->current->previous_sequence);
-            if (success) {
+            if (success && job->aer_direct_4x) {
+                audit.stage = 4;
+                if (!state->independent_aer_direct_4x)
+                    state->independent_aer_direct_4x = std::make_shared<IndependentAerDirect4x>();
+                success = state->independent_aer_direct_4x->process(state, *job, prepared, direct_aer4_outputs);
+                if (success && job->pair) xrfg::embedded::ofr_last_success_ms = GetTickCount64();
+            } else if (success) {
                 std::vector<ProjectionResourceDestination> real_destinations, synthetic_destinations, extra_destinations, third_destinations;
                 for (const auto& resource : prepared.resources) {
                     XrSwapchain source = resource.application_swapchain;
@@ -16187,9 +16236,9 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                     }
                 }
             }
-            const bool aer_single=success && state->nvidia_options.ofr && job->pair && job->snapshot.aer_fresh_mask!=3;
+            const bool aer_single=!job->aer_direct_4x && success && state->nvidia_options.ofr && job->pair && job->snapshot.aer_fresh_mask!=3;
             if(aer_single) {real=std::move(synthetic);real->blackbar_pose.paired=false;real->interface_stamp.mark_aer_mixed();job->pair=false;}
-            if(success && state->nvidia_options.ofr && (aer_single || job->pair))
+            if(!job->aer_direct_4x && success && state->nvidia_options.ofr && (aer_single || job->pair))
                 xrfg::embedded::ofr_last_success_ms=GetTickCount64();
             xrfg::bridge_flight_logger().end(build_token,
                 xrfg::BridgeFlightOperation::timing_worker_build, success ? 0 : -1,
@@ -16249,6 +16298,15 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state, bool comp
                     output->previous_sequence=job->current->previous_sequence;output->frame=std::move(image);
                     state->independent_outputs.push_back(std::move(output));
                 };
+                if(job->aer_direct_4x) {
+                    state->independent_aer_double.reset();state->independent_aer_double_unavailable=false;
+                    std::scoped_lock lock(state->presenter_mutex);
+                    for(auto& frame:direct_aer4_outputs)append(std::move(frame));
+                    state->independent_completion_busy=false;
+                    state->presenter_condition.notify_all();
+                    continue;
+                }
+                state->independent_aer_direct_4x.reset();
                 if(job->aer_double) {
                     if(!state->independent_aer_double)state->independent_aer_double=std::make_shared<IndependentAerDouble>();
                     for(auto& endpoint:endpoints) {
@@ -17222,7 +17280,29 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     if (!post_afw_frame && !build_generated_frame_end_info(source, snapshot, false, identities, &metadata))
         return XR_ERROR_LAYER_INVALID;
     auto job = std::make_shared<SynthesisJob>();
-    job->aer_double=state->independent_pacing && state->nvidia_options.ofr && xrfg::embedded::snapshot().desired.independent_aer_double;
+    const auto aer_direct_scene = independent_aer_direct_4x(*state) && mappings.size() == 2
+        ? ofr_scene_projection(job->snapshot.layers.empty() ? snapshot : job->snapshot, mappings) : std::nullopt;
+    bool aer_direct_ready = aer_direct_scene.has_value();
+    if (aer_direct_ready) {
+        unsigned eye_mask{};
+        for (const auto& mapping : mappings) {
+            const auto chain = find_swapchain(mapping.application_swapchain);
+            if (!chain || chain->create_info.arraySize != 1 || mapping.views.size() != 1 ||
+                mapping.views[0].projection_index != *aer_direct_scene || mapping.views[0].view_index > 1) {
+                aer_direct_ready = false; break;
+            }
+            eye_mask |= 1U << unsigned(mapping.views[0].view_index);
+            std::scoped_lock lock(chain->mutex);
+            if (!chain->frame_generation || !chain->frame_generation->direct_extra_outputs ||
+                chain->frame_generation->synthetic_runtime_rings < 6) {
+                aer_direct_ready = false; break;
+            }
+        }
+        aer_direct_ready = aer_direct_ready && eye_mask == 3U;
+    }
+    job->aer_direct_4x = aer_direct_ready;
+    job->aer_double = state->independent_pacing && state->nvidia_options.ofr &&
+        xrfg::embedded::snapshot().desired.independent_aer_double && !job->aer_direct_4x;
     // AFW color is already the final direct-XR output. Do not apply the
     // game's presentation transform a second time in the OFXR consumer.
     job->presentation_transform = post_afw_frame
@@ -17234,15 +17314,16 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     std::optional<ProjectionSnapshot> previous;
     { std::scoped_lock lock(state->mutex); previous=state->previous_projection; }
     if(state->nvidia_options.ofr)job->aer_previous=previous;
-    job->fraction=state->nvidia_options.ofr?.5F:synthetic_interpolation_fraction(state,previous,job->snapshot);
-    job->extra_fraction=synthetic_interpolation_fraction(state,previous,job->snapshot,1);
-    job->third_fraction=synthetic_interpolation_fraction(state,previous,job->snapshot,2);
-    if (previous && (state->nvidia_options.ofr || xrfg::autonomous::r19_camera_enabled.load(std::memory_order_acquire))) {
-        job->synthetic_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->fraction,state->nvidia_options.ofr?ofr_scene_projection(job->snapshot,job->mappings):std::nullopt);
-        job->extra_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->extra_fraction,state->nvidia_options.ofr?ofr_scene_projection(job->snapshot,job->mappings):std::nullopt);
-        job->third_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->third_fraction,state->nvidia_options.ofr?ofr_scene_projection(job->snapshot,job->mappings):std::nullopt);
-    }
+    job->fraction=job->aer_direct_4x ? .25F : state->nvidia_options.ofr ? .5F : synthetic_interpolation_fraction(state,previous,job->snapshot);
+    job->extra_fraction=job->aer_direct_4x ? .50F : synthetic_interpolation_fraction(state,previous,job->snapshot,1);
+    job->third_fraction=job->aer_direct_4x ? .75F : synthetic_interpolation_fraction(state,previous,job->snapshot,2);
     job->mappings.assign(mappings.begin(), mappings.end());
+    if (previous && (state->nvidia_options.ofr || xrfg::autonomous::r19_camera_enabled.load(std::memory_order_acquire))) {
+        const auto camera_scene = state->nvidia_options.ofr ? ofr_scene_projection(job->snapshot, job->mappings) : std::nullopt;
+        job->synthetic_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->fraction,camera_scene);
+        job->extra_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->extra_fraction,camera_scene);
+        job->third_camera=synthetic_camera_snapshot(*previous,job->snapshot,job->third_fraction,camera_scene);
+    }
     job->post_afw_frame = std::move(post_afw_frame);
     job->osr_pair_phase=job->post_afw_frame && independent_osr_optical_pair(*state);
     job->stereo_recovery=independent_stereo_recovery(*state);
@@ -17283,8 +17364,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
          if(state->presenter_stop_requested)return XR_ERROR_SESSION_NOT_RUNNING;
          if(XR_FAILED(state->presenter_failure))return state->presenter_failure;
          job->pair=metadata_pairable && state->director_anchor_sequence!=0;
-         job->triple=job->pair && native_frame_multiplier(*state)>=3;
-         job->quad=job->pair && native_frame_multiplier(*state)>=4;
+         job->triple=job->pair && (native_frame_multiplier(*state)>=3 || job->aer_direct_4x);
+         job->quad=job->pair && (native_frame_multiplier(*state)>=4 || job->aer_direct_4x);
          if(job->stereo_recovery)job->independent_first_due_ns=state->independent_batch_deadlines.claim(
              job->independent_first_due_ns,job->independent_period_ns,job->pair?native_frame_multiplier(*state):1U);
          job->current->source_sequence=state->next_source_sequence++;
@@ -18348,8 +18429,11 @@ void clear_generation_continuity(
         SUCCEEDED(state->independent_aer_double->failure)&&
         SUCCEEDED(state->independent_aer_double->reset_temporal(1));
     if(!kept)state->independent_aer_double.reset();
+    const bool kept_direct=preserve_aer_resources&&!structural&&state->independent_aer_direct_4x;
+    if(kept_direct)state->independent_aer_direct_4x->reset();
+    else state->independent_aer_direct_4x.reset();
     state->independent_aer_double_unavailable=false;
-    xrfg::embedded::independent_aer_double_state=kept?1:0;
+    xrfg::embedded::independent_aer_double_state=(kept||kept_direct)?1:0;
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::continuity_reset,
         0,
@@ -19154,7 +19238,10 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     }
     const int effective_separation = effective_memory_control(*state,control.desired.separate_synthesis);
     const int effective_reduction = effective_memory_control(*state,control.desired.lower_vram);
-    const bool changed = options.ofr!=state->nvidia_options.ofr || options.ofr_swap!=state->nvidia_options.ofr_swap || options.rife_resolution_percent!=state->nvidia_options.rife_resolution_percent || options.rife_multiplier!=state->nvidia_options.rife_multiplier || options.rife_async!=state->nvidia_options.rife_async || options.rife_model!=state->nvidia_options.rife_model || options.hybrid!=state->nvidia_options.hybrid ||
+    const bool aer_direct_changed = state->independent_pacing &&
+        ((options.ofr && control.desired.independent_aer_double) !=
+         (state->nvidia_options.ofr && state->independent_aer_double_requested));
+    const bool changed = options.ofr!=state->nvidia_options.ofr || options.ofr_swap!=state->nvidia_options.ofr_swap || aer_direct_changed || options.rife_resolution_percent!=state->nvidia_options.rife_resolution_percent || options.rife_multiplier!=state->nvidia_options.rife_multiplier || options.rife_async!=state->nvidia_options.rife_async || options.rife_model!=state->nvidia_options.rife_model || options.hybrid!=state->nvidia_options.hybrid ||
         control.desired.hybrid!=state->hybrid_requested || force_startup_rendezvous || state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||
         options.input_scale != state->nvidia_options.input_scale ||
@@ -19176,6 +19263,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     // also see this tuple. A partial failure remains bypass, never mixed flow.
     state->optical_flow_backend = backend;
     state->nvidia_options = options;
+    state->independent_aer_double_requested = control.desired.independent_aer_double;
+    if (changed) state->independent_aer_direct_4x.reset();
     state->ofr_delivery=0;state->ofr_last_mask=0;
     state->ofr_source_tracker.reset();
     std::atomic_store(&xrfg::embedded::ofr_evidence,std::make_shared<xrfg::AerFramegenEvidence>());
@@ -19297,17 +19386,18 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             chain->generation_refusal = SwapchainEligibilityReason::ready;
             chain->generation_refusal_detail = 0;
         }
+        const bool aer_direct_outputs = !chain->panel_source && independent_aer_direct_4x(*state);
         const bool admitted_shape_change = changed && chain->frame_generation &&
             (chain->frame_generation->separate_native_publications != separate_native_publications(*state) ||
              ((state->graphics_binding == SessionGraphicsBinding::d3d12 &&
             (chain->frame_generation->staged_outputs != staged_native_outputs(*state) ||
              chain->frame_generation->current_runtime_rings != native_current_rings(*state) ||
              chain->frame_generation->synthetic_runtime_rings != source_synthetic_rings(*state,chain->panel_source,&chain->create_info) ||
-             chain->frame_generation->direct_extra_outputs != (!staged_native_outputs(*state) && extra_output_capacity(*state)) ||
+             chain->frame_generation->direct_extra_outputs != (!staged_native_outputs(*state) && (extra_output_capacity(*state) || aer_direct_outputs)) ||
              chain->frame_generation->staging_stride != (staged_native_outputs(*state) && extra_output_capacity(*state) ? 2U : 1U))) ||
              (state->graphics_binding == SessionGraphicsBinding::d3d11 &&
-              (chain->frame_generation->synthetic_runtime_rings != (rife_frames(*state)>2?rife_frames(*state)-1:kSyntheticSlotCount) ||
-               chain->frame_generation->direct_extra_outputs != (rife_frames(*state)>2)))));
+              (chain->frame_generation->synthetic_runtime_rings != d3d11_synthetic_rings(*state) ||
+               chain->frame_generation->direct_extra_outputs != (rife_frames(*state)>2 || aer_direct_outputs)))));
         if (admitted_shape_change) {
             result = chain->frame_generation->synthesizer
                 ? chain->frame_generation->synthesizer->wait_for_idle() : S_OK;
@@ -19483,7 +19573,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         state->generation_resume_display_time = 0;
         if (SUCCEEDED(result)) {
             state->optical_flow_backend = backend;
-    state->nvidia_options = options;
+            state->nvidia_options = options;
+            state->independent_aer_double_requested = control.desired.independent_aer_double;
         }
     }
     configure_session_guide_capture(*state);

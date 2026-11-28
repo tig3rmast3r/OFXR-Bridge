@@ -3072,7 +3072,7 @@ if(argc>1 && std::string_view(argv[1])=="independent-optical-first")return indep
     if(independent_stream_hold)check(stream_probe_done,"streamed native first-output dependency probe missing");
     if(independent_paired_split) {
         std::scoped_lock lock(state->presenter_mutex);
-        if(std::getenv("XRFG_TEST_NVIDIA_OPTICAL"))check(state->independent_streamed_first>0,
+        if(std::getenv("XRFG_TEST_NVIDIA_OPTICAL") && !independent_aer4)check(state->independent_streamed_first>0,
             "paired split-source NVIDIA stream never published a first output");
     }
     if(hfw && !toggling)check(hfw_gate_proven,"HFW never promoted to actual synthesis worker");
@@ -3155,15 +3155,30 @@ if(argc>1 && std::string_view(argv[1])=="independent-optical-first")return indep
         // Native D11's lazy output initialization can pass more cold real
         // frames before coherent reconstruction begins. Every original output
         // must still be accounted for, plus each genuinely paired endpoint.
+        const auto direct_aer4=independent_aer4 ? state->independent_aer_direct_4x : nullptr;
         const auto stage_endpoints=independent_aer4 && state->independent_aer_double
             ?state->independent_aer_double->ordinal:0;
-        const auto expected=base_outputs+(independent_aer4 && stage_endpoints?unsigned(stage_endpoints-1):0);
+        const auto extra_aer4_outputs=direct_aer4 ? unsigned(direct_aer4->generated_midpoints)
+            : (independent_aer4 && stage_endpoints ? unsigned(stage_endpoints-1) : 0U);
+        const auto expected=base_outputs+extra_aer4_outputs;
         if(independent_aer4) {
-            const auto stage=state->independent_aer_double;
-            std::fprintf(stderr,"AER4 state helper=%u hr=%08x ordinal=%llu selected=%u mapped=%u\n",unsigned(bool(stage)),stage?unsigned(stage->failure):0,stage?stage->ordinal:0,unsigned(xrfg::autonomous::generation_multiplier(xrfg::autonomous::snapshot().desired)),unsigned(xrfg::embedded::snapshot().desired.independent_aer_double));
-            check(stage && SUCCEEDED(stage->failure) && stage->ordinal>2 &&
-                xrfg::embedded::independent_aer_double_state==2,"4X AER never generated actual coherent stereo midpoints");
-            std::printf("AER4 accepted coherent endpoints=%llu final outputs=%u expired=%llu expected=%u\n",stage->ordinal,f.real_ends.load(),expired,expected);
+            if(direct_aer4) {
+                std::fprintf(stderr,"AER4 direct paired=%llu midpoints=%llu selected=%u mapped=%u\n",
+                    direct_aer4->paired_frames,direct_aer4->generated_midpoints,
+                    unsigned(xrfg::autonomous::generation_multiplier(xrfg::autonomous::snapshot().desired)),
+                    unsigned(xrfg::embedded::snapshot().desired.independent_aer_double));
+                check(!state->independent_aer_double,"direct AER 4X must not allocate the second-stage optical-flow helper");
+                check(direct_aer4->paired_frames>2 && direct_aer4->generated_midpoints>2 &&
+                    xrfg::embedded::independent_aer_double_state==2,"direct 4X AER never generated actual coherent quarter-step stereo pairs");
+                std::printf("AER4 direct paired=%llu midpoints=%llu final outputs=%u expired=%llu expected=%u\n",
+                    direct_aer4->paired_frames,direct_aer4->generated_midpoints,f.real_ends.load(),expired,expected);
+            } else {
+                const auto stage=state->independent_aer_double;
+                std::fprintf(stderr,"AER4 state helper=%u hr=%08x ordinal=%llu selected=%u mapped=%u\n",unsigned(bool(stage)),stage?unsigned(stage->failure):0,stage?stage->ordinal:0,unsigned(xrfg::autonomous::generation_multiplier(xrfg::autonomous::snapshot().desired)),unsigned(xrfg::embedded::snapshot().desired.independent_aer_double));
+                check(stage && SUCCEEDED(stage->failure) && stage->ordinal>2 &&
+                    xrfg::embedded::independent_aer_double_state==2,"4X AER never generated actual coherent stereo midpoints");
+                std::printf("AER4 accepted coherent endpoints=%llu final outputs=%u expired=%llu expected=%u\n",stage->ordinal,f.real_ends.load(),expired,expected);
+            }
         }
         if(independent_offon && independent_aer)
             std::printf("FIXED_AER_PUBLICATIONS native=%u expired=%llu expected=%u\n",

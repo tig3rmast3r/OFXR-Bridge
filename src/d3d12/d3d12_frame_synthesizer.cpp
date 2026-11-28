@@ -7624,7 +7624,7 @@ struct D3D12FrameSynthesizer::Impl {
         bool allow_synthetic_camera, unsigned ofr_fresh_mask, bool current_output_unused, bool split_aer_first,
         bool separate_synthetic_ready, bool allow_queued_fidelity_pair, bool defer_extra_reuse) noexcept {
         ofr_paired = ofr_fresh_mask == 3;
-        if(nvidia_options.ofr) {defer_current_copy=false;interpolation_fraction=.5F;}
+        if(nvidia_options.ofr) {defer_current_copy=false;if(!extra_synthetic)interpolation_fraction=.5F;}
         rife_pair={}; // no abandoned pre-submission transaction survives a retry
         synthetic_fraction = usable_synthesis_fraction(interpolation_fraction, false);
         synthetic_camera_turned = {};
@@ -8131,7 +8131,7 @@ struct D3D12FrameSynthesizer::Impl {
                 two_frame_capture_guide_contract(c);
             }
         }
-        if(aer_retimed && ofr_paired && !slot.aer_early_copy) {
+        if(aer_retimed && ofr_paired && !slot.aer_early_copy && !extra_output) {
             auto* list=slot.current_copy_command_list.Get();
             auto barrier=transition_barrier(current_destination,release_state,D3D12_RESOURCE_STATE_COPY_DEST);
             list->ResourceBarrier(1,&barrier);
