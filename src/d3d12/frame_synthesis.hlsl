@@ -520,18 +520,24 @@ void PackFlowInput(uint3 thread_id : SV_DispatchThreadID) {
             (float2(float(thread_id.x), float(local_y)) + 0.5) /
                 max(input_scale, float2(1.0e-6, 1.0e-6)) - 0.5;
         if (source_coordinate.y < float(Height)) {
-            current_color =
-                bilinear_current_source(source_coordinate, slice);
 #ifdef XRFG_HYBRID_QUARTER_INPUT
-            // One bilinear tap filters 2x2 pixels; at a quarter, four of
-            // them cover the 4x4 the packed pixel stands for.
+            hybrid_layout = true;
+            // One hardware linear tap filters 2x2 pixels; at a quarter, four
+            // of them cover the 4x4 the packed pixel stands for without 20
+            // manual Load() fetches.
             if (input_scale.x < 0.3) {
                 current_color = 0.25 * (
                     bilinear_current_source(source_coordinate + float2(-1.0, -1.0), slice) +
                     bilinear_current_source(source_coordinate + float2(1.0, -1.0), slice) +
                     bilinear_current_source(source_coordinate + float2(-1.0, 1.0), slice) +
                     bilinear_current_source(source_coordinate + float2(1.0, 1.0), slice));
+            } else {
+                current_color =
+                    bilinear_current_source(source_coordinate, slice);
             }
+#else
+            current_color =
+                bilinear_current_source(source_coordinate, slice);
 #endif
         }
     } else if (thread_id.x < Width && local_y < Height) {
