@@ -159,7 +159,7 @@ int main() {
         }
         // Exhaustion must fail the diagnostic without changing XR pixels or
         // its immutable publication receipt; the final retirement still runs.
-        session->allocated = xrfg::kMaximumBytes;
+        session->allocated[0] = xrfg::kMaximumBytes;
         require(bridge.diagnostic_capture_published_current(receipt, info) == E_OUTOFMEMORY,
             "bounded recorder budget");
         success(bridge.wait_for_idle(), "failed diagnostic retirement");
@@ -244,7 +244,7 @@ int main() {
         }
         info.slice=2;
         require(xrfg::two_frame_capture_record_d3d11(info,d12.Get(),context.Get(),native_source.Get())==E_INVALIDARG,"native original accepted invalid array slice");
-        info.slice=0;manager.session->allocated=xrfg::kMaximumBytes;
+        info.slice=0;manager.session->allocated[0]=xrfg::kMaximumBytes;
         require(xrfg::two_frame_capture_record_d3d11(info,d12.Get(),context.Get(),native_source.Get())==E_OUTOFMEMORY,"native original exceeded existing capture budget");
         const auto native_directory=std::filesystem::temp_directory_path()/
             (L"xrfg-native-original-"+std::to_wstring(GetCurrentProcessId()));
@@ -340,7 +340,7 @@ int main() {
         require(!xrfg::two_frame_capture_claim_nr(101),"NR duplicate view claim");
         for(unsigned i=102;i<105;++i)require(xrfg::two_frame_capture_claim_nr(i)==i-100,"NR quad views");
         require(!xrfg::two_frame_capture_claim_nr(105),"NR bounded view count");
-        nr_session->allocated=xrfg::kMaximumBytes;
+        nr_session->allocated[0]=xrfg::kMaximumBytes;
         info.stage="nr_pass1_color";info.stream=101;info.capture_serial=1;info.slice=0;
         success(xrfg::two_frame_capture_record_queue(info,d12.Get(),queue.Get(),mirror,D3D12_RESOURCE_STATE_COMMON),"NR reserve survives full ordinary budget");
         require(nr_session->shots.size()==1&&SUCCEEDED(nr_session->shots[0]->status),"NR GPU copy enqueued");
