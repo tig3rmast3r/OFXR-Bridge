@@ -264,6 +264,7 @@ std::shared_ptr<Shot> prepare_shot(
         format == DXGI_FORMAT_D24_UNORM_S8_UINT ||
         format == DXGI_FORMAT_R24G8_TYPELESS ||
         format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT ||
+        format == DXGI_FORMAT_R32G8X24_TYPELESS ||
         format == DXGI_FORMAT_D32_FLOAT ||
         format == DXGI_FORMAT_R32_FLOAT ||
         format == DXGI_FORMAT_R8G8_UNORM ||
@@ -334,6 +335,7 @@ void record_copy(
     const UINT subresource = shot.info.slice * shot.description.MipLevels;
     const UINT barrier_subresource =
         (shot.description.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT ||
+         shot.description.Format == DXGI_FORMAT_R32G8X24_TYPELESS ||
          shot.description.Format == DXGI_FORMAT_D24_UNORM_S8_UINT ||
          shot.description.Format == DXGI_FORMAT_R24G8_TYPELESS)
             ? D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES : subresource;

@@ -39,7 +39,8 @@ void test_guide_composer_occlusion(D3D12WarpFixture& fixture) {
             values.push_back(h&0x8000?-value:value);}
         buffer->Unmap(0,nullptr);return values;
     };
-    for(bool colour_aligned:{false,true})for(bool mirrored:{false,true}) {
+    for(bool colour_aligned:{false,true})for(bool mirrored:{false,true})for(DXGI_FORMAT depth_fmt:{DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R32G8X24_TYPELESS}) {
+        if(colour_aligned && depth_fmt!=DXGI_FORMAT_R32_FLOAT)continue;
         std::vector<std::uint32_t> mb(width),mr(width),db(width),dr(width);
         for(UINT x=0;x<width;++x){const auto i=mirrored?width-1-x:x;
             mb[x]=great_circle_wall::motion_b[i]^(mirrored?0x8000U:0);
@@ -50,7 +51,7 @@ void test_guide_composer_occlusion(D3D12WarpFixture& fixture) {
             value=std::bit_cast<std::uint32_t>(depth>0?.012F:.01F);
         }
         auto b=std::make_shared<xrfg::DlssMotionVectorFrame>();
-        b->motion_vectors=texture(DXGI_FORMAT_R16G16_FLOAT,mb);b->depth=texture(DXGI_FORMAT_R32_FLOAT,db);
+        b->motion_vectors=texture(DXGI_FORMAT_R16G16_FLOAT,mb);b->depth=texture(depth_fmt,db);
         b->motion_width=b->depth_width=width;b->motion_height=b->depth_height=1;
         b->output_width=width*2;b->output_height=2;b->scale_x=-1880;b->scale_y=1;
         b->raw_motion_native_span=1;b->raw_motion_native_span_confirmed=true;
@@ -69,7 +70,7 @@ void test_guide_composer_occlusion(D3D12WarpFixture& fixture) {
             }
             r->camera_position[0]=mirrored?-5.726F:5.726F;
         }
-        r->motion_vectors=texture(DXGI_FORMAT_R16G16_FLOAT,mr);r->depth=texture(DXGI_FORMAT_R32_FLOAT,dr);b->bridge=r;
+        r->motion_vectors=texture(DXGI_FORMAT_R16G16_FLOAT,mr);r->depth=texture(depth_fmt,dr);b->bridge=r;
         auto set=std::make_shared<xrfg::DlssMotionVectorSet>();set->eye_count=1;set->eyes[0]=b;
         xrfg::D3D12GuideComposer composer;require_hresult(composer.initialize(fixture.device()),"occlusion composer");
         xrfg::D3D12ReprojectionView view{};view.fov={-.7F,.7F,.7F,-.7F};
