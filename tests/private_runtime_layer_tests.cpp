@@ -26,6 +26,7 @@
 #include "independent_stereo_recovery_test.inc"
 #include "independent_midpoint_test.inc"
 #include "independent_async_creation_test.inc"
+#include "independent_panel_budget_test.inc"
 #include "independent_source_admission_test.inc"
 #include "independent_optical_first_test.inc"
 #include "independent_overlap_recovery.inc"
@@ -674,6 +675,14 @@ static int aer_input_warning_test() {
 }
 
 int main(int argc,char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="independent-panel-priority")return independent_panel_budget_test(3);
+    if(argc>1 && std::string_view(argv[1])=="independent-budget-rearm-legacy")return independent_budget_rearm_probe(true);
+    if(argc>1 && std::string_view(argv[1])=="independent-budget-rearm-control")return independent_budget_rearm_probe();
+    if(argc>1 && std::string_view(argv[1])=="independent-budget-rearm-probe")return independent_budget_rearm_probe();
+    if(argc>1 && std::string_view(argv[1])=="independent-panel-budget") {
+        for(unsigned order=0;order<3;++order)independent_panel_budget_test(order);
+        return 0;
+    }
     if(argc>1 && std::string_view(argv[1])=="uevr-aer-crop")return uevr_aer_crop_test();
     if(argc>1 && std::string_view(argv[1])=="uevr-stock-bootstrap")return uevr_stock_bootstrap_test();
     if(argc>1 && std::string_view(argv[1])=="uevr-turn-stop")return uevr_turn_stop_test();
@@ -2737,6 +2746,21 @@ if(argc>1 && std::string_view(argv[1])=="independent-optical-first")return indep
             // This oracle starts from warmed generation. Cold construction is
             // exercised separately with a gated worker and live native frames.
             finish_session_generation_creation(state);
+            if(panel_test && independent && !independent_aer && !state->generation_budget_exhausted) {
+                // Finish optional warm-up only AFTER the eye futures above.
+                // The output-count oracle below starts warm; it must not
+                // assume panels can race unfinished eyes on the first frame.
+                ProjectionSnapshot warmed;
+                if(capture_projection_snapshot(&end,&warmed)) {
+                    warmed.panel_corrections=true;
+                    const auto mapped=build_projection_resource_mappings(warmed);
+                    const auto optional=panel_sources(*state,warmed,mapped.mappings);
+                    if(!arm_panel_generation(state,optional)) {
+                        state->panel_budget_refused=true;
+                        retire_panel_generation(state);
+                    }
+                }
+            }
             if(budget_fallback_test && n==4) {
                 budget_meter=f.make_chain(false,1);
                 // Pooling saves native handles. Fill the actual remaining

@@ -120,7 +120,10 @@ static int independent_async_creation_test(bool cancel,bool refuse=false) {
         } else {
             check(chain->frame_generation && !chain->generation_eligible_pending,"finished generator was not atomically adopted");
             const auto native_count=f.chains.size();
-            const auto private_count=f.transport->native_swapchain_mapping()->size();
+            auto inventory=f.transport->native_swapchain_mapping();
+            for(unsigned retry=0;!inventory && retry<1000;++retry){std::this_thread::yield();inventory=f.transport->native_swapchain_mapping();}
+            check(inventory.has_value(),"async allocation inventory available");
+            const auto private_count=inventory->size();
             f.transport->stop();destroy_frame_generation_swapchains(chain);
             check(f.chains.size()==1,"async generation retirement leaked native pools");
             // Compare actual allocations against the original synchronous
@@ -128,8 +131,10 @@ static int independent_async_creation_test(bool cancel,bool refuse=false) {
             // not increase during this oracle either.
             SwapchainEligibilityReason reason{};std::uint64_t detail{};
             chain->frame_generation=create_d3d12_frame_generation_swapchains(chain,&reason,&detail);
+            inventory=f.transport->native_swapchain_mapping();
+            check(inventory.has_value(),"stopped synchronous allocation inventory available");
             check(chain->frame_generation && f.chains.size()==native_count &&
-                f.transport->native_swapchain_mapping()->size()==private_count,
+                inventory->size()==private_count,
                 "asynchronous startup changed native/private image allocation counts");
             destroy_frame_generation_swapchains(chain);
         }

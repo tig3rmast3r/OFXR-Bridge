@@ -5012,12 +5012,14 @@ void release_session_generation_budget(
         }
         for (const auto& swapchain : find_swapchains(session)) {
             std::scoped_lock call_lock(swapchain->call_mutex);
+            drain_swapchain_gpu(swapchain);
+            destroy_frame_generation_swapchains(swapchain);
+            // Destruction joins and may adopt a completed async owner. Apply
+            // the refusal afterward so that adoption cannot erase it.
             swapchain->generation_eligible_pending = false;
             swapchain->generation_declined = true;
             swapchain->generation_refusal = SwapchainEligibilityReason::budget_exhausted;
             swapchain->generation_refusal_detail = 0;
-            drain_swapchain_gpu(swapchain);
-            destroy_frame_generation_swapchains(swapchain);
         }
     } catch (...) {
     }
@@ -8919,9 +8921,7 @@ XrResult layer_enumerate_swapchain_images_impl(
             const bool static_image =
                 (state->create_info.createFlags &
                  XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
-            if (!has_generation && !state->generation_declined &&
-                !state->session->generation_budget_exhausted.load(
-                    std::memory_order_acquire)) {
+            if (!has_generation && !state->generation_declined) {
                 if (static_image) {
                     eligibility_reason =
                         SwapchainEligibilityReason::static_image;
@@ -8932,9 +8932,16 @@ XrResult layer_enumerate_swapchain_images_impl(
                     eligibility_detail = state->create_info.faceCount;
                 } else {
                     state->enumerated_image_count = count;
-                    state->generation_eligible_pending = true;
-                    eligibility_reason =
-                        SwapchainEligibilityReason::awaiting_projection_use;
+                    if(state->session->generation_budget_exhausted.load(std::memory_order_acquire)) {
+                        state->generation_eligible_pending=false;
+                        state->generation_declined=true;
+                        state->generation_refusal=SwapchainEligibilityReason::budget_exhausted;
+                        state->generation_refusal_detail=0;
+                        eligibility_reason=SwapchainEligibilityReason::budget_exhausted;
+                    } else {
+                        state->generation_eligible_pending = true;
+                        eligibility_reason = SwapchainEligibilityReason::awaiting_projection_use;
+                    }
                 }
             }
             log_swapchain_eligibility(
@@ -9117,9 +9124,7 @@ XrResult layer_enumerate_swapchain_images_impl(
             (state->create_info.createFlags &
              XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
         if (history && release_state == D3D12_RESOURCE_STATE_RENDER_TARGET &&
-            !has_generation && !state->generation_declined &&
-            !state->session->generation_budget_exhausted.load(
-                std::memory_order_acquire)) {
+            !has_generation && !state->generation_declined) {
             if (static_image) {
                 eligibility_reason = SwapchainEligibilityReason::static_image;
                 eligibility_detail = state->create_info.createFlags;
@@ -9128,9 +9133,19 @@ XrResult layer_enumerate_swapchain_images_impl(
                     SwapchainEligibilityReason::unsupported_face_count;
                 eligibility_detail = state->create_info.faceCount;
             } else {
-                state->generation_eligible_pending = true;
-                eligibility_reason =
-                    SwapchainEligibilityReason::awaiting_projection_use;
+                // UEVR can replace AFR with packed Native Stereo while the
+                // session is bypassing a budget refusal. Keep the reason so
+                // the next explicit route revision can re-arm this source.
+                if(state->session->generation_budget_exhausted.load(std::memory_order_acquire)) {
+                    state->generation_eligible_pending=false;
+                    state->generation_declined=true;
+                    state->generation_refusal=SwapchainEligibilityReason::budget_exhausted;
+                    state->generation_refusal_detail=0;
+                    eligibility_reason=SwapchainEligibilityReason::budget_exhausted;
+                } else {
+                    state->generation_eligible_pending = true;
+                    eligibility_reason = SwapchainEligibilityReason::awaiting_projection_use;
+                }
             }
         }
 
@@ -15464,6 +15479,10 @@ bool panel_generation_pending(std::span<const PanelSource> panels) {
     return false;
 }
 bool arm_panel_generation(const std::shared_ptr<SessionState>& state,std::span<const PanelSource> panels) {
+    // Eye construction may still be waiting to enter the factory. Optional
+    // panels must not take its runtime slots first. Poll on a later real
+    // frame; do not join the worker or add a presentation wait here.
+    if(generation_creation_pending(state))return true;
 #if !defined(_WIN64)
     static_cast<void>(state);
     static_cast<void>(panels);
@@ -21053,13 +21072,16 @@ XrResult layer_end_frame_impl(
             // That path drains/retire the old temporal anchor and preserves the
             // runtime frame-call owner. Never synthesize from the other eye alone
             // or let transient capture backpressure become a presenter failure.
-            bool missing_capture = false;
+            bool missing_capture = false, missing_generation = false;
             for (const auto& mapping : projection_mappings) {
                 const auto chain = find_swapchain(mapping.application_swapchain);
                 if (!chain) continue;
                 std::scoped_lock lock(chain->mutex);
                 missing_capture |= !chain->last_released_capture.has_value();
+                missing_generation |= !chain->frame_generation;
             }
+            if (missing_generation)
+                return bypass_generation(GenerationPrepareReason::missing_generation, true);
             if (missing_capture)
                 return bypass_generation(GenerationPrepareReason::missing_capture, true);
         }
